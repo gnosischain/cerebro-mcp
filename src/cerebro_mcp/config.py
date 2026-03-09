@@ -41,5 +41,8 @@ class Settings(BaseSettings):
         "dbt",
     ]
 
+    # Report output directory
+    REPORTS_OUTPUT_DIR: str = "~/.cerebro-mcp/reports"
+
 
 settings = Settings()
