@@ -1,5 +1,6 @@
 import json
 import os
+from unittest.mock import patch, MagicMock
 import pytest
 from cerebro_mcp.manifest_loader import ManifestLoader
 
@@ -112,7 +113,8 @@ def loader_with_sample():
             ],
         },
     }
-    loader._build_indexes(sample)
+    indexes = loader._build_indexes_internal(sample)
+    loader._apply_indexes(indexes)
     loader._loaded = True
     return loader
 
@@ -213,7 +215,8 @@ class TestManifestLoaderReal:
         loader = ManifestLoader()
         with open(MANIFEST_PATH, "r") as f:
             data = json.load(f)
-        loader._build_indexes(data)
+        indexes = loader._build_indexes_internal(data)
+        loader._apply_indexes(indexes)
         loader._loaded = True
         return loader
 
@@ -233,3 +236,235 @@ class TestManifestLoaderReal:
         modules = real_loader.get_modules()
         assert "execution" in modules
         assert "consensus" in modules
+
+
+class TestLowercaseModules:
+    """Test that module index is case-insensitive."""
+
+    def test_module_search_case_insensitive(self, loader_with_sample):
+        """ESG, esg, Esg should all match the same module."""
+        # The sample has 'execution' and 'consensus' modules (lowercase in path)
+        results_lower = loader_with_sample.search_models(module="execution")
+        results_upper = loader_with_sample.search_models(module="EXECUTION")
+        results_mixed = loader_with_sample.search_models(module="Execution")
+        assert len(results_lower) == len(results_upper) == len(results_mixed)
+        assert len(results_lower) == 2
+
+    def test_module_index_keys_are_lowercase(self, loader_with_sample):
+        modules = loader_with_sample.get_modules()
+        for key in modules:
+            assert key == key.lower(), f"Module key '{key}' is not lowercase"
+
+    def test_get_module_models_case_insensitive(self, loader_with_sample):
+        lower = loader_with_sample.get_module_models("execution")
+        upper = loader_with_sample.get_module_models("EXECUTION")
+        assert len(lower) == len(upper) == 2
+
+    def test_esg_case_normalization(self):
+        """Specifically test ESG → esg normalization."""
+        loader = ManifestLoader()
+        sample = {
+            "nodes": {
+                "model.gnosis_dbt.esg_model": {
+                    "resource_type": "model",
+                    "unique_id": "model.gnosis_dbt.esg_model",
+                    "name": "esg_model",
+                    "description": "ESG metrics",
+                    "schema": "dbt",
+                    "alias": "esg_model",
+                    "path": "ESG/esg_model.sql",  # uppercase in path
+                    "tags": [],
+                    "config": {"materialized": "view"},
+                    "columns": {},
+                    "raw_code": "",
+                    "compiled_code": "",
+                },
+            },
+            "sources": {},
+            "parent_map": {},
+            "child_map": {},
+        }
+        indexes = loader._build_indexes_internal(sample)
+        loader._apply_indexes(indexes)
+        loader._loaded = True
+
+        # Should be indexed as 'esg' not 'ESG'
+        assert "esg" in loader.get_modules()
+        assert "ESG" not in loader.get_modules()
+
+        # Both casings should find the model
+        assert len(loader.search_models(module="ESG")) == 1
+        assert len(loader.search_models(module="esg")) == 1
+
+
+class TestConditionalGET:
+    """Test manifest conditional GET refresh logic."""
+
+    def test_reload_no_url_returns_false(self):
+        """With no URL configured, reload should do nothing."""
+        loader = ManifestLoader()
+        with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+            mock_settings.DBT_MANIFEST_URL = None
+            changed, error = loader.reload_if_changed()
+            assert changed is False
+            assert error is None
+
+    def test_reload_304_not_modified(self):
+        """304 response should not update indexes."""
+        loader = ManifestLoader()
+        loader._etag = '"abc123"'
+        loader._loaded = True
+        loader._content_hash = "oldhash"
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 304
+
+        with patch("cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp):
+            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+                mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
+                changed, error = loader.reload_if_changed()
+
+        assert changed is False
+        assert loader._content_hash == "oldhash"
+
+    def test_reload_200_new_content_updates_indexes(self):
+        """200 response with new content should update indexes."""
+        loader = ManifestLoader()
+        loader._loaded = True
+        loader._content_hash = "oldhash"
+
+        new_data = {
+            "nodes": {
+                "model.test.new_model": {
+                    "resource_type": "model",
+                    "unique_id": "model.test.new_model",
+                    "name": "new_model",
+                    "description": "A new model",
+                    "schema": "dbt",
+                    "alias": "new_model",
+                    "path": "test/new_model.sql",
+                    "tags": [],
+                    "config": {"materialized": "view"},
+                    "columns": {},
+                    "raw_code": "",
+                    "compiled_code": "",
+                },
+            },
+            "sources": {},
+            "parent_map": {},
+            "child_map": {},
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = new_data
+        mock_resp.headers = {"ETag": '"new_etag"', "Last-Modified": "Thu, 01 Jan 2026"}
+
+        with patch("cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp):
+            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+                mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
+                changed, error = loader.reload_if_changed()
+
+        assert changed is True
+        assert error is None
+        assert loader.get_model("new_model") is not None
+        assert loader._etag == '"new_etag"'
+        assert loader._content_hash != "oldhash"
+
+    def test_reload_error_keeps_stale_data(self):
+        """Network error should keep existing data and set error."""
+        loader = ManifestLoader()
+        loader._loaded = True
+        loader._content_hash = "existing"
+
+        # Set up some existing data
+        sample = {
+            "nodes": {
+                "model.test.existing": {
+                    "resource_type": "model",
+                    "unique_id": "model.test.existing",
+                    "name": "existing_model",
+                    "description": "",
+                    "schema": "dbt",
+                    "alias": "existing_model",
+                    "path": "test/existing.sql",
+                    "tags": [],
+                    "config": {"materialized": "view"},
+                    "columns": {},
+                    "raw_code": "",
+                    "compiled_code": "",
+                },
+            },
+            "sources": {},
+            "parent_map": {},
+            "child_map": {},
+        }
+        indexes = loader._build_indexes_internal(sample)
+        loader._apply_indexes(indexes)
+
+        with patch(
+            "cerebro_mcp.manifest_loader.requests.get",
+            side_effect=Exception("Connection timeout"),
+        ):
+            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+                mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
+                changed, error = loader.reload_if_changed()
+
+        assert changed is False
+        assert "Connection timeout" in loader.last_refresh_error
+        # Existing data should still be there
+        assert loader.get_model("existing_model") is not None
+
+    def test_reload_uses_short_timeout(self):
+        """Conditional GET should use 1s timeout, not 30s."""
+        loader = ManifestLoader()
+        loader._loaded = True
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 304
+
+        with patch(
+            "cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp
+        ) as mock_get:
+            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+                mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
+                loader.reload_if_changed()
+
+        # Verify the timeout was 1 second
+        call_kwargs = mock_get.call_args[1]
+        assert call_kwargs["timeout"] == 1
+
+    def test_content_hash_dedup(self):
+        """Same content should not trigger index rebuild."""
+        loader = ManifestLoader()
+        loader._loaded = True
+
+        data = {
+            "nodes": {},
+            "sources": {},
+            "parent_map": {},
+            "child_map": {},
+        }
+        content_hash = loader._hash_bytes(
+            json.dumps(data, sort_keys=True).encode()
+        )
+        loader._content_hash = content_hash
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = data
+        mock_resp.headers = {}
+
+        with patch("cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp):
+            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+                mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
+                changed, error = loader.reload_if_changed()
+
+        assert changed is False
+        assert error is None
+
+    def test_status_properties(self, loader_with_sample):
+        """Test read-only status properties."""
+        assert loader_with_sample.model_count == 3
+        assert loader_with_sample.content_hash is None  # Not set via _build_indexes
+        assert loader_with_sample.last_refresh_error is None

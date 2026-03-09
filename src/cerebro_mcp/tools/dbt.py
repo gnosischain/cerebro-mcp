@@ -1,7 +1,21 @@
 import json
+import time
 from typing import Optional
 
+from cerebro_mcp.config import settings
 from cerebro_mcp.manifest_loader import manifest
+from cerebro_mcp.tools.query import truncate_response
+
+_last_manifest_check: float = 0.0
+
+
+def _maybe_refresh_manifest():
+    """Lazily refresh manifest if enough time has elapsed."""
+    global _last_manifest_check
+    now = time.time()
+    if now - _last_manifest_check > settings.MANIFEST_REFRESH_INTERVAL_SECONDS:
+        _last_manifest_check = now
+        manifest.reload_if_changed()
 
 
 def register_dbt_tools(mcp):
@@ -10,6 +24,7 @@ def register_dbt_tools(mcp):
         query: str = "",
         tags: Optional[list[str]] = None,
         module: Optional[str] = None,
+        limit: int = 50,
     ) -> str:
         """Search dbt models by name, description, or tags.
 
@@ -19,14 +34,20 @@ def register_dbt_tools(mcp):
             tags: Optional list of tags to filter by (e.g., ['execution', 'production']).
             module: Optional module filter (e.g., 'execution', 'consensus', 'contracts',
                     'p2p', 'bridges', 'ESG', 'probelab', 'crawlers_data').
+            limit: Maximum number of results to return (1-200). Default: 50.
 
         Returns:
             Matching models with name, description, materialization, and tags.
         """
+        _maybe_refresh_manifest()
+
         if not manifest.is_loaded:
             return "Error: dbt manifest not loaded. dbt context is unavailable."
 
-        results = manifest.search_models(query=query, tags=tags, module=module)
+        capped_limit = min(max(limit, 1), 200)
+        results = manifest.search_models(
+            query=query, tags=tags, module=module, limit=capped_limit
+        )
         if not results:
             return f"No models found matching query='{query}', tags={tags}, module={module}."
 
@@ -39,7 +60,7 @@ def register_dbt_tools(mcp):
                 f"  Tags: {tags_str} | Path: {m['path']}"
             )
 
-        return "\n".join(lines)
+        return truncate_response("\n".join(lines))
 
     @mcp.tool()
     def get_model_details(model_name: str) -> str:
@@ -53,6 +74,8 @@ def register_dbt_tools(mcp):
             Model description, table name, columns with types/descriptions,
             raw SQL code, and upstream/downstream dependencies.
         """
+        _maybe_refresh_manifest()
+
         if not manifest.is_loaded:
             return "Error: dbt manifest not loaded."
 
@@ -102,4 +125,4 @@ def register_dbt_tools(mcp):
             for dep in details["downstream"][:20]:
                 parts.append(f"- {dep}")
 
-        return "\n".join(parts)
+        return truncate_response("\n".join(parts))

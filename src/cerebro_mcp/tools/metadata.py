@@ -1,5 +1,10 @@
+import time
+from datetime import datetime, timezone
+
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
+from cerebro_mcp.manifest_loader import manifest
+from cerebro_mcp.tools.query import truncate_response
 
 
 DATABASE_DESCRIPTIONS = {
@@ -48,9 +53,12 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                 try:
                     sql = (
                         "SELECT count() FROM system.tables "
-                        f"WHERE database = '{db_name}'"
+                        "WHERE database = {db:String}"
                     )
-                    result = ch.execute_raw(sql, db_name)
+                    cache_key = f"tables:{db_name}:"
+                    result = ch.execute_raw_cached(
+                        sql, db_name, cache_key, parameters={"db": db_name}
+                    )
                     count = result["rows"][0][0] if result["rows"] else "?"
                 except Exception:
                     count = "?"
@@ -59,6 +67,50 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                     f"## {db_name} ({count} tables)\n{desc}\n"
                 )
 
-            return "\n".join(lines)
+            return truncate_response("\n".join(lines))
         except Exception as e:
             return f"Error: {e}"
+
+    @mcp.tool()
+    def system_status() -> str:
+        """Show server status: ClickHouse connectivity, manifest state, config."""
+        lines = ["# System Status\n"]
+
+        # ClickHouse connectivity
+        lines.append("## ClickHouse Connectivity\n")
+        for db_name in settings.ALLOWED_DATABASES:
+            try:
+                client = ch.get_client(db_name)
+                client.query("SELECT 1")
+                lines.append(f"- **{db_name}**: connected")
+            except Exception as e:
+                lines.append(f"- **{db_name}**: error — {e}")
+
+        # Manifest state
+        lines.append("\n## Manifest\n")
+        lines.append(f"- **Loaded:** {manifest.is_loaded}")
+        lines.append(f"- **Model count:** {manifest.model_count}")
+        lines.append(f"- **Source:** {settings.DBT_MANIFEST_URL or settings.DBT_MANIFEST_PATH or 'none'}")
+        lines.append(f"- **Content hash:** {manifest.content_hash or 'n/a'}")
+        if manifest.last_load_time:
+            ts = datetime.fromtimestamp(manifest.last_load_time, tz=timezone.utc)
+            lines.append(f"- **Last load:** {ts.isoformat()}")
+        else:
+            lines.append("- **Last load:** never")
+        if manifest.last_refresh_error:
+            lines.append(f"- **Last refresh error:** {manifest.last_refresh_error}")
+
+        # Config
+        lines.append("\n## Config\n")
+        lines.append(f"- MAX_ROWS: {settings.MAX_ROWS}")
+        lines.append(f"- QUERY_TIMEOUT_SECONDS: {settings.QUERY_TIMEOUT_SECONDS}")
+        lines.append(f"- TOOL_RESPONSE_MAX_CHARS: {settings.TOOL_RESPONSE_MAX_CHARS}")
+        lines.append(f"- MANIFEST_REFRESH_INTERVAL_SECONDS: {settings.MANIFEST_REFRESH_INTERVAL_SECONDS}")
+        lines.append(f"- ALLOWED_DATABASES: {', '.join(settings.ALLOWED_DATABASES)}")
+
+        # Cache
+        lines.append("\n## Cache\n")
+        lines.append(f"- Schema cache entries: {ch.schema_cache_size}")
+        lines.append(f"- Schema cache TTL: {ch.SCHEMA_CACHE_TTL}s")
+
+        return "\n".join(lines)

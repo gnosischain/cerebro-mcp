@@ -10,8 +10,12 @@ from cerebro_mcp.safety import validate_query, validate_identifier, ensure_limit
 class ClickHouseManager:
     """Manages per-database ClickHouse client connections."""
 
+    SCHEMA_CACHE_TTL = 300  # 5 minutes
+    SCHEMA_CACHE_MAX_ENTRIES = 256
+
     def __init__(self):
         self._clients: dict[str, Any] = {}
+        self._schema_cache: dict[str, tuple[float, dict]] = {}
 
     def get_client(self, database: str):
         if database not in self._clients:
@@ -23,6 +27,7 @@ class ClickHouseManager:
                 database=database,
                 secure=settings.CLICKHOUSE_SECURE,
                 send_receive_timeout=settings.QUERY_TIMEOUT_SECONDS,
+                settings={"readonly": 1},
             )
         return self._clients[database]
 
@@ -67,12 +72,49 @@ class ClickHouseManager:
             "elapsed_seconds": round(elapsed, 3),
         }
 
-    def execute_raw(self, sql: str, database: str = "dbt") -> dict:
+    def execute_raw(
+        self, sql: str, database: str = "dbt", parameters: dict | None = None
+    ) -> dict:
         """Execute a system/metadata query (DESCRIBE, SHOW, etc.)."""
         self._validate_database(database)
         client = self.get_client(database)
-        result = client.query(sql)
+        result = client.query(sql, parameters=parameters)
         return {
             "columns": result.column_names,
             "rows": result.result_rows,
         }
+
+    # --- Schema metadata cache ---
+
+    def _cache_get(self, key: str) -> dict | None:
+        if key in self._schema_cache:
+            ts, result = self._schema_cache[key]
+            if time.time() - ts < self.SCHEMA_CACHE_TTL:
+                return result
+            del self._schema_cache[key]
+        return None
+
+    def _cache_set(self, key: str, result: dict) -> None:
+        if len(self._schema_cache) >= self.SCHEMA_CACHE_MAX_ENTRIES:
+            oldest_key = next(iter(self._schema_cache))
+            del self._schema_cache[oldest_key]
+        self._schema_cache[key] = (time.time(), result)
+
+    @property
+    def schema_cache_size(self) -> int:
+        return len(self._schema_cache)
+
+    def execute_raw_cached(
+        self,
+        sql: str,
+        database: str,
+        cache_key: str,
+        parameters: dict | None = None,
+    ) -> dict:
+        """Execute a metadata query with TTL caching."""
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+        result = self.execute_raw(sql, database, parameters=parameters)
+        self._cache_set(cache_key, result)
+        return result

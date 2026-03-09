@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     MAX_ROWS: int = 10000
     QUERY_TIMEOUT_SECONDS: int = 30
     MAX_QUERY_LENGTH: int = 10000
+    TOOL_RESPONSE_MAX_CHARS: int = 40_000
+
+    # Manifest refresh
+    MANIFEST_REFRESH_INTERVAL_SECONDS: int = 300
 
     # Databases accessible via the MCP server
     ALLOWED_DATABASES: list[str] = [

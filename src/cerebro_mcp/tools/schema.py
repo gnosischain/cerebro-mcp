@@ -1,7 +1,7 @@
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.manifest_loader import manifest
 from cerebro_mcp.safety import validate_identifier
-from cerebro_mcp.tools.query import format_results_table
+from cerebro_mcp.tools.query import format_results_table, truncate_response
 
 
 def register_schema_tools(mcp, ch: ClickHouseManager):
@@ -30,13 +30,18 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
                 "SELECT name, engine, total_rows, "
                 "formatReadableSize(total_bytes) AS size "
                 "FROM system.tables "
-                f"WHERE database = '{database}'"
+                "WHERE database = {db:String}"
             )
+            params = {"db": database}
             if name_pattern:
-                sql += f" AND name LIKE '{name_pattern}'"
+                sql += " AND name LIKE {pat:String}"
+                params["pat"] = name_pattern
             sql += " ORDER BY name"
 
-            result = ch.execute_raw(sql, database)
+            cache_key = f"tables:{database}:{name_pattern}"
+            result = ch.execute_raw_cached(
+                sql, database, cache_key, parameters=params
+            )
             if not result["rows"]:
                 return f"No tables found in database '{database}'."
 
@@ -70,10 +75,14 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
             sql = (
                 "SELECT name, type, default_kind, comment "
                 "FROM system.columns "
-                f"WHERE database = '{database}' AND table = '{table}' "
+                "WHERE database = {db:String} AND table = {tbl:String} "
                 "ORDER BY position"
             )
-            result = ch.execute_raw(sql, database)
+            cache_key = f"columns:{database}.{table}"
+            result = ch.execute_raw_cached(
+                sql, database, cache_key,
+                parameters={"db": database, "tbl": table},
+            )
 
             if not result["rows"]:
                 return f"Table '{database}.{table}' not found or has no columns."
@@ -113,7 +122,7 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
                 enriched_rows.append([col_name, col_type, default, description])
 
             output_parts.append(format_results_table(columns, enriched_rows))
-            return "\n".join(output_parts)
+            return truncate_response("\n".join(output_parts))
         except Exception as e:
             return f"Error: {e}"
 
@@ -146,13 +155,17 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
             # Verify table exists
             check_sql = (
                 "SELECT count() FROM system.tables "
-                f"WHERE database = '{database}' AND name = '{table}'"
+                "WHERE database = {db:String} AND name = {tbl:String}"
             )
-            check = ch.execute_raw(check_sql, database)
+            cache_key = f"exists:{database}.{table}"
+            check = ch.execute_raw_cached(
+                check_sql, database, cache_key,
+                parameters={"db": database, "tbl": table},
+            )
             if not check["rows"] or check["rows"][0][0] == 0:
                 return f"Table '{database}.{table}' not found."
 
-            sql = f"SELECT * FROM {database}.{table} LIMIT {capped}"
+            sql = f"SELECT * FROM `{database}`.`{table}` LIMIT {capped}"
             result = ch.execute_raw(sql, database)
             if not result["rows"]:
                 return f"Table '{database}.{table}' is empty."

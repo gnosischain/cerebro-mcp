@@ -1,11 +1,17 @@
 from cerebro_mcp.clickhouse_client import ClickHouseManager
+from cerebro_mcp.config import settings
 from cerebro_mcp.safety import validate_query
 
 
-def format_results_table(columns: list, rows: list, max_col_width: int = 60) -> str:
-    """Format query results as a markdown table."""
+def format_results_table(
+    columns: list, rows: list, max_col_width: int = 60, max_chars: int = 0
+) -> str:
+    """Format query results as a markdown table with row-aware truncation."""
     if not rows:
         return "No rows returned."
+
+    if max_chars <= 0:
+        max_chars = settings.TOOL_RESPONSE_MAX_CHARS
 
     # Convert all values to strings, truncate wide columns
     str_rows = []
@@ -24,15 +30,39 @@ def format_results_table(columns: list, rows: list, max_col_width: int = 60) -> 
         for i, val in enumerate(row):
             widths[i] = max(widths[i], len(val))
 
-    # Build table
+    # Build table with row-aware size budget
     header = " | ".join(c.ljust(widths[i]) for i, c in enumerate(columns))
     separator = "-|-".join("-" * w for w in widths)
 
     lines = [header, separator]
+    current_chars = len(header) + len(separator) + 2
+
     for row in str_rows:
-        lines.append(" | ".join(val.ljust(widths[i]) for i, val in enumerate(row)))
+        row_str = " | ".join(val.ljust(widths[i]) for i, val in enumerate(row))
+        if current_chars + len(row_str) + 1 > max_chars:
+            lines.append(
+                f"\n[Table truncated at ~{current_chars:,} chars. "
+                f"Showing {len(lines) - 2} of {len(str_rows)} rows. "
+                "Use more specific filters or add LIMIT to reduce output.]"
+            )
+            break
+        lines.append(row_str)
+        current_chars += len(row_str) + 1
 
     return "\n".join(lines)
+
+
+def truncate_response(text: str, max_chars: int = 0) -> str:
+    """Truncate free-text responses that exceed the size budget."""
+    if max_chars <= 0:
+        max_chars = settings.TOOL_RESPONSE_MAX_CHARS
+    if len(text) <= max_chars:
+        return text
+    return (
+        text[:max_chars]
+        + f"\n\n[Response truncated at {max_chars:,} chars. "
+        "Use more specific filters or add LIMIT to reduce output.]"
+    )
 
 
 def register_query_tools(mcp, ch: ClickHouseManager):
@@ -89,6 +119,6 @@ def register_query_tools(mcp, ch: ClickHouseManager):
             explain_sql = f"EXPLAIN {sql}"
             result = ch.execute_raw(explain_sql, database)
             lines = [str(row[0]) if row else "" for row in result["rows"]]
-            return "\n".join(lines)
+            return truncate_response("\n".join(lines))
         except Exception as e:
             return f"Error: {e}"
