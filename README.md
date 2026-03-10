@@ -430,6 +430,62 @@ docker run --env-file .env cerebro-mcp
 
 ---
 
+## Deployment
+
+### CI/CD
+
+Push to `main` triggers GitHub Actions to build and push multi-arch Docker images:
+
+```
+ghcr.io/gnosischain/gc-cerebro-mcp:latest
+ghcr.io/gnosischain/gc-cerebro-mcp:<commit-sha>
+```
+
+### SSE Transport
+
+The `--sse` flag starts an HTTP server (uvicorn) for remote MCP clients:
+
+```bash
+cerebro-mcp --sse
+# Listens on http://0.0.0.0:8000 (configurable via FASTMCP_HOST / FASTMCP_PORT)
+```
+
+Without `--sse`, the server uses stdio transport (default for local Claude Desktop).
+
+### Authentication
+
+Set `MCP_AUTH_TOKEN` to require Bearer token authentication on all endpoints:
+
+```bash
+export MCP_AUTH_TOKEN=$(openssl rand -hex 32)
+cerebro-mcp --sse
+```
+
+- All requests require `Authorization: Bearer <token>` header
+- `/health` endpoint bypasses auth (for K8s probes)
+- When `MCP_AUTH_TOKEN` is unset, auth is disabled (local dev)
+
+### Hosted Endpoint
+
+The team instance is deployed on EKS at `mcp.analytics.gnosis.io`:
+
+```json
+{
+  "mcpServers": {
+    "cerebro": {
+      "url": "https://mcp.analytics.gnosis.io/sse",
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  }
+}
+```
+
+Terraform deployment details are in the [infrastructure repo](https://github.com/gnosischain/infrastructure-gnosis-analytics-deployments/tree/main/aws/deployments/gnosis-analytics/mcp).
+
+---
+
 ## Configuration
 
 All settings via environment variables or `.env` file:
@@ -451,6 +507,10 @@ All settings via environment variables or `.env` file:
 | `THINKING_LOG_DIR` | `.cerebro/logs` | Trace log directory |
 | `THINKING_LOG_RETENTION_DAYS` | `30` | Log retention |
 | `CEREBRO_REPORT_DIR` | `~/.cerebro/reports` | Saved report directory |
+| `CEREBRO_SAVED_QUERIES_DIR` | `~/.cerebro-mcp` | Saved queries directory |
+| `MCP_AUTH_TOKEN` | -- | Bearer token for SSE auth (disabled when unset) |
+| `FASTMCP_HOST` | `127.0.0.1` | SSE server bind address |
+| `FASTMCP_PORT` | `8000` | SSE server port |
 
 ---
 
