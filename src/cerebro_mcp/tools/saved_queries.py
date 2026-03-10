@@ -8,7 +8,7 @@ from cerebro_mcp.safety import validate_query, validate_identifier
 from cerebro_mcp.tools.query import format_results_table, truncate_response
 
 
-SAVED_QUERIES_DIR = os.path.expanduser("~/.cerebro-mcp")
+SAVED_QUERIES_DIR = os.environ.get("CEREBRO_SAVED_QUERIES_DIR", os.path.expanduser("~/.cerebro-mcp"))
 SAVED_QUERIES_FILE = os.path.join(SAVED_QUERIES_DIR, "saved_queries.json")
 
 

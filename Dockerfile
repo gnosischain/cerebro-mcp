@@ -18,6 +18,18 @@ COPY src/ src/
 # Copy built UI artifact into the Python package
 COPY --from=ui-builder /ui/dist/index.html src/cerebro_mcp/static/report.html
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . && \
+    useradd -r -u 1000 cerebro && \
+    mkdir -p /data/reports /data/logs /data/saved-queries && \
+    chown -R cerebro:cerebro /data
 
-ENTRYPOINT ["cerebro-mcp"]
+ENV FASTMCP_HOST=0.0.0.0
+ENV FASTMCP_PORT=8000
+ENV CEREBRO_REPORT_DIR=/data/reports
+ENV THINKING_LOG_DIR=/data/logs
+ENV CEREBRO_SAVED_QUERIES_DIR=/data/saved-queries
+
+EXPOSE 8000
+USER cerebro
+
+ENTRYPOINT ["cerebro-mcp", "--sse"]

@@ -1,4 +1,8 @@
+import os
+
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.manifest_loader import manifest
@@ -115,10 +119,57 @@ register_agent_tools(mcp)
 install_auto_tool_tracing(mcp)
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+
 def main():
     import sys
+
     transport = "sse" if "--sse" in sys.argv else "stdio"
-    mcp.run(transport=transport)
+
+    if transport == "sse":
+        _run_sse_with_auth()
+    else:
+        mcp.run(transport="stdio")
+
+
+def _run_sse_with_auth():
+    """Run SSE transport, optionally wrapped with Bearer token auth."""
+    import anyio
+    import uvicorn
+    from starlette.middleware import Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    auth_token = os.environ.get("MCP_AUTH_TOKEN")
+
+    class BearerAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            # Health endpoint bypasses auth
+            if request.url.path == "/health":
+                return await call_next(request)
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header != f"Bearer {auth_token}":
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await call_next(request)
+
+    starlette_app = mcp.sse_app()
+
+    if auth_token:
+        starlette_app.add_middleware(BearerAuthMiddleware)
+
+    async def _serve():
+        config = uvicorn.Config(
+            starlette_app,
+            host=mcp.settings.host,
+            port=mcp.settings.port,
+            log_level=mcp.settings.log_level.lower(),
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    anyio.run(_serve)
 
 
 if __name__ == "__main__":
