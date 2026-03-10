@@ -12,71 +12,55 @@ from cerebro_mcp.prompts.templates import register_prompts
 from cerebro_mcp.tools.query_async import register_async_query_tools
 from cerebro_mcp.tools.saved_queries import register_saved_query_tools
 from cerebro_mcp.tools.visualization import register_visualization_tools
+from cerebro_mcp.tools.reasoning import (
+    install_auto_tool_tracing,
+    register_reasoning_tools,
+)
 
 mcp = FastMCP(
     "cerebro-mcp",
     instructions=(
         "Gnosis Chain data platform MCP server.\n\n"
 
-        "STANDARD OPERATING PROCEDURE:\n"
-        "When asked to analyze data, find insights, or write queries, "
-        "you MUST follow this workflow:\n"
-        "1. DISCOVER: Always use `search_models` or `list_tables` first to find "
-        "the correct data source. ALWAYS check for dbt `api_*/fct_*` mart models first — "
-        "they are 100x faster than raw tables.\n"
-        "2. VERIFY: Use `get_model_details` or `describe_table` to verify column "
-        "names and types. Never guess schema.\n"
-        "3. SAMPLE: Use `get_sample_data` to understand data formatting "
-        "(e.g., are addresses lowercased? are timestamps ms or seconds?).\n"
-        "4. EXECUTE: Write and run ClickHouse SQL using `execute_query`. "
-        "Always use LIMIT and date filters. For long-running queries, use "
-        "`start_query`/`get_query_results` async pattern.\n\n"
+        "OUTPUT FORMAT RULES (MANDATORY):\n"
+        "You have two output modes. ALWAYS use the correct mode:\n\n"
+
+        "MODE 1: REPORTS & VISUALIZATIONS (INTERACTIVE UI)\n"
+        "TRIGGER: User asks for a report, charts, plots, visual analysis, trends, "
+        "or any weekly/daily/monthly summary.\n"
+        "REQUIRED WORKFLOW:\n"
+        "  1. Query data with `execute_query`\n"
+        "  2. Call `generate_chart` for EACH metric (minimum 3 charts for reports)\n"
+        "  3. Write markdown with `{{chart:CHART_ID}}` placeholders\n"
+        "  4. Call `generate_report(title, content_markdown)` — returns interactive UI resource\n"
+        "  5. Summarize key insights in your response text\n"
+        "  6. Ask user if they want the report converted to another format (docx/pdf/pptx)\n"
+        "CRITICAL: After `generate_report` or `open_report` returns, do NOT echo the "
+        "report markdown or {{chart:...}} placeholders as conversation text. "
+        "Only summarize insights and include the report URI.\n"
+        "ALWAYS complete this workflow. `generate_report` produces a native interactive "
+        "UI resource and opens the report in the user's browser.\n\n"
+
+        "MODE 2: QUICK QUERIES & RAW DATA (MARKDOWN OUTPUT)\n"
+        "TRIGGER: User asks for raw data, numbers, or a simple text explanation WITHOUT charts.\n"
+        "- Workflow: Query data → output a Markdown response.\n"
+        "- Structure: ### Objective → ### Query (SQL block) → ### Results (Markdown table, max 10 rows) → "
+        "### Key Insights (Bullet points).\n\n"
+
+        "STANDARD OPERATING PROCEDURE (MANDATORY):\n"
+        "1. DISCOVER: Use `search_models` or `list_tables`. "
+        "Check for dbt `api_*/fct_*` models first (they are much faster).\n"
+        "2. VERIFY SCHEMA: Call `describe_table` or `get_model_details` "
+        "to get EXACT column names before writing SQL. "
+        "Do NOT guess generic names like 'transactions' or 'value' without verifying.\n"
+        "3. EXECUTE: Write ClickHouse SQL using verified column names. "
+        "Always use LIMIT and partition key filters (e.g., block_timestamp/block_date).\n\n"
 
         "GNOSIS CHAIN SPECIFICS:\n"
-        "Gnosis Chain is NOT Ethereum. Do NOT assume Ethereum parameters.\n"
-        "- Block time: 5 seconds (not 12). ~17,280 blocks per day.\n"
-        "- Native gas token: xDAI (not ETH). Gas is paid in xDAI.\n"
-        "- Staking token: GNO. 1 GNO per validator (not 32 ETH).\n"
+        "- Block time: 5 seconds. ~17,280 blocks per day.\n"
+        "- Native gas token: xDAI. Staking token: GNO (1 GNO per validator).\n"
         "- Chain ID: 100. Slots per epoch: 16.\n"
-        "- Use `gnosis://chain-parameters` resource for full consensus specs.\n"
-        "- Use `gnosis://address-directory` for token addresses and decimals.\n\n"
-
-        "QUERY BEST PRACTICES:\n"
-        "- CRITICAL: Always include WHERE on partition key (block_timestamp, block_date, "
-        "or slot) to enable partition pruning. Never full-scan.\n"
-        "- Verify token decimals before aggregating values: "
-        "xDAI/GNO/WETH = 18 decimals, USDC/USDT = 6 decimals. "
-        "Use `get_token_metadata` to check.\n"
-        "- On query errors, use `explain_query` or `describe_table` to debug. "
-        "Do NOT randomly guess syntax fixes.\n"
-        "- Use `resolve_address` for address-to-label lookups.\n"
-        "- Use `search_models_by_address` to find dbt models by contract address.\n"
-        "- Use `search_docs` for targeted documentation lookups.\n"
-        "- Check `gnosis://query-cookbook` for optimized query templates.\n"
-        "- Use `generate_chart` to produce ECharts visualizations for trends.\n\n"
-
-        "STANDARDIZED OUTPUT FORMAT:\n"
-        "Always present your final answer to the user using this exact "
-        "markdown structure:\n"
-        "### Objective\n"
-        "[Briefly state what you are analyzing]\n\n"
-        "### Query\n"
-        "```sql\n[Insert the ClickHouse SQL you ran]\n```\n\n"
-        "### Results\n"
-        "[Show the data in a concise markdown table, limiting to the top "
-        "5-10 most relevant rows. Round financial metrics to 2 decimal places. "
-        "Dates in YYYY-MM-DD UTC format. Specify if amounts are in wei or native units.]\n\n"
-        "### Key Insights\n"
-        "- **[Insight 1]**: [Explanation based on the data]\n"
-        "- **[Insight 2]**: [Explanation based on the data]\n\n"
-
-        "INTERACTIVE REPORTS:\n"
-        "For interactive reports with rendered charts, follow this workflow:\n"
-        "1. Generate charts with `generate_chart` (each returns a chart ID like chart_1)\n"
-        "2. Use `list_charts` to see all registered chart IDs\n"
-        "3. Write markdown content with `{{chart:CHART_ID}}` placeholders where charts should appear\n"
-        "4. Call `generate_report` to produce a standalone HTML file with rendered ECharts visualizations\n"
-        "Use the `weekly_report` prompt for a guided weekly report workflow.\n"
+        "- Verify token decimals (xDAI/GNO/WETH = 18, USDC/USDT = 6) via `get_token_metadata`.\n"
     ),
 )
 
@@ -101,10 +85,14 @@ register_prompts(mcp)
 register_async_query_tools(mcp, ch)
 register_saved_query_tools(mcp, ch)
 register_visualization_tools(mcp, ch)
+register_reasoning_tools(mcp)
+install_auto_tool_tracing(mcp)
 
 
 def main():
-    mcp.run(transport="stdio")
+    import sys
+    transport = "sse" if "--sse" in sys.argv else "stdio"
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

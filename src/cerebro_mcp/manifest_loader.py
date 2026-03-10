@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import time
 from typing import Any, Optional
 
@@ -214,6 +215,17 @@ class ManifestLoader:
     def get_all_model_names(self) -> list[str]:
         return list(self._models.keys())
 
+    def _model_summary(self, node: dict) -> dict[str, Any]:
+        """Build a summary dict for a model node."""
+        return {
+            "name": node["name"],
+            "description": node.get("description", ""),
+            "materialized": node.get("config", {}).get("materialized", ""),
+            "tags": node.get("tags", []),
+            "schema": node.get("schema", ""),
+            "path": node.get("path", ""),
+        }
+
     def search_models(
         self,
         query: str = "",
@@ -221,7 +233,11 @@ class ManifestLoader:
         module: Optional[str] = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """Search models by name, description, or tags."""
+        """Search models by name, description, or tags.
+
+        Multi-word queries are tokenized and matched independently (OR logic).
+        Results are ranked by number of matching tokens (most relevant first).
+        """
         candidates = set(self._models.keys())
 
         # Filter by module (case-insensitive)
@@ -235,27 +251,42 @@ class ManifestLoader:
                 tag_models = set(self._tags_index.get(tag, []))
                 candidates &= tag_models
 
-        # Filter by query string (name or description match)
-        results = []
-        query_lower = query.lower()
-        for name in sorted(candidates):
-            node = self._models[name]
-            if query:
-                name_match = query_lower in name.lower()
-                desc_match = query_lower in node.get("description", "").lower()
-                if not name_match and not desc_match:
-                    continue
-            results.append({
-                "name": name,
-                "description": node.get("description", ""),
-                "materialized": node.get("config", {}).get("materialized", ""),
-                "tags": node.get("tags", []),
-                "schema": node.get("schema", ""),
-                "path": node.get("path", ""),
-            })
-            if len(results) >= limit:
-                break
+        if not query:
+            # No query — return all candidates sorted alphabetically
+            results = []
+            for name in sorted(candidates):
+                results.append(self._model_summary(self._models[name]))
+                if len(results) >= limit:
+                    break
+            return results
 
+        # Tokenize query: split on whitespace/underscores, drop short words
+        tokens = re.split(r"[\s_]+", query.lower())
+        tokens = [t for t in tokens if len(t) >= 3]
+
+        if not tokens:
+            # All words were too short — use the original query as-is
+            tokens = [query.lower()]
+
+        # Score each model by number of matching tokens
+        scored: list[tuple[int, str]] = []
+        for name in candidates:
+            node = self._models[name]
+            name_lower = name.lower()
+            desc_lower = node.get("description", "").lower()
+            tags_lower = " ".join(node.get("tags", [])).lower()
+            searchable = f"{name_lower} {desc_lower} {tags_lower}"
+
+            hits = sum(1 for t in tokens if t in searchable)
+            if hits > 0:
+                scored.append((hits, name))
+
+        # Sort by relevance (most matching tokens first), then alphabetical
+        scored.sort(key=lambda x: (-x[0], x[1]))
+
+        results = []
+        for _score, name in scored[:limit]:
+            results.append(self._model_summary(self._models[name]))
         return results
 
     def get_model_details(self, model_name: str) -> Optional[dict[str, Any]]:

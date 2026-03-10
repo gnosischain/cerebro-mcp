@@ -57,8 +57,14 @@ def validate_query(sql: str, max_length: int = 10000) -> Tuple[bool, str]:
     if len(sql_stripped) > max_length:
         return False, f"Query exceeds maximum length of {max_length} characters"
 
-    # Check query starts with an allowed keyword
-    sql_upper = sql_stripped.upper().lstrip("( \t\n\r")
+    # Strip leading comments before checking prefix
+    sql_no_leading_comments = re.sub(
+        r"^(\s*(--[^\n]*\n|/\*.*?\*/\s*))+",
+        "",
+        sql_stripped,
+        flags=re.DOTALL,
+    ).strip()
+    sql_upper = sql_no_leading_comments.upper().lstrip("( \t\n\r")
     if not any(sql_upper.startswith(prefix) for prefix in ALLOWED_PREFIXES):
         return False, (
             f"Query must start with one of: {', '.join(ALLOWED_PREFIXES)}. "

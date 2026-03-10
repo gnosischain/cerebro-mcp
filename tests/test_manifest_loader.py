@@ -238,6 +238,64 @@ class TestManifestLoaderReal:
         assert "consensus" in modules
 
 
+class TestMultiTokenSearch:
+    """Test that multi-word queries are tokenized and matched independently."""
+
+    def test_search_multi_word_query(self, loader_with_sample):
+        """Multi-word queries should match on individual tokens."""
+        results = loader_with_sample.search_models(
+            query="validator daily count"
+        )
+        assert len(results) >= 1
+        assert any(
+            r["name"] == "api_consensus_validators_active_daily"
+            for r in results
+        )
+
+    def test_search_relevance_ordering(self, loader_with_sample):
+        """Models matching more tokens should rank higher."""
+        results = loader_with_sample.search_models(
+            query="execution blocks daily"
+        )
+        names = [r["name"] for r in results]
+        # int_execution_blocks_daily matches all 3 tokens, should be first
+        assert names[0] == "int_execution_blocks_daily"
+
+    def test_search_includes_tags(self, loader_with_sample):
+        """Tags should be included in search matching."""
+        results = loader_with_sample.search_models(query="production")
+        assert len(results) >= 1
+        # stg_execution__blocks and api_consensus_validators_active_daily
+        # both have tag "production"
+        names = [r["name"] for r in results]
+        assert "stg_execution__blocks" in names
+
+    def test_search_short_words_ignored(self, loader_with_sample):
+        """Words shorter than 3 chars should be ignored."""
+        results = loader_with_sample.search_models(query="a of in blocks")
+        assert len(results) == 2  # Same as searching "blocks"
+
+    def test_search_single_word_still_works(self, loader_with_sample):
+        """Single-word queries should behave the same as before."""
+        results = loader_with_sample.search_models(query="blocks")
+        assert len(results) == 2
+        names = [r["name"] for r in results]
+        assert "stg_execution__blocks" in names
+        assert "int_execution_blocks_daily" in names
+
+    def test_search_underscore_splitting(self, loader_with_sample):
+        """Underscores in query should be treated as word separators."""
+        results = loader_with_sample.search_models(
+            query="execution_blocks"
+        )
+        assert len(results) == 2
+
+    def test_search_empty_query_returns_all(self, loader_with_sample):
+        """Empty query should return all models."""
+        results = loader_with_sample.search_models(query="")
+        assert len(results) == 3
+
+
 class TestLowercaseModules:
     """Test that module index is case-insensitive."""
 

@@ -2,6 +2,11 @@ from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
 from cerebro_mcp.safety import validate_query
 
+# Session query counter and nudge state for report workflow
+_query_count = 0
+_last_nudge_time: float = 0.0
+_NUDGE_COOLDOWN = 300  # seconds between nudges (5 min)
+
 
 def format_results_table(
     columns: list, rows: list, max_col_width: int = 60, max_chars: int = 0
@@ -74,9 +79,15 @@ def register_query_tools(mcp, ch: ClickHouseManager):
     ) -> str:
         """Execute a read-only SQL query against a Gnosis Chain ClickHouse database.
 
+        IMPORTANT: Before calling this tool, you MUST first call `describe_table`
+        or `get_model_details` to verify exact column names. Column names are
+        non-obvious (e.g., `value` not `staked_gno`, `cnt` not `count`,
+        `txs` not `transactions`). Never guess column names.
+
         Args:
             sql: The SQL query to execute. Must be a SELECT statement.
-                 Use ClickHouse SQL syntax.
+                 Use ClickHouse SQL syntax. Only use column names verified
+                 via `describe_table` or `get_model_details`.
             database: Target database. One of: execution, consensus,
                       crawlers_data, nebula, dbt. Default: dbt.
             max_rows: Maximum rows to return (1-10000). Default: 100.
@@ -85,6 +96,9 @@ def register_query_tools(mcp, ch: ClickHouseManager):
             Query results as a formatted table with metadata.
         """
         try:
+            global _query_count
+            _query_count += 1
+
             result = ch.execute_query(sql, database, max_rows)
             table = format_results_table(result["columns"], result["rows"])
             meta = (
@@ -93,8 +107,56 @@ def register_query_tools(mcp, ch: ClickHouseManager):
                 f"Time: {result['elapsed_seconds']}s | "
                 f"Database: {database}"
             )
-            return table + meta
+            response = table + meta
+
+            # Nudge toward generate_chart / generate_report during multi-query workflows
+            if _query_count >= 3:
+                import time as _time
+
+                global _last_nudge_time
+                now = _time.monotonic()
+                if now - _last_nudge_time > _NUDGE_COOLDOWN:
+                    from cerebro_mcp.tools.visualization import _chart_registry
+
+                    if _chart_registry:
+                        response += (
+                            f"\n\n> **Reminder:** You have "
+                            f"{len(_chart_registry)} chart(s) registered. "
+                            "Call `generate_report(title, content_markdown)` "
+                            "with `{{chart:CHART_ID}}` placeholders to "
+                            "produce the interactive report."
+                        )
+                    else:
+                        response += (
+                            "\n\n> **Tip:** To create charts and a visual "
+                            "report, use `generate_chart(sql, chart_type, "
+                            "x_field, y_field, title)` for each metric, then "
+                            "`generate_report(title, content_markdown)`."
+                        )
+                    _last_nudge_time = now
+
+            return response
         except Exception as e:
+            error_msg = str(e)
+            # Add actionable hint for column-name errors
+            if "UNKNOWN_IDENTIFIER" in error_msg or "Unknown expression" in error_msg:
+                # Extract table name from the query for the hint
+                import re
+
+                table_match = re.search(
+                    r"\bFROM\s+(\w+)", sql, re.IGNORECASE
+                )
+                table_hint = (
+                    f" Use `describe_table` on '{table_match.group(1)}' "
+                    "to see exact column names."
+                    if table_match
+                    else " Use `describe_table` to check exact column names."
+                )
+                return (
+                    f"Error: {error_msg}\n\n"
+                    f"**Hint**: Wrong column name.{table_hint} "
+                    "Do NOT guess — verify the schema first."
+                )
             return f"Error: {e}"
 
     @mcp.tool()

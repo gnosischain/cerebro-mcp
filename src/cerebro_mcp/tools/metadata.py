@@ -95,6 +95,8 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
     @mcp.tool()
     def system_status() -> str:
         """Show server status: ClickHouse connectivity, manifest state, config."""
+        from cerebro_mcp.tools.reasoning import get_tracing_status
+
         lines = ["# System Status\n"]
 
         # ClickHouse connectivity
@@ -128,6 +130,20 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
         lines.append(f"- TOOL_RESPONSE_MAX_CHARS: {settings.TOOL_RESPONSE_MAX_CHARS}")
         lines.append(f"- MANIFEST_REFRESH_INTERVAL_SECONDS: {settings.MANIFEST_REFRESH_INTERVAL_SECONDS}")
         lines.append(f"- ALLOWED_DATABASES: {', '.join(settings.ALLOWED_DATABASES)}")
+
+        tracing_status = get_tracing_status()
+        lines.append("\n## Tracing\n")
+        lines.append(f"- enabled: {tracing_status['enabled']}")
+        lines.append(f"- always_on: {tracing_status['always_on']}")
+        lines.append(f"- log_dir: {tracing_status['log_dir']}")
+        lines.append(f"- retention_days: {tracing_status['retention_days']}")
+        lines.append(f"- session_files: {tracing_status['session_files']}")
+        lines.append(
+            f"- recent_session_files_24h: {tracing_status['recent_session_files']}"
+        )
+        lines.append(
+            f"- active_session_id: {tracing_status['active_session_id'] or 'none'}"
+        )
 
         # Cache
         lines.append("\n## Cache\n")
@@ -374,7 +390,6 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                 QUERY_COOKBOOK,
             )
 
-            topic_lower = topic.lower()
             sources = {
                 "Platform Overview": PLATFORM_OVERVIEW,
                 "ClickHouse SQL Guide": CLICKHOUSE_SQL_GUIDE,
@@ -383,23 +398,41 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                 "Query Cookbook": QUERY_COOKBOOK,
             }
 
-            results = []
+            # Tokenize topic: split on whitespace, drop short words
+            tokens = [t for t in re.split(r"\s+", topic.lower()) if len(t) >= 3]
+            if not tokens:
+                tokens = [topic.lower()]
+
+            scored_results = []
             for source_name, content in sources.items():
                 # Split into sections by ## headers
                 sections = re.split(r"(?=^## )", content, flags=re.MULTILINE)
                 for section in sections:
-                    if topic_lower in section.lower():
-                        # Trim to reasonable length
+                    section_lower = section.lower()
+                    hits = sum(1 for t in tokens if t in section_lower)
+                    if hits > 0:
                         trimmed = section.strip()[:500]
                         if len(section.strip()) > 500:
                             trimmed += "\n...(truncated)"
-                        results.append(f"**[{source_name}]**\n{trimmed}")
+                        scored_results.append(
+                            (hits, f"**[{source_name}]**\n{trimmed}")
+                        )
 
-            if not results:
-                return f"No documentation found matching '{topic}'."
+            # Sort by relevance (most matching tokens first)
+            scored_results.sort(key=lambda x: -x[0])
 
-            header = f"# Documentation Search: '{topic}'\n\nFound {len(results)} matching section(s).\n\n"
-            body = "\n\n---\n\n".join(results[:10])
+            if not scored_results:
+                return (
+                    f"No documentation found matching '{topic}'.\n\n"
+                    "**Tips:** Use short keywords (e.g., 'bridge', 'gas', "
+                    "'validator'). Individual topics work better than "
+                    "long phrases."
+                )
+
+            header = f"# Documentation Search: '{topic}'\n\nFound {len(scored_results)} matching section(s).\n\n"
+            body = "\n\n---\n\n".join(
+                text for _score, text in scored_results[:10]
+            )
             return truncate_response(header + body)
         except Exception as e:
             return f"Error: {e}"

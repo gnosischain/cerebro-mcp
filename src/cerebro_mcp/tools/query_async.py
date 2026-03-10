@@ -70,8 +70,12 @@ def register_async_query_tools(mcp, ch: ClickHouseManager):
         Use this instead of execute_query when the query might take longer than
         30 seconds (e.g., large aggregations over raw execution/consensus tables).
 
+        IMPORTANT: Before calling this tool, verify column names using
+        `describe_table` or `get_model_details`. Never guess column names.
+
         Args:
-            sql: The SQL query to execute (SELECT only).
+            sql: The SQL query to execute (SELECT only). Only use column names
+                 verified via `describe_table` or `get_model_details`.
             database: Target database. Default: dbt.
             max_rows: Maximum rows to return (1-10000). Default: 100.
 
@@ -145,9 +149,26 @@ def register_async_query_tools(mcp, ch: ClickHouseManager):
                 )
 
             if job.status == "failed":
+                error_msg = job.error or ""
+                hint = ""
+                if "UNKNOWN_IDENTIFIER" in error_msg or "Unknown expression" in error_msg:
+                    import re as _re
+                    table_match = _re.search(
+                        r"\bFROM\s+(\w+)", job.sql, _re.IGNORECASE
+                    )
+                    table_hint = (
+                        f" Use `describe_table` on '{table_match.group(1)}' "
+                        "to see exact column names."
+                        if table_match
+                        else " Use `describe_table` to check exact column names."
+                    )
+                    hint = (
+                        f"\n\n**Hint**: Wrong column name.{table_hint} "
+                        "Do NOT guess — verify the schema first."
+                    )
                 return (
                     f"**Status:** Failed\n"
-                    f"**Error:** {job.error}\n\n"
+                    f"**Error:** {error_msg}{hint}\n\n"
                     f"**SQL:**\n```sql\n{job.sql}\n```"
                 )
 

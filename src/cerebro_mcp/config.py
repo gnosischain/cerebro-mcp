@@ -32,17 +32,22 @@ class Settings(BaseSettings):
     # Manifest refresh
     MANIFEST_REFRESH_INTERVAL_SECONDS: int = 300
 
+    # Thinking / performance tracing
+    THINKING_MODE_ENABLED: bool = True
+    THINKING_ALWAYS_ON: bool = True
+    THINKING_LOG_DIR: str = ".cerebro/logs"
+    THINKING_LOG_RETENTION_DAYS: int = 30
+
     # Databases accessible via the MCP server
     ALLOWED_DATABASES: list[str] = [
         "execution",
         "consensus",
         "crawlers_data",
         "nebula",
+        "nebula_discv4",
         "dbt",
     ]
 
-    # Report output directory
-    REPORTS_OUTPUT_DIR: str = "~/.cerebro-mcp/reports"
 
 
 settings = Settings()

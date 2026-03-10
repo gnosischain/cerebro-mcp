@@ -31,6 +31,9 @@ def register_dbt_tools(mcp):
         Args:
             query: Search term to match against model name or description.
                    Case-insensitive substring match.
+                   Supports multi-word queries — each word is matched independently.
+                   Use short keywords like 'bridge', 'transactions', 'validator'.
+                   Model names use underscores (e.g., api_execution_transactions_daily).
             tags: Optional list of tags to filter by (e.g., ['execution', 'production']).
             module: Optional module filter (e.g., 'execution', 'consensus', 'contracts',
                     'p2p', 'bridges', 'ESG', 'probelab', 'crawlers_data').
@@ -49,7 +52,15 @@ def register_dbt_tools(mcp):
             query=query, tags=tags, module=module, limit=capped_limit
         )
         if not results:
-            return f"No models found matching query='{query}', tags={tags}, module={module}."
+            return (
+                f"No models found matching query='{query}', "
+                f"tags={tags}, module={module}.\n\n"
+                "**Tips:** Use short single keywords (e.g., 'bridge', "
+                "'transactions', 'validator', 'gas'). "
+                "Try module filter: 'execution', 'consensus', 'contracts', "
+                "'bridges', 'p2p', 'ESG'. "
+                "Or call `list_tables(database='dbt')` to browse all tables."
+            )
 
         lines = [f"Found {len(results)} model(s):\n"]
         for m in results:
@@ -60,7 +71,20 @@ def register_dbt_tools(mcp):
                 f"  Tags: {tags_str} | Path: {m['path']}"
             )
 
-        return truncate_response("\n".join(lines))
+        result = truncate_response("\n".join(lines))
+
+        # Append report workflow hint for report-oriented queries
+        _report_keywords = {
+            "report", "trend", "weekly", "daily", "monthly",
+            "summary", "overview", "highlights",
+        }
+        if query and any(kw in query.lower() for kw in _report_keywords):
+            result += (
+                "\n\n> **Workflow:** query data → `generate_chart` per metric → "
+                "`generate_report` for interactive report."
+            )
+
+        return result
 
     @mcp.tool()
     def get_model_details(model_name: str) -> str:
