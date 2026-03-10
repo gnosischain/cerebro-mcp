@@ -162,8 +162,8 @@ def _run_sse_with_auth():
     async def _serve():
         config = uvicorn.Config(
             starlette_app,
-            host=mcp.settings.host,
-            port=mcp.settings.port,
+            host=os.environ.get("FASTMCP_HOST", "0.0.0.0"),
+            port=int(os.environ.get("FASTMCP_PORT", "8000")),
             log_level=mcp.settings.log_level.lower(),
         )
         server = uvicorn.Server(config)
