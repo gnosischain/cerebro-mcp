@@ -1,6 +1,24 @@
-import { useState, useCallback, useEffect } from "react";
+import {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useEffect,
+} from "react";
+import type { ReactNode } from "react";
+import { createElement } from "react";
 
-export function useTheme() {
+interface ThemeContextValue {
+  isDark: boolean;
+  toggle: () => void;
+}
+
+const ThemeContext = createContext<ThemeContextValue>({
+  isDark: false,
+  toggle: () => {},
+});
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
   const [isDark, setIsDark] = useState(() => {
     document.documentElement.dataset.theme = "light";
     return false;
@@ -14,5 +32,9 @@ export function useTheme() {
     setIsDark((prev) => !prev);
   }, []);
 
-  return { isDark, toggle };
+  return createElement(ThemeContext.Provider, { value: { isDark, toggle } }, children);
+}
+
+export function useTheme() {
+  return useContext(ThemeContext);
 }
