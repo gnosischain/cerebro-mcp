@@ -14,39 +14,39 @@ Cerebro MCP connects AI assistants (Claude Desktop, VS Code, Claude Code) to Gno
                           ┌─────────────────────────────────────────┐
                           │            MCP Host (Client)            │
                           │  Claude Desktop / VS Code / Claude Code │
-                          └────────────────┬───────────────────────-┘
+                          └────────────────┬────────────────────────┘
                                            │ MCP Protocol
                                            │ (stdio / SSE)
-                          ┌────────────────▼───────────────────────┐
+                          ┌────────────────▼────────────────────────┐
                           │          cerebro-mcp (FastMCP)          │
-                          │                                        │
-                          │  ┌──────────┐ ┌──────────┐ ┌────────┐  │
-                          │  │  Query   │ │  Schema  │ │  dbt   │  │
-                          │  │  Tools   │ │  Tools   │ │  Tools │  │
-                          │  └────┬─────┘ └────┬─────┘ └───┬────┘  │
+                          │                                         │
+                          │  ┌──────────┐ ┌──────────┐ ┌────────┐   │
+                          │  │  Query   │ │  Schema  │ │  dbt   │   │
+                          │  │  Tools   │ │  Tools   │ │  Tools │   │
+                          │  └────┬─────┘ └────┬─────┘ └───┬────┘   │
                           │       │            │           │        │
                           │  ┌────▼────────────▼───────────▼────┐   │
                           │  │       ClickHouse Client          │   │
                           │  │    (clickhouse-connect + cache)  │   │
                           │  └────────────────┬─────────────────┘   │
                           │                   │                     │
-                          │  ┌────────────────┼─────────────────┐   │
+                          │  ┌────────────────┴─────────────────┐   │
                           │  │  Visualization  │  Reasoning     │   │
                           │  │  Tools          │  Tracing       │   │
-                          │  └────────┬───────-┘  └─────────────┘   │
+                          │  └────────┬────────┘────────────────┘   │
                           │           │                             │
                           │  ┌────────▼──────────────────────────┐  │
                           │  │  React Report UI (Vite bundle)    │  │
                           │  │  ECharts + Sidebar + Theme toggle │  │
                           │  └───────────────────────────────────┘  │
-                          └────────────────┬───────────────────────┘
+                          └────────────────┬────────────────────────┘
                                            │
-                          ┌────────────────▼───────────────────────┐
-                          │     ClickHouse Cloud (Gnosis Chain)    │
-                          │                                        │
-                          │  execution │ consensus │ crawlers_data │
-                          │  nebula    │ nebula_discv4 │ dbt       │
-                          └────────────────────────────────────────┘
+                          ┌────────────────▼────────────────────────┐
+                          │     ClickHouse Cloud (Gnosis Chain)     │
+                          │                                         │
+                          │  execution │ consensus │ crawlers_data  │
+                          │  nebula    │ nebula_discv4 │ dbt        │
+                          └─────────────────────────────────────────┘
 ```
 
 ---
@@ -142,8 +142,8 @@ Cerebro MCP connects AI assistants (Claude Desktop, VS Code, Claude Code) to Gno
   │                                                                 │
   │  1. Standalone HTML saved to ~/.cerebro/reports/                │
   │  2. Interactive UI rendered in MCP App iframe (Claude Desktop)  │
-  │  3. Chat shows: title, file:// link, report ID                 │
-  │  4. User can reopen with: open_report("abc12345")              │
+  │  3. Chat shows: title, file:// link, report ID                  │
+  │  4. User can reopen with: open_report("abc12345")               │
   └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -153,27 +153,27 @@ Cerebro MCP connects AI assistants (Claude Desktop, VS Code, Claude Code) to Gno
 
 ```
   ┌──────────────────────────────────────────────────────────────┐
-  │  ┌──────────┐  ┌──────────────────────────────────────────┐  │
-  │  │          │  │  [owl] Weekly Report       [sun] toggle  │  │
-  │  │ Sidebar   │  │  2026-03-10 12:00 UTC                    │  │
-  │  │           │  ├──────────────────────────────────────────┤  │
-  │  │ Overview  │  │                                          │  │
-  │  │ Network   │  │  ## Overview                             │  │
-  │  │ Validators│  │                                          │  │
-  │  │ Bridges   │  │  ┌──────────────────────────────────┐    │  │
-  │  │           │  │  │  Daily Transactions    [img][tbl] │    │  │
-  │  │  [<] hide │  │  │  ┌─────────────────────────┐     │    │  │
-  │  │           │  │  │  │      Line Chart          │     │    │  │
-  │  │           │  │  │  │                          │     │    │  │
-  │  │           │  │  │  │                    [owl] │     │    │  │
-  │  │           │  │  │  └─────────────────────────┘     │    │  │
-  │  │           │  │  └──────────────────────────────────┘    │  │
-  │  │           │  │                                          │  │
-  │  │           │  │  Key highlights:                         │  │
-  │  │           │  │  - Transactions increased by +12.3%      │  │
-  │  │           │  │  - Gas usage decreased by -5.1%          │  │
-  │  │           │  │                                          │  │
-  │  └──────────┘  └──────────────────────────────────────────┘  │
+  │  ┌───────────┐  ┌─────────────────────────────────────────┐  │
+  │  │           │  │  [owl] Weekly Report       [sun] toggle │  │
+  │  │ Sidebar   │  │  2026-03-10 12:00 UTC                   │  │
+  │  │           │  ├─────────────────────────────────────────┤  │
+  │  │ Overview  │  │                                         │  │
+  │  │ Network   │  │  ## Overview                            │  │
+  │  │ Validators│  │                                         │  │
+  │  │ Bridges   │  │  ┌──────────────────────────────────┐   │  │
+  │  │           │  │  │  Daily Transactions    [img][tbl]│   │  │
+  │  │  [<] hide │  │  │  ┌─────────────────────────┐     │   │  │
+  │  │           │  │  │  │      Line Chart         │     │   │  │
+  │  │           │  │  │  │                         │     │   │  │
+  │  │           │  │  │  │                    [owl]│     │   │  │
+  │  │           │  │  │  └─────────────────────────┘     │   │  │
+  │  │           │  │  └──────────────────────────────────┘   │  │
+  │  │           │  │                                         │  │
+  │  │           │  │  Key highlights:                        │  │
+  │  │           │  │  - Transactions increased by +12.3%     │  │
+  │  │           │  │  - Gas usage decreased by -5.1%         │  │
+  │  │           │  │                                         │  │
+  │  └───────────┘  └─────────────────────────────────────────┘  │
   └──────────────────────────────────────────────────────────────┘
 
   [img] = Save chart as PNG       [tbl] = View raw data
@@ -197,9 +197,9 @@ Cerebro MCP connects AI assistants (Claude Desktop, VS Code, Claude Code) to Gno
 
 ```
   ┌─────────────────────────────────────────────────────────────┐
-  │                    ClickHouse Cloud                          │
+  │                    ClickHouse Cloud                         │
   │                                                             │
-  │  ┌─────────────┐  ┌─────────────┐  ┌───────────────────┐   │
+  │  ┌──────────────┐  ┌─────────────┐  ┌───────────────────┐   │
   │  │  execution   │  │  consensus  │  │  crawlers_data    │   │
   │  │              │  │             │  │                   │   │
   │  │  blocks      │  │  validators │  │  dune_labels (5M) │   │
@@ -208,9 +208,9 @@ Cerebro MCP connects AI assistants (Claude Desktop, VS Code, Claude Code) to Gno
   │  │  traces      │  │  deposits   │  │  gno_supply       │   │
   │  │  contracts   │  │  blobs      │  │  probelab_*       │   │
   │  │  transfers   │  │  specs      │  │  gpay_wallets     │   │
-  │  └─────────────┘  └─────────────┘  └───────────────────┘   │
+  │  └──────────────┘  └─────────────┘  └───────────────────┘   │
   │                                                             │
-  │  ┌─────────────┐  ┌─────────────┐  ┌───────────────────┐   │
+  │  ┌──────────────┐  ┌─────────────┐  ┌───────────────────┐   │
   │  │  nebula      │  │ nebula_     │  │  dbt              │   │
   │  │              │  │  discv4     │  │                   │   │
   │  │  crawls      │  │  (variant)  │  │  ~400 models      │   │
@@ -223,7 +223,7 @@ Cerebro MCP connects AI assistants (Claude Desktop, VS Code, Claude Code) to Gno
   │  │              │  │             │  │   ESG (18)        │   │
   │  │              │  │             │  │   probelab (9)    │   │
   │  │              │  │             │  │   crawlers (9)    │   │
-  │  └─────────────┘  └─────────────┘  └───────────────────┘   │
+  │  └──────────────┘  └─────────────┘  └───────────────────┘   │
   └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -234,20 +234,20 @@ Cerebro MCP connects AI assistants (Claude Desktop, VS Code, Claude Code) to Gno
 Cerebro MCP uses three specialized agent personas for complex report generation:
 
 ```
-  ┌───────────────────┐    ┌───────────────────┐    ┌───────────────────┐
-  │ Analytics Reporter │    │    UI Designer     │    │  Reality Checker  │
-  │                   │    │                   │    │                   │
-  │ - search_models   │    │ - Chart type       │    │ - SQL safety      │
-  │ - describe_table  │──► │   selection        │──► │ - Data validation │
-  │ - execute_query   │    │ - Markdown layout  │    │ - Chart specs     │
-  │ - generate_chart  │    │ - generate_report  │    │ - Report structure│
-  │                   │    │                   │    │ - Formatting QA   │
-  │ SOP: DISCOVER →   │    │ Enforces:          │    │                   │
-  │   VERIFY → SAMPLE │    │ - Min 2 h2 sections│    │ Zero tolerance:   │
-  │   → EXECUTE →     │    │ - Descriptive titles│    │ - Wrong columns  │
-  │   VISUALIZE       │    │ - No emojis        │    │ - Missing dates  │
-  │                   │    │ - Report link      │    │ - Bad chart types │
-  └───────────────────┘    └───────────────────┘    └───────────────────┘
+  ┌────────────────────┐    ┌─────────────────────┐    ┌───────────────────┐
+  │ Analytics Reporter │    │    UI Designer      │    │  Reality Checker  │
+  │                    │    │                     │    │                   │
+  │ - search_models    │    │ - Chart type        │    │ - SQL safety      │
+  │ - describe_table   │──► │   selection         │──► │ - Data validation │
+  │ - execute_query    │    │ - Markdown layout   │    │ - Chart specs     │
+  │ - generate_chart   │    │ - generate_report   │    │ - Report structure│
+  │                    │    │                     │    │ - Formatting QA   │
+  │ SOP: DISCOVER →    │    │ Enforces:           │    │                   │
+  │   VERIFY → SAMPLE  │    │ - Min 2 h2 sections │    │ Zero tolerance:   │
+  │   → EXECUTE →      │    │ - Descriptive titles│    │ - Wrong columns   │
+  │   VISUALIZE        │    │ - No emojis         │    │ - Missing dates   │
+  │                    │    │ - Report link       │    │ - Bad chart types │
+  └────────────────────┘    └─────────────────────┘    └───────────────────┘
 ```
 
 Each persona is loaded via `get_agent_persona(role)` and provides strict operational rules, success metrics, and BAD/GOOD formatting examples.
