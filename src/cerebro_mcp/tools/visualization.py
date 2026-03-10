@@ -1,3 +1,4 @@
+import importlib.resources
 import json
 import os
 import re
@@ -12,15 +13,20 @@ from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.tools.query import truncate_response
 
 
-# Watermark URLs — applied in JS at render time, not in Python chart specs
-GNOSIS_WATERMARK_LIGHT = (
-    "https://raw.githubusercontent.com/gnosis/gnosis-brand-assets/"
-    "main/Brand%20Assets/Logo/RGB/Owl_Logomark_Black_RGB.png"
-)
-GNOSIS_WATERMARK_DARK = (
-    "https://raw.githubusercontent.com/gnosis/gnosis-brand-assets/"
-    "main/Brand%20Assets/Logo/RGB/Owl_Logomark_White_RGB.png"
-)
+# --- Bundled React UI (Vite single-file build) ---
+_BUNDLED_REPORT_HTML: str | None = None
+
+
+def _get_report_html() -> str:
+    """Load the Vite-built single-file React app from the static package."""
+    global _BUNDLED_REPORT_HTML
+    if _BUNDLED_REPORT_HTML is None:
+        _BUNDLED_REPORT_HTML = (
+            importlib.resources.files("cerebro_mcp")
+            .joinpath("static/report.html")
+            .read_text("utf-8")
+        )
+    return _BUNDLED_REPORT_HTML
 
 # ECharts color palettes matching metrics-dashboard
 ECHARTS_PALETTE_LIGHT = [
@@ -493,12 +499,24 @@ def _markdown_to_html(text: str) -> str:
 
 
 def _inline_format(text: str) -> str:
-    """Apply inline markdown formatting: bold, code, links."""
+    """Apply inline markdown formatting: bold, code, links, and value coloring."""
     text = _escape_html(text)
     # Bold
     text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
     # Inline code
     text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
+    # Positive numeric changes: +1,234.56% or +1234.56 etc.
+    text = re.sub(
+        r"(\+\d[\d,]*\.?\d*%?)",
+        r'<span class="number-change positive">\1</span>',
+        text,
+    )
+    # Negative numeric changes: -1,234.56% or -1234.56 etc.
+    text = re.sub(
+        r"(-\d[\d,]*\.?\d*%?)",
+        r'<span class="number-change negative">\1</span>',
+        text,
+    )
     return text
 
 
@@ -516,570 +534,17 @@ def _escape_html(text: str) -> str:
 REPORT_URI = "ui://cerebro/report"
 
 
-# --- CSS shared between MCP App and standalone HTML ---
-
-_REPORT_CSS = """\
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-/* ── Design tokens from metrics-dashboard ── */
-:root {
-  --bg: #0f172a;
-  --surface: #1e293b;
-  --border: #334155;
-  --border-hover: #475569;
-  --primary: #818cf8;
-  --primary-hover: #a5b4fc;
-  --success: #34d399;
-  --warning: #fbbf24;
-  --error: #f87171;
-  --text-primary: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted: #475569;
-  --accent-soft: rgba(99,102,241,0.16);
-  --accent-softer: rgba(99,102,241,0.1);
-  --table-header: #1e293b;
-  --table-stripe: rgba(255,255,255,0.02);
-  --shadow-sm: 0 1px 2px 0 rgba(2,6,23,0.45);
-  --shadow-base: 0 4px 8px -2px rgba(2,6,23,0.5), 0 2px 6px -2px rgba(2,6,23,0.4);
-  --radius-sm: 4px;
-  --radius-base: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
-}
-[data-theme="light"] {
-  --bg: #f1f5f9;
-  --surface: #ffffff;
-  --border: #e2e8f0;
-  --border-hover: #cbd5e1;
-  --primary: #4f46e5;
-  --primary-hover: #4338ca;
-  --success: #10b981;
-  --warning: #f59e0b;
-  --error: #ef4444;
-  --text-primary: #0f172a;
-  --text-secondary: #334155;
-  --text-muted: #94a3b8;
-  --accent-soft: rgba(79,70,229,0.1);
-  --accent-softer: rgba(79,70,229,0.06);
-  --table-header: #f1f5f9;
-  --table-stripe: rgba(0,0,0,0.02);
-  --shadow-sm: 0 1px 2px 0 rgba(15,23,42,0.06);
-  --shadow-base: 0 4px 6px -1px rgba(15,23,42,0.08), 0 2px 4px -2px rgba(15,23,42,0.05);
-}
-* { margin:0; padding:0; box-sizing:border-box; }
-body {
-  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-  background: var(--bg);
-  color: var(--text-primary);
-  line-height: 1.6;
-  transition: background 0.2s, color 0.2s;
-}
-/* ── Header ── */
-.report-header {
-  background: var(--surface);
-  padding: 0.75rem 1.5rem;
-  border-bottom: 1px solid var(--border);
-  box-shadow: var(--shadow-sm);
-}
-.report-header-inner {
-  max-width: 1280px;
-  margin: 0 auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  min-height: 44px;
-}
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-.header-icon {
-  width: 2rem; height: 2rem;
-  border-radius: var(--radius-base);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 1.125rem;
-  background: linear-gradient(135deg, #4f46e5, #818cf8);
-  color: #fff;
-}
-.report-header h1 {
-  font-size: 1.25rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-.meta {
-  color: var(--text-muted);
-  font-size: 0.8125rem;
-}
-.theme-toggle {
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  width: 2.5rem; height: 2.5rem;
-  border-radius: 50%;
-  cursor: pointer;
-  font-size: 1.2rem;
-  display: flex; align-items: center; justify-content: center;
-  transition: background 0.2s, color 0.2s;
-}
-.theme-toggle:hover {
-  background: rgba(0,0,0,0.05);
-  color: var(--primary);
-}
-/* ── Tab bar ── */
-.tab-bar {
-  display: flex;
-  gap: 0.25rem;
-  padding: 0.25rem;
-  background: var(--table-header);
-  border-radius: var(--radius-base);
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-.tab-btn {
-  padding: 0.375rem 0.75rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  font-family: inherit;
-  border: none;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.2s, color 0.2s;
-  background: transparent;
-  color: var(--text-muted);
-}
-.tab-btn:hover { color: var(--text-secondary); }
-.tab-btn.active {
-  background: var(--primary);
-  color: #fff;
-}
-/* ── Layout ── */
-.report-body {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 1.25rem 1.5rem 2rem;
-}
-.tab-section { display: none; }
-.tab-section.active { display: block; }
-/* ── Cards ── */
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-base);
-  box-shadow: var(--shadow-sm);
-  padding: 1.25rem;
-  margin-bottom: 1rem;
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-.card:hover {
-  border-color: var(--border-hover);
-  box-shadow: var(--shadow-base);
-}
-.chart-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-base);
-  box-shadow: var(--shadow-sm);
-  overflow: hidden;
-  margin: 1rem 0;
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-.chart-card:hover {
-  border-color: var(--border-hover);
-  box-shadow: var(--shadow-base);
-}
-.chart-title {
-  padding: 0.75rem 1rem 0;
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.chart-container {
-  width: 100%;
-  height: 400px;
-  background: transparent;
-}
-/* ── Content cards for h3 subsections ── */
-.content-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-base);
-  padding: 1rem 1.25rem;
-  margin: 0.75rem 0 1rem;
-  box-shadow: var(--shadow-sm);
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-.content-card:hover {
-  border-color: var(--border-hover);
-  box-shadow: var(--shadow-base);
-}
-.content-card h3 {
-  margin: 0 0 0.5rem;
-  font-size: 0.9375rem;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.content-card p {
-  margin: 0.35rem 0;
-}
-.content-card ul {
-  margin: 0.35rem 0;
-}
-/* ── Callout / blockquote ── */
-blockquote {
-  border-radius: var(--radius-lg);
-  padding: 1rem 1.25rem;
-  margin: 1rem 0;
-  font-size: 0.875rem;
-  border: 1px solid var(--accent-soft);
-  background: var(--accent-softer);
-  color: var(--text-secondary);
-}
-blockquote strong { color: var(--text-primary); }
-/* ── Typography ── */
-h1 { font-size: 1.5rem; font-weight: 700; margin: 1.5rem 0 0.75rem; }
-h2 { font-size: 1.125rem; font-weight: 700; margin: 1.75rem 0 0.75rem; color: var(--text-primary); }
-h3 { font-size: 0.9375rem; font-weight: 600; margin: 1.25rem 0 0.5rem; color: var(--text-primary); }
-p { margin: 0.5rem 0; font-size: 0.875rem; color: var(--text-secondary); }
-hr { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
-ul { padding-left: 1.5rem; margin: 0.5rem 0; }
-li { margin: 0.35rem 0; font-size: 0.875rem; color: var(--text-secondary); line-height: 1.5; }
-li::marker { color: var(--primary); }
-li strong { color: var(--text-primary); }
-strong { font-weight: 600; }
-code {
-  background: var(--accent-softer);
-  color: var(--primary);
-  padding: 0.1rem 0.35rem;
-  border-radius: var(--radius-sm);
-  font-size: 0.8em;
-  font-family: Monaco, Consolas, 'Courier New', monospace;
-}
-pre {
-  background: var(--surface);
-  padding: 1rem;
-  border-radius: var(--radius-base);
-  overflow-x: auto;
-  margin: 0.75rem 0;
-  border: 1px solid var(--border);
-}
-pre code { background: none; color: var(--text-primary); padding: 0; }
-/* ── Tables ── */
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0.75rem 0;
-  font-size: 0.8125rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-base);
-  overflow: hidden;
-}
-th, td {
-  padding: 0.5rem 0.75rem;
-  text-align: left;
-}
-th {
-  background: var(--table-header);
-  font-weight: 600;
-  font-size: 0.6875rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-  border-bottom: 1px solid var(--border);
-}
-td {
-  border-top: 1px solid var(--border);
-  font-family: Monaco, Consolas, 'Courier New', monospace;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-}
-tr:nth-child(even) td { background: var(--table-stripe); }
-/* ── Footer ── */
-.report-footer {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 1rem 1.5rem 2rem;
-  border-top: 1px solid var(--border);
-  text-align: center;
-}
-.report-footer p {
-  font-size: 0.6875rem;
-  color: var(--text-muted);
-}
-/* ── Print ── */
-@media print {
-  .theme-toggle, .tab-bar { display: none; }
-  body { background: #fff; color: #000; }
-  .tab-section { display: block !important; }
-  .chart-container { break-inside: avoid; }
-}
-/* ── Mobile ── */
-@media (max-width: 768px) {
-  .report-body { padding: 1rem; }
-  .chart-container { height: 300px; }
-  .report-header-inner { flex-direction: column; align-items: flex-start; }
-  .tab-bar { width: 100%; }
-}
-</style>"""
-
-
-# --- Shared JavaScript for ECharts themes, watermarks, tabs ---
-
-_REPORT_JS = """\
-/* ── ECharts themes matching metrics-dashboard ── */
-const FONT = '"Plus Jakarta Sans", system-ui, sans-serif';
-
-const CEREBRO_LIGHT = {
-  color: ['#4F46E5','#10B981','#F59E0B','#EF4444','#8B5CF6','#3B82F6','#EC4899','#14B8A6','#F97316','#84CC16','#06B6D4','#A855F7','#22C55E','#FB7185','#0EA5E9'],
-  backgroundColor: 'transparent',
-  textStyle: { color: '#334155', fontFamily: FONT },
-  title: { textStyle: { color: '#0F172A', fontFamily: FONT } },
-  legend: { textStyle: { color: '#334155' } },
-  tooltip: {
-    backgroundColor: 'rgba(255,255,255,0.96)',
-    borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 8,
-    extraCssText: 'box-shadow:0 12px 24px -12px rgba(15,23,42,0.3);',
-    textStyle: { color: '#0F172A', fontFamily: FONT }
-  },
-  categoryAxis: {
-    axisLine: { lineStyle: { color: '#CBD5E1' } },
-    axisLabel: { color: '#64748B' },
-    splitLine: { lineStyle: { color: 'rgba(148,163,184,0.24)', type: 'dashed' } }
-  },
-  valueAxis: {
-    axisLine: { lineStyle: { color: '#CBD5E1' } },
-    axisLabel: { color: '#64748B' },
-    splitLine: { lineStyle: { color: 'rgba(148,163,184,0.24)', type: 'dashed' } }
-  }
-};
-
-const CEREBRO_DARK = {
-  color: ['#818CF8','#34D399','#FBBF24','#F87171','#A78BFA','#60A5FA','#F472B6','#2DD4BF','#FDBA74','#A3E635','#67E8F9','#C4B5FD','#4ADE80','#FDA4AF','#38BDF8'],
-  backgroundColor: 'transparent',
-  textStyle: { color: '#E2E8F0', fontFamily: FONT },
-  title: { textStyle: { color: '#E2E8F0', fontFamily: FONT } },
-  legend: { textStyle: { color: '#CBD5E1' } },
-  tooltip: {
-    backgroundColor: 'rgba(30,41,59,0.96)',
-    borderColor: '#334155', borderWidth: 1, borderRadius: 8,
-    extraCssText: 'box-shadow:0 14px 28px -14px rgba(2,6,23,0.75);',
-    textStyle: { color: '#E2E8F0', fontFamily: FONT }
-  },
-  categoryAxis: {
-    axisLine: { lineStyle: { color: '#475569' } },
-    axisLabel: { color: '#94A3B8' },
-    splitLine: { lineStyle: { color: 'rgba(148,163,184,0.18)', type: 'dashed' } }
-  },
-  valueAxis: {
-    axisLine: { lineStyle: { color: '#475569' } },
-    axisLabel: { color: '#94A3B8' },
-    splitLine: { lineStyle: { color: 'rgba(148,163,184,0.18)', type: 'dashed' } }
-  }
-};
-
-echarts.registerTheme('cerebro-light', CEREBRO_LIGHT);
-echarts.registerTheme('cerebro-dark', CEREBRO_DARK);
-
-/* ── Watermark helper ── */
-function getWatermark(isDark) {
-  const WM_LIGHT = 'https://raw.githubusercontent.com/gnosis/gnosis-brand-assets/main/Brand%20Assets/Logo/RGB/Owl_Logomark_Black_RGB.png';
-  const WM_DARK = 'https://raw.githubusercontent.com/gnosis/gnosis-brand-assets/main/Brand%20Assets/Logo/RGB/Owl_Logomark_White_RGB.png';
-  return [{
-    type: 'image', id: 'watermark', z: 1000, bounding: 'raw',
-    style: { image: isDark ? WM_DARK : WM_LIGHT, width: 25, height: 25, opacity: 0.1 },
-    right: 10, bottom: 10
-  }];
-}
-
-/* ── Chart rendering ── */
-const charts = {};
-function isDark() { return document.documentElement.dataset.theme === 'dark'; }
-function currentTheme() { return isDark() ? 'cerebro-dark' : 'cerebro-light'; }
-
-function renderCharts(chartSpecs) {
-  Object.keys(charts).forEach(id => { charts[id].dispose(); delete charts[id]; });
-  Object.entries(chartSpecs).forEach(([id, spec]) => {
-    const el = document.getElementById('chart-' + id);
-    if (!el) return;
-
-    // Handle custom numberDisplay rendering directly via HTML
-    if (spec.type === 'numberDisplay') {
-      const val = typeof spec.value === 'number'
-        ? spec.value.toLocaleString()
-        : spec.value;
-      el.style.height = 'auto';
-      el.style.display = 'flex';
-      el.style.alignItems = 'center';
-      el.style.justifyContent = 'center';
-      el.style.padding = '1.5rem';
-      let html = '<div style="text-align:center">'
-        + '<div style="font-size:2.5rem;font-weight:700;color:var(--primary)">' + val + '</div>';
-      if (spec.title) {
-        html += '<div style="font-size:0.875rem;color:var(--text-muted);margin-top:0.25rem">' + spec.title + '</div>';
-      }
-      html += '</div>';
-      el.innerHTML = html;
-      return;
-    }
-
-    const chart = echarts.init(el, currentTheme());
-    spec.graphic = getWatermark(isDark());
-    spec.animation = true;
-    spec.animationDuration = 1000;
-    spec.animationEasing = 'cubicOut';
-    chart.setOption(spec);
-    charts[id] = chart;
-  });
-}
-
-window.addEventListener('resize', () => {
-  Object.values(charts).forEach(c => c.resize());
-});
-
-/* ── Theme toggle ── */
-function toggleTheme() {
-  const html = document.documentElement;
-  html.dataset.theme = isDark() ? 'light' : 'dark';
-  const btn = document.querySelector('.theme-toggle');
-  if (btn) btn.textContent = isDark() ? '\\u2600' : '\\u263e';
-  // Re-render charts with new theme
-  const dataEl = document.getElementById('report-data');
-  if (dataEl) {
-    try { renderCharts(JSON.parse(dataEl.textContent).charts); } catch(e) {}
-  }
-}
-
-/* ── Auto-tab from h2 sections ── */
-function initTabs() {
-  const content = document.getElementById('report-content');
-  if (!content) return;
-  const h2s = content.querySelectorAll('h2');
-  if (h2s.length < 2) return;
-  const sections = [];
-  h2s.forEach((h2, i) => {
-    const section = document.createElement('div');
-    section.className = 'tab-section' + (i === 0 ? ' active' : '');
-    section.dataset.tab = i;
-    let node = h2.nextElementSibling;
-    const nodes = [h2];
-    while (node && node.tagName !== 'H2') {
-      nodes.push(node);
-      node = node.nextElementSibling;
-    }
-    nodes.forEach(n => section.appendChild(n));
-    sections.push({ title: h2.textContent, el: section });
-  });
-  sections.forEach(s => content.appendChild(s.el));
-  const bar = document.createElement('div');
-  bar.className = 'tab-bar';
-  bar.style.marginBottom = '1.25rem';
-  sections.forEach((s, i) => {
-    const btn = document.createElement('button');
-    btn.className = 'tab-btn' + (i === 0 ? ' active' : '');
-    btn.textContent = s.title;
-    btn.onclick = () => {
-      document.querySelectorAll('.tab-section').forEach(el => el.classList.remove('active'));
-      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-      s.el.classList.add('active');
-      btn.classList.add('active');
-      Object.values(charts).forEach(c => c.resize());
-    };
-    bar.appendChild(btn);
-  });
-  document.getElementById('tab-bar-slot').appendChild(bar);
-}
-
-/* ── Render report from data object ── */
-function renderReport(data) {
-  document.title = data.title || 'Cerebro Report';
-  const h1 = document.querySelector('.report-header h1');
-  if (h1) h1.textContent = data.title || '';
-  const meta = document.querySelector('.report-header .meta');
-  if (meta) meta.textContent = 'Generated: ' + (data.timestamp || '') + ' \\u00b7 Data from Cerebro / dbt-cerebro';
-  const content = document.getElementById('report-content');
-  if (content && data.sections_html) content.innerHTML = data.sections_html;
-  initTabs();
-  if (data.charts) renderCharts(data.charts);
-}
-"""
-
-
-# --- MCP App HTML (static, served via resource, receives data via ontoolresult) ---
-
-REPORT_APP_HTML = (
-    '<!DOCTYPE html>\n'
-    '<html lang="en" data-theme="dark">\n'
-    '<head>\n'
-    '<meta charset="UTF-8">\n'
-    '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
-    '<meta name="color-scheme" content="light dark">\n'
-    '<title>Cerebro Report</title>\n'
-    + _REPORT_CSS +
-    '</head>\n'
-    '<body>\n'
-    '<div class="report-header">\n'
-    '  <div class="report-header-inner">\n'
-    '    <div class="header-left">\n'
-    '      <div class="header-icon">&#10192;</div>\n'
-    '      <div>\n'
-    '        <h1 style="margin:0">Loading report...</h1>\n'
-    '        <p class="meta" style="margin:0"></p>\n'
-    '      </div>\n'
-    '    </div>\n'
-    '    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#9728;</button>\n'
-    '  </div>\n'
-    '</div>\n'
-    '<div class="report-body">\n'
-    '  <div id="tab-bar-slot"></div>\n'
-    '  <div id="report-content"></div>\n'
-    '</div>\n'
-    '<div class="report-footer">\n'
-    '  <p>Data sourced from Cerebro &middot; dbt-cerebro models &middot; Gnosis Chain ClickHouse</p>\n'
-    '</div>\n'
-    '<script>\n'
-    + _REPORT_JS +
-    '</script>\n'
-    '<script type="module">\n'
-    'import { App } from "https://unpkg.com/@modelcontextprotocol/ext-apps@0.4.0/app-with-deps";\n'
-    '\n'
-    'const app = new App({ name: "Cerebro Report", version: "1.0.0" });\n'
-    '\n'
-    'app.ontoolresult = ({ structuredContent }) => {\n'
-    '  if (structuredContent) renderReport(structuredContent);\n'
-    '};\n'
-    '\n'
-    'function handleHostContext(ctx) {\n'
-    '  if (ctx.safeAreaInsets) {\n'
-    '    document.body.style.paddingTop = ctx.safeAreaInsets.top + "px";\n'
-    '    document.body.style.paddingRight = ctx.safeAreaInsets.right + "px";\n'
-    '    document.body.style.paddingBottom = ctx.safeAreaInsets.bottom + "px";\n'
-    '    document.body.style.paddingLeft = ctx.safeAreaInsets.left + "px";\n'
-    '  }\n'
-    '}\n'
-    'app.onhostcontextchanged = handleHostContext;\n'
-    '\n'
-    'await app.connect();\n'
-    'const ctx = app.getHostContext();\n'
-    'if (ctx) handleHostContext(ctx);\n'
-    '</script>\n'
-    '</body>\n'
-    '</html>'
-)
-
-
 def _build_standalone_html(
     title: str,
     timestamp: str,
     charts: dict,
     sections_html: str,
 ) -> str:
-    """Build self-contained HTML with embedded data for disk saves / direct file access."""
+    """Build self-contained HTML with embedded data for disk saves / direct file access.
+
+    Injects a <script id="report-data"> tag into the Vite-built React app.
+    The React app detects this tag and renders the report in standalone mode.
+    """
     data = json.dumps({
         "title": title,
         "timestamp": timestamp,
@@ -1087,52 +552,13 @@ def _build_standalone_html(
         "sections_html": sections_html,
     }, default=str)
 
-    # _REPORT_CSS and _REPORT_JS are plain strings concatenated directly (no .format).
-    return (
-        '<!DOCTYPE html>\n'
-        '<html lang="en" data-theme="dark">\n'
-        '<head>\n'
-        '<meta charset="UTF-8">\n'
-        '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
-        f'<title>{_escape_html(title)}</title>\n'
-        + _REPORT_CSS +
-        '</head>\n'
-        '<body>\n'
-        '<div class="report-header">\n'
-        '  <div class="report-header-inner">\n'
-        '    <div class="header-left">\n'
-        '      <div class="header-icon">&#10192;</div>\n'
-        '      <div>\n'
-        f'        <h1 style="margin:0">{_escape_html(title)}</h1>\n'
-        f'        <p class="meta" style="margin:0">Generated: {timestamp} &middot; Data from Cerebro / dbt-cerebro</p>\n'
-        '      </div>\n'
-        '    </div>\n'
-        '    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#9728;</button>\n'
-        '  </div>\n'
-        '</div>\n'
-        '<div class="report-body">\n'
-        '  <div id="tab-bar-slot"></div>\n'
-        f'  <div id="report-content">{sections_html}</div>\n'
-        '</div>\n'
-        '<div class="report-footer">\n'
-        '  <p>Data sourced from Cerebro &middot; dbt-cerebro models &middot; Gnosis Chain ClickHouse</p>\n'
-        '</div>\n'
-        f'<script id="report-data" type="application/json">{data}</script>\n'
-        '<script>\n'
-        + _REPORT_JS +
-        '\n'
-        '// Standalone: load data from embedded script tag\n'
-        'const dataEl = document.getElementById("report-data");\n'
-        'if (dataEl) {\n'
-        '  try {\n'
-        '    const data = JSON.parse(dataEl.textContent);\n'
-        '    renderReport(data);\n'
-        '  } catch(e) { console.error("Failed to parse report data:", e); }\n'
-        '}\n'
-        '</script>\n'
-        '</body>\n'
-        '</html>'
-    )
+    html = _get_report_html()
+    data_tag = f'<script id="report-data" type="application/json">{data}</script>'
+    # Use rfind to target only the LAST </body> tag (not one inside minified JS)
+    insert_pos = html.rfind("</body>")
+    if insert_pos == -1:
+        return html + data_tag
+    return html[:insert_pos] + data_tag + "\n" + html[insert_pos:]
 
 
 def register_visualization_tools(mcp, ch: ClickHouseManager):
@@ -1552,14 +978,11 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
     @mcp.resource(
         REPORT_URI,
         mime_type="text/html;profile=mcp-app",
-        meta={"ui": {"csp": {"resourceDomains": [
-            "https://cdn.jsdelivr.net",
-            "https://unpkg.com",
-            "https://fonts.googleapis.com",
-            "https://fonts.gstatic.com",
-            "https://raw.githubusercontent.com",
-        ]}}},
     )
     def serve_report_app() -> str:
-        """Serves the MCP App HTML for interactive report rendering."""
-        return REPORT_APP_HTML
+        """Serves the MCP App HTML for interactive report rendering.
+
+        Returns the Vite-built single-file React app. All assets (JS, CSS,
+        fonts, watermarks) are inlined — no external network requests needed.
+        """
+        return _get_report_html()

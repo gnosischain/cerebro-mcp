@@ -548,7 +548,7 @@ class TestListReports:
 
 class TestMCPAppResource:
     def test_resource_serves_static_html(self):
-        """The MCP App resource serves the static REPORT_APP_HTML."""
+        """The MCP App resource serves the Vite-built React app."""
         from mcp.server.fastmcp import FastMCP
 
         mcp = FastMCP("test-resource")
@@ -562,8 +562,7 @@ class TestMCPAppResource:
             if "cerebro/report" in key:
                 result = res.fn()
                 assert "<!DOCTYPE html>" in result
-                assert "ext-apps" in result
-                assert "ontoolresult" in result
+                assert 'id="root"' in result
                 found = True
                 break
         assert found, "MCP App resource not registered"

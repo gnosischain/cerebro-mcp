@@ -1,4 +1,56 @@
+import importlib.resources
+
+from mcp.server.fastmcp.prompts import base as prompt_base
+
+
 def register_prompts(mcp):
+
+    # --- Agent Persona Prompts (user-facing, supplementary) ---
+
+    @mcp.prompt()
+    def adopt_persona_analytics_reporter() -> list[prompt_base.Message]:
+        """Adopt the Analytics Reporter persona for data discovery and querying.
+
+        Loads strict operational rules for the Analytics Reporter agent:
+        ClickHouse SQL, dbt metadata navigation, and the generate_chart pipeline.
+        """
+        content = (
+            importlib.resources.files("cerebro_mcp.prompts.agents")
+            .joinpath("analytics_reporter.md")
+            .read_text("utf-8")
+        )
+        return [prompt_base.Message(role="user", content=content)]
+
+    @mcp.prompt()
+    def adopt_persona_ui_designer() -> list[prompt_base.Message]:
+        """Adopt the UI Designer persona for chart selection and report assembly.
+
+        Loads strict operational rules for the UI Designer agent:
+        chart type selection, ECharts theming, and generate_report markdown layout.
+        """
+        content = (
+            importlib.resources.files("cerebro_mcp.prompts.agents")
+            .joinpath("ui_designer.md")
+            .read_text("utf-8")
+        )
+        return [prompt_base.Message(role="user", content=content)]
+
+    @mcp.prompt()
+    def adopt_persona_reality_checker() -> list[prompt_base.Message]:
+        """Adopt the Reality Checker persona for validation and quality assurance.
+
+        Loads strict operational rules for the Reality Checker agent:
+        SQL safety, data validation, chart spec verification, and report integrity.
+        """
+        content = (
+            importlib.resources.files("cerebro_mcp.prompts.agents")
+            .joinpath("reality_checker.md")
+            .read_text("utf-8")
+        )
+        return [prompt_base.Message(role="user", content=content)]
+
+    # --- Data Analysis Prompts ---
+
     @mcp.prompt()
     def analyze_data(topic: str) -> str:
         """Generate a guided prompt for analyzing Gnosis Chain data on a specific topic.

@@ -16,11 +16,34 @@ from cerebro_mcp.tools.reasoning import (
     install_auto_tool_tracing,
     register_reasoning_tools,
 )
+from cerebro_mcp.tools.agents import register_agent_tools
 
 mcp = FastMCP(
     "cerebro-mcp",
     instructions=(
         "Gnosis Chain data platform MCP server.\n\n"
+
+        "FORMATTING RULE (MANDATORY):\n"
+        "All generated reports, markdown, and summaries MUST strictly adhere to a "
+        "professional, clean, corporate style. The use of emojis, emoticons, or "
+        "Unicode symbols (e.g., red circle, chart icon, warning sign, checkmarks, "
+        "rocket, fire, sparkle, arrow symbols) is STRICTLY FORBIDDEN across ALL "
+        "outputs — chat text, headers, lists, tables, and body text.\n"
+        "Use standard markdown formatting (bold, italics, blockquotes) for emphasis.\n"
+        "Examples:\n"
+        "  BAD:  'Transactions surged by 42%! 🚀🔥'\n"
+        "  BAD:  '📊 Weekly Overview'\n"
+        "  BAD:  '✅ Validators increased'\n"
+        "  GOOD: 'Transactions increased by 42%.'\n"
+        "  GOOD: 'Weekly Overview'\n"
+        "  GOOD: 'Validators increased by 3%.'\n\n"
+
+        "AGENCY WORKFLOW:\n"
+        "For complex analytical tasks, adopt specialized agent personas by calling "
+        "`get_agent_persona(role)` before each phase:\n"
+        "  Phase 1 (Analytics Reporter): discover, verify, query, generate_chart\n"
+        "  Phase 2 (UI Designer): chart type selection, markdown layout, generate_report\n"
+        "  Phase 3 (Reality Checker): validate SQL safety, check chart specs, confirm\n\n"
 
         "OUTPUT FORMAT RULES (MANDATORY):\n"
         "You have two output modes. ALWAYS use the correct mode:\n\n"
@@ -39,7 +62,9 @@ mcp = FastMCP(
         "report markdown or {{chart:...}} placeholders as conversation text. "
         "Only summarize insights and include the report URI.\n"
         "ALWAYS complete this workflow. `generate_report` produces a native interactive "
-        "UI resource and opens the report in the user's browser.\n\n"
+        "UI resource and opens the report in the user's browser.\n"
+        "MANDATORY: After generate_report succeeds, ALWAYS include the file:// link "
+        "in your text response so the user can open the report directly.\n\n"
 
         "MODE 2: QUICK QUERIES & RAW DATA (MARKDOWN OUTPUT)\n"
         "TRIGGER: User asks for raw data, numbers, or a simple text explanation WITHOUT charts.\n"
@@ -86,6 +111,7 @@ register_async_query_tools(mcp, ch)
 register_saved_query_tools(mcp, ch)
 register_visualization_tools(mcp, ch)
 register_reasoning_tools(mcp)
+register_agent_tools(mcp)
 install_auto_tool_tracing(mcp)
 
 
