@@ -6,6 +6,7 @@ from starlette.responses import JSONResponse
 
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.manifest_loader import manifest
+from cerebro_mcp.docs_loader import docs_index
 from cerebro_mcp.tools.query import register_query_tools
 from cerebro_mcp.tools.schema import register_schema_tools
 from cerebro_mcp.tools.dbt import register_dbt_tools
@@ -99,6 +100,9 @@ ch = ClickHouseManager()
 
 # Load dbt manifest
 manifest.load()
+
+# Load external docs index
+docs_index.load()
 
 # Register all tools
 register_query_tools(mcp, ch)

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
+from cerebro_mcp.docs_loader import docs_index
 from cerebro_mcp.manifest_loader import manifest
 from cerebro_mcp.tools.query import format_results_table, truncate_response
 
@@ -122,6 +123,21 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
             lines.append("- **Last load:** never")
         if manifest.last_refresh_error:
             lines.append(f"- **Last refresh error:** {manifest.last_refresh_error}")
+
+        # Docs Index
+        lines.append("\n## Docs Index\n")
+        lines.append(f"- **Loaded:** {docs_index.is_loaded}")
+        lines.append(f"- **Entry count:** {docs_index.entry_count}")
+        lines.append(
+            f"- **Source:** {settings.DOCS_SEARCH_INDEX_URL or settings.DOCS_SEARCH_INDEX_PATH or 'none'}"
+        )
+        if docs_index.last_load_time:
+            ts = datetime.fromtimestamp(docs_index.last_load_time, tz=timezone.utc)
+            lines.append(f"- **Last load:** {ts.isoformat()}")
+        else:
+            lines.append("- **Last load:** never")
+        if docs_index.last_refresh_error:
+            lines.append(f"- **Last refresh error:** {docs_index.last_refresh_error}")
 
         # Config
         lines.append("\n## Config\n")
@@ -373,14 +389,14 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
         """Search across all platform documentation and reference resources.
 
         Searches platform overview, SQL guide, address directory, metric definitions,
-        and query cookbook for sections matching your topic. More token-efficient than
-        loading entire resources.
+        query cookbook, and the external hosted analytics docs. If an external doc
+        is highly relevant, use `get_doc_chunk(location)` to read the full page.
 
         Args:
             topic: Search term or topic (e.g., 'partition pruning', 'bridge', 'USDC decimals').
 
         Returns:
-            Matching sections from documentation resources.
+            Matching sections and locations from documentation resources.
         """
         try:
             from cerebro_mcp.resources.context import PLATFORM_OVERVIEW, CLICKHOUSE_SQL_GUIDE
@@ -390,6 +406,12 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                 QUERY_COOKBOOK,
             )
 
+            # Periodically check for docs refresh
+            if docs_index.is_loaded and docs_index.last_load_time:
+                if time.time() - docs_index.last_load_time > settings.DOCS_REFRESH_INTERVAL_SECONDS:
+                    docs_index.reload_if_changed()
+
+            # 1. Score existing static sources
             sources = {
                 "Platform Overview": PLATFORM_OVERVIEW,
                 "ClickHouse SQL Guide": CLICKHOUSE_SQL_GUIDE,
@@ -398,30 +420,56 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                 "Query Cookbook": QUERY_COOKBOOK,
             }
 
-            # Tokenize topic: split on whitespace, drop short words
-            tokens = [t for t in re.split(r"\s+", topic.lower()) if len(t) >= 3]
+            raw_tokens = re.split(r"\s+", topic.lower())
+            tokens = [t for t in raw_tokens if len(t) >= 3]
             if not tokens:
-                tokens = [topic.lower()]
+                tokens = raw_tokens
 
             scored_results = []
             for source_name, content in sources.items():
-                # Split into sections by ## headers
                 sections = re.split(r"(?=^## )", content, flags=re.MULTILINE)
                 for section in sections:
                     section_lower = section.lower()
                     hits = sum(1 for t in tokens if t in section_lower)
+                    # Exact phrase boost
+                    if topic.lower() in section_lower:
+                        hits += 5
                     if hits > 0:
-                        trimmed = section.strip()[:500]
-                        if len(section.strip()) > 500:
+                        trimmed = section.strip()[:600]
+                        if len(section.strip()) > 600:
                             trimmed += "\n...(truncated)"
                         scored_results.append(
-                            (hits, f"**[{source_name}]**\n{trimmed}")
+                            (hits, f"**[Static: {source_name}]**\n{trimmed}")
                         )
 
-            # Sort by relevance (most matching tokens first)
+            # 2. Search external MkDocs index and merge
+            if docs_index.is_loaded:
+                doc_results = docs_index.search(topic, limit=10)
+                base_docs_url = "https://docs.analytics.gnosis.io/"
+
+                for r in doc_results:
+                    full_url = f"{base_docs_url}{r['location']}"
+                    text_block = (
+                        f"**[Docs: {r['title']}]({full_url})**\n"
+                        f"{r['snippet']}\n"
+                        f"*To read full text, call tool: `get_doc_chunk(\"{r['location']}\")`*"
+                    )
+                    scored_results.append((r["score"], text_block))
+
+            # 3. Sort merged results by relevance
             scored_results.sort(key=lambda x: -x[0])
 
-            if not scored_results:
+            # Deduplicate
+            seen_texts = set()
+            unique_results = []
+            for _score, text in scored_results:
+                if text not in seen_texts:
+                    seen_texts.add(text)
+                    unique_results.append(text)
+                    if len(unique_results) >= 10:
+                        break
+
+            if not unique_results:
                 return (
                     f"No documentation found matching '{topic}'.\n\n"
                     "**Tips:** Use short keywords (e.g., 'bridge', 'gas', "
@@ -429,10 +477,31 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                     "long phrases."
                 )
 
-            header = f"# Documentation Search: '{topic}'\n\nFound {len(scored_results)} matching section(s).\n\n"
-            body = "\n\n---\n\n".join(
-                text for _score, text in scored_results[:10]
-            )
+            header = f"# Documentation Search: '{topic}'\n\nFound {len(unique_results)} matching section(s).\n"
+            if not docs_index.is_loaded:
+                header += "*(Note: External docs index is currently unavailable; showing static results only)*\n"
+            header += "\n"
+
+            body = "\n\n---\n\n".join(unique_results)
             return truncate_response(header + body)
         except Exception as e:
             return f"Error: {e}"
+
+    @mcp.tool()
+    def get_doc_chunk(location: str, max_chars: int = 6000) -> str:
+        """Retrieve full text of a documentation page by its location path.
+
+        Use this tool after search_docs returns a promising match to read the
+        complete content of that page.
+
+        Args:
+            location: Doc location path (e.g., 'data-pipeline/ingestion/cryo-indexer/').
+            max_chars: Max characters to return (default 6000).
+
+        Returns:
+            The raw text content of the documentation page.
+        """
+        try:
+            return docs_index.get_chunk(location, max_chars)
+        except Exception as e:
+            return f"Error retrieving document: {e}"

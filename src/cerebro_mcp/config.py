@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     )
     DBT_MANIFEST_PATH: str = ""
 
+    # External Docs index source
+    DOCS_SEARCH_INDEX_URL: Optional[str] = (
+        "https://docs.analytics.gnosis.io/search/search_index.json"
+    )
+    DOCS_SEARCH_INDEX_PATH: str = ""
+    DOCS_REFRESH_INTERVAL_SECONDS: int = 3600
+
     # Safety limits
     MAX_ROWS: int = 10000
     QUERY_TIMEOUT_SECONDS: int = 30
