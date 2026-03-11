@@ -88,10 +88,10 @@ mcp = FastMCP(
         "Always use LIMIT and partition key filters (e.g., block_timestamp/block_date).\n\n"
 
         "GNOSIS CHAIN SPECIFICS:\n"
-        "- Block time: 5 seconds. ~17,280 blocks per day.\n"
-        "- Native gas token: xDAI. Staking token: GNO (1 GNO per validator).\n"
-        "- Chain ID: 100. Slots per epoch: 16.\n"
-        "- Verify token decimals (xDAI/GNO/WETH = 18, USDC/USDT = 6) via `get_token_metadata`.\n"
+        "- Call `get_platform_constants()` for event signatures, infrastructure contracts, "
+        "partition keys, and table scale.\n"
+        "- Key: Block time 5s, ~17,280 blocks/day, xDAI (gas), GNO (staking, 1/validator), Chain ID 100.\n"
+        "- Verify token decimals via `get_token_metadata`.\n"
     ),
 )
 

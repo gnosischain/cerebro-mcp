@@ -68,7 +68,7 @@ ADDRESS_DIRECTORY = """\
 | Uniswap V3 | Concentrated liquidity | Factory | 0xe32f7dd7e3f098d518ff19a22d5f028e076489b1 |
 | Balancer V2 | Weighted pools | Vault | 0xba12222222228d8ba445958a75a0704d566bf2c8 |
 | Balancer V3 | Next-gen pools | Vault | 0xba1333333333a1ba1108e8412f11850a5c319ba9 |
-| CoW Protocol | Batch auctions | Settlement | 0x177127622c4a00f3d409b75571e12cb3c8973d3c |
+| CoW Protocol | Batch auctions | Settlement | 0x9008d19f58aabd9ed0d60971565aa8510560ab41 |
 
 ### Lending
 | Protocol | Type | Key Contract | Address |
@@ -80,7 +80,7 @@ ADDRESS_DIRECTORY = """\
 | Protocol | Type | Key Contract | Address |
 |----------|------|-------------|---------|
 | xDAI Bridge | Canonical DAI bridge | Mediator | 0x7301cfa0e1756b71869e93d4e4dca5c7d0eb0aa6 |
-| Omnibridge | ERC-20 bridge | Mediator | 0x6a023ccd1ff6f2045c3309768ead9e68f978f6e1 |
+| Omnibridge | ERC-20 bridge | Mediator | 0xf6a78083ca3e2a662d6dd1703c939c8ace2e268d |
 
 ### Other Protocols
 | Protocol | Type | Key Contract | Address |

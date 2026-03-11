@@ -59,6 +59,159 @@ DATABASE_DESCRIPTIONS = {
 }
 
 
+# --- Hardcoded Platform Constants ---
+# All values are small, permanent, frequently used, and foundational.
+# See get_platform_constants() tool to expose these to the LLM.
+
+CHAIN_CONSTANTS = {
+    "chain_id": 100,
+    "chain_name": "Gnosis Chain",
+    "block_time_seconds": 5,
+    "blocks_per_day_approx": 17_280,
+    "slots_per_epoch": 16,
+    "epoch_duration_seconds": 80,
+    "native_token": "xDAI",
+    "staking_token": "GNO",
+    "stake_per_validator": "1 GNO",
+    "genesis_timestamp": 1539021785,  # 2018-10-08T18:43:05Z (block 1)
+    "consensus_genesis_timestamp": 1638993340,  # 2021-12-08T19:55:40Z (GBC slot 0)
+}
+
+COMMON_EVENT_SIGNATURES = {
+    "Transfer": {
+        "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "signature": "Transfer(address,address,uint256)",
+        "notes": "ERC20 and ERC721 share the same topic0. ERC20: 2 indexed + 1 data; ERC721: 3 indexed.",
+    },
+    "Approval": {
+        "topic0": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+        "signature": "Approval(address,address,uint256)",
+        "notes": "ERC20 approval event.",
+    },
+    "UniswapV2Swap": {
+        "topic0": "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822",
+        "signature": "Swap(address,uint256,uint256,uint256,uint256,address)",
+        "notes": "UniswapV2 / Honeyswap / SushiSwap pair swap.",
+    },
+    "UniswapV3Swap": {
+        "topic0": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+        "signature": "Swap(address,address,int256,int256,uint160,uint128,int24)",
+        "notes": "UniswapV3 / Swapr V3 pool swap.",
+    },
+    "WETH_Deposit": {
+        "topic0": "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c",
+        "signature": "Deposit(address,uint256)",
+        "notes": "WETH deposit (wrap).",
+    },
+    "WETH_Withdrawal": {
+        "topic0": "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65",
+        "signature": "Withdrawal(address,uint256)",
+        "notes": "WETH withdrawal (unwrap).",
+    },
+    "PairCreated": {
+        "topic0": "0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9",
+        "signature": "PairCreated(address,address,address,uint256)",
+        "notes": "UniswapV2 factory pair creation.",
+    },
+    "GnosisSafeExecutionSuccess": {
+        "topic0": "0x442e715f626346e8c54381002da614f62bee8d27386535b2521ec8540898556e",
+        "signature": "ExecutionSuccess(bytes32,uint256)",
+        "notes": "Gnosis Safe successful execution.",
+    },
+}
+
+CORE_INFRASTRUCTURE_CONTRACTS = {
+    "xdai_bridge": {
+        "address": "0x7301cfa0e1756b71869e93d4e4dca5c7d0eb0aa6",
+        "name": "xDAI Bridge Proxy (Home)",
+        "type": "bridge",
+    },
+    "omnibridge": {
+        "address": "0xf6a78083ca3e2a662d6dd1703c939c8ace2e268d",
+        "name": "Omnibridge Multi-Token Mediator (Home)",
+        "type": "bridge",
+    },
+    "amb_proxy": {
+        "address": "0x75df5af045d91108662d8080fd1fefad6aa0bb59",
+        "name": "AMB Contract Proxy (Home)",
+        "type": "bridge",
+    },
+    "hashi_integration_gc": {
+        "address": "0x60aa15198a3adfc86ff15b941549a6447b2ddb49",
+        "name": "Hashi Integration Manager (Gnosis)",
+        "type": "bridge_security",
+    },
+    "beacon_deposit_contract": {
+        "address": "0x0b98057ea310f4d31f2a452b414647007d1645d9",
+        "name": "GBC Deposit Contract",
+        "type": "consensus",
+    },
+    "gno_to_mgno": {
+        "address": "0x647507a70ff598f386cb96ae5046486389368c66",
+        "name": "GNO-to-mGNO Wrapper",
+        "type": "consensus",
+    },
+    "cowswap_settlement": {
+        "address": "0x9008d19f58aabd9ed0d60971565aa8510560ab41",
+        "name": "CoW Protocol GPv2Settlement",
+        "type": "dex",
+    },
+    "balancer_v2_vault": {
+        "address": "0xba12222222228d8ba445958a75a0704d566bf2c8",
+        "name": "Balancer V2 Vault",
+        "type": "dex",
+    },
+    "aave_v3_pool": {
+        "address": "0xb50201558b00496a145fe76f7424749556e326d8",
+        "name": "Aave V3 Pool (proxy)",
+        "type": "lending",
+    },
+    "gnosis_pay": {
+        "address": "0x90830ed558f12d826370dc52e9d87947a7f18de9",
+        "name": "Gnosis Pay Main Contract",
+        "type": "payments",
+    },
+    "circles_hub_v2": {
+        "address": "0xc12c1e50abb450d6205ea2c3fa861b3b834d13e8",
+        "name": "Circles Hub V2",
+        "type": "social",
+    },
+}
+
+TABLE_PARTITION_KEYS = {
+    "execution": {
+        "time_column": "block_timestamp",
+        "partition_expr": "toStartOfMonth(block_timestamp)",
+        "requires_final": True,
+        "notes": "All execution.* tables use this partitioning.",
+    },
+    "consensus": {
+        "time_column": "slot_timestamp",
+        "partition_expr": "toStartOfMonth(slot_timestamp)",
+        "requires_final": True,
+        "notes": "slot_timestamp is a materialized column. Some tables also have slot as UInt64.",
+    },
+    "dbt": {
+        "time_column": "varies (day, week, block_date)",
+        "partition_expr": "varies by model",
+        "requires_final": False,
+        "notes": "dbt views/tables do not need FINAL. Pre-aggregated and deduplicated.",
+    },
+}
+
+# Approximate row counts as of March 2026. Used for query planning guidance.
+TABLE_ROW_SCALE = {
+    "execution.logs": {"approx_rows": "8.7B", "approx_size": "249 GiB", "caution": "high"},
+    "execution.native_transfers": {"approx_rows": "7.9B", "approx_size": "42 GiB", "caution": "high"},
+    "execution.traces": {"approx_rows": "7.7B", "approx_size": "291 GiB", "caution": "high"},
+    "execution.storage_diffs": {"approx_rows": "2.4B", "approx_size": "72 GiB", "caution": "high"},
+    "execution.balance_diffs": {"approx_rows": "1.0B", "approx_size": "54 GiB", "caution": "medium"},
+    "execution.transactions": {"approx_rows": "346M", "approx_size": "208 GiB", "caution": "medium"},
+    "consensus.attestations": {"approx_rows": "2.3B", "approx_size": "256 GiB", "caution": "high"},
+    "consensus.validators": {"approx_rows": "415M", "approx_size": "22 GiB", "caution": "medium"},
+}
+
+
 def register_metadata_tools(mcp, ch: ClickHouseManager):
     @mcp.tool()
     def list_databases() -> str:
@@ -505,3 +658,71 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
             return docs_index.get_chunk(location, max_chars)
         except Exception as e:
             return f"Error retrieving document: {e}"
+
+    @mcp.tool()
+    def get_platform_constants() -> str:
+        """Returns hardcoded Gnosis Chain platform constants: chain parameters,
+        common event signatures (topic0 hashes), core infrastructure contracts,
+        table partition keys, and table scale estimates.
+
+        Call this before writing queries against raw execution/consensus tables,
+        when filtering logs by topic0, or when referencing core contract addresses.
+
+        Returns:
+            Markdown with chain constants, event signatures, contracts, partition
+            keys, and table scale for query planning.
+        """
+        lines = ["# Gnosis Chain Platform Constants\n"]
+
+        # 1. Chain Constants
+        lines.append("## Chain Constants\n")
+        lines.append("| Parameter | Value |")
+        lines.append("|-----------|-------|")
+        for key, val in CHAIN_CONSTANTS.items():
+            lines.append(f"| {key} | {val} |")
+
+        # 2. Event Signatures
+        lines.append("\n## Common Event Signatures (execution.logs topic0)\n")
+        lines.append("| Event | topic0 | Signature | Notes |")
+        lines.append("|-------|--------|-----------|-------|")
+        for name, info in COMMON_EVENT_SIGNATURES.items():
+            lines.append(
+                f"| {name} | `{info['topic0']}` | `{info['signature']}` | {info['notes']} |"
+            )
+
+        # 3. Infrastructure Contracts
+        lines.append("\n## Core Infrastructure Contracts\n")
+        lines.append("| Key | Address | Name | Type |")
+        lines.append("|-----|---------|------|------|")
+        for key, info in CORE_INFRASTRUCTURE_CONTRACTS.items():
+            lines.append(
+                f"| {key} | `{info['address']}` | {info['name']} | {info['type']} |"
+            )
+
+        # 4. Table Partition Keys
+        lines.append("\n## Table Partition Keys\n")
+        lines.append("| Database | Time Column | Partition Expression | Requires FINAL | Notes |")
+        lines.append("|----------|-------------|---------------------|----------------|-------|")
+        for db, info in TABLE_PARTITION_KEYS.items():
+            lines.append(
+                f"| {db} | {info['time_column']} | `{info['partition_expr']}` "
+                f"| {'Yes' if info['requires_final'] else 'No'} | {info['notes']} |"
+            )
+
+        # 5. Table Scale
+        lines.append("\n## Table Scale (approximate, for query planning)\n")
+        lines.append("| Table | Rows | Size | Caution |")
+        lines.append("|-------|------|------|---------|")
+        for table, info in TABLE_ROW_SCALE.items():
+            lines.append(
+                f"| {table} | {info['approx_rows']} | {info['approx_size']} "
+                f"| {info['caution'].upper()} |"
+            )
+
+        lines.append("\n**Query Planning Tips:**")
+        lines.append("- HIGH caution: MUST include partition key filter AND additional filters (topic0, address)")
+        lines.append("- MEDIUM caution: partition key filter required, additional filters recommended")
+        lines.append("- Always prefer dbt api_*/fct_* models over raw tables when available")
+        lines.append("- Use FINAL on execution/consensus raw tables (ReplacingMergeTree)")
+
+        return truncate_response("\n".join(lines))
