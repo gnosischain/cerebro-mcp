@@ -1,6 +1,6 @@
 # Cerebro MCP
 
-![Beacon Indexer](img/header-banner.png)
+![Cerebro MCP](img/header-banner.png)
 
 **Model Context Protocol server for Gnosis Chain on-chain analytics.**
 

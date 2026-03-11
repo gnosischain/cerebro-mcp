@@ -24,6 +24,7 @@ from cerebro_mcp.tools.agents import register_agent_tools
 
 mcp = FastMCP(
     "cerebro-mcp",
+    host="0.0.0.0",
     instructions=(
         "Gnosis Chain data platform MCP server.\n\n"
 
