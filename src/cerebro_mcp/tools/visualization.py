@@ -820,6 +820,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 }
 
             file_uri = _report_file_uri(report_path)
+            structured["file_uri"] = file_uri
 
             # Reply text — link only. SQL is embedded in the report UI.
             reply_text = (
@@ -891,6 +892,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                         priority=1.0,
                     ),
                 ))
+                if structured is not None:
+                    structured["file_uri"] = file_uri
             metadata = (
                 f"Report ID: `{report_id[:8]}`"
                 + (f"\n\n{extra}" if extra else "")

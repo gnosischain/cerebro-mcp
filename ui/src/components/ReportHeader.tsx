@@ -1,13 +1,14 @@
-import { Sun, Moon } from "lucide-react";
+import { Sun, Moon, ExternalLink } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { WATERMARK_LIGHT, WATERMARK_DARK } from "../assets/watermark";
 
 interface Props {
   title: string;
   timestamp: string;
+  fileUri?: string;
 }
 
-export function ReportHeader({ title, timestamp }: Props) {
+export function ReportHeader({ title, timestamp, fileUri }: Props) {
   const { isDark, toggle } = useTheme();
 
   // Use the owl icon as the header logo — light theme gets dark icon, dark theme gets white icon
@@ -45,13 +46,26 @@ export function ReportHeader({ title, timestamp }: Props) {
             </p>
           </div>
         </div>
-        <button
-          className="no-print theme-toggle"
-          onClick={toggle}
-          title="Toggle theme"
-        >
-          {isDark ? <Sun size={18} /> : <Moon size={18} />}
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
+          {fileUri && (
+            <a
+              href={fileUri}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="no-print theme-toggle"
+              title="Open in browser"
+            >
+              <ExternalLink size={16} />
+            </a>
+          )}
+          <button
+            className="no-print theme-toggle"
+            onClick={toggle}
+            title="Toggle theme"
+          >
+            {isDark ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+        </div>
       </div>
     </header>
   );

@@ -71,6 +71,7 @@ mcp = FastMCP(
         "to get EXACT column names before writing SQL. "
         "Do NOT guess generic names like 'transactions' or 'value' without verifying.\n"
         "3. EXECUTE: Write ClickHouse SQL using verified column names. "
+        "Always use fully-qualified table names (`database.table`, e.g. `dbt.api_eure_supply_daily`). "
         "Always use LIMIT and partition key filters (e.g., block_timestamp/block_date).\n\n"
 
         "GNOSIS CHAIN SPECIFICS:\n"

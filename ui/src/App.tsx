@@ -30,7 +30,7 @@ export default function App() {
           onChange={setActiveSection}
         />
         <div className="dashboard-main">
-          <ReportHeader title={data.title} timestamp={data.timestamp} />
+          <ReportHeader title={data.title} timestamp={data.timestamp} fileUri={data.file_uri} />
           <ReportContent
             data={data}
             sections={sections}

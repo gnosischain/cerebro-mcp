@@ -78,7 +78,6 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
             spec={spec}
             title={chartTitle}
             sql={queries?.[chartId]?.sql}
-            database={queries?.[chartId]?.database}
           />
         );
       }

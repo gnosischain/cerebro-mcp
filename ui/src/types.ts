@@ -21,6 +21,7 @@ export interface ReportData {
   charts: Record<string, ChartSpec>;
   sections_html: string;
   queries?: Record<string, QueryInfo>;
+  file_uri?: string;
 }
 
 export interface HtmlSection {

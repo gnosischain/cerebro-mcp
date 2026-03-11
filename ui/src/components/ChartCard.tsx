@@ -14,7 +14,6 @@ interface Props {
   spec: ChartSpec;
   title?: string;
   sql?: string;
-  database?: string;
 }
 
 /**
@@ -77,7 +76,7 @@ function buildDataViewTable(opt: EChartsOption): string {
   return html;
 }
 
-function ChartCardInner({ chartId, spec, title, sql, database }: Props) {
+function ChartCardInner({ chartId, spec, title, sql }: Props) {
   const { isDark } = useTheme();
   const [showSql, setShowSql] = useState(false);
 
@@ -126,9 +125,6 @@ function ChartCardInner({ chartId, spec, title, sql, database }: Props) {
         )}
         {showSql && sql && (
           <div className="chart-sql-block">
-            {database && (
-              <div className="chart-sql-db">Database: {database}</div>
-            )}
             <pre>
               <code>{sql}</code>
             </pre>
