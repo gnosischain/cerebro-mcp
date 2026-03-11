@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
 from cerebro_mcp.safety import validate_query, ensure_limit
-from cerebro_mcp.tools.query import format_results_table, truncate_response
+from cerebro_mcp.tools.query import format_results_table, truncate_response, _truncate_sql
 
 
 @dataclass
@@ -180,12 +180,14 @@ def register_async_query_tools(mcp, ch: ClickHouseManager):
                 result["rows"],
             )
 
+            sql_block = f"\n\n### SQL\n```sql\n{_truncate_sql(job.sql)}\n```"
             output = (
                 f"**Status:** Completed\n"
                 f"**Rows:** {result['row_count']} | "
                 f"**Time:** {elapsed:.1f}s | "
                 f"**Database:** {job.database}\n\n"
                 f"{table}"
+                f"{sql_block}"
             )
             return truncate_response(output)
 

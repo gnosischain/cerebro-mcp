@@ -1,17 +1,18 @@
-import type { ReportData, ChartSpec } from "../types";
+import type { ReportData, ChartSpec, QueryInfo } from "../types";
 import type { HtmlSection } from "../types";
 import { ChartCard } from "./ChartCard";
 
 interface SectionContentProps {
   html: string;
   charts: Record<string, ChartSpec>;
+  queries?: Record<string, QueryInfo>;
 }
 
 /**
  * Given a section's HTML, find chart placeholder divs and render them
  * as React ChartCards, while keeping the surrounding HTML intact.
  */
-function SectionContent({ html, charts }: SectionContentProps) {
+function SectionContent({ html, charts, queries }: SectionContentProps) {
   // Split HTML on chart container divs: <div id="chart-chart_N" class="chart-container"></div>
   const parts = html.split(
     /(<div\s+id="chart-(chart_\d+)"\s+class="chart-container"><\/div>)/i
@@ -76,6 +77,8 @@ function SectionContent({ html, charts }: SectionContentProps) {
             chartId={chartId}
             spec={spec}
             title={chartTitle}
+            sql={queries?.[chartId]?.sql}
+            database={queries?.[chartId]?.database}
           />
         );
       }
@@ -113,7 +116,11 @@ export function ReportContent({ data, sections, activeIndex }: Props) {
           key={i}
           style={{ display: i === activeIndex ? "block" : "none" }}
         >
-          <SectionContent html={section.html} charts={data.charts} />
+          <SectionContent
+            html={section.html}
+            charts={data.charts}
+            queries={data.queries}
+          />
         </div>
       ))}
     </div>

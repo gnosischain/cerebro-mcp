@@ -150,12 +150,18 @@ class TestGenerateReport:
             content_markdown="## Section\n\n{{chart:chart_1}}\n\nSome text.",
         )
         assert isinstance(result, CallToolResult)
-        assert len(result.content) == 1
+        # 2 blocks: link (annotated) + metadata
+        assert len(result.content) == 2
+        # First content: link block, annotated for assistant
         assert isinstance(result.content[0], TextContent)
         assert "Test Report" in result.content[0].text
-        assert "Charts: 1" in result.content[0].text
-        assert "file://" in result.content[0].text
-        assert ">>> Open report:" in result.content[0].text
+        assert "[Open Report](file://" in result.content[0].text
+        assert result.content[0].annotations is not None
+        assert result.content[0].annotations.audience == ["assistant"]
+        assert result.content[0].annotations.priority == 1.0
+        # Last content: metadata
+        assert isinstance(result.content[-1], TextContent)
+        assert "Report ID:" in result.content[-1].text
 
         # Structured content has charts and sections
         sc = result.structuredContent
@@ -164,6 +170,7 @@ class TestGenerateReport:
         assert "chart_1" in sc["charts"]
         assert "sections_html" in sc
         assert "timestamp" in sc
+        assert "queries" in sc
 
     def test_caches_report_with_path_and_title(self, tmp_path, monkeypatch):
         """generate_report caches report with path, title, and structured data."""

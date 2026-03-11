@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 
@@ -13,10 +13,73 @@ interface Props {
   chartId: string;
   spec: ChartSpec;
   title?: string;
+  sql?: string;
+  database?: string;
 }
 
-function ChartCardInner({ chartId, spec, title }: Props) {
+/**
+ * Build a styled HTML table from an ECharts option for the dataView feature.
+ */
+function buildDataViewTable(opt: EChartsOption): string {
+  const xAxis = opt.xAxis as { data?: string[] } | undefined;
+  const series = (opt.series ?? []) as Array<{
+    name?: string;
+    data?: (number | string | null)[];
+  }>;
+
+  if (!xAxis?.data || series.length === 0) {
+    // Fallback for pie charts or other formats
+    const pieData = series[0]?.data as
+      | Array<{ name?: string; value?: number }>
+      | undefined;
+    if (pieData && pieData.length > 0 && typeof pieData[0] === "object") {
+      let html =
+        '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+      html +=
+        "<thead><tr>" +
+        '<th style="padding:6px 10px;text-align:left;border-bottom:2px solid #ddd;font-weight:600">Name</th>' +
+        '<th style="padding:6px 10px;text-align:right;border-bottom:2px solid #ddd;font-weight:600">Value</th>' +
+        "</tr></thead><tbody>";
+      for (const item of pieData) {
+        html +=
+          "<tr>" +
+          `<td style="padding:4px 10px;border-bottom:1px solid #eee">${item.name ?? ""}</td>` +
+          `<td style="padding:4px 10px;text-align:right;border-bottom:1px solid #eee;font-family:monospace">${item.value ?? ""}</td>` +
+          "</tr>";
+      }
+      html += "</tbody></table>";
+      return html;
+    }
+    return "<p>No tabular data available</p>";
+  }
+
+  // Build header row
+  let html =
+    '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+  html += "<thead><tr>";
+  html += `<th style="padding:6px 10px;text-align:left;border-bottom:2px solid #ddd;font-weight:600">${(opt.xAxis as { name?: string })?.name ?? ""}</th>`;
+  for (const s of series) {
+    html += `<th style="padding:6px 10px;text-align:right;border-bottom:2px solid #ddd;font-weight:600">${s.name ?? ""}</th>`;
+  }
+  html += "</tr></thead><tbody>";
+
+  // Build data rows
+  for (let i = 0; i < xAxis.data.length; i++) {
+    html += "<tr>";
+    html += `<td style="padding:4px 10px;border-bottom:1px solid #eee">${xAxis.data[i]}</td>`;
+    for (const s of series) {
+      const val = s.data?.[i] ?? "";
+      html += `<td style="padding:4px 10px;text-align:right;border-bottom:1px solid #eee;font-family:monospace">${val}</td>`;
+    }
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  return html;
+}
+
+function ChartCardInner({ chartId, spec, title, sql, database }: Props) {
   const { isDark } = useTheme();
+  const [showSql, setShowSql] = useState(false);
 
   if (isNumberDisplay(spec)) {
     return (
@@ -30,16 +93,45 @@ function ChartCardInner({ chartId, spec, title }: Props) {
           margin: "1rem 0",
         }}
       >
-        {title && (
+        {(title || sql) && (
           <div
             style={{
               padding: "0.75rem 1rem 0",
-              fontSize: "0.875rem",
-              fontWeight: 600,
-              color: "var(--text-primary)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
             }}
           >
-            {title}
+            {title && (
+              <span
+                style={{
+                  fontSize: "0.875rem",
+                  fontWeight: 600,
+                  color: "var(--text-primary)",
+                }}
+              >
+                {title}
+              </span>
+            )}
+            {sql && (
+              <button
+                className="chart-sql-toggle"
+                onClick={() => setShowSql(!showSql)}
+                title="View SQL query"
+              >
+                {"</>"}
+              </button>
+            )}
+          </div>
+        )}
+        {showSql && sql && (
+          <div className="chart-sql-block">
+            {database && (
+              <div className="chart-sql-db">Database: {database}</div>
+            )}
+            <pre>
+              <code>{sql}</code>
+            </pre>
           </div>
         )}
         <NumberDisplay spec={spec} />
@@ -66,6 +158,8 @@ function ChartCardInner({ chartId, spec, title }: Props) {
           title: "View data",
           lang: ["Data view", "Close", "Refresh"],
           readOnly: true,
+          optionToContent: (o: unknown) =>
+            buildDataViewTable(o as EChartsOption),
         },
       },
       iconStyle: {
@@ -90,16 +184,42 @@ function ChartCardInner({ chartId, spec, title }: Props) {
         transition: "border-color 0.2s, box-shadow 0.2s",
       }}
     >
-      {title && (
+      {(title || sql) && (
         <div
           style={{
             padding: "0.75rem 1rem 0",
-            fontSize: "0.875rem",
-            fontWeight: 600,
-            color: "var(--text-primary)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
           }}
         >
-          {title}
+          {title && (
+            <span
+              style={{
+                fontSize: "0.875rem",
+                fontWeight: 600,
+                color: "var(--text-primary)",
+              }}
+            >
+              {title}
+            </span>
+          )}
+          {sql && (
+            <button
+              className="chart-sql-toggle"
+              onClick={() => setShowSql(!showSql)}
+              title="View SQL query"
+            >
+              {"</>"}
+            </button>
+          )}
+        </div>
+      )}
+      {showSql && sql && (
+        <div className="chart-sql-block">
+          <pre>
+            <code>{sql}</code>
+          </pre>
         </div>
       )}
       <ReactECharts

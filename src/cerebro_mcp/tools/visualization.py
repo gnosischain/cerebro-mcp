@@ -7,10 +7,10 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from mcp.types import CallToolResult, TextContent
+from mcp.types import Annotations, CallToolResult, TextContent
 
 from cerebro_mcp.clickhouse_client import ClickHouseManager
-from cerebro_mcp.tools.query import truncate_response
+from cerebro_mcp.tools.query import truncate_response, _truncate_sql
 
 
 # --- Bundled React UI (Vite single-file build) ---
@@ -539,18 +539,22 @@ def _build_standalone_html(
     timestamp: str,
     charts: dict,
     sections_html: str,
+    queries: dict | None = None,
 ) -> str:
     """Build self-contained HTML with embedded data for disk saves / direct file access.
 
     Injects a <script id="report-data"> tag into the Vite-built React app.
     The React app detects this tag and renders the report in standalone mode.
     """
-    data = json.dumps({
+    data_dict = {
         "title": title,
         "timestamp": timestamp,
         "charts": charts,
         "sections_html": sections_html,
-    }, default=str)
+    }
+    if queries:
+        data_dict["queries"] = queries
+    data = json.dumps(data_dict, default=str)
 
     html = _get_report_html()
     data_tag = f'<script id="report-data" type="application/json">{data}</script>'
@@ -649,6 +653,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     "chart_type": chart_type,
                     "data_points": len(rows),
                     "created_at": datetime.now(),
+                    "sql": sql,
+                    "database": database,
                 }
 
             output = json.dumps(option, default=str, indent=2)
@@ -660,6 +666,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 f"Data points: {len(rows)} | "
                 f"Query time: {result['elapsed_seconds']}s"
             )
+
+            metadata += f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
 
             # Workflow next-step with registered charts summary
             total_charts = len(_chart_registry)
@@ -727,12 +735,12 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         For GUI clients (Claude Desktop, VS Code): renders as interactive iframe.
         For terminal clients (Claude Code): opens report in default browser.
 
-        After generation, ask the user if they want conversion to docx/pdf/pptx.
-
-        CRITICAL: After this tool returns successfully, do NOT echo the report
-        markdown or {{chart:...}} placeholders as conversation text. They are
-        meaningless in plain text. Only share the text summary returned by this
-        tool, summarize key insights, and ask about docx/pdf/pptx conversion.
+        CRITICAL: After this tool returns, your reply to the user MUST include:
+        1. The file:// report link from the response (copy it verbatim)
+        2. A brief summary of key insights
+        3. Ask if they want conversion to docx/pdf/pptx
+        Do NOT echo the report markdown or {{chart:...}} placeholders.
+        SQL queries are embedded in the report UI (click </> on each chart).
 
         Args:
             title: Report title displayed in the header.
@@ -747,12 +755,18 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 r"\{\{chart:(\w+)\}\}", content_markdown
             )
 
-            # Collect chart specs for referenced charts
+            # Collect chart specs and SQL queries for referenced charts
             chart_specs: dict = {}
+            chart_queries: dict = {}
             missing = []
             for cid in chart_ids_in_content:
                 if cid in _chart_registry:
                     chart_specs[cid] = _chart_registry[cid]["option"]
+                    chart_queries[cid] = {
+                        "sql": _chart_registry[cid].get("sql", ""),
+                        "database": _chart_registry[cid].get("database", "dbt"),
+                        "title": _chart_registry[cid].get("title", ""),
+                    }
                 else:
                     missing.append(cid)
 
@@ -781,10 +795,11 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 "timestamp": timestamp,
                 "charts": chart_specs,
                 "sections_html": rendered_html,
+                "queries": chart_queries,
             }
 
             # Build standalone HTML for disk saves
-            html = _build_standalone_html(title, timestamp, chart_specs, rendered_html)
+            html = _build_standalone_html(title, timestamp, chart_specs, rendered_html, chart_queries)
 
             # Cache the report
             report_id = str(uuid.uuid4())
@@ -806,19 +821,32 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
 
             file_uri = _report_file_uri(report_path)
 
-            # Text summary
-            summary_text = (
-                f"**{title}**\n\n"
-                f"**>>> Open report:** {file_uri}\n\n"
+            # Reply text — link only. SQL is embedded in the report UI.
+            reply_text = (
+                f"**Report:** {title}\n\n"
+                f"**Report link:** [Open Report]({file_uri})"
+            )
+
+            # Metadata for context (unannotated)
+            metadata_text = (
                 f"Charts: {len(chart_specs)} | "
-                f"Sections: {content_markdown.count('## ')} | "
                 f"Report ID: `{report_id[:8]}`\n\n"
-                f"To reopen later: `open_report(\"{report_id[:8]}\")`\n\n"
-                f"_Ask if you'd like this converted to docx, pdf, or pptx._"
+                f"To reopen: `open_report(\"{report_id[:8]}\")`\n\n"
+                f"_Ask if they want conversion to docx, pdf, or pptx._"
             )
 
             return CallToolResult(
-                content=[TextContent(type="text", text=summary_text)],
+                content=[
+                    TextContent(
+                        type="text",
+                        text=reply_text,
+                        annotations=Annotations(
+                            audience=["assistant"],
+                            priority=1.0,
+                        ),
+                    ),
+                    TextContent(type="text", text=metadata_text),
+                ],
                 structuredContent=structured,
             )
 
@@ -840,8 +868,10 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         Accepts the full UUID or the 8-character short ID shown in report
         summaries. Returns the same interactive UI resource as generate_report.
 
-        CRITICAL: After this tool returns, do NOT echo the report markdown.
-        Only share the text summary returned by this tool.
+        CRITICAL: After this tool returns, your reply MUST include:
+        1. The file:// report link (copy it verbatim from the response)
+        2. A brief summary
+        Do NOT echo the report markdown.
 
         Args:
             report_ref: Full report UUID or 8-character prefix.
@@ -851,14 +881,23 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         """
         def _build_result(title: str, file_uri: str, report_id: str,
                           structured: dict | None, extra: str = "") -> CallToolResult:
-            summary = (
-                f"**{title}**\n\n"
-                + (f"**>>> Open report:** {file_uri}\n\n" if file_uri else "")
-                + f"Report ID: `{report_id[:8]}`"
+            content_items = []
+            if file_uri:
+                content_items.append(TextContent(
+                    type="text",
+                    text=f"**Report:** {title}\n\n**Report link:** [Open Report]({file_uri})",
+                    annotations=Annotations(
+                        audience=["assistant"],
+                        priority=1.0,
+                    ),
+                ))
+            metadata = (
+                f"Report ID: `{report_id[:8]}`"
                 + (f"\n\n{extra}" if extra else "")
             )
+            content_items.append(TextContent(type="text", text=metadata))
             return CallToolResult(
-                content=[TextContent(type="text", text=summary)],
+                content=content_items,
                 structuredContent=structured,
             )
 

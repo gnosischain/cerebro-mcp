@@ -9,11 +9,18 @@ export interface NumberDisplaySpec {
 
 export type ChartSpec = EChartsOption | NumberDisplaySpec;
 
+export interface QueryInfo {
+  sql: string;
+  database: string;
+  title: string;
+}
+
 export interface ReportData {
   title: string;
   timestamp: string;
   charts: Record<string, ChartSpec>;
   sections_html: string;
+  queries?: Record<string, QueryInfo>;
 }
 
 export interface HtmlSection {

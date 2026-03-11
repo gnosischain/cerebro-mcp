@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
 from cerebro_mcp.safety import validate_query, validate_identifier
-from cerebro_mcp.tools.query import format_results_table, truncate_response
+from cerebro_mcp.tools.query import format_results_table, truncate_response, _truncate_sql
 
 
 SAVED_QUERIES_DIR = os.environ.get("CEREBRO_SAVED_QUERIES_DIR", os.path.expanduser("~/.cerebro-mcp"))
@@ -155,6 +155,7 @@ def register_saved_query_tools(mcp, ch: ClickHouseManager):
             if q.get("description"):
                 header = f"**Description:** {q['description']}\n" + header
 
-            return truncate_response(header + table)
+            sql_block = f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
+            return truncate_response(header + table + sql_block)
         except Exception as e:
             return f"Error: {e}"

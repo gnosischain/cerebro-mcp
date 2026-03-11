@@ -57,6 +57,14 @@ def format_results_table(
     return "\n".join(lines)
 
 
+_SQL_DISPLAY_LIMIT = 2000
+
+
+def _truncate_sql(sql: str, limit: int = _SQL_DISPLAY_LIMIT) -> str:
+    """Truncate SQL for display in tool responses."""
+    return sql if len(sql) <= limit else sql[:limit] + "\n-- [SQL truncated]"
+
+
 def truncate_response(text: str, max_chars: int = 0) -> str:
     """Truncate free-text responses that exceed the size budget."""
     if max_chars <= 0:
@@ -107,6 +115,7 @@ def register_query_tools(mcp, ch: ClickHouseManager):
                 f"Time: {result['elapsed_seconds']}s | "
                 f"Database: {database}"
             )
+            meta += f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
             response = table + meta
 
             # Nudge toward generate_chart / generate_report during multi-query workflows

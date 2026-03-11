@@ -308,6 +308,60 @@ body {
   background: var(--table-stripe);
 }
 
+/* --- SQL toggle button & block --- */
+.chart-sql-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: Monaco, Consolas, "Courier New", monospace;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.chart-sql-toggle:hover {
+  background: var(--accent-softer);
+  color: var(--primary);
+  border-color: var(--primary);
+}
+.chart-sql-block {
+  margin: 0.5rem 1rem;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.chart-sql-db {
+  font-family: Monaco, Consolas, "Courier New", monospace;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  padding: 0.4rem 1rem 0;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.chart-sql-block pre {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  background: var(--table-header);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.chart-sql-block code {
+  font-family: Monaco, Consolas, "Courier New", monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: none;
+  padding: 0;
+}
+
 /* --- Value coloring (positive/negative) --- */
 .report-html .number-change.positive {
   color: var(--success);

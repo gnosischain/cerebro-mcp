@@ -12,9 +12,11 @@ When a user asks for a report, trends, or visual analysis using cerebro:
 
 Never skip the `generate_chart` -> `generate_report` pipeline.
 
-**After `generate_report` or `open_report` succeeds, do NOT repeat the markdown content as text.**
-Only confirm, share the file:// link, summarize key insights, and ask about format conversion.
-Chart placeholders (`{{chart:CHART_ID}}`) are meaningless in plain text.
+**After `generate_report` or `open_report` succeeds:**
+- ALWAYS include the file:// link from the tool response in your reply
+- Do NOT repeat the markdown content or {{chart:CHART_ID}} placeholders as text
+- Summarize key insights and ask about format conversion
+- SQL queries are embedded in the report UI (click `</>` on each chart card)
 
 Use `list_reports()` and `open_report(id)` to reopen past reports.
 
