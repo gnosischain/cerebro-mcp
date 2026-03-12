@@ -73,6 +73,20 @@ def register_dbt_tools(mcp):
 
         result = truncate_response("\n".join(lines))
 
+        from cerebro_mcp.tools.session_state import state
+
+        state.record_search_models(query, len(results))
+
+        if len(results) >= 5:
+            result += (
+                "\n\n> **Next steps (enforced by generate_chart):**\n"
+                "> 1. Call `get_model_details` for the top models "
+                "(minimum 3-5, ideally 10+ if available).\n"
+                "> 2. Identify dimensions: token, action, user segment, "
+                "time grain.\n"
+                "> 3. Run EDA with quantiles/stddev before charting."
+            )
+
         # Append report workflow hint for report-oriented queries
         _report_keywords = {
             "report", "trend", "weekly", "daily", "monthly",
@@ -104,6 +118,11 @@ def register_dbt_tools(mcp):
             return "Error: dbt manifest not loaded."
 
         details = manifest.get_model_details(model_name)
+        if details:
+            from cerebro_mcp.tools.session_state import state
+
+            state.record_get_model_details(model_name)
+
         if not details:
             # Try fuzzy match
             suggestions = manifest.search_models(query=model_name, limit=5)

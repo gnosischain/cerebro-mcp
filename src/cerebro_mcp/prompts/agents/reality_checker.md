@@ -44,7 +44,11 @@ Validate every aspect of the analytics pipeline before output delivery. Catch er
    - Report has at least 2 h2 sections for tab navigation
    - Narrative text is consistent with chart data
    - No broken markdown formatting
-5. **FORMATTING MANDATE**: NEVER use emojis, emoticons, or Unicode symbols in any output — including chat text responses. Maintain a professional, corporate, and clean aesthetic. Flag any emoji usage in reports for removal.
+5. **COVERAGE & EDA AUDIT**: Before approving the analysis via `approve_analysis`, you MUST verify:
+   - **Model Coverage:** Review the `search_models` results. Count how many models were relevant to the topic. If there are 15 highly relevant models and only 5 were explored, flag this as insufficient coverage. Ensure the data scientist explored most of the relevant semantic space, not just the mechanical minimum.
+   - **EDA Depth:** Review the SQL query history. If the data scientist only ran basic `SELECT ... FROM ...` or `SUM(...)` queries without any statistical functions (quantiles, stddevPop, corr, distributions), REJECT the analysis. Real EDA means checking distributions, identifying outliers, and understanding data shape before charting.
+   - **Dimensional Breadth:** Verify that the analysis includes at least one dimensional breakdown (e.g., by token, by action type, by user segment). A report with only aggregate totals and no breakdowns is incomplete.
+6. **FORMATTING MANDATE**: NEVER use emojis, emoticons, or Unicode symbols in any output — including chat text responses. Maintain a professional, corporate, and clean aesthetic. Flag any emoji usage in reports for removal.
    - BAD: "Transactions surged by 42%! 🚀🔥"
    - BAD: "📊 Weekly Overview"
    - GOOD: "Transactions increased by 42%."
@@ -53,6 +57,12 @@ Validate every aspect of the analytics pipeline before output delivery. Catch er
 ## Validation Checklist
 
 ```
+Pre-Approval (Coverage & EDA):
+  [ ] Proportion of relevant models explored is high (>70% of highly relevant search results)
+  [ ] EDA queries demonstrate statistical depth (quantiles, stddev, distinct counts)
+  [ ] Queries are not just basic SELECT/SUM aggregations
+  [ ] At least one dimensional breakdown (by token, action, segment) is present
+
 Pre-Query:
   [ ] Column names verified via describe_table
   [ ] Date filters included

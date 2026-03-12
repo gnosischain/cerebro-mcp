@@ -143,6 +143,10 @@ def register_saved_query_tools(mcp, ch: ClickHouseManager):
             sql = q["sql"]
             database = q.get("database", "dbt")
 
+            from cerebro_mcp.tools.session_state import state
+
+            state.record_execute_query(sql)
+
             result = ch.execute_query(sql, database, max_rows)
             table = format_results_table(result["columns"], result["rows"])
 

@@ -728,7 +728,7 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 ### Agents
 | Tool | Description |
 |------|-------------|
-| `get_agent_persona` | Load operational rules for a persona (analytics_reporter, ui_designer, reality_checker) |
+| `get_agent_persona` | Load operational rules for a persona: analytics_reporter (Data Science Lead), ui_designer, reality_checker |
 
 ## Prompts
 

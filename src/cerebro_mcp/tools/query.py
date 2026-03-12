@@ -103,6 +103,10 @@ def register_query_tools(mcp, ch: ClickHouseManager):
             global _query_count
             _query_count += 1
 
+            from cerebro_mcp.tools.session_state import state
+
+            state.record_execute_query(sql)
+
             result = ch.execute_query(sql, database, max_rows)
             table = format_results_table(result["columns"], result["rows"])
             meta = (
@@ -114,30 +118,35 @@ def register_query_tools(mcp, ch: ClickHouseManager):
             meta += f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
             response = table + meta
 
-            # Nudge toward generate_chart / generate_report during multi-query workflows
-            if _query_count >= 3:
+            # Nudge toward statistical functions and report workflows
+            if _query_count >= 2:
                 import time as _time
 
                 global _last_nudge_time
                 now = _time.monotonic()
                 if now - _last_nudge_time > _NUDGE_COOLDOWN:
-                    from cerebro_mcp.tools.visualization import _chart_registry
+                    nudge_text = state.suggest_statistical_functions(sql)
+                    if nudge_text:
+                        response += f"\n\n> **Tip:** {nudge_text}"
 
-                    if _chart_registry:
-                        response += (
-                            f"\n\n> **Reminder:** You have "
-                            f"{len(_chart_registry)} chart(s) registered. "
-                            "Call `generate_report(title, content_markdown)` "
-                            "with `{{chart:CHART_ID}}` placeholders to "
-                            "produce the interactive report."
-                        )
-                    else:
-                        response += (
-                            "\n\n> **Tip:** To create charts and a visual "
-                            "report, use `generate_chart(sql, chart_type, "
-                            "x_field, y_field, title)` for each metric, then "
-                            "`generate_report(title, content_markdown)`."
-                        )
+                    if _query_count >= 3:
+                        from cerebro_mcp.tools.visualization import _chart_registry
+
+                        if _chart_registry:
+                            response += (
+                                f"\n\n> **Reminder:** You have "
+                                f"{len(_chart_registry)} chart(s) registered. "
+                                "Call `generate_report(title, content_markdown)` "
+                                "with `{{chart:CHART_ID}}` placeholders to "
+                                "produce the interactive report."
+                            )
+                        else:
+                            response += (
+                                "\n\n> **Tip:** To create charts and a visual "
+                                "report, use `generate_chart(sql, chart_type, "
+                                "x_field, y_field, title)` for each metric, then "
+                                "`generate_report(title, content_markdown)`."
+                            )
                     _last_nudge_time = now
 
             return response

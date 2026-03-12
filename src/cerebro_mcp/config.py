@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     # Manifest refresh
     MANIFEST_REFRESH_INTERVAL_SECONDS: int = 300
 
+    # Agent enforcement settings
+    ENFORCE_CHART_PRECONDITIONS: bool = True
+    MIN_MODELS_DETAILED: int = 5      # get_model_details calls required (raised from 3)
+    MIN_TABLES_VERIFIED: int = 1      # describe_table calls required
+    MIN_CHARTS_FOR_REPORT: int = 3
+    REQUIRE_CHART_DIVERSITY: bool = True
+    REQUIRE_REVIEW_APPROVAL: bool = True
+    MIN_STATISTICAL_QUERIES: int = 1  # hard gate: queries using quantiles/stddev/corr
+    MIN_EXPLORATORY_QUERIES: int = 3  # hard gate: execute_query calls before approval
+
     # Thinking / performance tracing
     THINKING_MODE_ENABLED: bool = True
     THINKING_ALWAYS_ON: bool = True

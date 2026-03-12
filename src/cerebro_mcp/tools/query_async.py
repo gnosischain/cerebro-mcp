@@ -92,6 +92,10 @@ def register_async_query_tools(mcp, ch: ClickHouseManager):
             capped_max = min(max_rows, settings.MAX_ROWS)
             safe_sql = ensure_limit(sql, capped_max)
 
+            from cerebro_mcp.tools.session_state import state
+
+            state.record_execute_query(sql)
+
             query_id = str(uuid.uuid4())[:8]
             job = QueryJob(
                 id=query_id,

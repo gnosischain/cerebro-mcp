@@ -459,7 +459,35 @@ def _markdown_to_html(text: str) -> str:
                 continue
             html_lines.append("<tr>")
             for cell in cells:
-                html_lines.append(f"<td>{_inline_format(cell)}</td>")
+                cell_chart = re.match(
+                    r"\{\{chart:(\w+)\}\}", cell.strip()
+                )
+                if cell_chart:
+                    cid = cell_chart.group(1)
+                    chart_data = _chart_registry.get(cid, {})
+                    chart_opt = chart_data.get("option", {})
+                    # Render numberDisplay values inline in table cells
+                    if chart_opt.get("type") == "numberDisplay":
+                        val = chart_opt.get("value", "")
+                        if isinstance(val, (int, float)):
+                            formatted = f"{val:,.0f}" if val == int(val) else f"{val:,.2f}"
+                        else:
+                            formatted = str(val)
+                        html_lines.append(
+                            f'<td class="kpi-cell">'
+                            f'<span class="kpi-value">{_escape_html(formatted)}</span>'
+                            f'</td>'
+                        )
+                    else:
+                        # Non-number charts: emit chart container div
+                        html_lines.append(
+                            f'<td><div id="chart-{cid}" '
+                            f'class="chart-container"></div></td>'
+                        )
+                else:
+                    html_lines.append(
+                        f"<td>{_inline_format(cell)}</td>"
+                    )
             html_lines.append("</tr>")
             continue
 
@@ -569,50 +597,27 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
     """Register chart generation and report tools."""
 
     @mcp.tool()
-    def generate_chart(
+    # ── Shared chart builder ───────────────────────────────────────
+
+    def _build_and_register_chart(
         sql: str,
-        database: str = "dbt",
-        chart_type: str = "line",
-        x_field: str = "",
-        y_field: str = "",
-        series_field: str = "",
-        title: str = "",
-        max_rows: int = 500,
+        database: str,
+        chart_type: str,
+        x_field: str,
+        y_field: str,
+        series_field: str,
+        title: str,
+        max_rows: int,
     ) -> str:
-        """Execute a query and generate an ECharts visualization spec.
+        """Internal helper: execute SQL, build ECharts spec, register chart."""
+        from cerebro_mcp.tools.session_state import state
 
-        YOU MUST call this tool for every metric that needs visualization when
-        the user asks for a report, analysis, or trends. This is the ONLY way
-        to create charts. After creating all charts, call `generate_report`
-        to assemble the final interactive report.
+        if chart_type not in CHART_BUILDERS:
+            supported = ", ".join(CHART_BUILDERS.keys())
+            return f"Error: Unknown chart type '{chart_type}'. Supported: {supported}"
 
-        Returns a JSON object compatible with echarts.setOption() and the
-        Gnosis metrics-dashboard EChartsContainer component. The Gnosis owl
-        watermark is applied automatically when rendered via generate_report.
-
-        IMPORTANT: Before calling this tool, verify column names using
-        `describe_table` or `get_model_details`. Never guess column names.
-
-        Supported chart types: line, area, bar, pie, numberDisplay.
-
-        Args:
-            sql: SQL query to execute for chart data. Only use column names
-                 verified via `describe_table` or `get_model_details`.
-            database: Target database. Default: dbt.
-            chart_type: Chart type (line, area, bar, pie, numberDisplay). Default: line.
-            x_field: Column name for the X axis (categories/dates).
-            y_field: Column name for the Y axis (values).
-            series_field: Optional column name to split data into multiple series.
-            title: Chart title.
-            max_rows: Maximum data points. Default: 500.
-
-        Returns:
-            ECharts option JSON string. Render with: echarts.setOption(JSON.parse(result))
-        """
         try:
-            if chart_type not in CHART_BUILDERS:
-                supported = ", ".join(CHART_BUILDERS.keys())
-                return f"Error: Unknown chart type '{chart_type}'. Supported: {supported}"
+            state.record_generate_chart(chart_type, sql)
 
             result = ch.execute_query(sql, database, max_rows)
             columns = result["columns"]
@@ -692,6 +697,105 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 )
             return f"Error: {e}"
 
+    # ── Gated chart tool (for reports) ──────────────────────────────
+
+    @mcp.tool()
+    def generate_chart(
+        sql: str,
+        database: str = "dbt",
+        chart_type: str = "line",
+        x_field: str = "",
+        y_field: str = "",
+        series_field: str = "",
+        title: str = "",
+        max_rows: int = 500,
+    ) -> str:
+        """Execute a query and generate an ECharts visualization spec.
+
+        YOU MUST call this tool for every metric that needs visualization when
+        the user asks for a report, analysis, or trends. This is the ONLY way
+        to create charts. After creating all charts, call `generate_report`
+        to assemble the final interactive report.
+
+        Returns a JSON object compatible with echarts.setOption() and the
+        Gnosis metrics-dashboard EChartsContainer component. The Gnosis owl
+        watermark is applied automatically when rendered via generate_report.
+
+        IMPORTANT: Before calling this tool, verify column names using
+        `describe_table` or `get_model_details`. Never guess column names.
+
+        Supported chart types: line, area, bar, pie, numberDisplay.
+
+        Args:
+            sql: SQL query to execute for chart data. Only use column names
+                 verified via `describe_table` or `get_model_details`.
+            database: Target database. Default: dbt.
+            chart_type: Chart type (line, area, bar, pie, numberDisplay). Default: line.
+            x_field: Column name for the X axis (categories/dates).
+            y_field: Column name for the Y axis (values).
+            series_field: Optional column name to split data into multiple series.
+            title: Chart title.
+            max_rows: Maximum data points. Default: 500.
+
+        Returns:
+            ECharts option JSON string. Render with: echarts.setOption(JSON.parse(result))
+        """
+        from cerebro_mcp.tools.session_state import state
+
+        passed, reason = state.check_chart_preconditions()
+        if not passed:
+            return (
+                f"**Analysis depth check failed:** {reason}\n\n"
+                "Complete the missing steps, then retry `generate_chart`."
+            )
+
+        return _build_and_register_chart(
+            sql, database, chart_type, x_field, y_field,
+            series_field, title, max_rows,
+        )
+
+    # ── Quick chart tool (no gates) ─────────────────────────────────
+
+    @mcp.tool()
+    def quick_chart(
+        sql: str,
+        database: str = "dbt",
+        chart_type: str = "line",
+        x_field: str = "",
+        y_field: str = "",
+        series_field: str = "",
+        title: str = "",
+        max_rows: int = 500,
+    ) -> str:
+        """Generate a quick ad-hoc chart without workflow gates.
+
+        Use this for simple, one-off plot requests. No discovery or
+        exploration preconditions — just provide SQL and get a chart.
+        Charts from quick_chart are registered and can be used in reports.
+
+        For full analytical reports, use `generate_chart` instead (which
+        enforces discovery and exploration).
+
+        Supported chart types: line, area, bar, pie, numberDisplay.
+
+        Args:
+            sql: SQL query to execute for chart data.
+            database: Target database. Default: dbt.
+            chart_type: Chart type (line, area, bar, pie, numberDisplay). Default: line.
+            x_field: Column name for the X axis (categories/dates).
+            y_field: Column name for the Y axis (values).
+            series_field: Optional column name to split data into multiple series.
+            title: Chart title.
+            max_rows: Maximum data points. Default: 500.
+
+        Returns:
+            ECharts option JSON string. Render with: echarts.setOption(JSON.parse(result))
+        """
+        return _build_and_register_chart(
+            sql, database, chart_type, x_field, y_field,
+            series_field, title, max_rows,
+        )
+
     @mcp.tool()
     def list_charts() -> str:
         """List all charts in the registry with IDs, titles, and types.
@@ -750,6 +854,19 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             Interactive UI resource rendered natively in the chat client.
         """
         try:
+            # --- Report quality gate ---
+            from cerebro_mcp.tools.session_state import state
+
+            passed, reason = state.check_report_preconditions(_chart_registry)
+            if not passed:
+                return CallToolResult(
+                    content=[TextContent(
+                        type="text",
+                        text=f"Error: Report quality gate failed: {reason}",
+                    )],
+                    isError=True,
+                )
+
             # Find chart placeholders
             chart_ids_in_content = re.findall(
                 r"\{\{chart:(\w+)\}\}", content_markdown
@@ -818,6 +935,9 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     "path": report_path,
                     "title": title,
                 }
+
+            # Reset workflow state for the next analysis cycle
+            state.reset()
 
             file_uri = _report_file_uri(report_path)
             structured["file_uri"] = file_uri

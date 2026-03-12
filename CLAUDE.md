@@ -22,8 +22,10 @@ Use `list_reports()` and `open_report(id)` to reopen past reports.
 
 ## Data Query SOP
 
-1. DISCOVER: `search_models` (prefer api_*/fct_* models)
-2. VERIFY: `describe_table` for exact column names
-3. QUERY: `execute_query` with date filters and LIMIT
-4. VISUALIZE: `generate_chart` per metric
-5. REPORT: `generate_report` with {{chart:CHART_ID}} placeholders
+1. DISCOVER: `search_models` — find models across ALL tiers (api_*, fct_*, int_*), not just the first match
+2. EXPLORE: `get_model_details` for top 3-5 models — map lineage, identify all dimensions (token, action, segment)
+3. VERIFY: `describe_table` for exact column names
+4. EDA: Quick distribution check — `quantiles`, `stddevPop`, `min/max`, `count` to assess data shape and outliers
+5. QUERY: `execute_query` with date filters, LIMIT, and statistical functions (medians over means)
+6. VISUALIZE: `generate_chart` per metric (min: KPIs + trends + breakdowns — never just KPI counters)
+7. REPORT: `generate_report` with {{chart:CHART_ID}} placeholders

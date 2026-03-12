@@ -122,6 +122,11 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
                 enriched_rows.append([col_name, col_type, default, description])
 
             output_parts.append(format_results_table(columns, enriched_rows))
+
+            from cerebro_mcp.tools.session_state import state
+
+            state.record_describe_table(table)
+
             return truncate_response("\n".join(output_parts))
         except Exception as e:
             return f"Error: {e}"

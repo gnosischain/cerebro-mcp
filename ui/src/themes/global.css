@@ -24,7 +24,8 @@ body {
 /* --- Dashboard Layout (sidebar + main) --- */
 .dashboard {
   display: flex;
-  min-height: 100vh;
+  height: 200vh;
+  overflow: hidden;
 }
 
 .dashboard-main {
@@ -32,6 +33,7 @@ body {
   min-width: 0; /* prevent flex overflow */
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 /* --- Report Header --- */
@@ -42,6 +44,7 @@ body {
   min-height: var(--header-height);
   display: flex;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .report-header-inner {
@@ -77,12 +80,12 @@ body {
   padding: 1.25rem 1.5rem 2rem;
   max-width: 1280px;
   width: 100%;
+  overflow-y: auto;
 }
 
 /* --- Sidebar --- */
 .sidebar {
   width: var(--sidebar-width);
-  min-height: 100vh;
   background: var(--surface);
   border-right: 1px solid var(--border);
   display: flex;
@@ -351,6 +354,19 @@ body {
   word-break: break-all;
   background: none;
   padding: 0;
+}
+
+/* --- Inline KPI values in table cells --- */
+.report-html td.kpi-cell {
+  text-align: center;
+  vertical-align: middle;
+  padding: 0.75rem;
+}
+.report-html td.kpi-cell .kpi-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--primary);
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
 }
 
 /* --- Value coloring (positive/negative) --- */
