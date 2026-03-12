@@ -20,7 +20,10 @@ interface Props {
  * Build a styled HTML table from an ECharts option for the dataView feature.
  */
 function buildDataViewTable(opt: EChartsOption): string {
-  const xAxis = opt.xAxis as { data?: string[] } | undefined;
+  const xAxisRaw = opt.xAxis;
+  const xAxis = (Array.isArray(xAxisRaw) ? xAxisRaw[0] : xAxisRaw) as
+    | { data?: string[]; name?: string }
+    | undefined;
   const series = (opt.series ?? []) as Array<{
     name?: string;
     data?: (number | string | null)[];
@@ -56,7 +59,7 @@ function buildDataViewTable(opt: EChartsOption): string {
   let html =
     '<table style="width:100%;border-collapse:collapse;font-size:13px">';
   html += "<thead><tr>";
-  html += `<th style="padding:6px 10px;text-align:left;border-bottom:2px solid #ddd;font-weight:600">${(opt.xAxis as { name?: string })?.name ?? ""}</th>`;
+  html += `<th style="padding:6px 10px;text-align:left;border-bottom:2px solid #ddd;font-weight:600">${xAxis?.name ?? ""}</th>`;
   for (const s of series) {
     html += `<th style="padding:6px 10px;text-align:right;border-bottom:2px solid #ddd;font-weight:600">${s.name ?? ""}</th>`;
   }
