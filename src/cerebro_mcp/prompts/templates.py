@@ -49,6 +49,63 @@ def register_prompts(mcp):
         )
         return [prompt_base.Message(role="user", content=content)]
 
+    # --- Onboarding Prompt ---
+
+    @mcp.prompt()
+    def getting_started() -> str:
+        """Get started with Cerebro MCP — overview of capabilities and example workflows.
+
+        Use this prompt to learn what Cerebro MCP can do and how to interact with it.
+        """
+        return """\
+Welcome to Cerebro MCP — the Gnosis Chain data platform.
+
+You can query on-chain data, explore DeFi protocols, generate interactive reports,
+and look up addresses across 5 ClickHouse databases and ~400 pre-computed dbt models.
+
+## What You Can Do
+
+### 1. Discover Available Data
+Start by exploring what's available:
+- `list_databases` — see all databases (execution, consensus, crawlers_data, nebula, dbt)
+- `search_models` — find pre-computed dbt models by keyword (e.g., 'transactions', 'validators', 'bridge')
+- `get_model_details` — see columns, SQL logic, and dependencies for any model
+
+### 2. Query Data
+Once you find a model or table:
+- `describe_table` — verify exact column names before writing SQL
+- `execute_query` — run ClickHouse SQL (read-only, always use date filters and LIMIT)
+- Prefer dbt `api_*/fct_*` models — they're pre-aggregated and much faster than raw tables
+
+### 3. Generate Interactive Reports
+For visual analysis with charts:
+1. `generate_chart` — create a chart (line, area, bar, pie, numberDisplay) from a SQL query
+2. Repeat for each metric you want to visualize
+3. `generate_report` — assemble charts into an interactive HTML report with Gnosis branding
+
+### 4. Explore DeFi Protocols
+- `search_models(module='contracts')` — find decoded event/call tables for 15+ protocols
+- Supported: Aave, Balancer, Uniswap, Swapr, Circles, Gnosis Pay, CoW Protocol, and more
+
+### 5. Look Up Addresses & Tokens
+- `resolve_address('Uniswap')` — search 5.3M labeled addresses
+- `get_token_metadata('GNO')` — get address, decimals, and price data availability
+
+## Example Questions to Try
+
+- "How many transactions were there on Gnosis Chain yesterday?"
+- "Show me validator count trends over the past month with a chart"
+- "Explore the Circles protocol data on Gnosis Chain"
+- "Give me a weekly report on network activity"
+- "What is the address for the Balancer V2 Vault?"
+
+## More Help
+
+- Call `get_help()` for a full reference of all tools, prompts, and resources
+- Call `get_platform_constants()` for chain parameters, event signatures, and contract addresses
+- Call `search_docs('topic')` to search platform documentation
+"""
+
     # --- Data Analysis Prompts ---
 
     @mcp.prompt()

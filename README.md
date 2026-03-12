@@ -295,6 +295,7 @@ Each persona is loaded via `get_agent_persona(role)` and provides strict operati
 | `get_token_metadata` | Token info: address, decimals, price data |
 | `search_models_by_address` | Find dbt models related to a contract |
 | `search_docs` | Search platform documentation and references |
+| `get_help` | Overview of all tools, prompts, and resources |
 
 ### Saved Queries
 
@@ -312,6 +313,32 @@ Each persona is loaded via `get_agent_persona(role)` and provides strict operati
 | `log_reasoning` | Record a decision point for audit |
 | `get_reasoning_log` | Retrieve trace for a session |
 | `get_performance_stats` | Aggregate metrics across sessions |
+
+### Prompts
+
+Guided workflows available in the prompt selector (Claude Desktop / VS Code):
+
+| Prompt | Description |
+|--------|-------------|
+| `getting_started` | Onboarding guide with example workflows |
+| `analyze_data(topic)` | Guided data analysis on any topic |
+| `explore_protocol(protocol)` | Explore a DeFi protocol's on-chain data |
+| `write_query(question)` | Step-by-step SQL query writing |
+| `report(period, topics, focus)` | Generate interactive reports with charts |
+| `adopt_persona_*` | Load agent personas (analytics_reporter, ui_designer, reality_checker) |
+
+### Resources
+
+Reference materials available via MCP resource protocol:
+
+| Resource URI | Description |
+|-------------|-------------|
+| `gnosis://platform-overview` | Architecture, databases, dbt modules |
+| `gnosis://clickhouse-sql-guide` | ClickHouse syntax and common patterns |
+| `gnosis://chain-parameters` | Block time, tokens, validators, specs |
+| `gnosis://address-directory` | Token addresses, DeFi protocols |
+| `gnosis://metric-definitions` | Standard metric formulas (DAU, gas, TVL) |
+| `gnosis://query-cookbook` | 12 optimized SQL templates with examples |
 
 ---
 

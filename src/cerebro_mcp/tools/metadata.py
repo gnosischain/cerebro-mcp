@@ -660,6 +660,113 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
             return f"Error retrieving document: {e}"
 
     @mcp.tool()
+    def get_help() -> str:
+        """Overview of all available tools, prompts, and resources in Cerebro MCP.
+
+        Call this to discover what you can do with the Gnosis Chain data platform.
+
+        Returns:
+            Structured overview of all capabilities with examples.
+        """
+        return """\
+# Cerebro MCP — Capabilities
+
+## Tools
+
+### Query & Schema
+| Tool | Description |
+|------|-------------|
+| `execute_query` | Run read-only SQL against ClickHouse |
+| `start_query` / `get_query_results` | Async execution for long-running queries |
+| `explain_query` | Show ClickHouse execution plan |
+| `list_tables` | List tables in a database with row counts |
+| `describe_table` | Column schema with dbt descriptions |
+| `get_sample_data` | Sample rows to understand data shape |
+
+### dbt Models
+| Tool | Description |
+|------|-------------|
+| `search_models` | Search ~400 dbt models by name, description, tags, or module |
+| `get_model_details` | Full model info: SQL, columns, lineage, dependencies |
+
+### Visualization & Reports
+| Tool | Description |
+|------|-------------|
+| `generate_chart` | Create ECharts visualization (line, area, bar, pie, numberDisplay) |
+| `generate_report` | Assemble interactive report with charts |
+| `list_charts` | Show registered charts in current session |
+| `open_report` | Reopen a saved report by ID |
+| `list_reports` | List all saved reports on disk |
+
+### Metadata & Reference
+| Tool | Description |
+|------|-------------|
+| `list_databases` | All ClickHouse databases with descriptions |
+| `system_status` | Server health: ClickHouse, manifest, config |
+| `resolve_address` | Look up address labels (5.3M entries from Dune) |
+| `get_token_metadata` | Token info: address, decimals, price data |
+| `search_models_by_address` | Find dbt models related to a contract |
+| `search_docs` | Search platform documentation and references |
+| `get_doc_chunk` | Read full text of a documentation page |
+| `get_platform_constants` | Chain params, event signatures, contracts, partition keys |
+
+### Saved Queries
+| Tool | Description |
+|------|-------------|
+| `save_query` | Save a query for reuse |
+| `list_saved_queries` | Show all saved queries |
+| `run_saved_query` | Execute a saved query by name |
+
+### Reasoning & Tracing
+| Tool | Description |
+|------|-------------|
+| `set_thinking_mode` | Enable/disable reasoning capture |
+| `log_reasoning` | Record a decision point for audit |
+| `get_reasoning_log` | Retrieve trace for a session |
+| `get_performance_stats` | Aggregate metrics across sessions |
+
+### Agents
+| Tool | Description |
+|------|-------------|
+| `get_agent_persona` | Load operational rules for a persona (analytics_reporter, ui_designer, reality_checker) |
+
+## Prompts
+
+Guided workflows you can select in Claude Desktop / VS Code:
+
+| Prompt | Description |
+|--------|-------------|
+| `getting_started` | Onboarding guide with example workflows |
+| `analyze_data(topic)` | Guided data analysis on any topic |
+| `explore_protocol(protocol)` | Explore a DeFi protocol's on-chain data |
+| `write_query(question)` | Step-by-step SQL query writing |
+| `report(period, topics, focus)` | Generate interactive reports with charts |
+| `adopt_persona_*` | Load agent personas for multi-phase workflows |
+
+## Resources
+
+Reference materials available via MCP resource protocol:
+
+| Resource | Description |
+|----------|-------------|
+| `gnosis://platform-overview` | Architecture, databases, dbt modules |
+| `gnosis://clickhouse-sql-guide` | ClickHouse syntax and common patterns |
+| `gnosis://chain-parameters` | Block time, tokens, validators, specs |
+| `gnosis://address-directory` | Token addresses, DeFi protocols |
+| `gnosis://metric-definitions` | Standard metric formulas (DAU, gas, TVL) |
+| `gnosis://query-cookbook` | 12 optimized SQL templates with examples |
+
+## Quick Start Examples
+
+Try asking:
+- "What data is available?" — uses `list_databases` and `search_models`
+- "Show me transaction trends this week" — queries data and generates charts
+- "Explore the Circles protocol" — finds decoded contract events
+- "Look up address 0x9c58ba..." — uses `resolve_address` for label lookup
+- "Give me a weekly report" — full report workflow with interactive charts
+"""
+
+    @mcp.tool()
     def get_platform_constants() -> str:
         """Returns hardcoded Gnosis Chain platform constants: chain parameters,
         common event signatures (topic0 hashes), core infrastructure contracts,
