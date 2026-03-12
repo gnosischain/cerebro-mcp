@@ -18,22 +18,18 @@ def format_results_table(
     if max_chars <= 0:
         max_chars = settings.TOOL_RESPONSE_MAX_CHARS
 
-    # Convert all values to strings, truncate wide columns
+    # Convert all values to strings, truncate wide columns, and calculate widths
+    widths = [len(c) for c in columns]
     str_rows = []
     for row in rows:
         str_row = []
-        for val in row:
+        for i, val in enumerate(row):
             s = str(val) if val is not None else "NULL"
             if len(s) > max_col_width:
                 s = s[: max_col_width - 3] + "..."
             str_row.append(s)
+            widths[i] = max(widths[i], len(s))
         str_rows.append(str_row)
-
-    # Calculate column widths
-    widths = [len(c) for c in columns]
-    for row in str_rows:
-        for i, val in enumerate(row):
-            widths[i] = max(widths[i], len(val))
 
     # Build table with row-aware size budget
     header = " | ".join(c.ljust(widths[i]) for i, c in enumerate(columns))

@@ -43,10 +43,10 @@ def _cleanup_old_jobs():
 
 
 def _run_query(job: QueryJob, ch: ClickHouseManager):
-    """Execute a query in a background thread."""
+    """Execute a query in a background thread using Arrow path."""
     try:
         job.status = "running"
-        result = ch.execute_query(job.sql, job.database, job.max_rows)
+        result = ch.execute_query_arrow(job.sql, job.database, job.max_rows)
         job.result = result
         job.status = "completed"
     except Exception as e:

@@ -413,9 +413,11 @@ class TestConditionalGET:
             "child_map": {},
         }
 
+        raw_bytes = json.dumps(new_data).encode()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = new_data
+        mock_resp.content = raw_bytes
         mock_resp.headers = {"ETag": '"new_etag"', "Last-Modified": "Thu, 01 Jan 2026"}
 
         with patch("cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp):
@@ -503,14 +505,14 @@ class TestConditionalGET:
             "parent_map": {},
             "child_map": {},
         }
-        content_hash = loader._hash_bytes(
-            json.dumps(data, sort_keys=True).encode()
-        )
+        raw_bytes = json.dumps(data).encode()
+        content_hash = loader._hash_bytes(raw_bytes)
         loader._content_hash = content_hash
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = data
+        mock_resp.content = raw_bytes
         mock_resp.headers = {}
 
         with patch("cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp):

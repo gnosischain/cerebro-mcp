@@ -20,6 +20,7 @@ class ManifestLoader:
         self._child_map: dict[str, list[str]] = {}
         self._tags_index: dict[str, list[str]] = {}
         self._module_index: dict[str, list[str]] = {}
+        self._search_index: dict[str, str] = {}
         self._loaded = False
 
         # Conditional GET state
@@ -31,22 +32,26 @@ class ManifestLoader:
 
     def load(self) -> None:
         """Load manifest from URL or local file and build indexes."""
-        data = self._fetch_manifest()
-        if data:
+        result = self._fetch_manifest()
+        if result:
+            data, content_hash = result
             indexes = self._build_indexes_internal(data)
             self._apply_indexes(indexes)
-            self._content_hash = self._hash_bytes(
-                json.dumps(data, sort_keys=True).encode()
-            )
+            self._content_hash = content_hash
             self._last_load_time = time.time()
             self._loaded = True
 
-    def _fetch_manifest(self, conditional: bool = False) -> Optional[dict]:
+    def _fetch_manifest(
+        self, conditional: bool = False
+    ) -> Optional[tuple[dict, str]]:
         """Fetch manifest from URL with local file fallback.
 
         Args:
             conditional: If True, use conditional GET (If-None-Match/If-Modified-Since)
                         with a short timeout. Only applies to URL source.
+
+        Returns:
+            Tuple of (parsed_data, content_hash) or None if unchanged/unavailable.
         """
         # Try URL first
         if settings.DBT_MANIFEST_URL:
@@ -71,9 +76,10 @@ class ManifestLoader:
                     self._etag = resp.headers.get("ETag")
                     self._last_modified_header = resp.headers.get("Last-Modified")
                     self._last_refresh_error = None
+                    content_hash = self._hash_bytes(resp.content)
                     if not conditional:
                         print(f"Loaded manifest from {settings.DBT_MANIFEST_URL}")
-                    return resp.json()
+                    return resp.json(), content_hash
 
                 error_msg = f"Failed to fetch manifest: HTTP {resp.status_code}"
                 if conditional:
@@ -94,10 +100,12 @@ class ManifestLoader:
         # Fallback to local file (initial load only, for dev convenience)
         if settings.DBT_MANIFEST_PATH and os.path.exists(settings.DBT_MANIFEST_PATH):
             try:
-                with open(settings.DBT_MANIFEST_PATH, "r") as f:
-                    data = json.load(f)
+                with open(settings.DBT_MANIFEST_PATH, "rb") as f:
+                    raw = f.read()
+                content_hash = self._hash_bytes(raw)
+                data = json.loads(raw)
                 print(f"Loaded manifest from {settings.DBT_MANIFEST_PATH}")
-                return data
+                return data, content_hash
             except Exception as e:
                 print(f"Error loading local manifest: {e}")
 
@@ -118,11 +126,11 @@ class ManifestLoader:
         if not settings.DBT_MANIFEST_URL:
             return False, None
 
-        data = self._fetch_manifest(conditional=True)
-        if data is None:
+        result = self._fetch_manifest(conditional=True)
+        if result is None:
             return False, self._last_refresh_error
 
-        new_hash = self._hash_bytes(json.dumps(data, sort_keys=True).encode())
+        data, new_hash = result
         if new_hash == self._content_hash:
             return False, None
 
@@ -143,6 +151,7 @@ class ManifestLoader:
         sources: dict[str, dict] = {}
         tags_index: dict[str, list[str]] = {}
         module_index: dict[str, list[str]] = {}
+        search_index: dict[str, str] = {}
 
         for key, node in data.get("nodes", {}).items():
             if node.get("resource_type") == "model":
@@ -156,6 +165,13 @@ class ManifestLoader:
                 if "/" in path:
                     module = path.split("/")[0].lower()
                     module_index.setdefault(module, []).append(name)
+
+                # Precompute lowercase searchable text
+                desc = node.get("description", "")
+                tags_str = " ".join(node.get("tags", []))
+                search_index[name] = (
+                    f"{name.lower()} {desc.lower()} {tags_str.lower()}"
+                )
 
         for key, node in data.get("sources", {}).items():
             source_key = f"{node.get('schema', '')}.{node.get('name', '')}"
@@ -178,6 +194,7 @@ class ManifestLoader:
             "child_map": child_map,
             "tags_index": tags_index,
             "module_index": module_index,
+            "search_index": search_index,
         }
 
     def _apply_indexes(self, indexes: dict) -> None:
@@ -188,6 +205,7 @@ class ManifestLoader:
         self._child_map = indexes["child_map"]
         self._tags_index = indexes["tags_index"]
         self._module_index = indexes["module_index"]
+        self._search_index = indexes["search_index"]
 
     @property
     def is_loaded(self) -> bool:
@@ -271,11 +289,7 @@ class ManifestLoader:
         # Score each model by number of matching tokens
         scored: list[tuple[int, str]] = []
         for name in candidates:
-            node = self._models[name]
-            name_lower = name.lower()
-            desc_lower = node.get("description", "").lower()
-            tags_lower = " ".join(node.get("tags", [])).lower()
-            searchable = f"{name_lower} {desc_lower} {tags_lower}"
+            searchable = self._search_index[name]
 
             hits = sum(1 for t in tokens if t in searchable)
             if hits > 0:

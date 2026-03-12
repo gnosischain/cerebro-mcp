@@ -84,6 +84,53 @@ class ClickHouseManager:
             "rows": result.result_rows,
         }
 
+    def execute_query_arrow(
+        self,
+        sql: str,
+        database: str = "dbt",
+        max_rows: int = 100,
+    ) -> dict:
+        """Execute a query using Arrow for efficient columnar processing.
+
+        Falls back to execute_query() if Arrow conversion fails.
+        """
+        self._validate_database(database)
+
+        is_valid, error = validate_query(sql, settings.MAX_QUERY_LENGTH)
+        if not is_valid:
+            raise ValueError(f"Query rejected: {error}")
+
+        capped_max = min(max_rows, settings.MAX_ROWS)
+        safe_sql = ensure_limit(sql, capped_max)
+
+        client = self.get_client(database)
+        start = time.time()
+
+        try:
+            arrow_table = client.query_arrow(safe_sql)
+            elapsed = time.time() - start
+
+            col_dict = arrow_table.to_pydict()
+            columns = list(col_dict.keys())
+            if columns:
+                num_rows = min(len(col_dict[columns[0]]), capped_max)
+                rows = [
+                    [col_dict[c][i] for c in columns]
+                    for i in range(num_rows)
+                ]
+            else:
+                rows = []
+
+            return {
+                "columns": columns,
+                "rows": rows,
+                "row_count": len(rows),
+                "elapsed_seconds": round(elapsed, 3),
+            }
+        except Exception:
+            # Fallback to standard row-based path
+            return self.execute_query(sql, database, max_rows)
+
     # --- Schema metadata cache ---
 
     def _cache_get(self, key: str) -> dict | None:

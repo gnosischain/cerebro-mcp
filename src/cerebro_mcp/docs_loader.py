@@ -26,17 +26,22 @@ class DocsLoader:
 
     def load(self) -> None:
         """Load docs index from URL or local file."""
-        data = self._fetch_index()
-        if data:
+        result = self._fetch_index()
+        if result:
+            data, content_hash = result
             self._apply_index(data)
-            self._content_hash = self._hash_bytes(
-                json.dumps(data, sort_keys=True).encode()
-            )
+            self._content_hash = content_hash
             self._last_load_time = time.time()
             self._loaded = True
 
-    def _fetch_index(self, conditional: bool = False) -> Optional[dict]:
-        """Fetch index from URL with local file fallback."""
+    def _fetch_index(
+        self, conditional: bool = False
+    ) -> Optional[tuple[dict, str]]:
+        """Fetch index from URL with local file fallback.
+
+        Returns:
+            Tuple of (parsed_data, content_hash) or None if unchanged/unavailable.
+        """
         if settings.DOCS_SEARCH_INDEX_URL:
             try:
                 headers = {}
@@ -61,11 +66,12 @@ class DocsLoader:
                     self._etag = resp.headers.get("ETag")
                     self._last_modified_header = resp.headers.get("Last-Modified")
                     self._last_refresh_error = None
+                    content_hash = self._hash_bytes(resp.content)
                     if not conditional:
                         print(
                             f"Loaded docs index from {settings.DOCS_SEARCH_INDEX_URL}"
                         )
-                    return resp.json()
+                    return resp.json(), content_hash
 
                 error_msg = (
                     f"Failed to fetch docs index: HTTP {resp.status_code}"
@@ -89,12 +95,14 @@ class DocsLoader:
             settings.DOCS_SEARCH_INDEX_PATH
         ):
             try:
-                with open(settings.DOCS_SEARCH_INDEX_PATH, "r") as f:
-                    data = json.load(f)
+                with open(settings.DOCS_SEARCH_INDEX_PATH, "rb") as f:
+                    raw = f.read()
+                content_hash = self._hash_bytes(raw)
+                data = json.loads(raw)
                 print(
                     f"Loaded docs index from {settings.DOCS_SEARCH_INDEX_PATH}"
                 )
-                return data
+                return data, content_hash
             except Exception as e:
                 print(f"Error loading local docs index: {e}")
 
@@ -136,13 +144,11 @@ class DocsLoader:
         if not settings.DOCS_SEARCH_INDEX_URL:
             return False, None
 
-        data = self._fetch_index(conditional=True)
-        if data is None:
+        result = self._fetch_index(conditional=True)
+        if result is None:
             return False, self._last_refresh_error
 
-        new_hash = self._hash_bytes(
-            json.dumps(data, sort_keys=True).encode()
-        )
+        data, new_hash = result
         if new_hash == self._content_hash:
             return False, None
 
