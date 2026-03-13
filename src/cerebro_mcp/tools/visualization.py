@@ -6,11 +6,28 @@ import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+import sys
+if sys.version_info >= (3, 11):
+    from typing import NotRequired, TypedDict
+else:
+    from typing_extensions import NotRequired, TypedDict
 
 from mcp.types import Annotations, CallToolResult, TextContent
 
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.tools.query import truncate_response, _truncate_sql
+
+
+class ChartSpec(TypedDict):
+    """Typed specification for a single chart in a batch generate_charts call."""
+    sql: str
+    database: NotRequired[str]
+    chart_type: NotRequired[str]
+    x_field: NotRequired[str]
+    y_field: NotRequired[str]
+    series_field: NotRequired[str]
+    title: NotRequired[str]
+    max_rows: NotRequired[int]
 
 
 # --- Bundled React UI (Vite single-file build) ---
@@ -103,9 +120,50 @@ def _report_filename(report_id: str, title: str) -> str:
     return f"cerebro_report_{ts}_{slug}_{report_id}.html"
 
 
-def _report_file_uri(path: Path) -> str:
-    """Proper file:// URI via pathlib."""
-    return path.resolve().as_uri()
+# --- Optional HTTP Report Server ---
+_report_server_started = False
+
+
+def _ensure_report_server() -> None:
+    """Start a lightweight HTTP server for serving reports (daemon thread)."""
+    global _report_server_started
+    from cerebro_mcp.config import settings
+
+    if _report_server_started or not settings.REPORT_SERVER_PORT:
+        return
+
+    from http.server import SimpleHTTPRequestHandler
+    from socketserver import ThreadingTCPServer
+
+    report_dir = _get_report_dir()
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(report_dir), **kwargs)
+
+        def log_message(self, format, *args):
+            pass  # suppress access logs
+
+    try:
+        server = ThreadingTCPServer(("", settings.REPORT_SERVER_PORT), Handler)
+        server.daemon_threads = True
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        _report_server_started = True
+    except OSError:
+        pass  # port in use, skip
+
+
+def _get_report_link(path: Path) -> str:
+    """Get the best available URL for a report file."""
+    from cerebro_mcp.config import settings
+
+    if settings.REPORT_BASE_URL:
+        return f"{settings.REPORT_BASE_URL.rstrip('/')}/{path.name}"
+    if settings.REPORT_SERVER_PORT:
+        _ensure_report_server()
+        return f"http://localhost:{settings.REPORT_SERVER_PORT}/{path.name}"
+    return path.resolve().as_uri()  # file:// fallback
 
 
 def _find_report_on_disk(report_ref: str) -> Path | None:
@@ -181,6 +239,37 @@ def _build_line_chart(
 ) -> dict:
     """Build ECharts option for line/area charts."""
     x_idx = col_index[x_field]
+
+    # Dual y-axis: comma-separated y_field (e.g., "transactions,gas_price")
+    y_fields = [f.strip() for f in y_field.split(",")]
+    if len(y_fields) > 1:
+        rows_sorted = sorted(rows, key=lambda r: r[x_idx])
+        x_values = _extract_column(rows_sorted, x_idx)
+        series_list = []
+        for i, yf in enumerate(y_fields):
+            yi = col_index[yf]
+            s: dict = {
+                "name": yf,
+                "type": "line",
+                "data": _extract_column(rows_sorted, yi),
+                "smooth": True,
+                "symbolSize": 2,
+            }
+            if i > 0:
+                s["yAxisIndex"] = 1
+            if area:
+                s["areaStyle"] = {"opacity": 0.3}
+            series_list.append(s)
+        return {
+            "title": {},
+            "tooltip": {"trigger": "axis"},
+            "legend": {"data": y_fields, "top": 0, "type": "scroll"},
+            "grid": {"left": "3%", "right": "6%", "bottom": "10%", "top": "40", "containLabel": True},
+            "xAxis": {"type": "category", "data": x_values, "boundaryGap": False},
+            "yAxis": [{"type": "value"}, {"type": "value"}],
+            "series": series_list,
+        }
+
     y_idx = col_index[y_field]
 
     if series_field and series_field in col_index:
@@ -252,6 +341,28 @@ def _build_bar_chart(
 ) -> dict:
     """Build ECharts option for bar charts."""
     x_idx = col_index[x_field]
+
+    # Dual y-axis: comma-separated y_field
+    y_fields = [f.strip() for f in y_field.split(",")]
+    if len(y_fields) > 1:
+        x_values = _extract_column(rows, x_idx)
+        series_list = []
+        for i, yf in enumerate(y_fields):
+            yi = col_index[yf]
+            s: dict = {"name": yf, "type": "bar", "data": _extract_column(rows, yi)}
+            if i > 0:
+                s["yAxisIndex"] = 1
+            series_list.append(s)
+        return {
+            "title": {},
+            "tooltip": {"trigger": "axis"},
+            "legend": {"data": y_fields, "top": 0, "type": "scroll"},
+            "grid": {"left": "3%", "right": "6%", "bottom": "10%", "top": "40", "containLabel": True},
+            "xAxis": {"type": "category", "data": x_values},
+            "yAxis": [{"type": "value"}, {"type": "value"}],
+            "series": series_list,
+        }
+
     y_idx = col_index[y_field]
 
     if series_field and series_field in col_index:
@@ -344,12 +455,358 @@ def _build_number_display(
     }
 
 
+def _build_scatter_chart(
+    rows: list,
+    col_index: dict[str, int],
+    x_field: str,
+    y_field: str,
+    series_field: str,
+    title: str,
+) -> dict:
+    """Build ECharts option for scatter charts."""
+    x_idx = col_index[x_field]
+    y_idx = col_index[y_field]
+
+    if series_field and series_field in col_index:
+        series_idx = col_index[series_field]
+        series_data: dict[str, list] = {}
+        for row in rows:
+            s_val = str(_serialize_value(row[series_idx]))
+            if s_val not in series_data:
+                series_data[s_val] = []
+            series_data[s_val].append([
+                _serialize_value(row[x_idx]),
+                _serialize_value(row[y_idx]),
+            ])
+        series_list = [
+            {"name": s_name, "type": "scatter", "data": data, "symbolSize": 6}
+            for s_name, data in series_data.items()
+        ]
+        legend_data = list(series_data.keys())
+    else:
+        data = [
+            [_serialize_value(row[x_idx]), _serialize_value(row[y_idx])]
+            for row in rows
+        ]
+        series_list = [{"name": y_field, "type": "scatter", "data": data, "symbolSize": 6}]
+        legend_data = [y_field]
+
+    return {
+        "title": {},
+        "tooltip": {"trigger": "item"},
+        "legend": {"data": legend_data, "top": 0, "type": "scroll"},
+        "grid": {"left": "3%", "right": "4%", "bottom": "10%", "top": "40", "containLabel": True},
+        "xAxis": {"type": "value", "name": x_field},
+        "yAxis": {"type": "value", "name": y_field},
+        "series": series_list,
+    }
+
+
+def _build_heatmap_chart(
+    rows: list,
+    col_index: dict[str, int],
+    x_field: str,
+    y_field: str,
+    series_field: str,
+    title: str,
+) -> dict:
+    """Build ECharts option for grid heatmap charts."""
+    x_idx = col_index[x_field]
+    y_idx = col_index[y_field]
+    # Value comes from series_field or the 3rd column
+    if series_field and series_field in col_index:
+        v_idx = col_index[series_field]
+    else:
+        remaining = [i for i in range(len(col_index)) if i != x_idx and i != y_idx]
+        v_idx = remaining[0] if remaining else y_idx
+
+    x_cats = list(dict.fromkeys(_serialize_value(row[x_idx]) for row in rows))
+    y_cats = list(dict.fromkeys(_serialize_value(row[y_idx]) for row in rows))
+    x_map = {v: i for i, v in enumerate(x_cats)}
+    y_map = {v: i for i, v in enumerate(y_cats)}
+
+    data = []
+    values = []
+    for row in rows:
+        xv = _serialize_value(row[x_idx])
+        yv = _serialize_value(row[y_idx])
+        val = _serialize_value(row[v_idx])
+        data.append([x_map[xv], y_map[yv], val])
+        if isinstance(val, (int, float)):
+            values.append(val)
+
+    return {
+        "title": {},
+        "tooltip": {"position": "top"},
+        "grid": {"left": "3%", "right": "4%", "bottom": "15%", "top": "10%", "containLabel": True},
+        "xAxis": {"type": "category", "data": [str(c) for c in x_cats], "splitArea": {"show": True}},
+        "yAxis": {"type": "category", "data": [str(c) for c in y_cats], "splitArea": {"show": True}},
+        "visualMap": {
+            "min": min(values) if values else 0,
+            "max": max(values) if values else 1,
+            "calculable": True,
+            "orient": "horizontal",
+            "left": "center",
+            "bottom": "0%",
+        },
+        "series": [{"type": "heatmap", "data": data, "label": {"show": True}}],
+        "_cerebro_height": "400px",
+    }
+
+
+def _build_calendar_chart(
+    rows: list,
+    col_index: dict[str, int],
+    x_field: str,
+    y_field: str,
+    series_field: str,
+    title: str,
+) -> dict:
+    """Build ECharts option for calendar heatmap charts."""
+    x_idx = col_index[x_field]
+    y_idx = col_index[y_field]
+
+    data = []
+    values = []
+    dates = []
+    for row in rows:
+        d = str(_serialize_value(row[x_idx]))[:10]  # YYYY-MM-DD
+        val = _serialize_value(row[y_idx])
+        data.append([d, val])
+        dates.append(d)
+        if isinstance(val, (int, float)):
+            values.append(val)
+
+    if not dates:
+        return {"title": {"text": "No data"}}
+
+    date_min = min(dates)
+    date_max = max(dates)
+    # Calculate number of years for height
+    year_min = int(date_min[:4])
+    year_max = int(date_max[:4])
+    num_years = max(1, year_max - year_min + 1)
+    height = f"{180 * num_years}px"
+
+    calendars = []
+    series_list = []
+    for i, year in enumerate(range(year_min, year_max + 1)):
+        calendars.append({
+            "top": 60 + i * 160,
+            "range": str(year),
+            "cellSize": ["auto", 15],
+            "left": 80,
+            "right": 30,
+        })
+        year_data = [d for d in data if d[0].startswith(str(year))]
+        series_list.append({
+            "type": "heatmap",
+            "coordinateSystem": "calendar",
+            "calendarIndex": i,
+            "data": year_data,
+        })
+
+    return {
+        "tooltip": {"position": "top", "formatter": "{c}"},
+        "visualMap": {
+            "min": min(values) if values else 0,
+            "max": max(values) if values else 1,
+            "calculable": True,
+            "orient": "horizontal",
+            "left": "center",
+            "top": 0,
+        },
+        "calendar": calendars,
+        "series": series_list,
+        "_cerebro_height": height,
+    }
+
+
+def _build_gauge_chart(
+    rows: list,
+    col_index: dict[str, int],
+    x_field: str,
+    y_field: str,
+    series_field: str,
+    title: str,
+) -> dict:
+    """Build ECharts option for gauge charts."""
+    y_idx = col_index[y_field]
+    value = _serialize_value(rows[0][y_idx]) if rows else 0
+
+    return {
+        "tooltip": {"formatter": "{b}: {c}"},
+        "series": [{
+            "type": "gauge",
+            "data": [{"value": value, "name": title or y_field}],
+            "detail": {"formatter": "{value}"},
+            "title": {"fontSize": 14},
+        }],
+        "_cerebro_height": "250px",
+    }
+
+
+def _build_treemap_chart(
+    rows: list,
+    col_index: dict[str, int],
+    x_field: str,
+    y_field: str,
+    series_field: str,
+    title: str,
+) -> dict:
+    """Build ECharts option for treemap charts."""
+    x_idx = col_index[x_field]
+    y_idx = col_index[y_field]
+
+    data = [
+        {"name": str(_serialize_value(row[x_idx])), "value": _serialize_value(row[y_idx])}
+        for row in rows
+    ]
+
+    return {
+        "tooltip": {"formatter": "{b}: {c}"},
+        "series": [{
+            "type": "treemap",
+            "data": data,
+            "label": {"show": True, "formatter": "{b}"},
+            "breadcrumb": {"show": False},
+        }],
+    }
+
+
+def _build_sankey_chart(
+    rows: list,
+    col_index: dict[str, int],
+    x_field: str,
+    y_field: str,
+    series_field: str,
+    title: str,
+) -> dict:
+    """Build ECharts option for sankey flow diagrams."""
+    src_idx = col_index[x_field]
+    tgt_idx = col_index[y_field]
+    val_idx = col_index[series_field] if series_field and series_field in col_index else None
+
+    nodes_set: set[str] = set()
+    links = []
+    for row in rows:
+        src = str(_serialize_value(row[src_idx]))
+        tgt = str(_serialize_value(row[tgt_idx]))
+        val = _serialize_value(row[val_idx]) if val_idx is not None else 1
+        nodes_set.add(src)
+        nodes_set.add(tgt)
+        links.append({"source": src, "target": tgt, "value": val})
+
+    return {
+        "tooltip": {"trigger": "item"},
+        "series": [{
+            "type": "sankey",
+            "data": [{"name": n} for n in sorted(nodes_set)],
+            "links": links,
+            "emphasis": {"focus": "adjacency"},
+            "lineStyle": {"color": "gradient", "curveness": 0.5},
+        }],
+        "_cerebro_height": "450px",
+    }
+
+
+def _build_graph_chart(
+    rows: list,
+    col_index: dict[str, int],
+    x_field: str,
+    y_field: str,
+    series_field: str,
+    title: str,
+) -> dict:
+    """Build ECharts option for force-directed graph charts."""
+    src_idx = col_index[x_field]
+    tgt_idx = col_index[y_field]
+    val_idx = col_index[series_field] if series_field and series_field in col_index else None
+
+    degree: dict[str, int] = {}
+    links = []
+    for row in rows:
+        src = str(_serialize_value(row[src_idx]))
+        tgt = str(_serialize_value(row[tgt_idx]))
+        val = _serialize_value(row[val_idx]) if val_idx is not None else 1
+        degree[src] = degree.get(src, 0) + 1
+        degree[tgt] = degree.get(tgt, 0) + 1
+        links.append({"source": src, "target": tgt, "value": val})
+
+    max_deg = max(degree.values(), default=1)
+    nodes = [
+        {"name": n, "symbolSize": 10 + 30 * (d / max_deg)}
+        for n, d in degree.items()
+    ]
+
+    return {
+        "tooltip": {},
+        "series": [{
+            "type": "graph",
+            "layout": "force",
+            "data": nodes,
+            "links": links,
+            "roam": True,
+            "label": {"show": True, "position": "right", "fontSize": 10},
+            "force": {"repulsion": 200, "edgeLength": [50, 200]},
+            "emphasis": {"focus": "adjacency"},
+            "lineStyle": {"opacity": 0.6},
+        }],
+        "_cerebro_height": "500px",
+    }
+
+
+def _build_funnel_chart(
+    rows: list,
+    col_index: dict[str, int],
+    x_field: str,
+    y_field: str,
+    series_field: str,
+    title: str,
+) -> dict:
+    """Build ECharts option for funnel charts."""
+    x_idx = col_index[x_field]
+    y_idx = col_index[y_field]
+
+    data = sorted(
+        [
+            {"name": str(_serialize_value(row[x_idx])), "value": _serialize_value(row[y_idx])}
+            for row in rows
+        ],
+        key=lambda d: d["value"] if isinstance(d["value"], (int, float)) else 0,
+        reverse=True,
+    )
+
+    return {
+        "tooltip": {"trigger": "item", "formatter": "{b}: {c}"},
+        "legend": {"data": [d["name"] for d in data], "top": 0, "type": "scroll"},
+        "series": [{
+            "type": "funnel",
+            "left": "10%",
+            "width": "80%",
+            "top": 40,
+            "bottom": 20,
+            "data": data,
+            "label": {"show": True, "position": "inside"},
+            "emphasis": {"label": {"fontSize": 14}},
+        }],
+    }
+
+
 CHART_BUILDERS = {
     "line": lambda rows, ci, xf, yf, sf, t: _build_line_chart(rows, ci, xf, yf, sf, t, area=False),
     "area": lambda rows, ci, xf, yf, sf, t: _build_line_chart(rows, ci, xf, yf, sf, t, area=True),
     "bar": _build_bar_chart,
     "pie": lambda rows, ci, xf, yf, sf, t: _build_pie_chart(rows, ci, xf, yf, t),
     "numberDisplay": lambda rows, ci, xf, yf, sf, t: _build_number_display(rows, ci, yf, t),
+    "scatter": _build_scatter_chart,
+    "heatmap": _build_heatmap_chart,
+    "calendar": _build_calendar_chart,
+    "gauge": _build_gauge_chart,
+    "treemap": _build_treemap_chart,
+    "sankey": _build_sankey_chart,
+    "graph": _build_graph_chart,
+    "funnel": _build_funnel_chart,
 }
 
 
@@ -364,6 +821,9 @@ def _markdown_to_html(text: str) -> str:
     in_table = False
     table_header_done = False
     in_content_card = False
+    in_grid = False
+    grid_cols = 0
+    grid_chart_ids: list[str] = []
 
     def _close_content_card():
         nonlocal in_content_card
@@ -401,11 +861,36 @@ def _markdown_to_html(text: str) -> str:
 
         stripped = line.strip()
 
-        # Chart placeholders — wrapped in card with title
+        # Grid open: {{grid:N}}
+        grid_open = re.match(r"\{\{grid:(\d+)\}\}", stripped)
+        if grid_open:
+            _close_content_card()
+            in_grid = True
+            grid_cols = int(grid_open.group(1))
+            grid_chart_ids = []
+            continue
+
+        # Grid close: {{/grid}} — emit combined grid element with data attribute
+        if stripped == "{{/grid}}" and in_grid:
+            ids_str = ",".join(grid_chart_ids)
+            html_lines.append(
+                f'<div class="chart-grid chart-grid-{grid_cols}" '
+                f'data-grid-charts="{ids_str}"></div>'
+            )
+            in_grid = False
+            grid_chart_ids = []
+            continue
+
+        # Chart placeholders
         chart_match = re.match(r"\{\{chart:(\w+)\}\}", stripped)
         if chart_match:
-            _close_content_card()
             chart_id = chart_match.group(1)
+            # Inside grid: collect IDs, don't emit individual cards
+            if in_grid:
+                grid_chart_ids.append(chart_id)
+                continue
+            # Outside grid: emit standalone card
+            _close_content_card()
             chart_title = _chart_registry.get(chart_id, {}).get("title", "")
             title_html = (
                 f'<div class="chart-title">{_escape_html(chart_title)}</div>'
@@ -608,8 +1093,14 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         series_field: str,
         title: str,
         max_rows: int,
+        return_metadata_only: bool = False,
     ) -> str:
-        """Internal helper: execute SQL, build ECharts spec, register chart."""
+        """Internal helper: execute SQL, build ECharts spec, register chart.
+
+        When return_metadata_only=True, returns only a compact metadata line
+        (chart ID, type, title, data points, query time) without the full
+        ECharts JSON or SQL echo. Used by generate_charts batch tool.
+        """
         from cerebro_mcp.tools.session_state import state
 
         if chart_type not in CHART_BUILDERS:
@@ -617,7 +1108,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             return f"Error: Unknown chart type '{chart_type}'. Supported: {supported}"
 
         try:
-            state.record_generate_chart(chart_type, sql)
+            state.record_generate_chart(chart_type, sql, series_field)
 
             result = ch.execute_query(sql, database, max_rows)
             columns = result["columns"]
@@ -660,7 +1151,16 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     "created_at": datetime.now(),
                     "sql": sql,
                     "database": database,
+                    "series_field": series_field,
                 }
+
+            # Metadata-only mode: compact single line for batch tool
+            if return_metadata_only:
+                series_tag = f" | series: {series_field}" if series_field else ""
+                return (
+                    f"OK|{chart_id}|{chart_type}|{title or chart_type}"
+                    f"|{len(rows)}|{result['elapsed_seconds']}s{series_tag}"
+                )
 
             output = json.dumps(option, default=str, indent=2)
             metadata = (
@@ -710,27 +1210,24 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         title: str = "",
         max_rows: int = 500,
     ) -> str:
-        """Execute a query and generate an ECharts visualization spec.
+        """Generate a single ad-hoc chart. For reports, use `generate_charts` instead.
 
-        YOU MUST call this tool for every metric that needs visualization when
-        the user asks for a report, analysis, or trends. This is the ONLY way
-        to create charts. After creating all charts, call `generate_report`
-        to assemble the final interactive report.
+        This tool creates ONE chart at a time. If you are building a report,
+        DO NOT call this tool repeatedly — use `generate_charts` (batch) to
+        create all charts in a single call. Calling this tool multiple times
+        wastes steps and context.
 
-        Returns a JSON object compatible with echarts.setOption() and the
-        Gnosis metrics-dashboard EChartsContainer component. The Gnosis owl
-        watermark is applied automatically when rendered via generate_report.
+        Use this tool ONLY for:
+        - Adding a single extra chart after a batch
+        - Quick one-off visualizations outside of a report workflow
 
-        IMPORTANT: Before calling this tool, verify column names using
-        `describe_table` or `get_model_details`. Never guess column names.
-
-        Supported chart types: line, area, bar, pie, numberDisplay.
+        Supported chart types: line, area, bar, pie, numberDisplay, scatter, heatmap, calendar, gauge, treemap, sankey, graph, funnel.
 
         Args:
             sql: SQL query to execute for chart data. Only use column names
                  verified via `describe_table` or `get_model_details`.
             database: Target database. Default: dbt.
-            chart_type: Chart type (line, area, bar, pie, numberDisplay). Default: line.
+            chart_type: Chart type (line, area, bar, pie, numberDisplay, scatter, heatmap, calendar, gauge, treemap, sankey, graph, funnel). Default: line.
             x_field: Column name for the X axis (categories/dates).
             y_field: Column name for the Y axis (values).
             series_field: Optional column name to split data into multiple series.
@@ -749,10 +1246,23 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 "Complete the missing steps, then retry `generate_chart`."
             )
 
-        return _build_and_register_chart(
+        result = _build_and_register_chart(
             sql, database, chart_type, x_field, y_field,
             series_field, title, max_rows,
         )
+
+        # Nudge LLM toward batch tool if calling repeatedly
+        with state.lock:
+            chart_count = state.generate_chart_count
+        if chart_count >= 2:
+            result += (
+                f"\n\n**Warning:** You have called `generate_chart` "
+                f"{chart_count} times individually. For reports, use "
+                f"`generate_charts` (batch) to create all remaining "
+                f"charts in ONE call — this saves steps and context."
+            )
+
+        return result
 
     # ── Quick chart tool (no gates) ─────────────────────────────────
 
@@ -776,12 +1286,12 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         For full analytical reports, use `generate_chart` instead (which
         enforces discovery and exploration).
 
-        Supported chart types: line, area, bar, pie, numberDisplay.
+        Supported chart types: line, area, bar, pie, numberDisplay, scatter, heatmap, calendar, gauge, treemap, sankey, graph, funnel.
 
         Args:
             sql: SQL query to execute for chart data.
             database: Target database. Default: dbt.
-            chart_type: Chart type (line, area, bar, pie, numberDisplay). Default: line.
+            chart_type: Chart type (line, area, bar, pie, numberDisplay, scatter, heatmap, calendar, gauge, treemap, sankey, graph, funnel). Default: line.
             x_field: Column name for the X axis (categories/dates).
             y_field: Column name for the Y axis (values).
             series_field: Optional column name to split data into multiple series.
@@ -795,6 +1305,110 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             sql, database, chart_type, x_field, y_field,
             series_field, title, max_rows,
         )
+
+    # ── Batch chart tool (for reports) ──────────────────────────────
+
+    @mcp.tool()
+    def generate_charts(charts: list[ChartSpec]) -> str:
+        """Create multiple charts in ONE tool call. Use this for reports.
+
+        PREFERRED over generate_chart for reports. Creates all charts in a
+        single call instead of calling generate_chart repeatedly. This saves
+        steps and context — always use this when building a report.
+
+        Runs the same precondition checks as generate_chart but only once,
+        then creates all charts in sequence. Returns compact metadata (no
+        ECharts JSON, no SQL echo) mapping input index to chart ID.
+
+        Each chart spec must have at least `sql`. All other fields are optional
+        with sensible defaults. Reports MUST include:
+        - At least 1 chart with series_field (dimensional breakdown)
+        - At least 1 scatter/heatmap chart OR correlation query
+
+        Args:
+            charts: List of chart specifications. Each spec has:
+                sql (required), database (default "dbt"),
+                chart_type (default "line"), x_field, y_field,
+                series_field, title, max_rows (default 500).
+
+        Returns:
+            Summary table mapping input index to chart IDs for report placement.
+        """
+        from cerebro_mcp.tools.session_state import state
+
+        if not charts:
+            return "Error: No chart specs provided. Pass a non-empty list."
+
+        # Run precondition check once
+        passed, reason = state.check_chart_preconditions()
+        if not passed:
+            return (
+                f"**Analysis depth check failed:** {reason}\n\n"
+                "Complete the missing steps, then retry `generate_charts`."
+            )
+
+        succeeded = []
+        failed = []
+
+        for i, spec in enumerate(charts, 1):
+            sql = spec.get("sql", "")
+            if not sql:
+                failed.append((i, spec.get("title", "untitled"), "No SQL provided"))
+                continue
+
+            result = _build_and_register_chart(
+                sql=sql,
+                database=spec.get("database", "dbt"),
+                chart_type=spec.get("chart_type", "line"),
+                x_field=spec.get("x_field", ""),
+                y_field=spec.get("y_field", ""),
+                series_field=spec.get("series_field", ""),
+                title=spec.get("title", ""),
+                max_rows=spec.get("max_rows", 500),
+                return_metadata_only=True,
+            )
+
+            if result.startswith("OK|"):
+                parts = result.split("|")
+                succeeded.append({
+                    "index": i,
+                    "chart_id": parts[1],
+                    "chart_type": parts[2],
+                    "title": parts[3],
+                    "data_points": parts[4],
+                    "query_time": parts[5],
+                })
+            else:
+                failed.append((i, spec.get("title", "untitled"), result))
+
+        # Build output
+        total = len(charts)
+        ok_count = len(succeeded)
+        lines = [f"Generated {ok_count}/{total} charts:\n"]
+
+        lines.append("| # | Chart ID | Title | Type | Points | Time |")
+        lines.append("|---|----------|-------|------|--------|------|")
+        for s in succeeded:
+            lines.append(
+                f"| {s['index']} | {s['chart_id']} | {s['title']} "
+                f"| {s['chart_type']} | {s['data_points']} "
+                f"| {s['query_time']} |"
+            )
+
+        if failed:
+            lines.append(f"\nFailed ({len(failed)}):")
+            for idx, title, err in failed:
+                lines.append(f"- Input #{idx} (\"{title}\"): {err}")
+
+        # Chart registry summary
+        chart_list = ", ".join(_chart_registry.keys())
+        lines.append(
+            f"\n**Registered charts ({len(_chart_registry)}):** {chart_list}\n"
+            "**Next step:** Call `generate_report(title, content_markdown)` "
+            "with `{{chart:ID}}` placeholders."
+        )
+
+        return "\n".join(lines)
 
     @mcp.tool()
     def list_charts() -> str:
@@ -833,16 +1447,39 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         """Create an interactive report rendered as a native UI in the chat client.
 
         YOU MUST call this as the FINAL step when producing any report or visual
-        analysis. Call `generate_chart` first for each metric, then call this
-        tool with markdown containing {{chart:CHART_ID}} placeholders.
+        analysis. Call `generate_charts` (batch) first to create all charts in
+        one call, then call this tool with markdown containing {{chart:CHART_ID}}
+        placeholders.
 
         For GUI clients (Claude Desktop, VS Code): renders as interactive iframe.
         For terminal clients (Claude Code): opens report in default browser.
 
-        CRITICAL: After this tool returns, your reply to the user MUST include:
-        1. The file:// report link from the response (copy it verbatim)
-        2. A brief summary of key insights
-        3. Ask if they want conversion to docx/pdf/pptx
+        LAYOUT RULES (ENFORCED — report will be rejected without proper layout):
+        - KPI/counter charts (numberDisplay) MUST be in {{grid:3}} or {{grid:4}} rows
+        - Breakdown charts (bar/pie) should pair in {{grid:2}}
+        - Trend charts (line/area) go full-width between grid groups
+        - Text commentary goes BETWEEN chart groups, not lumped at the end
+
+        Example layout:
+            ## Key Metrics
+            {{grid:3}}
+            {{chart:chart_1}}
+            {{chart:chart_2}}
+            {{chart:chart_3}}
+            {{/grid}}
+
+            Commentary about the KPI trends.
+
+            {{chart:chart_4}}
+
+            ## Breakdown
+            {{grid:2}}
+            {{chart:chart_5}}
+            {{chart:chart_6}}
+            {{/grid}}
+
+        After this tool returns, summarize key insights and ask if the user
+        wants the HTML exported (via `export_report`) or converted to docx/pdf/pptx.
         Do NOT echo the report markdown or {{chart:...}} placeholders.
         SQL queries are embedded in the report UI (click </> on each chart).
 
@@ -857,7 +1494,9 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             # --- Report quality gate ---
             from cerebro_mcp.tools.session_state import state
 
-            passed, reason = state.check_report_preconditions(_chart_registry)
+            passed, reason, warnings = state.check_report_preconditions(
+                _chart_registry
+            )
             if not passed:
                 return CallToolResult(
                     content=[TextContent(
@@ -871,6 +1510,28 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             chart_ids_in_content = re.findall(
                 r"\{\{chart:(\w+)\}\}", content_markdown
             )
+
+            # --- Grid layout enforcement ---
+            has_grid = "{{grid:" in content_markdown
+            kpi_count = sum(
+                1 for cid in chart_ids_in_content
+                if _chart_registry.get(cid, {}).get("chart_type") == "numberDisplay"
+            )
+            if not has_grid and kpi_count >= 2:
+                return CallToolResult(
+                    content=[TextContent(
+                        type="text",
+                        text=(
+                            f"Error: Layout rejected: Found {kpi_count} KPI/counter "
+                            f"charts but no {{{{grid:N}}}} directives. "
+                            f"KPI counters MUST be grouped in a grid row "
+                            f"(e.g., {{{{grid:3}}}} ... {{{{/grid}}}}). "
+                            f"Breakdowns should use {{{{grid:2}}}}. "
+                            f"Restructure the markdown and retry."
+                        ),
+                    )],
+                    isError=True,
+                )
 
             # Collect chart specs and SQL queries for referenced charts
             chart_specs: dict = {}
@@ -926,6 +1587,9 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             report_path = report_dir / _report_filename(report_id, title)
             report_path.write_text(html, encoding="utf-8")
 
+            file_uri = _get_report_link(report_path)
+            structured["file_uri"] = file_uri
+
             with _REPORT_LOCK:
                 _prune_report_cache()
                 _REPORT_CACHE[report_id] = {
@@ -939,21 +1603,14 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             # Reset workflow state for the next analysis cycle
             state.reset()
 
-            file_uri = _report_file_uri(report_path)
-            structured["file_uri"] = file_uri
-
-            # Reply text — link only. SQL is embedded in the report UI.
+            # Reply text for the assistant
             reply_text = (
                 f"**Report:** {title}\n\n"
-                f"**Report link:** [Open Report]({file_uri})"
-            )
-
-            # Metadata for context (unannotated)
-            metadata_text = (
-                f"Charts: {len(chart_specs)} | "
-                f"Report ID: `{report_id[:8]}`\n\n"
-                f"To reopen: `open_report(\"{report_id[:8]}\")`\n\n"
-                f"_Ask if they want conversion to docx, pdf, or pptx._"
+                f"Report ID: `{report_id[:8]}` | "
+                f"Charts: {len(chart_specs)}\n\n"
+                f"To reopen: `open_report(\"{report_id[:8]}\")`\n"
+                f"To export HTML: `export_report(\"{report_id[:8]}\")`\n\n"
+                f"_Ask if they want the HTML exported or conversion to docx/pdf/pptx._"
             )
 
             return CallToolResult(
@@ -966,7 +1623,14 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                             priority=1.0,
                         ),
                     ),
-                    TextContent(type="text", text=metadata_text),
+                    TextContent(
+                        type="text",
+                        text=(
+                            f"Report generated: {title} "
+                            f"({len(chart_specs)} charts). "
+                            f"Report ID: `{report_id[:8]}`"
+                        ),
+                    ),
                 ],
                 structuredContent=structured,
             )
@@ -1012,6 +1676,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                         priority=1.0,
                     ),
                 ))
+                content_items.append(TextContent(type="text", text=file_uri))
                 if structured is not None:
                     structured["file_uri"] = file_uri
             metadata = (
@@ -1028,7 +1693,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         with _REPORT_LOCK:
             cached = _REPORT_CACHE.get(report_ref)
         if cached:
-            file_uri = _report_file_uri(cached["path"]) if cached.get("path") else ""
+            file_uri = _get_report_link(cached["path"]) if cached.get("path") else ""
             return _build_result(
                 cached.get("title", "Report"), file_uri, report_ref,
                 cached.get("structured"),
@@ -1042,7 +1707,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             ]
         if len(prefix_matches) == 1:
             rid, data = prefix_matches[0]
-            file_uri = _report_file_uri(data["path"]) if data.get("path") else ""
+            file_uri = _get_report_link(data["path"]) if data.get("path") else ""
             return _build_result(
                 data.get("title", "Report"), file_uri, rid,
                 data.get("structured"),
@@ -1061,7 +1726,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         if disk_path:
             html = disk_path.read_text(encoding="utf-8")
             full_id = _extract_report_id_from_path(disk_path)
-            file_uri = _report_file_uri(disk_path)
+            file_uri = _get_report_link(disk_path)
             # Try to extract structured data from embedded JSON
             structured = _extract_structured_from_html(html)
             return _build_result(
@@ -1115,7 +1780,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 stat.st_mtime, tz=timezone.utc
             ).strftime("%Y-%m-%d %H:%M")
             size_kb = stat.st_size / 1024
-            file_uri = _report_file_uri(f)
+            file_uri = _get_report_link(f)
             # Parse filename for ID and slug
             full_id = _extract_report_id_from_path(f)
             short_id = full_id[:8]
@@ -1134,6 +1799,75 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         lines.append(f"\nReport directory: `{report_dir}`")
         lines.append("\nTo reopen: `open_report(\"<report_id>\")`")
         return "\n".join(lines)
+
+    # --- Export Report as HTML ---
+
+    @mcp.tool()
+    def export_report(report_ref: str = "") -> str:
+        """Export a report as standalone HTML that can be saved and opened in any browser.
+
+        Returns the full self-contained HTML content. Save it to a .html file
+        to view the interactive report offline — no server needed.
+
+        Args:
+            report_ref: Report ID (full UUID or 8-char prefix). Empty = latest report.
+
+        Returns:
+            Full HTML string of the standalone report.
+        """
+        # Try in-memory cache
+        if report_ref:
+            with _REPORT_LOCK:
+                cached = _REPORT_CACHE.get(report_ref)
+            if cached and cached.get("html"):
+                return cached["html"]
+
+            # Try prefix match
+            with _REPORT_LOCK:
+                prefix_matches = [
+                    (rid, data) for rid, data in _REPORT_CACHE.items()
+                    if rid.startswith(report_ref)
+                ]
+            if len(prefix_matches) == 1:
+                return prefix_matches[0][1]["html"]
+            if len(prefix_matches) > 1:
+                ids = ", ".join(f"`{rid[:8]}`" for rid, _ in prefix_matches)
+                return f"Ambiguous report reference `{report_ref}`. Matches: {ids}"
+
+            # Disk fallback
+            disk_path = _find_report_on_disk(report_ref)
+            if disk_path:
+                return disk_path.read_text(encoding="utf-8")
+
+            return (
+                f"Report `{report_ref}` not found. "
+                f"Use `list_reports` to see available reports."
+            )
+
+        # No ref → latest report from cache or disk
+        with _REPORT_LOCK:
+            if _REPORT_CACHE:
+                latest = max(
+                    _REPORT_CACHE.values(),
+                    key=lambda v: v.get("expires", datetime.min.replace(tzinfo=timezone.utc)),
+                )
+                if latest.get("html"):
+                    return latest["html"]
+
+        # Disk: most recent file
+        report_dir = Path(
+            os.environ.get("CEREBRO_REPORT_DIR", "~/.cerebro/reports")
+        ).expanduser()
+        if report_dir.exists():
+            files = sorted(
+                report_dir.glob("cerebro_report_*.html"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if files:
+                return files[0].read_text(encoding="utf-8")
+
+        return "No reports found. Generate a report first with `generate_report`."
 
     # --- MCP App Resource ---
 

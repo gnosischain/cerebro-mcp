@@ -4,7 +4,7 @@
 @import "@fontsource/plus-jakarta-sans/700.css";
 
 :root {
-  --bg: #0f172a;
+  --bg: transparent;
   --surface: #1e293b;
   --border: #334155;
   --border-hover: #475569;
@@ -14,8 +14,8 @@
   --warning: #fbbf24;
   --error: #f87171;
   --text-primary: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted: #475569;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
   --accent-soft: rgba(99, 102, 241, 0.16);
   --accent-softer: rgba(99, 102, 241, 0.1);
   --table-header: #1e293b;
@@ -33,7 +33,7 @@
 }
 
 [data-theme="light"] {
-  --bg: #f1f5f9;
+  --bg: transparent;
   --surface: #ffffff;
   --border: #e2e8f0;
   --border-hover: #cbd5e1;

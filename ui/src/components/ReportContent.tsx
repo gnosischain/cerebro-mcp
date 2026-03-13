@@ -9,13 +9,13 @@ interface SectionContentProps {
 }
 
 /**
- * Given a section's HTML, find chart placeholder divs and render them
- * as React ChartCards, while keeping the surrounding HTML intact.
+ * Given a section's HTML, find chart placeholder divs and grid containers,
+ * then render them as React ChartCards while keeping surrounding HTML intact.
  */
 function SectionContent({ html, charts, queries }: SectionContentProps) {
-  // Split HTML on chart container divs: <div id="chart-chart_N" class="chart-container"></div>
+  // Split on chart containers AND grid containers
   const parts = html.split(
-    /(<div\s+id="chart-(chart_\d+)"\s+class="chart-container"><\/div>)/i
+    /(<div\s+class="chart-grid[^"]*"\s+data-grid-charts="[^"]*"><\/div>|<div\s+id="chart-(chart_\d+)"\s+class="chart-container"><\/div>)/i
   );
 
   const elements: React.ReactNode[] = [];
@@ -24,7 +24,36 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
     const part = parts[i];
     if (!part) continue;
 
-    // Check if this part matches a chart container pattern
+    // Check for grid container: <div class="chart-grid chart-grid-N" data-grid-charts="id1,id2,..."></div>
+    const gridMatch = part.match(
+      /^<div\s+class="(chart-grid[^"]*)"\s+data-grid-charts="([^"]*)"><\/div>$/i
+    );
+    if (gridMatch) {
+      const gridClasses = gridMatch[1];
+      const chartIds = gridMatch[2].split(",").filter(Boolean);
+
+      elements.push(
+        <div className={gridClasses} key={`grid-${i}`}>
+          {chartIds.map((chartId) => {
+            const spec = charts[chartId];
+            if (!spec) return null;
+            const chartData = findChartTitle(chartId, html);
+            return (
+              <ChartCard
+                key={chartId}
+                chartId={chartId}
+                spec={spec}
+                title={chartData}
+                sql={queries?.[chartId]?.sql}
+              />
+            );
+          })}
+        </div>
+      );
+      continue;
+    }
+
+    // Check for individual chart container
     const chartMatch = part.match(
       /^<div\s+id="chart-(chart_\d+)"\s+class="chart-container"><\/div>$/i
     );
@@ -33,12 +62,11 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
       const chartId = chartMatch[1];
       const spec = charts[chartId];
       if (spec) {
-        // Find the chart-card wrapper div and chart-title before this container
+        // Extract title from the chart-card wrapper in the previous HTML part
+        let chartTitle = "";
         const prevHtml =
           elements.length > 0 ? elements[elements.length - 1] : null;
-        let chartTitle = "";
 
-        // Extract title from the chart-card wrapper in the previous HTML part
         if (
           prevHtml &&
           typeof prevHtml === "object" &&
@@ -55,7 +83,6 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
             );
             if (titleMatch) {
               chartTitle = titleMatch[1];
-              // Remove the chart-card wrapper from the previous HTML
               const cleaned = prevStr.replace(
                 /<div class="chart-card">.*?<div class="chart-title">.*?<\/div>\s*$/,
                 ""
@@ -86,12 +113,12 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
       continue;
     }
 
-    // Regular HTML content
+    // Regular HTML content — wrap in card like charts
     if (part.trim()) {
       elements.push(
         <div
           key={`html-${i}`}
-          className="report-html"
+          className="content-card report-html"
           dangerouslySetInnerHTML={{ __html: part }}
         />
       );
@@ -101,20 +128,21 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
   return <>{elements}</>;
 }
 
+/** Extract chart title — title comes from the chart spec via Python backend */
+function findChartTitle(_chartId: string, _html: string): string {
+  return "";
+}
+
 interface Props {
   data: ReportData;
   sections: HtmlSection[];
-  activeIndex: number;
 }
 
-export function ReportContent({ data, sections, activeIndex }: Props) {
+export function ReportContent({ data, sections }: Props) {
   return (
     <div className="report-content">
       {sections.map((section, i) => (
-        <div
-          key={i}
-          style={{ display: i === activeIndex ? "block" : "none" }}
-        >
+        <div key={i} id={`section-${i}`}>
           <SectionContent
             html={section.html}
             charts={data.charts}

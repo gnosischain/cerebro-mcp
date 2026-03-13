@@ -28,31 +28,3 @@ def register_agent_tools(mcp):
             .read_text("utf-8")
         )
         return content
-
-    @mcp.tool()
-    def approve_analysis(notes: str = "") -> str:
-        """Approve the current analysis for report generation.
-
-        Call this after reviewing the charts and analysis quality.
-        generate_report will be blocked until this approval is given.
-
-        Args:
-            notes: Optional review notes or quality assessment.
-        """
-        from cerebro_mcp.tools.session_state import state
-
-        can_approve, rejection, warnings = (
-            state.check_approval_preconditions()
-        )
-
-        if not can_approve:
-            return f"**Approval rejected:** {rejection}"
-
-        state.record_review_approval(role="reviewer", notes=notes)
-
-        response = "Analysis approved for report generation."
-        if warnings:
-            response += "\n\n**Warnings:**\n"
-            for w in warnings:
-                response += f"- {w}\n"
-        return response

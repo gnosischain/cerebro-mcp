@@ -1,5 +1,16 @@
 import * as echarts from "echarts/core";
-import { LineChart, BarChart, PieChart } from "echarts/charts";
+import {
+  LineChart,
+  BarChart,
+  PieChart,
+  ScatterChart,
+  HeatmapChart,
+  GaugeChart,
+  TreemapChart,
+  SankeyChart,
+  GraphChart,
+  FunnelChart,
+} from "echarts/charts";
 import {
   TitleComponent,
   TooltipComponent,
@@ -8,6 +19,8 @@ import {
   GraphicComponent,
   DataZoomComponent,
   ToolboxComponent,
+  CalendarComponent,
+  VisualMapComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 
@@ -18,6 +31,13 @@ echarts.use([
   LineChart,
   BarChart,
   PieChart,
+  ScatterChart,
+  HeatmapChart,
+  GaugeChart,
+  TreemapChart,
+  SankeyChart,
+  GraphChart,
+  FunnelChart,
   TitleComponent,
   TooltipComponent,
   LegendComponent,
@@ -25,6 +45,8 @@ echarts.use([
   GraphicComponent,
   DataZoomComponent,
   ToolboxComponent,
+  CalendarComponent,
+  VisualMapComponent,
   CanvasRenderer,
 ]);
 

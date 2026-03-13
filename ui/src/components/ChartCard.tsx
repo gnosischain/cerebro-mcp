@@ -86,13 +86,14 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
   if (isNumberDisplay(spec)) {
     return (
       <div
+        className="chart-card"
         style={{
           background: "var(--surface)",
           border: "1px solid var(--border)",
           borderRadius: "var(--radius-base)",
           boxShadow: "var(--shadow-sm)",
           overflow: "hidden",
-          margin: "1rem 0",
+          margin: "0.75rem 0",
         }}
       >
         {(title || sql) && (
@@ -170,16 +171,19 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
     return opt;
   }, [spec, isDark]);
 
+  const chartHeight = (spec as Record<string, unknown>)?._cerebro_height as string || "350px";
+
   return (
     <div
       id={`chart-${chartId}`}
+      className="chart-card"
       style={{
         background: "var(--surface)",
         border: "1px solid var(--border)",
         borderRadius: "var(--radius-base)",
         boxShadow: "var(--shadow-sm)",
         overflow: "hidden",
-        margin: "1rem 0",
+        margin: "0.75rem 0",
         transition: "border-color 0.2s, box-shadow 0.2s",
       }}
     >
@@ -224,7 +228,7 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
       <ReactECharts
         option={echartsOption}
         theme={isDark ? "cerebro-dark" : "cerebro-light"}
-        style={{ width: "100%", height: "400px" }}
+        style={{ width: "100%", height: chartHeight }}
         notMerge
       />
     </div>

@@ -17,6 +17,11 @@ _STATISTICAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CORRELATION_RE = re.compile(
+    r"\bcorr\s*\(|\bcovar(?:Pop|Samp)?\s*\(|\bsimpleLinearRegression\s*\(",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class SessionState:
@@ -29,9 +34,8 @@ class SessionState:
     execute_query_count: int = 0
     generate_chart_count: int = 0
     statistical_query_count: int = 0
-
-    # Review gate
-    review_approved: bool = False
+    correlation_query_count: int = 0
+    chart_types_generated: set[str] = field(default_factory=set)
 
     # Thread safety
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -55,20 +59,25 @@ class SessionState:
             self.execute_query_count += 1
             if self.is_statistical_query(sql):
                 self.statistical_query_count += 1
+            if self._is_correlation_query(sql):
+                self.correlation_query_count += 1
 
-    def record_generate_chart(self, chart_type: str, sql: str) -> None:
+    def record_generate_chart(
+        self, chart_type: str, sql: str, series_field: str = "",
+    ) -> None:
         with self.lock:
             self.generate_chart_count += 1
-
-    def record_review_approval(self, role: str, notes: str = "") -> None:
-        with self.lock:
-            self.review_approved = True
+            self.chart_types_generated.add(chart_type)
 
     # ── Statistical helpers (advisory only) ─────────────────────────
 
     def is_statistical_query(self, sql: str) -> bool:
         """Check if SQL uses statistical functions. Soft signal only."""
         return bool(_STATISTICAL_RE.search(sql))
+
+    def _is_correlation_query(self, sql: str) -> bool:
+        """Check if SQL uses correlation/regression functions."""
+        return bool(_CORRELATION_RE.search(sql))
 
     def suggest_statistical_functions(self, sql: str) -> str | None:
         """Return a gentle nudge if the query lacks statistical functions."""
@@ -116,10 +125,12 @@ class SessionState:
 
     def check_report_preconditions(
         self, chart_registry: dict
-    ) -> tuple[bool, str]:
-        """Gate for generate_report. Returns (passed, reason)."""
+    ) -> tuple[bool, str, list[str]]:
+        """Gate for generate_report. Returns (passed, reason, warnings)."""
         if not settings.ENFORCE_CHART_PRECONDITIONS:
-            return True, ""
+            return True, "", []
+
+        warnings: list[str] = []
 
         with self.lock:
             # Minimum chart count
@@ -129,7 +140,7 @@ class SessionState:
                     f"Insufficient charts: Generated {len(chart_registry)} "
                     f"chart(s), but the minimum required for a report is "
                     f"{min_charts}."
-                )
+                ), []
 
             # Chart diversity: need at least one trend OR one breakdown
             if settings.REQUIRE_CHART_DIVERSITY:
@@ -146,64 +157,82 @@ class SessionState:
                         "Chart diversity lacking: Report must include at "
                         "least one trend chart (line/area) or one breakdown "
                         "chart (bar/pie)."
-                    )
+                    ), []
 
-            # Review approval gate
-            if settings.REQUIRE_REVIEW_APPROVAL and not self.review_approved:
-                return False, (
-                    "Analysis not approved: A review agent must call "
-                    "`approve_analysis` before generating the final report."
-                )
-
-        return True, ""
-
-    def check_approval_preconditions(
-        self,
-    ) -> tuple[bool, str, list[str]]:
-        """Gate for approve_analysis. Returns (can_approve, reason, warnings)."""
-        if not settings.ENFORCE_CHART_PRECONDITIONS:
-            return True, "", []
-
-        warnings: list[str] = []
-
-        with self.lock:
-            # Hard gate: model exploration depth
-            min_detailed = settings.MIN_MODELS_DETAILED
-            if len(self.explored_models) < min_detailed:
-                return False, (
-                    f"Approval rejected: Explore at least {min_detailed} "
-                    f"models via `get_model_details` to understand lineage "
-                    f"and dimensions. "
-                    f"(Currently explored: {len(self.explored_models)})."
-                ), []
-
-            # Hard gate: minimum exploratory queries
+            # Minimum exploratory queries (hard gate)
             min_queries = settings.MIN_EXPLORATORY_QUERIES
             if self.execute_query_count < min_queries:
                 return False, (
-                    f"Approval rejected: Run at least {min_queries} "
+                    f"Insufficient exploration: Run at least {min_queries} "
                     f"exploratory queries (EDA, distribution checks, "
-                    f"dimensional queries) before approving. "
+                    f"dimensional queries) before generating a report. "
                     f"(Currently run: {self.execute_query_count})."
                 ), []
 
-            # Hard gate: statistical rigor
+            # Statistical rigor (soft warning — was causing retry loops)
             min_stats = settings.MIN_STATISTICAL_QUERIES
             if self.statistical_query_count < min_stats:
-                return False, (
-                    f"Approval rejected: At least {min_stats} query must "
-                    f"use statistical functions (quantiles, stddevPop, corr, "
-                    f"median, percentile, etc.). Run EDA or distribution "
-                    f"queries first. "
-                    f"(Currently: {self.statistical_query_count} statistical "
-                    f"queries)."
-                ), []
+                warnings.append(
+                    f"No statistical queries detected (quantiles, stddev, "
+                    f"corr, etc.). Consider running EDA with statistical "
+                    f"functions for more robust analysis."
+                )
+
+            # Correlation analysis (soft warning — was causing retry loops)
+            min_corr = settings.MIN_CORRELATION_QUERIES
+            if (len(chart_registry) >= 3
+                    and self.correlation_query_count < min_corr):
+                warnings.append(
+                    f"No correlation/regression queries detected. Consider "
+                    f"using corr(), covarPop(), or simpleLinearRegression() "
+                    f"to analyze relationships between metrics."
+                )
+
+            # Dimensional breakdown enforcement
+            if settings.REQUIRE_DIMENSIONAL_BREAKDOWN:
+                has_dimensional = any(
+                    v.get("series_field")
+                    or v.get("chart_type") in (
+                        "pie", "treemap", "heatmap", "sankey",
+                    )
+                    for v in chart_registry.values()
+                )
+                if not has_dimensional:
+                    return False, (
+                        "No dimensional breakdown: At least one chart must "
+                        "use series_field to show data split by a dimension "
+                        "(token, action type, segment, etc.), or use a "
+                        "pie/treemap/heatmap/sankey chart type."
+                    ), []
+
+            # Relational analysis enforcement
+            if settings.REQUIRE_RELATIONAL_CHART:
+                has_relational = any(
+                    v.get("chart_type") in ("scatter", "heatmap")
+                    for v in chart_registry.values()
+                )
+                has_correlation = self.correlation_query_count >= 1
+                if not has_relational and not has_correlation:
+                    return False, (
+                        "No relational analysis: At least one scatter/"
+                        "heatmap chart OR one correlation query (corr(), "
+                        "covarPop(), simpleLinearRegression()) is required "
+                        "for multi-dimensional analysis."
+                    ), []
 
             # Soft warning: charts generated with few queries
             if self.execute_query_count < 5 and self.generate_chart_count > 0:
                 warnings.append(
                     "Only a few exploratory queries were run before "
                     "charting. Consider deeper EDA for more robust analysis."
+                )
+
+            # Soft warning: no scatter chart for correlations
+            if ("scatter" not in self.chart_types_generated
+                    and self.generate_chart_count >= 3):
+                warnings.append(
+                    "No scatter chart generated. Consider adding a scatter "
+                    "plot to visualize strong correlations (|r| > 0.5)."
                 )
 
         return True, "", warnings
@@ -219,7 +248,8 @@ class SessionState:
             self.execute_query_count = 0
             self.generate_chart_count = 0
             self.statistical_query_count = 0
-            self.review_approved = False
+            self.correlation_query_count = 0
+            self.chart_types_generated.clear()
 
 
 # Global singleton

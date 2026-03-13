@@ -1,4 +1,5 @@
-import { Sun, Moon, ExternalLink } from "lucide-react";
+import { useState } from "react";
+import { Sun, Moon, ExternalLink, Copy, Check } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { WATERMARK_LIGHT, WATERMARK_DARK } from "../assets/watermark";
 
@@ -10,9 +11,10 @@ interface Props {
 
 export function ReportHeader({ title, timestamp, fileUri }: Props) {
   const { isDark, toggle } = useTheme();
+  const [copied, setCopied] = useState(false);
 
-  // Use the owl icon as the header logo — light theme gets dark icon, dark theme gets white icon
   const logoSrc = isDark ? WATERMARK_DARK : WATERMARK_LIGHT;
+  const isFileUri = fileUri?.startsWith("file://");
 
   return (
     <header className="report-header">
@@ -47,7 +49,20 @@ export function ReportHeader({ title, timestamp, fileUri }: Props) {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
-          {fileUri && (
+          {fileUri && isFileUri && (
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(fileUri);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              }}
+              className="no-print theme-toggle"
+              title="Copy report path"
+            >
+              {copied ? <Check size={16} /> : <Copy size={16} />}
+            </button>
+          )}
+          {fileUri && !isFileUri && (
             <a
               href={fileUri}
               target="_blank"
