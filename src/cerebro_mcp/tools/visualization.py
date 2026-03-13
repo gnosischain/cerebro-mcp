@@ -120,49 +120,12 @@ def _report_filename(report_id: str, title: str) -> str:
     return f"cerebro_report_{ts}_{slug}_{report_id}.html"
 
 
-# --- Optional HTTP Report Server ---
-_report_server_started = False
-
-
-def _ensure_report_server() -> None:
-    """Start a lightweight HTTP server for serving reports (daemon thread)."""
-    global _report_server_started
-    from cerebro_mcp.config import settings
-
-    if _report_server_started or not settings.REPORT_SERVER_PORT:
-        return
-
-    from http.server import SimpleHTTPRequestHandler
-    from socketserver import ThreadingTCPServer
-
-    report_dir = _get_report_dir()
-
-    class Handler(SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=str(report_dir), **kwargs)
-
-        def log_message(self, format, *args):
-            pass  # suppress access logs
-
-    try:
-        server = ThreadingTCPServer(("", settings.REPORT_SERVER_PORT), Handler)
-        server.daemon_threads = True
-        t = threading.Thread(target=server.serve_forever, daemon=True)
-        t.start()
-        _report_server_started = True
-    except OSError:
-        pass  # port in use, skip
-
-
 def _get_report_link(path: Path) -> str:
     """Get the best available URL for a report file."""
-    from cerebro_mcp.config import settings
-
-    if settings.REPORT_BASE_URL:
-        return f"{settings.REPORT_BASE_URL.rstrip('/')}/{path.name}"
-    if settings.REPORT_SERVER_PORT:
-        _ensure_report_server()
-        return f"http://localhost:{settings.REPORT_SERVER_PORT}/{path.name}"
+    report_id = _extract_report_id_from_path(path)
+    url = _get_report_download_url(report_id)
+    if url:
+        return url
     return path.resolve().as_uri()  # file:// fallback
 
 
@@ -193,6 +156,94 @@ def _extract_report_id_from_path(path: Path) -> str:
     if len(parts) >= 5:
         return parts[-1]
     return name
+
+
+def _resolve_report(
+    report_ref: str,
+) -> tuple[str | None, str | None, Path | None]:
+    """Resolve a report reference to (html, report_id, disk_path).
+
+    Lookup order: in-memory cache (exact) -> cache (prefix) -> disk.
+    Returns (None, None, None) if not found.
+    Raises ValueError on ambiguous prefix.
+    """
+    if report_ref:
+        # Exact cache match
+        with _REPORT_LOCK:
+            cached = _REPORT_CACHE.get(report_ref)
+        if cached and cached.get("html"):
+            return cached["html"], report_ref, cached.get("path")
+
+        # Prefix match in cache
+        with _REPORT_LOCK:
+            prefix_matches = [
+                (rid, data)
+                for rid, data in _REPORT_CACHE.items()
+                if rid.startswith(report_ref)
+            ]
+        if len(prefix_matches) == 1:
+            rid, data = prefix_matches[0]
+            return data["html"], rid, data.get("path")
+        if len(prefix_matches) > 1:
+            ids = ", ".join(f"`{rid[:8]}`" for rid, _ in prefix_matches)
+            raise ValueError(
+                f"Ambiguous report reference `{report_ref}`. Matches: {ids}"
+            )
+
+        # Disk fallback
+        disk_path = _find_report_on_disk(report_ref)
+        if disk_path:
+            html = disk_path.read_text(encoding="utf-8")
+            rid = _extract_report_id_from_path(disk_path)
+            return html, rid, disk_path
+
+        return None, None, None
+
+    # No ref -> latest from cache or disk
+    with _REPORT_LOCK:
+        if _REPORT_CACHE:
+            latest_id = max(
+                _REPORT_CACHE,
+                key=lambda k: _REPORT_CACHE[k].get(
+                    "expires", datetime.min.replace(tzinfo=timezone.utc)
+                ),
+            )
+            latest = _REPORT_CACHE[latest_id]
+            if latest.get("html"):
+                return latest["html"], latest_id, latest.get("path")
+
+    # Disk: most recent file
+    report_dir = _get_report_dir()
+    if report_dir.exists():
+        files = sorted(
+            report_dir.glob("cerebro_report_*.html"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if files:
+            html = files[0].read_text(encoding="utf-8")
+            rid = _extract_report_id_from_path(files[0])
+            return html, rid, files[0]
+
+    return None, None, None
+
+
+def _get_report_download_url(report_id: str) -> str | None:
+    """Build the HTTP download URL for a report, or None if unavailable."""
+    from cerebro_mcp.config import settings
+
+    if settings.REPORT_BASE_URL:
+        return f"{settings.REPORT_BASE_URL.rstrip('/')}/{report_id}"
+
+    # Check if running in SSE mode (HTTP server available)
+    if os.environ.get("CEREBRO_TRANSPORT") == "sse":
+        host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
+        port = os.environ.get("FASTMCP_PORT", "8000")
+        if host == "0.0.0.0":
+            host = "localhost"
+        return f"http://{host}:{port}/reports/{report_id}"
+
+    return None
 
 
 def _extract_structured_from_html(html: str) -> dict | None:
@@ -1806,68 +1857,58 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
     def export_report(report_ref: str = "") -> str:
         """Export a report as standalone HTML that can be saved and opened in any browser.
 
-        Returns the full self-contained HTML content. Save it to a .html file
-        to view the interactive report offline — no server needed.
+        When the server runs in SSE mode (or REPORT_BASE_URL is configured),
+        returns a download URL instead of the raw HTML. Otherwise returns
+        the file path for local access.
 
         Args:
             report_ref: Report ID (full UUID or 8-char prefix). Empty = latest report.
 
         Returns:
-            Full HTML string of the standalone report.
+            Download URL, file path, or full HTML string of the standalone report.
         """
-        # Try in-memory cache
-        if report_ref:
-            with _REPORT_LOCK:
-                cached = _REPORT_CACHE.get(report_ref)
-            if cached and cached.get("html"):
-                return cached["html"]
+        try:
+            html, report_id, disk_path = _resolve_report(report_ref)
+        except ValueError as exc:
+            return str(exc)
 
-            # Try prefix match
-            with _REPORT_LOCK:
-                prefix_matches = [
-                    (rid, data) for rid, data in _REPORT_CACHE.items()
-                    if rid.startswith(report_ref)
-                ]
-            if len(prefix_matches) == 1:
-                return prefix_matches[0][1]["html"]
-            if len(prefix_matches) > 1:
-                ids = ", ".join(f"`{rid[:8]}`" for rid, _ in prefix_matches)
-                return f"Ambiguous report reference `{report_ref}`. Matches: {ids}"
-
-            # Disk fallback
-            disk_path = _find_report_on_disk(report_ref)
-            if disk_path:
-                return disk_path.read_text(encoding="utf-8")
-
-            return (
-                f"Report `{report_ref}` not found. "
-                f"Use `list_reports` to see available reports."
-            )
-
-        # No ref → latest report from cache or disk
-        with _REPORT_LOCK:
-            if _REPORT_CACHE:
-                latest = max(
-                    _REPORT_CACHE.values(),
-                    key=lambda v: v.get("expires", datetime.min.replace(tzinfo=timezone.utc)),
+        if html is None:
+            if report_ref:
+                return (
+                    f"Report `{report_ref}` not found. "
+                    f"Use `list_reports` to see available reports."
                 )
-                if latest.get("html"):
-                    return latest["html"]
+            return "No reports found. Generate a report first with `generate_report`."
 
-        # Disk: most recent file
-        report_dir = Path(
-            os.environ.get("CEREBRO_REPORT_DIR", "~/.cerebro/reports")
-        ).expanduser()
-        if report_dir.exists():
-            files = sorted(
-                report_dir.glob("cerebro_report_*.html"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if files:
-                return files[0].read_text(encoding="utf-8")
+        # If HTTP endpoint is available, return a download URL
+        download_url = _get_report_download_url(report_id)
+        if download_url:
+            size_kb = len(html) / 1024
+            lines = [
+                f"Report ready for download ({size_kb:.0f} KB):\n",
+                f"**Download URL:** {download_url}\n",
+                "Open this URL in a browser to view the full interactive report.",
+                f"Report ID: `{report_id[:8]}`",
+            ]
+            if disk_path:
+                lines.append(f"Server path: `{disk_path}`")
+            return "\n".join(lines)
 
-        return "No reports found. Generate a report first with `generate_report`."
+        # stdio fallback: return disk path (HTML is too large for tool response)
+        from cerebro_mcp.config import settings
+
+        if disk_path:
+            size_kb = len(html) / 1024
+            if len(html) > settings.TOOL_RESPONSE_MAX_CHARS:
+                return (
+                    f"Report is {size_kb:,.0f} KB (exceeds tool response limit). "
+                    f"Saved at: `{disk_path}`\n\n"
+                    f"Run the server in SSE mode (`--sse`) or set "
+                    f"`REPORT_BASE_URL` to enable HTTP downloads."
+                )
+            return html
+
+        return html
 
     # --- MCP App Resource ---
 

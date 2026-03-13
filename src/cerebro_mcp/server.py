@@ -2,7 +2,7 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.manifest_loader import manifest
@@ -140,6 +140,35 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+@mcp.custom_route("/reports/{report_id}", methods=["GET"])
+async def download_report(request: Request) -> JSONResponse | HTMLResponse:
+    """Serve a report HTML file by ID (full UUID or 8-char prefix)."""
+    from cerebro_mcp.tools.visualization import _resolve_report
+
+    # Auth: accept Bearer header or ?token= query param
+    auth_token = os.environ.get("MCP_AUTH_TOKEN")
+    if auth_token:
+        auth_header = request.headers.get("Authorization", "")
+        query_token = request.query_params.get("token", "")
+        if auth_header != f"Bearer {auth_token}" and query_token != auth_token:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    report_id = request.path_params["report_id"]
+
+    try:
+        html, resolved_id, _ = _resolve_report(report_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    if html is None:
+        return JSONResponse(
+            {"error": f"Report '{report_id}' not found"},
+            status_code=404,
+        )
+
+    return HTMLResponse(content=html)
+
+
 def main():
     import sys
 
@@ -155,6 +184,8 @@ def _run_sse_with_auth():
     """Run SSE transport, optionally wrapped with Bearer token auth."""
     import anyio
     import uvicorn
+
+    os.environ["CEREBRO_TRANSPORT"] = "sse"
     from starlette.middleware import Middleware
     from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -162,8 +193,10 @@ def _run_sse_with_auth():
 
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            # Health endpoint bypasses auth
-            if request.url.path == "/health":
+            # Health and reports endpoints handle auth themselves
+            if request.url.path == "/health" or request.url.path.startswith(
+                "/reports/"
+            ):
                 return await call_next(request)
             auth_header = request.headers.get("Authorization", "")
             if auth_header != f"Bearer {auth_token}":
