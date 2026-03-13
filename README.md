@@ -252,6 +252,68 @@ Cerebro MCP uses three specialized agent personas for complex report generation:
 
 Each persona is loaded via `get_agent_persona(role)` and provides strict operational rules, success metrics, and BAD/GOOD formatting examples.
 
+### Persona Details
+
+| Persona | Key Rules | Enforces |
+|---------|-----------|----------|
+| **Analytics Reporter** | Discover-first, verify columns, EDA before analysis, medians over means, outlier detection | Min 7 charts for full reports, date filters on all time-series, partition pruning, statistical context |
+| **UI Designer** | Chart type matches data semantics, grid layout rules, accessibility | Min 2 `h2` sections, descriptive titles, no emojis, responsive layout, report link in output |
+| **Reality Checker** | SQL safety audit, data validation, chart/report structure QA | Zero wrong columns, zero missing date filters, zero bad chart types, coverage audit |
+
+---
+
+## Enforcement Gates
+
+Cerebro MCP enforces a structured workflow via process-global session state tracking. Tools are gated to ensure data quality and analytical rigor.
+
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Session State Tracker (thread-safe singleton)              │
+  │                                                             │
+  │  Discovery:                                                 │
+  │    search_models_count, explored_models, explored_tables    │
+  │                                                             │
+  │  Execution:                                                 │
+  │    execute_query_count, statistical_query_count,            │
+  │    correlation_query_count, chart_types_generated           │
+  │                                                             │
+  │  ┌──────────────────────┐  ┌─────────────────────────────┐  │
+  │  │  generate_chart gate │  │  generate_report gate       │  │
+  │  │                      │  │                             │  │
+  │  │  - search_models >= 1│  │  - charts >= 3              │  │
+  │  │  - models detailed>=3│  │  - trend OR breakdown chart │  │
+  │  │  - tables verified>=1│  │  - queries >= 2             │  │
+  │  │                      │  │  - dimensional breakdown    │  │
+  │  │  (quick_chart bypasses│  │  - relational analysis     │  │
+  │  │   all gates)         │  │                             │  │
+  │  └──────────────────────┘  └─────────────────────────────┘  │
+  │                                                             │
+  │  State resets after each successful generate_report         │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+### Hard Gates (block tool execution)
+
+| Gate | Tool | Condition |
+|------|------|-----------|
+| Discovery | `generate_chart` | Must call `search_models` at least once |
+| Lineage | `generate_chart` | Must explore >= 3 models via `get_model_details` |
+| Schema | `generate_chart` | Must verify >= 1 table via `describe_table` |
+| Chart count | `generate_report` | Must have >= 3 charts registered |
+| Chart diversity | `generate_report` | At least one trend (line/area) or breakdown (bar/pie) |
+| Exploration | `generate_report` | At least 2 `execute_query` calls |
+| Dimensional | `generate_report` | At least 1 chart with `series_field` or pie/treemap/heatmap/sankey |
+| Relational | `generate_report` | At least 1 scatter/heatmap chart or correlation query |
+
+### Soft Warnings (logged, do not block)
+
+- No statistical queries (quantiles, stddev, corr) detected
+- No correlation/regression queries in multi-chart reports
+- Few exploratory queries before charting
+- No scatter chart for visualizing correlations
+
+All gates are configurable via environment variables (see [Configuration](#configuration)). Set `ENFORCE_CHART_PRECONDITIONS=False` to disable all gates.
+
 ---
 
 ## Tools
@@ -273,14 +335,18 @@ Each persona is loaded via `get_agent_persona(role)` and provides strict operati
 | Tool | Description |
 |------|-------------|
 | `search_models` | Search ~400 dbt models by name, description, tags, or module |
+| `discover_models` | Search + return full details for top N matches in one call |
 | `get_model_details` | Full model info: SQL, columns, lineage, dependencies |
 
 ### Visualization
 
 | Tool | Description |
 |------|-------------|
-| `generate_chart` | Create ECharts visualization (line, area, bar, pie, numberDisplay) |
-| `generate_report` | Assemble interactive report with chart placeholders |
+| `generate_chart` | Create single ECharts visualization (line, area, bar, pie, scatter, heatmap, numberDisplay, and more) |
+| `generate_charts` | **Batch** -- create multiple charts in one call (preferred for reports) |
+| `quick_chart` | Ad-hoc chart without precondition gates |
+| `generate_report` | Assemble interactive report with `{{chart:ID}}` placeholders |
+| `export_report` | Export report as download URL (SSE mode) or file path (stdio) |
 | `list_charts` | Show registered charts in current session |
 | `open_report` | Reopen a saved report by ID |
 | `list_reports` | List all saved reports on disk |
@@ -295,7 +361,9 @@ Each persona is loaded via `get_agent_persona(role)` and provides strict operati
 | `get_token_metadata` | Token info: address, decimals, price data |
 | `search_models_by_address` | Find dbt models related to a contract |
 | `search_docs` | Search platform documentation and references |
+| `get_doc_chunk` | Retrieve full text of a documentation page by location path |
 | `get_help` | Overview of all tools, prompts, and resources |
+| `get_platform_constants` | Chain parameters, event signatures, core contracts, partition keys |
 
 ### Saved Queries
 
@@ -488,9 +556,34 @@ export MCP_AUTH_TOKEN=$(openssl rand -hex 32)
 cerebro-mcp --sse
 ```
 
-- All requests require `Authorization: Bearer <token>` header
-- `/health` endpoint bypasses auth (for K8s probes)
+- All MCP/SSE endpoints require `Authorization: Bearer <token>` header
+- `/health` bypasses auth (for K8s probes)
+- `/reports/{id}` supports both Bearer header and `?token=<token>` query param (browser-friendly)
 - When `MCP_AUTH_TOKEN` is unset, auth is disabled (local dev)
+
+### Report Download Endpoint
+
+In SSE mode, reports can be downloaded directly via HTTP:
+
+```
+GET /reports/{report_id}
+```
+
+- `report_id`: Full UUID or 8-character prefix
+- Auth: `Authorization: Bearer <token>` header or `?token=<token>` query param
+- Returns: Full standalone HTML (`Content-Type: text/html`)
+- `404` if not found, `409` if ambiguous prefix
+
+```bash
+# With Bearer header
+curl -H "Authorization: Bearer $TOKEN" \
+  https://mcp.analytics.gnosis.io/reports/1fd3979f -o report.html
+
+# With query param (browser-friendly)
+open "https://mcp.analytics.gnosis.io/reports/1fd3979f?token=$TOKEN"
+```
+
+The `export_report` MCP tool automatically returns the download URL when running in SSE mode. Set `REPORT_BASE_URL` for production deployments (e.g., `https://mcp.analytics.gnosis.io/reports`).
 
 ### Hosted Endpoint
 
@@ -535,9 +628,17 @@ All settings via environment variables or `.env` file:
 | `THINKING_LOG_RETENTION_DAYS` | `30` | Log retention |
 | `CEREBRO_REPORT_DIR` | `~/.cerebro/reports` | Saved report directory |
 | `CEREBRO_SAVED_QUERIES_DIR` | `~/.cerebro-mcp` | Saved queries directory |
+| `REPORT_BASE_URL` | -- | URL prefix for report downloads (e.g. `https://host/reports`) |
 | `MCP_AUTH_TOKEN` | -- | Bearer token for SSE auth (disabled when unset) |
 | `FASTMCP_HOST` | `127.0.0.1` | SSE server bind address |
 | `FASTMCP_PORT` | `8000` | SSE server port |
+| `ENFORCE_CHART_PRECONDITIONS` | `True` | Enable/disable workflow gates |
+| `MIN_MODELS_DETAILED` | `3` | Models to explore via `get_model_details` before charting |
+| `MIN_TABLES_VERIFIED` | `1` | Tables to verify via `describe_table` before charting |
+| `MIN_CHARTS_FOR_REPORT` | `3` | Minimum charts for `generate_report` |
+| `MIN_EXPLORATORY_QUERIES` | `2` | Minimum `execute_query` calls before report |
+| `REQUIRE_DIMENSIONAL_BREAKDOWN` | `True` | Require series_field or pie/treemap/heatmap/sankey |
+| `REQUIRE_RELATIONAL_CHART` | `True` | Require scatter/heatmap chart or correlation query |
 
 ---
 
@@ -605,7 +706,8 @@ cerebro-mcp/
 │   │   ├── dbt.py                   # search_models, get_model_details
 │   │   ├── metadata.py              # list_databases, resolve_address, tokens
 │   │   ├── saved_queries.py         # save/list/run saved queries
-│   │   ├── visualization.py         # generate_chart, generate_report
+│   │   ├── visualization.py         # generate_chart, generate_report, export
+│   │   ├── session_state.py         # Workflow enforcement gates
 │   │   ├── reasoning.py             # tracing, performance stats
 │   │   └── agents.py                # get_agent_persona
 │   ├── prompts/
