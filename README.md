@@ -322,13 +322,15 @@ All gates are configurable via environment variables (see [Configuration](#confi
 
 | Tool | Description |
 |------|-------------|
-| `execute_query` | Run read-only SQL against ClickHouse (6 databases) |
+| `execute_query` | Run read-only SQL against ClickHouse and return structured rows plus `summary_markdown` |
 | `start_query` | Submit long-running query, returns query ID |
-| `get_query_results` | Poll async query status and results |
-| `explain_query` | Show ClickHouse execution plan |
-| `list_tables` | List tables in a database with row counts |
-| `describe_table` | Column schema with dbt descriptions |
+| `get_query_results` | Poll async query status and paginated preview results |
+| `explain_query` | Show ClickHouse execution plan as structured lines plus `summary_markdown` |
+| `list_tables` | Paginated table listing with row counts and `next_page_token` |
+| `describe_table` | Structured column schema with dbt descriptions |
 | `get_sample_data` | Sample rows to understand data shape |
+
+Query and schema tools now return structured payloads for agentic use while preserving a human-readable `summary_markdown` field. `list_tables` is cursor-paginated (`page_token`, `page_size`) to avoid oversized responses on large databases.
 
 ### dbt Models
 
@@ -549,7 +551,7 @@ Without `--sse`, the server uses stdio transport (default for local Claude Deskt
 
 ### Authentication
 
-Set `MCP_AUTH_TOKEN` to require Bearer token authentication on all endpoints:
+Remote SSE transport requires `MCP_AUTH_TOKEN` by default:
 
 ```bash
 export MCP_AUTH_TOKEN=$(openssl rand -hex 32)
@@ -559,7 +561,16 @@ cerebro-mcp --sse
 - All MCP/SSE endpoints require `Authorization: Bearer <token>` header
 - `/health` bypasses auth (for K8s probes)
 - `/reports/{id}` supports both Bearer header and `?token=<token>` query param (browser-friendly)
-- When `MCP_AUTH_TOKEN` is unset, auth is disabled (local dev)
+- Startup fails if `MCP_AUTH_TOKEN` is unset, unless `ALLOW_INSECURE_REMOTE_TRANSPORT=True`
+- `stdio` transport is unchanged and does not require `MCP_AUTH_TOKEN`
+
+### Health Endpoint
+
+`/health` now performs a real ClickHouse connectivity check:
+
+- `200` when ClickHouse is reachable
+- Includes `clickhouse_version` and `ssl_trust_injected`
+- `503` when ClickHouse is unreachable or misconfigured
 
 ### Report Download Endpoint
 
@@ -617,20 +628,31 @@ All settings via environment variables or `.env` file:
 | `CLICKHOUSE_USER` | `default` | ClickHouse user |
 | `CLICKHOUSE_PASSWORD` | *(required)* | ClickHouse password |
 | `CLICKHOUSE_SECURE` | `True` | Use TLS |
+| `CLICKHOUSE_VERIFY` | `True` | Verify TLS certificates |
+| `CLICKHOUSE_CONNECT_TIMEOUT` | `30` | Connection timeout (seconds) |
+| `CLICKHOUSE_SEND_RECEIVE_TIMEOUT` | `300` | Socket send/receive timeout (seconds) |
+| `CLICKHOUSE_QUERY_TIMEOUT_SECONDS` | `30` | Server-side `max_execution_time` |
 | `DBT_MANIFEST_URL` | `https://gnosischain.github.io/dbt-cerebro/manifest.json` | dbt manifest |
 | `DBT_MANIFEST_PATH` | -- | Local manifest fallback |
 | `MAX_ROWS` | `10000` | Max rows per query |
-| `QUERY_TIMEOUT_SECONDS` | `30` | Query timeout |
+| `QUERY_TIMEOUT_SECONDS` | `30` | Deprecated fallback for query timeout |
 | `MAX_QUERY_LENGTH` | `10000` | Max SQL length |
-| `TOOL_RESPONSE_MAX_CHARS` | `40000` | Max chars per tool response |
+| `TOOL_RESULT_MAX_ROWS` | `200` | Max rows exposed to sync tool responses |
+| `TOOL_RESULT_MAX_CHARS` | `40000` | Max serialized size for structured tool responses |
+| `TOOL_SUMMARY_BUDGET_RATIO` | `0.9` | Fraction of the tool budget reserved for `summary_markdown` |
+| `TOOL_RESPONSE_MAX_CHARS` | `40000` | Legacy fallback when `TOOL_RESULT_MAX_CHARS` is unset |
+| `ASYNC_RESULT_PAGE_SIZE` | `200` | Page size for async query result previews |
+| `ASYNC_RESULT_MEMORY_THRESHOLD_BYTES` | `5000000` | Spill async result pages to disk above this size |
+| `ASYNC_RESULT_DIR` | `.cerebro/query_results` | On-disk storage for large async result pages |
 | `THINKING_ALWAYS_ON` | `True` | Auto-capture all tool calls |
 | `THINKING_LOG_DIR` | `.cerebro/logs` | Trace log directory |
 | `THINKING_LOG_RETENTION_DAYS` | `30` | Log retention |
 | `CEREBRO_REPORT_DIR` | `~/.cerebro/reports` | Saved report directory |
 | `CEREBRO_SAVED_QUERIES_DIR` | `~/.cerebro-mcp` | Saved queries directory |
 | `REPORT_BASE_URL` | -- | URL prefix for report downloads (e.g. `https://host/reports`) |
-| `MCP_AUTH_TOKEN` | -- | Bearer token for SSE auth (disabled when unset) |
-| `FASTMCP_HOST` | `127.0.0.1` | SSE server bind address |
+| `MCP_AUTH_TOKEN` | -- | Bearer token required for SSE unless insecure mode is enabled |
+| `ALLOW_INSECURE_REMOTE_TRANSPORT` | `False` | Allow unauthenticated SSE startup for local/dev use only |
+| `FASTMCP_HOST` | `0.0.0.0` | SSE server bind address |
 | `FASTMCP_PORT` | `8000` | SSE server port |
 | `ENFORCE_CHART_PRECONDITIONS` | `True` | Enable/disable workflow gates |
 | `MIN_MODELS_DETAILED` | `3` | Models to explore via `get_model_details` before charting |
@@ -648,9 +670,11 @@ All SQL is validated before execution:
 
 - **Read-only**: Only `SELECT`, `EXPLAIN`, `DESCRIBE`, `SHOW` allowed
 - **No writes**: `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `TRUNCATE` blocked
-- **No injection**: Identifiers validated (alphanumeric + underscore only)
-- **Size limits**: Max query length, max rows, query timeout
-- **Auto LIMIT**: Queries without `LIMIT` get one appended automatically
+- **No escape hatches**: `FORMAT`, `SETTINGS`, and external readers like `s3(...)`, `url(...)`, and `remote(...)` are blocked
+- **No injection**: Identifiers validated (alphanumeric + underscore only), LIKE filters parameterized
+- **Execution caps**: Queries are forcibly wrapped/capped even when they already include `LIMIT`
+- **Payload caps**: Sync tool responses are truncated to row and serialized-size budgets to protect MCP/LLM context limits
+- **TLS trust**: Best-effort `truststore` injection uses OS certificate stores before ClickHouse/HTTP client initialization
 
 ### Recommended: Read-Only ClickHouse User
 
@@ -695,8 +719,11 @@ Built-in tracing records every tool call and reasoning step as JSON session trac
 cerebro-mcp/
 ├── src/cerebro_mcp/
 │   ├── server.py                    # FastMCP server, tool registration
+│   ├── bootstrap.py                 # TLS truststore + transport auth bootstrap
 │   ├── config.py                    # Settings from env vars
 │   ├── clickhouse_client.py         # ClickHouse connection pool + cache
+│   ├── tool_models.py               # Structured MCP tool response models
+│   ├── tool_output.py               # JSON-safe normalization + markdown summaries
 │   ├── manifest_loader.py           # dbt manifest loading + indexing
 │   ├── safety.py                    # SQL validation + injection prevention
 │   ├── tools/
@@ -807,6 +834,7 @@ uv run cerebro-mcp --sse
 |---------|---------|
 | `mcp[cli]` >= 1.2.0 | MCP Python SDK (FastMCP) |
 | `clickhouse-connect` >= 0.7.0 | ClickHouse client |
+| `truststore` >= 0.10 | Native OS trust store integration for TLS |
 | `pydantic-settings` >= 2.0 | Settings management |
 | `python-dotenv` >= 1.0 | .env file loading |
 | `requests` >= 2.31 | HTTP client for manifest |

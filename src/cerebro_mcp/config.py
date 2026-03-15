@@ -32,9 +32,20 @@ class Settings(BaseSettings):
 
     # Safety limits
     MAX_ROWS: int = 10000
+    CLICKHOUSE_VERIFY: bool = True
+    CLICKHOUSE_CONNECT_TIMEOUT: int = 30
+    CLICKHOUSE_SEND_RECEIVE_TIMEOUT: int = 300
+    CLICKHOUSE_QUERY_TIMEOUT_SECONDS: Optional[int] = None
     QUERY_TIMEOUT_SECONDS: int = 30
     MAX_QUERY_LENGTH: int = 10000
+    TOOL_RESULT_MAX_ROWS: int = 200
+    TOOL_RESULT_MAX_CHARS: Optional[int] = None
     TOOL_RESPONSE_MAX_CHARS: int = 40_000
+    TOOL_SUMMARY_BUDGET_RATIO: float = 0.9
+    ASYNC_RESULT_PAGE_SIZE: int = 200
+    ASYNC_RESULT_MEMORY_THRESHOLD_BYTES: int = 5_000_000
+    ASYNC_RESULT_DIR: str = ".cerebro/query_results"
+    ALLOW_INSECURE_REMOTE_TRANSPORT: bool = False
 
     # Manifest refresh
     MANIFEST_REFRESH_INTERVAL_SECONDS: int = 300
@@ -70,6 +81,36 @@ class Settings(BaseSettings):
         "nebula_discv4",
         "dbt",
     ]
+
+    @property
+    def effective_query_timeout_seconds(self) -> int:
+        return (
+            self.CLICKHOUSE_QUERY_TIMEOUT_SECONDS
+            if self.CLICKHOUSE_QUERY_TIMEOUT_SECONDS is not None
+            else self.QUERY_TIMEOUT_SECONDS
+        )
+
+    @property
+    def using_legacy_query_timeout(self) -> bool:
+        return self.CLICKHOUSE_QUERY_TIMEOUT_SECONDS is None
+
+    @property
+    def effective_tool_result_max_chars(self) -> int:
+        return (
+            self.TOOL_RESULT_MAX_CHARS
+            if self.TOOL_RESULT_MAX_CHARS is not None
+            else self.TOOL_RESPONSE_MAX_CHARS
+        )
+
+    @property
+    def using_legacy_tool_result_budget(self) -> bool:
+        return self.TOOL_RESULT_MAX_CHARS is None
+
+    @property
+    def effective_summary_max_chars(self) -> int:
+        return int(
+            self.effective_tool_result_max_chars * self.TOOL_SUMMARY_BUDGET_RATIO
+        )
 
 
 

@@ -6,6 +6,7 @@ from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
 from cerebro_mcp.docs_loader import docs_index
 from cerebro_mcp.manifest_loader import manifest
+from cerebro_mcp import runtime_state
 from cerebro_mcp.tools.query import format_results_table, truncate_response
 
 
@@ -295,10 +296,33 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
         # Config
         lines.append("\n## Config\n")
         lines.append(f"- MAX_ROWS: {settings.MAX_ROWS}")
-        lines.append(f"- QUERY_TIMEOUT_SECONDS: {settings.QUERY_TIMEOUT_SECONDS}")
-        lines.append(f"- TOOL_RESPONSE_MAX_CHARS: {settings.TOOL_RESPONSE_MAX_CHARS}")
+        lines.append(
+            f"- effective_query_timeout_seconds: {settings.effective_query_timeout_seconds}"
+        )
+        lines.append(
+            f"- CLICKHOUSE_CONNECT_TIMEOUT: {settings.CLICKHOUSE_CONNECT_TIMEOUT}"
+        )
+        lines.append(
+            f"- CLICKHOUSE_SEND_RECEIVE_TIMEOUT: "
+            f"{settings.CLICKHOUSE_SEND_RECEIVE_TIMEOUT}"
+        )
+        lines.append(f"- CLICKHOUSE_VERIFY: {settings.CLICKHOUSE_VERIFY}")
+        lines.append(
+            f"- effective_tool_result_max_chars: "
+            f"{settings.effective_tool_result_max_chars}"
+        )
+        lines.append(
+            f"- effective_summary_max_chars: {settings.effective_summary_max_chars}"
+        )
+        lines.append(f"- TOOL_RESULT_MAX_ROWS: {settings.TOOL_RESULT_MAX_ROWS}")
         lines.append(f"- MANIFEST_REFRESH_INTERVAL_SECONDS: {settings.MANIFEST_REFRESH_INTERVAL_SECONDS}")
         lines.append(f"- ALLOWED_DATABASES: {', '.join(settings.ALLOWED_DATABASES)}")
+        lines.append(
+            f"- legacy_query_timeout_fallback: {settings.using_legacy_query_timeout}"
+        )
+        lines.append(
+            f"- legacy_tool_budget_fallback: {settings.using_legacy_tool_result_budget}"
+        )
 
         tracing_status = get_tracing_status()
         lines.append("\n## Tracing\n")
@@ -318,6 +342,16 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
         lines.append("\n## Cache\n")
         lines.append(f"- Schema cache entries: {ch.schema_cache_size}")
         lines.append(f"- Schema cache TTL: {ch.SCHEMA_CACHE_TTL}s")
+        lines.append(f"- Table page cache entries: {ch.table_page_cache_size}")
+        lines.append(f"- Table page cache TTL: {ch.TABLE_PAGE_CACHE_TTL}s")
+
+        # Runtime
+        lines.append("\n## Runtime\n")
+        lines.append(f"- ssl_trust_injected: {runtime_state.ssl_trust_injected}")
+        lines.append(
+            f"- sse_auth_required_by_default: "
+            f"{not settings.ALLOW_INSECURE_REMOTE_TRANSPORT}"
+        )
 
         return "\n".join(lines)
 

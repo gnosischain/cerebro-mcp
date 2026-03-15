@@ -1,7 +1,45 @@
+import base64
+import hashlib
+import json
+
 from cerebro_mcp.clickhouse_client import ClickHouseManager
+from cerebro_mcp.config import settings
 from cerebro_mcp.manifest_loader import manifest
 from cerebro_mcp.safety import validate_identifier
-from cerebro_mcp.tools.query import format_results_table, truncate_response
+from cerebro_mcp.tool_models import ColumnSchema, TableListPage, TableSchema, TableSummary
+from cerebro_mcp.tool_output import (
+    build_query_summary,
+    format_results_table,
+    normalize_value,
+    truncate_response,
+)
+
+
+def _encode_page_token(database: str, pattern: str, last_name: str) -> str:
+    payload = {"db": database, "pat": pattern, "last": last_name}
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_page_token(
+    page_token: str | None,
+    *,
+    database: str,
+    pattern: str,
+) -> str:
+    if not page_token:
+        return ""
+
+    padding = "=" * (-len(page_token) % 4)
+    raw = base64.urlsafe_b64decode(page_token + padding)
+    payload = json.loads(raw.decode("utf-8"))
+    if payload.get("db") != database or payload.get("pat", "") != pattern:
+        raise ValueError("page_token does not match the requested database/filter")
+    last_name = payload.get("last", "")
+    valid, err = validate_identifier(last_name) if last_name else (True, "")
+    if not valid:
+        raise ValueError(err)
+    return last_name
 
 
 def register_schema_tools(mcp, ch: ClickHouseManager):
@@ -9,43 +47,120 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
     def list_tables(
         database: str,
         name_pattern: str = "",
-    ) -> str:
-        """List all tables in a ClickHouse database with engine and row counts.
-
-        Args:
-            database: Database to list tables from. One of: execution,
-                      consensus, crawlers_data, nebula, dbt.
-            name_pattern: Optional LIKE pattern to filter table names
-                          (e.g., 'stg_%', '%validators%').
-
-        Returns:
-            Table listing with name, engine, total_rows, and size.
-        """
+        like: str = "",
+        page_size: int = 50,
+        page_token: str | None = None,
+        include_detailed_columns: bool = False,
+    ) -> TableListPage | str:
+        """List tables in a ClickHouse database with cursor pagination."""
         try:
             valid, err = validate_identifier(database)
             if not valid:
                 return f"Error: {err}"
+            if database not in settings.ALLOWED_DATABASES:
+                return (
+                    f"Error: Database '{database}' is not allowed. "
+                    f"Allowed: {', '.join(settings.ALLOWED_DATABASES)}"
+                )
 
-            sql = (
-                "SELECT name, engine, total_rows, "
-                "formatReadableSize(total_bytes) AS size "
-                "FROM system.tables "
-                "WHERE database = {db:String}"
+            pattern = like or name_pattern
+            capped_page_size = min(max(page_size, 1), 200)
+            warnings: list[str] = []
+            if page_size != capped_page_size:
+                warnings.append("page_size_capped")
+            if include_detailed_columns:
+                warnings.append(
+                    "include_detailed_columns_ignored_use_describe_table"
+                )
+
+            last_name = _decode_page_token(
+                page_token,
+                database=database,
+                pattern=pattern,
             )
-            params = {"db": database}
-            if name_pattern:
-                sql += " AND name LIKE {pat:String}"
-                params["pat"] = name_pattern
-            sql += " ORDER BY name"
 
-            cache_key = f"tables:{database}:{name_pattern}"
+            sql = """
+SELECT name, engine, total_rows, formatReadableSize(total_bytes) AS size
+FROM system.tables
+WHERE database = {db:String}
+  AND ({pat:String} = '' OR name LIKE {pat:String})
+  AND ({last:String} = '' OR name > {last:String})
+ORDER BY name
+LIMIT {limit:UInt32}
+"""
+            params = {
+                "db": database,
+                "pat": pattern,
+                "last": last_name,
+                "limit": capped_page_size + 1,
+            }
+
+            cursor_key = hashlib.sha256((page_token or "").encode()).hexdigest()[:12]
+            cache_key = (
+                f"tables_page:{database}:{pattern}:{capped_page_size}:{cursor_key}"
+            )
             result = ch.execute_raw_cached(
-                sql, database, cache_key, parameters=params
+                sql,
+                database,
+                cache_key,
+                parameters=params,
+                page_cache=True,
             )
-            if not result["rows"]:
-                return f"No tables found in database '{database}'."
 
-            return format_results_table(result["columns"], result["rows"])
+            rows = result["rows"]
+            has_next = len(rows) > capped_page_size
+            page_rows = rows[:capped_page_size]
+            next_token = (
+                _encode_page_token(database, pattern, str(page_rows[-1][0]))
+                if has_next and page_rows
+                else None
+            )
+
+            tables = [
+                TableSummary(
+                    name=str(row[0]),
+                    engine=str(row[1]),
+                    total_rows=normalize_value(row[2]),
+                    size=str(row[3]),
+                )
+                for row in page_rows
+            ]
+
+            table_rows = [
+                [table.name, table.engine, table.total_rows, table.size]
+                for table in tables
+            ]
+            summary_parts = [f"## {database} tables\n"]
+            if tables:
+                summary_parts.append(
+                    format_results_table(
+                        ["name", "engine", "total_rows", "size"],
+                        table_rows,
+                    )
+                )
+            else:
+                summary_parts.append(f"No tables found in database '{database}'.")
+
+            if warnings:
+                summary_parts.append(
+                    "\n".join(["**Warnings:**", *[f"- {w}" for w in warnings]])
+                )
+            if next_token:
+                summary_parts.append(
+                    "More tables are available. Call `list_tables` again with "
+                    "`page_token` to continue."
+                )
+
+            return TableListPage(
+                database=database,
+                name_pattern=pattern,
+                page_size=capped_page_size,
+                include_detailed_columns=include_detailed_columns,
+                tables=tables,
+                next_page_token=next_token,
+                warnings=warnings,
+                summary_markdown=truncate_response("\n\n".join(summary_parts)),
+            )
         except Exception as e:
             return f"Error: {e}"
 
@@ -53,17 +168,8 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
     def describe_table(
         table: str,
         database: str = "dbt",
-    ) -> str:
-        """Get the column schema for a specific table.
-
-        Args:
-            table: Table name (e.g., 'blocks', 'api_execution_transactions_7d').
-            database: Database containing the table. Default: dbt.
-
-        Returns:
-            Column listing with name, type, default kind, and description.
-            Includes dbt model descriptions if available.
-        """
+    ) -> TableSchema | str:
+        """Get the column schema for a specific table."""
         try:
             valid, err = validate_identifier(table)
             if not valid:
@@ -80,28 +186,22 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
             )
             cache_key = f"columns:{database}.{table}"
             result = ch.execute_raw_cached(
-                sql, database, cache_key,
+                sql,
+                database,
+                cache_key,
                 parameters={"db": database, "tbl": table},
             )
 
             if not result["rows"]:
                 return f"Table '{database}.{table}' not found or has no columns."
 
-            output_parts = [f"## {database}.{table}\n"]
-
-            # Add dbt description if available
             model = manifest.get_model(table)
+            model_description = ""
+            materialization = ""
             if model:
-                desc = model.get("description", "")
-                if desc:
-                    output_parts.append(f"**Description:** {desc}\n")
-                mat = model.get("config", {}).get("materialized", "")
-                if mat:
-                    output_parts.append(f"**Materialization:** {mat}\n")
+                model_description = model.get("description", "")
+                materialization = model.get("config", {}).get("materialized", "")
 
-            # Build column table with dbt descriptions
-            columns = ["name", "type", "default_kind", "description"]
-            enriched_rows = []
             dbt_columns = {}
             if model:
                 dbt_columns = {
@@ -109,25 +209,51 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
                     for k, v in model.get("columns", {}).items()
                 }
 
+            columns = []
+            enriched_rows = []
             for row in result["rows"]:
-                col_name = row[0] if row[0] else ""
-                col_type = row[1] if row[1] else ""
-                default = row[2] if row[2] else ""
-                # Prefer dbt description over ClickHouse comment
+                col_name = str(row[0] or "")
+                col_type = str(row[1] or "")
+                default = str(row[2] or "")
                 dbt_col = dbt_columns.get(col_name.lower(), {})
-                description = (
+                description = str(
                     dbt_col.get("description", "")
                     or (row[3] if len(row) > 3 and row[3] else "")
                 )
+                columns.append(
+                    ColumnSchema(
+                        name=col_name,
+                        type=col_type,
+                        default_kind=default,
+                        description=description,
+                    )
+                )
                 enriched_rows.append([col_name, col_type, default, description])
 
-            output_parts.append(format_results_table(columns, enriched_rows))
+            summary_parts = [f"## {database}.{table}\n"]
+            if model_description:
+                summary_parts.append(f"**Description:** {model_description}")
+            if materialization:
+                summary_parts.append(f"**Materialization:** {materialization}")
+            summary_parts.append(
+                format_results_table(
+                    ["name", "type", "default_kind", "description"],
+                    enriched_rows,
+                )
+            )
 
             from cerebro_mcp.tools.session_state import state
 
             state.record_describe_table(table)
 
-            return truncate_response("\n".join(output_parts))
+            return TableSchema(
+                database=database,
+                table=table,
+                model_description=model_description,
+                materialization=materialization,
+                columns=columns,
+                summary_markdown=truncate_response("\n\n".join(summary_parts)),
+            )
         except Exception as e:
             return f"Error: {e}"
 
@@ -137,16 +263,7 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
         database: str = "dbt",
         limit: int = 5,
     ) -> str:
-        """Get sample rows from a table to understand data shape and values.
-
-        Args:
-            table: Table name to sample from.
-            database: Database containing the table. Default: dbt.
-            limit: Number of sample rows (1-20). Default: 5.
-
-        Returns:
-            Sample rows formatted as a table.
-        """
+        """Get sample rows from a table to understand data shape and values."""
         try:
             valid, err = validate_identifier(table)
             if not valid:
@@ -157,24 +274,36 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
 
             capped = min(max(limit, 1), 20)
 
-            # Verify table exists
             check_sql = (
                 "SELECT count() FROM system.tables "
                 "WHERE database = {db:String} AND name = {tbl:String}"
             )
             cache_key = f"exists:{database}.{table}"
             check = ch.execute_raw_cached(
-                check_sql, database, cache_key,
+                check_sql,
+                database,
+                cache_key,
                 parameters={"db": database, "tbl": table},
             )
             if not check["rows"] or check["rows"][0][0] == 0:
                 return f"Table '{database}.{table}' not found."
 
-            sql = f"SELECT * FROM `{database}`.`{table}` LIMIT {capped}"
-            result = ch.execute_raw(sql, database)
-            if not result["rows"]:
-                return f"Table '{database}.{table}' is empty."
-
-            return format_results_table(result["columns"], result["rows"])
+            executed = ch.run_query(
+                f"SELECT * FROM `{database}`.`{table}`",
+                database,
+                requested_max_rows=capped,
+                audience="tool",
+            )
+            result = ch.build_query_result(executed, max_rows=capped)
+            return build_query_summary(
+                columns=result.columns,
+                rows=result.rows,
+                row_count=result.row_count,
+                rows_returned=result.rows_returned,
+                elapsed_seconds=result.elapsed_seconds,
+                database=result.database,
+                sql=result.sql,
+                warnings=result.warnings,
+            )
         except Exception as e:
             return f"Error: {e}"

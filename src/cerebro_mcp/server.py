@@ -4,9 +4,12 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
+from cerebro_mcp import runtime_state
+from cerebro_mcp.bootstrap import init_ssl_trust, validate_remote_transport_auth
 from cerebro_mcp.clickhouse_client import ClickHouseManager
-from cerebro_mcp.manifest_loader import manifest
+from cerebro_mcp.config import settings
 from cerebro_mcp.docs_loader import docs_index
+from cerebro_mcp.manifest_loader import manifest
 from cerebro_mcp.tools.query import register_query_tools
 from cerebro_mcp.tools.schema import register_schema_tools
 from cerebro_mcp.tools.dbt import register_dbt_tools
@@ -22,6 +25,9 @@ from cerebro_mcp.tools.reasoning import (
     register_reasoning_tools,
 )
 from cerebro_mcp.tools.agents import register_agent_tools
+
+
+runtime_state.ssl_trust_injected = init_ssl_trust()
 
 mcp = FastMCP(
     "cerebro-mcp",
@@ -137,7 +143,27 @@ install_auto_tool_tracing(mcp)
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    try:
+        info = ch.get_server_info("dbt")
+        return JSONResponse(
+            {
+                "status": "ok",
+                "clickhouse_connected": True,
+                "clickhouse_version": info["version"],
+                "ssl_trust_injected": runtime_state.ssl_trust_injected,
+            },
+            status_code=200,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "status": "error",
+                "clickhouse_connected": False,
+                "error": str(exc),
+                "ssl_trust_injected": runtime_state.ssl_trust_injected,
+            },
+            status_code=503,
+        )
 
 
 @mcp.custom_route("/reports/{report_id}", methods=["GET"])
@@ -175,6 +201,7 @@ def main():
     transport = "sse" if "--sse" in sys.argv else "stdio"
 
     if transport == "sse":
+        validate_remote_transport_auth(os.environ.get("MCP_AUTH_TOKEN"))
         _run_sse_with_auth()
     else:
         mcp.run(transport="stdio")
@@ -186,10 +213,10 @@ def _run_sse_with_auth():
     import uvicorn
 
     os.environ["CEREBRO_TRANSPORT"] = "sse"
-    from starlette.middleware import Middleware
     from starlette.middleware.base import BaseHTTPMiddleware
 
     auth_token = os.environ.get("MCP_AUTH_TOKEN")
+    validate_remote_transport_auth(auth_token)
 
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):

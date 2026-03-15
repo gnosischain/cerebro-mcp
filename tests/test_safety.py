@@ -94,6 +94,26 @@ class TestValidateQuery:
         valid, err = validate_query("GRANT SELECT ON db.* TO user")
         assert not valid
 
+    def test_reject_format_clause(self):
+        valid, err = validate_query("SELECT * FROM t FORMAT JSON")
+        assert not valid
+        assert "pattern" in err
+
+    def test_reject_settings_clause(self):
+        valid, err = validate_query("SELECT * FROM t SETTINGS max_threads = 8")
+        assert not valid
+        assert "pattern" in err
+
+    def test_reject_external_table_functions(self):
+        for sql in (
+            "SELECT * FROM s3('https://example.com/file.csv')",
+            "SELECT * FROM remote('cluster', db, t)",
+            "SELECT * FROM url('https://example.com', 'CSV')",
+        ):
+            valid, err = validate_query(sql)
+            assert not valid
+            assert "pattern" in err
+
     def test_valid_subquery(self):
         valid, err = validate_query(
             "SELECT * FROM (SELECT 1 AS x) WHERE x = 1"
@@ -138,7 +158,8 @@ class TestEnsureLimit:
 
     def test_preserves_existing_limit(self):
         result = ensure_limit("SELECT * FROM t LIMIT 50", 100)
-        assert result.count("LIMIT") == 1
+        assert result.startswith("SELECT * FROM (SELECT * FROM t LIMIT 50)")
+        assert result.endswith("LIMIT 100")
 
     def test_handles_trailing_semicolon(self):
         result = ensure_limit("SELECT * FROM t;", 100)
@@ -147,4 +168,5 @@ class TestEnsureLimit:
 
     def test_case_insensitive_limit_detection(self):
         result = ensure_limit("SELECT * FROM t limit 50", 100)
-        assert result.count("LIMIT") + result.count("limit") == 1
+        assert result.startswith("SELECT * FROM (SELECT * FROM t limit 50)")
+        assert result.endswith("LIMIT 100")

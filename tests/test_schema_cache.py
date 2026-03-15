@@ -64,6 +64,12 @@ class TestSchemaCache:
         self.ch._cache_set("b", {"data": 2})
         assert self.ch.schema_cache_size == 2
 
+    def test_table_page_cache_size_property(self):
+        assert self.ch.table_page_cache_size == 0
+        self.ch._cache_set("page_a", {"data": 1}, page_cache=True)
+        self.ch._cache_set("page_b", {"data": 2}, page_cache=True)
+        assert self.ch.table_page_cache_size == 2
+
     def test_execute_raw_cached_returns_cached(self):
         """execute_raw_cached should return cached result on hit."""
         result = {"columns": ["x"], "rows": [[42]]}

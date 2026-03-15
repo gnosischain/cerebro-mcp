@@ -20,7 +20,12 @@ FORBIDDEN_KEYWORDS = [
     "KILL",
     "SYSTEM",
     "INTO OUTFILE",
-    "FORMAT Native",
+]
+
+FORBIDDEN_PATTERNS = [
+    r"\bFORMAT\s+\w+\b",
+    r"\bSETTINGS\b",
+    r"\b(file|url|s3|hdfs|jdbc|mysql|postgresql|odbc|remote)\s*\(",
 ]
 
 # Allowed query starts
@@ -87,6 +92,10 @@ def validate_query(sql: str, max_length: int = 10000) -> Tuple[bool, str]:
         if re.search(pattern, clean_upper):
             return False, f"Forbidden keyword detected: {keyword}"
 
+    for pattern in FORBIDDEN_PATTERNS:
+        if re.search(pattern, clean_sql, flags=re.IGNORECASE):
+            return False, f"Forbidden SQL pattern detected: {pattern}"
+
     return True, ""
 
 
@@ -102,10 +111,15 @@ def validate_identifier(name: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def ensure_limit(sql: str, max_rows: int) -> str:
-    """Append a LIMIT clause if one is not already present."""
+def enforce_result_limit(sql: str, max_rows: int) -> str:
+    """Guarantee a result cap even when the original query already has LIMIT."""
     clean = _strip_comments_and_strings(sql)
+    base = sql.rstrip().rstrip(";")
     if not re.search(r"\bLIMIT\b", clean, re.IGNORECASE):
-        sql = sql.rstrip().rstrip(";")
-        sql += f"\nLIMIT {max_rows}"
-    return sql
+        return f"{base}\nLIMIT {max_rows}"
+    return f"SELECT * FROM ({base}) AS _cerebro_limit LIMIT {max_rows}"
+
+
+def ensure_limit(sql: str, max_rows: int) -> str:
+    """Backward-compatible alias for result-cap enforcement."""
+    return enforce_result_limit(sql, max_rows)

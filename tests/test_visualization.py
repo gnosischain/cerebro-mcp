@@ -10,6 +10,7 @@ import pytest
 import cerebro_mcp.tools.visualization as viz
 import cerebro_mcp.tools.query as query_mod
 import cerebro_mcp.tools.dbt as dbt_mod
+from cerebro_mcp.tool_models import QueryResult
 
 
 # ---------------------------------------------------------------------------
@@ -596,12 +597,20 @@ class TestMCPAppResource:
 class TestExecuteQueryNudge:
     def _make_mock_ch(self):
         ch = MagicMock()
-        ch.execute_query.return_value = {
-            "columns": ["date", "value"],
-            "rows": [["2026-01-01", 42]],
-            "row_count": 1,
-            "elapsed_seconds": 0.1,
-        }
+        ch.run_query.return_value = object()
+        ch.build_query_result.return_value = QueryResult(
+            sql="SELECT 1",
+            database="dbt",
+            columns=["date", "value"],
+            rows=[["2026-01-01", 42]],
+            row_count=1,
+            rows_returned=1,
+            truncated=False,
+            fetch_mode="rows",
+            elapsed_seconds=0.1,
+            warnings=[],
+            summary_markdown="",
+        )
         return ch
 
     def test_nudge_fires_without_charts_after_3_queries(self):
@@ -616,11 +625,11 @@ class TestExecuteQueryNudge:
 
         r1 = fn(sql="SELECT 1", database="dbt", max_rows=10)
         r2 = fn(sql="SELECT 2", database="dbt", max_rows=10)
-        assert "generate_chart" not in r1
-        assert "generate_chart" not in r2
+        assert "generate_chart" not in r1.summary_markdown
+        assert "generate_chart" not in r2.summary_markdown
 
         r3 = fn(sql="SELECT 3", database="dbt", max_rows=10)
-        assert "generate_chart" in r3
+        assert "generate_chart" in r3.summary_markdown
 
     def test_nudge_with_charts_shows_reminder(self):
         """Nudge shows chart count when charts exist in registry."""
@@ -642,8 +651,8 @@ class TestExecuteQueryNudge:
         query_mod._query_count = 2
 
         r3 = fn(sql="SELECT 3", database="dbt", max_rows=10)
-        assert "1 chart(s) registered" in r3
-        assert "generate_report" in r3
+        assert "1 chart(s) registered" in r3.summary_markdown
+        assert "generate_report" in r3.summary_markdown
 
     def test_nudge_cooldown_prevents_spam(self):
         """Nudge does not fire again within cooldown window."""
@@ -658,10 +667,10 @@ class TestExecuteQueryNudge:
         fn(sql="SELECT 1", database="dbt", max_rows=10)
         fn(sql="SELECT 2", database="dbt", max_rows=10)
         r3 = fn(sql="SELECT 3", database="dbt", max_rows=10)
-        assert "generate_chart" in r3
+        assert "generate_chart" in r3.summary_markdown
 
         r4 = fn(sql="SELECT 4", database="dbt", max_rows=10)
-        assert "generate_chart" not in r4
+        assert "generate_chart" not in r4.summary_markdown
 
 
 # ---------------------------------------------------------------------------

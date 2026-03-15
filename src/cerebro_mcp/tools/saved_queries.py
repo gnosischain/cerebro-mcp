@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
 from cerebro_mcp.safety import validate_query, validate_identifier
-from cerebro_mcp.tools.query import format_results_table, truncate_response, _truncate_sql
+from cerebro_mcp.tool_output import build_query_summary
 
 
 SAVED_QUERIES_DIR = os.environ.get("CEREBRO_SAVED_QUERIES_DIR", os.path.expanduser("~/.cerebro-mcp"))
@@ -147,19 +147,29 @@ def register_saved_query_tools(mcp, ch: ClickHouseManager):
 
             state.record_execute_query(sql)
 
-            result = ch.execute_query(sql, database, max_rows)
-            table = format_results_table(result["columns"], result["rows"])
-
-            header = (
-                f"**Query:** {name}\n"
-                f"**Database:** {database}\n"
-                f"**Rows:** {result['row_count']} | "
-                f"**Time:** {result['elapsed_seconds']}s\n\n"
+            executed = ch.run_query(
+                sql,
+                database,
+                requested_max_rows=max_rows,
+                audience="tool",
             )
-            if q.get("description"):
-                header = f"**Description:** {q['description']}\n" + header
+            result = ch.build_query_result(executed, max_rows=max_rows)
 
-            sql_block = f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
-            return truncate_response(header + table + sql_block)
+            notes = []
+            if q.get("description"):
+                notes.append(f"**Description:** {q['description']}")
+            notes.append(f"**Saved Query:** {name}")
+
+            return build_query_summary(
+                columns=result.columns,
+                rows=result.rows,
+                row_count=result.row_count,
+                rows_returned=result.rows_returned,
+                elapsed_seconds=result.elapsed_seconds,
+                database=result.database,
+                sql=result.sql,
+                warnings=result.warnings,
+                extra_notes=notes,
+            )
         except Exception as e:
             return f"Error: {e}"

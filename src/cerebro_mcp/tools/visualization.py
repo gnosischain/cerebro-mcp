@@ -1161,9 +1161,14 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         try:
             state.record_generate_chart(chart_type, sql, series_field)
 
-            result = ch.execute_query(sql, database, max_rows)
-            columns = result["columns"]
-            rows = result["rows"]
+            executed = ch.run_query(
+                sql,
+                database,
+                requested_max_rows=max_rows,
+                audience="internal",
+            )
+            columns = executed.columns
+            rows = executed.rows
 
             if not rows:
                 return "Error: Query returned no data. Cannot generate chart."
@@ -1210,7 +1215,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 series_tag = f" | series: {series_field}" if series_field else ""
                 return (
                     f"OK|{chart_id}|{chart_type}|{title or chart_type}"
-                    f"|{len(rows)}|{result['elapsed_seconds']}s{series_tag}"
+                    f"|{len(rows)}|{executed.elapsed_seconds}s{series_tag}"
                 )
 
             output = json.dumps(option, default=str, indent=2)
@@ -1220,7 +1225,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 f"`{{{{chart:{chart_id}}}}}`) | "
                 f"Type: {chart_type} | "
                 f"Data points: {len(rows)} | "
-                f"Query time: {result['elapsed_seconds']}s"
+                f"Query time: {executed.elapsed_seconds}s"
             )
 
             metadata += f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
@@ -1899,7 +1904,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
 
         if disk_path:
             size_kb = len(html) / 1024
-            if len(html) > settings.TOOL_RESPONSE_MAX_CHARS:
+            if len(html) > settings.effective_tool_result_max_chars:
                 return (
                     f"Report is {size_kb:,.0f} KB (exceeds tool response limit). "
                     f"Saved at: `{disk_path}`\n\n"
