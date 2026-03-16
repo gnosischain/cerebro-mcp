@@ -315,6 +315,7 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
             f"- effective_summary_max_chars: {settings.effective_summary_max_chars}"
         )
         lines.append(f"- TOOL_RESULT_MAX_ROWS: {settings.TOOL_RESULT_MAX_ROWS}")
+        lines.append(f"- CEREBRO_RESEARCH_DIR: {settings.CEREBRO_RESEARCH_DIR}")
         lines.append(f"- MANIFEST_REFRESH_INTERVAL_SECONDS: {settings.MANIFEST_REFRESH_INTERVAL_SECONDS}")
         lines.append(f"- ALLOWED_DATABASES: {', '.join(settings.ALLOWED_DATABASES)}")
         lines.append(
@@ -751,6 +752,21 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 | `list_saved_queries` | Show all saved queries |
 | `run_saved_query` | Execute a saved query by name |
 
+### Research Workflow
+| Tool | Description |
+|------|-------------|
+| `start_research_project` | Create a durable phase-driven research project |
+| `get_research_project` | Compact project summary with counts and current phase |
+| `plan_research_phase` / `execute_research_phase` | Move through mapping, hypothesis, and execution |
+| `attach_research_evidence` | Link query/chart/report/schema artifacts to a project |
+| `capture_schema_snapshot` | Persist and attach a schema snapshot for mapping |
+| `record_research_memory` | Store reusable domain caveats and facts |
+| `record_research_finding` | Store evidence-backed project conclusions |
+| `get_research_memory` / `get_research_evidence` / `get_research_findings` | Paginated retrieval for large projects |
+| `verify_research_phase` | Run structural validation before peer review |
+| `prepare_peer_review` / `record_peer_review` | Client-orchestrated adversarial review workflow |
+| `publish_research_report` | Publish the final reviewed research report |
+
 ### Reasoning & Tracing
 | Tool | Description |
 |------|-------------|
@@ -776,6 +792,7 @@ Guided workflows you can select in Claude Desktop / VS Code:
 | `write_query(question)` | Step-by-step SQL query writing |
 | `report(period, topics, focus)` | Generate interactive reports with charts |
 | `adopt_persona_*` | Load agent personas for multi-phase workflows |
+| `conduct_research_peer_review(packet_json)` | Peer-review prompt with strict JSON schema injection |
 
 ## Resources
 

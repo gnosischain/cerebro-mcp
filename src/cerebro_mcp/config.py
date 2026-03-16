@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     ASYNC_RESULT_PAGE_SIZE: int = 200
     ASYNC_RESULT_MEMORY_THRESHOLD_BYTES: int = 5_000_000
     ASYNC_RESULT_DIR: str = ".cerebro/query_results"
+    CEREBRO_RESEARCH_DIR: str = ".cerebro/research_projects"
+    RESEARCH_PAGE_SIZE_DEFAULT: int = 20
+    RESEARCH_PAGE_SIZE_MAX: int = 100
     ALLOW_INSECURE_REMOTE_TRANSPORT: bool = False
 
     # Manifest refresh

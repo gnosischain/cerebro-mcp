@@ -528,3 +528,48 @@ class TestConditionalGET:
         assert loader_with_sample.model_count == 3
         assert loader_with_sample.content_hash is None  # Not set via _build_indexes
         assert loader_with_sample.last_refresh_error is None
+
+
+class TestStartupLogging:
+    def test_missing_manifest_logs_without_stdout(self, caplog, capsys):
+        loader = ManifestLoader()
+
+        with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+            mock_settings.DBT_MANIFEST_URL = None
+            mock_settings.DBT_MANIFEST_PATH = ""
+            with caplog.at_level("WARNING"):
+                loader.load()
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "No manifest loaded" in caplog.text
+
+    def test_manifest_load_success_uses_logging_not_stdout(
+        self, caplog, capsys
+    ):
+        loader = ManifestLoader()
+        data = {
+            "nodes": {},
+            "sources": {},
+            "parent_map": {},
+            "child_map": {},
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = data
+        mock_resp.content = json.dumps(data).encode()
+        mock_resp.headers = {}
+
+        with patch(
+            "cerebro_mcp.manifest_loader.requests.get",
+            return_value=mock_resp,
+        ):
+            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+                mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
+                mock_settings.DBT_MANIFEST_PATH = ""
+                with caplog.at_level("INFO"):
+                    loader.load()
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Loaded manifest from http://test.com/manifest.json" in caplog.text

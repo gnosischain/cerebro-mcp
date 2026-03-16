@@ -5,6 +5,7 @@ import re
 import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from numbers import Number
 from pathlib import Path
 import sys
 if sys.version_info >= (3, 11):
@@ -99,6 +100,12 @@ def _prune_report_cache() -> None:
     while len(_REPORT_CACHE) > _REPORT_MAX_ENTRIES:
         oldest = min(_REPORT_CACHE, key=lambda k: _REPORT_CACHE[k]["expires"])
         del _REPORT_CACHE[oldest]
+
+
+def get_chart_record(chart_id: str) -> dict | None:
+    with _chart_lock:
+        chart = _chart_registry.get(chart_id)
+        return dict(chart) if chart else None
 
 
 # --- Report Helpers ---
@@ -246,6 +253,117 @@ def _get_report_download_url(report_id: str) -> str | None:
     return None
 
 
+def create_report_artifact(
+    title: str,
+    content_markdown: str,
+    *,
+    enforce_quality_gate: bool = True,
+    reset_session_state: bool = True,
+) -> dict:
+    from cerebro_mcp.tools.session_state import state
+
+    if enforce_quality_gate:
+        passed, reason, _warnings = state.check_report_preconditions(
+            _chart_registry
+        )
+        if not passed:
+            raise ValueError(f"Report quality gate failed: {reason}")
+
+    chart_ids_in_content = re.findall(
+        r"\{\{chart:(\w+)\}\}",
+        content_markdown,
+    )
+
+    has_grid = "{{grid:" in content_markdown
+    kpi_count = sum(
+        1 for cid in chart_ids_in_content
+        if _chart_registry.get(cid, {}).get("chart_type") == "numberDisplay"
+    )
+    if not has_grid and kpi_count >= 2:
+        raise ValueError(
+            f"Layout rejected: Found {kpi_count} KPI/counter charts but no "
+            "{{grid:N}} directives. KPI counters must be grouped in a grid row."
+        )
+
+    chart_specs: dict = {}
+    chart_queries: dict = {}
+    missing = []
+    for cid in chart_ids_in_content:
+        if cid in _chart_registry:
+            chart_specs[cid] = _chart_registry[cid]["option"]
+            chart_queries[cid] = {
+                "sql": _chart_registry[cid].get("sql", ""),
+                "database": _chart_registry[cid].get("database", "dbt"),
+                "title": _chart_registry[cid].get("title", ""),
+            }
+        else:
+            missing.append(cid)
+
+    if missing:
+        raise ValueError(
+            f"Chart IDs not found in registry: {', '.join(missing)}. "
+            f"Available: {', '.join(_chart_registry.keys()) or 'none'}."
+        )
+
+    rendered_html = _markdown_to_html(content_markdown)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    structured = {
+        "title": title,
+        "timestamp": timestamp,
+        "charts": chart_specs,
+        "sections_html": rendered_html,
+        "queries": chart_queries,
+    }
+
+    html = _build_standalone_html(
+        title,
+        timestamp,
+        chart_specs,
+        rendered_html,
+        chart_queries,
+    )
+
+    report_id = str(uuid.uuid4())
+    report_dir = _get_report_dir()
+    report_path = report_dir / _report_filename(report_id, title)
+    report_path.write_text(html, encoding="utf-8")
+
+    file_uri = _get_report_link(report_path)
+    structured["file_uri"] = file_uri
+
+    with _REPORT_LOCK:
+        _prune_report_cache()
+        _REPORT_CACHE[report_id] = {
+            "html": html,
+            "structured": structured,
+            "expires": datetime.now(timezone.utc) + _REPORT_TTL,
+            "path": report_path,
+            "title": title,
+        }
+
+    if reset_session_state:
+        state.reset()
+
+    reply_text = (
+        f"**Report:** {title}\n\n"
+        f"Report ID: `{report_id[:8]}` | "
+        f"Charts: {len(chart_specs)}\n\n"
+        f"To reopen: `open_report(\"{report_id[:8]}\")`\n"
+        f"To export HTML: `export_report(\"{report_id[:8]}\")`\n\n"
+        f"_Ask if they want the HTML exported or conversion to docx/pdf/pptx._"
+    )
+
+    return {
+        "report_id": report_id,
+        "report_path": report_path,
+        "file_uri": file_uri,
+        "structured": structured,
+        "reply_text": reply_text,
+        "chart_count": len(chart_specs),
+    }
+
+
 def _extract_structured_from_html(html: str) -> dict | None:
     """Try to extract embedded report data from standalone HTML."""
     match = re.search(
@@ -277,6 +395,111 @@ def _build_col_index(columns: list[str]) -> dict[str, int]:
 def _extract_column(rows: list, index: int) -> list:
     """Extract a column from rows and serialize values."""
     return [_serialize_value(row[index]) for row in rows]
+
+
+def _first_non_null_value(rows: list, index: int):
+    """Return the first non-null value observed in a column."""
+    for row in rows:
+        if index >= len(row):
+            continue
+        value = row[index]
+        if value is not None:
+            return value
+    return None
+
+
+def _is_numeric_value(value) -> bool:
+    return isinstance(value, Number) and not isinstance(value, bool)
+
+
+def _numeric_value_columns(
+    columns: list[str],
+    rows: list,
+    *,
+    exclude_fields: set[str],
+) -> list[str]:
+    """Infer numeric value columns from the returned result set."""
+    numeric_columns: list[str] = []
+    for index, name in enumerate(columns):
+        if name in exclude_fields:
+            continue
+        sample = _first_non_null_value(rows, index)
+        if _is_numeric_value(sample):
+            numeric_columns.append(name)
+    return numeric_columns
+
+
+def _validate_chart_input_shape(
+    *,
+    chart_type: str,
+    columns: list[str],
+    rows: list,
+    x_field: str,
+    y_field: str,
+    series_field: str,
+) -> tuple[str | None, str]:
+    """Validate chart/query contracts and classify the input shape."""
+    if chart_type == "numberDisplay":
+        if series_field:
+            return (
+                "Error: `numberDisplay` does not support `series_field`. "
+                "Use a single-row query that returns exactly one KPI value.",
+                "",
+            )
+        if "," in y_field:
+            return (
+                "Error: `numberDisplay` requires a single metric column. "
+                "Use one `y_field` and return exactly one row.",
+                "",
+            )
+        if len(rows) != 1:
+            latest_hint = (
+                f" For latest-period KPIs, use `ORDER BY {x_field} DESC LIMIT 1`."
+                if x_field
+                else ""
+            )
+            return (
+                "Error: `numberDisplay` charts require a single-row query, "
+                f"but this query returned {len(rows)} rows."
+                f"{latest_hint} For aggregate KPIs, return one row with "
+                "`sum(...)`, `count(...)`, or similar.",
+                "",
+            )
+        return None, "scalar_kpi_input"
+
+    if chart_type in {"line", "area", "bar"}:
+        if series_field:
+            return None, "long_format_series_input"
+
+        y_fields = [field.strip() for field in y_field.split(",") if field.strip()]
+        if len(y_fields) > 1:
+            return None, "multi_series_wide_input"
+
+        numeric_columns = _numeric_value_columns(
+            columns,
+            rows,
+            exclude_fields={x_field, series_field},
+        )
+        extra_numeric = [
+            name for name in numeric_columns if name not in set(y_fields)
+        ]
+        if extra_numeric and len(y_fields) == 1:
+            available = ",".join(numeric_columns)
+            x_example = x_field or "x"
+            return (
+                f"Error: `{chart_type}` chart queries do not auto-plot extra "
+                "numeric columns. This query returned multiple numeric value "
+                f"columns ({', '.join(f'`{name}`' for name in numeric_columns)}) "
+                f"but the chart spec only selected `y_field=\"{y_fields[0]}\"` "
+                "and no `series_field`.\n\n"
+                f"Use `y_field=\"{available}\"` for a wide multi-series chart, "
+                f"or reshape the query to long form like `({x_example}, series, value)` "
+                "and set `series_field`.",
+                "",
+            )
+        return None, "single_series_trend_input"
+
+    return None, "other_chart_input"
 
 
 def _build_line_chart(
@@ -1159,8 +1382,6 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             return f"Error: Unknown chart type '{chart_type}'. Supported: {supported}"
 
         try:
-            state.record_generate_chart(chart_type, sql, series_field)
-
             executed = ch.run_query(
                 sql,
                 database,
@@ -1185,15 +1406,33 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             if x_field and x_field not in col_index:
                 available = ", ".join(columns)
                 return f"Error: x_field '{x_field}' not found in columns: {available}"
-            if y_field and y_field not in col_index:
-                available = ", ".join(columns)
-                return f"Error: y_field '{y_field}' not found in columns: {available}"
+            if y_field:
+                requested_y_fields = [field.strip() for field in y_field.split(",") if field.strip()]
+                missing_y_fields = [field for field in requested_y_fields if field not in col_index]
+                if missing_y_fields:
+                    available = ", ".join(columns)
+                    missing = ", ".join(missing_y_fields)
+                    return (
+                        f"Error: y_field '{missing}' not found in columns: {available}"
+                    )
             if series_field and series_field not in col_index:
                 available = ", ".join(columns)
                 return f"Error: series_field '{series_field}' not found in columns: {available}"
 
+            shape_error, input_shape = _validate_chart_input_shape(
+                chart_type=chart_type,
+                columns=columns,
+                rows=rows,
+                x_field=x_field,
+                y_field=y_field,
+                series_field=series_field,
+            )
+            if shape_error:
+                return shape_error
+
             builder = CHART_BUILDERS[chart_type]
             option = builder(rows, col_index, x_field, y_field, series_field, title)
+            state.record_generate_chart(chart_type, sql, series_field)
 
             # Register chart in registry (with TTL tracking)
             chart_id = _next_chart_id()
@@ -1208,6 +1447,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     "sql": sql,
                     "database": database,
                     "series_field": series_field,
+                    "input_shape": input_shape,
                 }
 
             # Metadata-only mode: compact single line for batch tool
@@ -1279,6 +1519,14 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
 
         Supported chart types: line, area, bar, pie, numberDisplay, scatter, heatmap, calendar, gauge, treemap, sankey, graph, funnel.
 
+        Chart/query contract:
+        - `numberDisplay` requires a single-row SQL result. For latest-period
+          KPIs, use queries such as `ORDER BY month DESC LIMIT 1`.
+        - `line`, `area`, and `bar` charts do NOT auto-plot extra numeric
+          columns. If your query returns multiple metrics, either set
+          `y_field="metric_a,metric_b"` or reshape to long form and provide
+          `series_field`.
+
         Args:
             sql: SQL query to execute for chart data. Only use column names
                  verified via `describe_table` or `get_model_details`.
@@ -1339,10 +1587,19 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         exploration preconditions — just provide SQL and get a chart.
         Charts from quick_chart are registered and can be used in reports.
 
-        For full analytical reports, use `generate_chart` instead (which
-        enforces discovery and exploration).
+        For full analytical reports, use `generate_charts` instead so all
+        report charts are created in one batch call with the normal workflow
+        gates.
 
         Supported chart types: line, area, bar, pie, numberDisplay, scatter, heatmap, calendar, gauge, treemap, sankey, graph, funnel.
+
+        Chart/query contract:
+        - `numberDisplay` requires a single-row SQL result. For latest-period
+          KPIs, use queries such as `ORDER BY month DESC LIMIT 1`.
+        - `line`, `area`, and `bar` charts do NOT auto-plot extra numeric
+          columns. If your query returns multiple metrics, either set
+          `y_field="metric_a,metric_b"` or reshape to long form and provide
+          `series_field`.
 
         Args:
             sql: SQL query to execute for chart data.
@@ -1377,7 +1634,18 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         ECharts JSON, no SQL echo) mapping input index to chart ID.
 
         Each chart spec must have at least `sql`. All other fields are optional
-        with sensible defaults. Reports MUST include:
+        with sensible defaults.
+
+        Chart/query contract:
+        - Every `numberDisplay` chart must come from a single-row query.
+          Do not pass raw time series into KPI cards.
+        - For latest-period monthly or weekly KPIs, use queries such as
+          `ORDER BY month DESC LIMIT 1`.
+        - For `line`, `area`, and `bar` charts, extra numeric columns are not
+          auto-plotted. Use comma-separated `y_field` values for wide input or
+          reshape to long form and provide `series_field`.
+
+        Reports MUST include:
         - At least 1 chart with series_field (dimensional breakdown)
         - At least 1 scatter/heatmap chart OR correlation query
 
@@ -1474,7 +1742,10 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             Table of registered charts available for use in generate_report.
         """
         if not _chart_registry:
-            return "No charts registered. Use `generate_chart` to create charts first."
+            return (
+                "No charts registered. Use `generate_charts` for report batches "
+                "or `generate_chart` / `quick_chart` for one-off charts first."
+            )
 
         lines = ["# Registered Charts\n"]
         lines.append("| Chart ID | Title | Type | Data Points |")
@@ -1547,133 +1818,18 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             Interactive UI resource rendered natively in the chat client.
         """
         try:
-            # --- Report quality gate ---
-            from cerebro_mcp.tools.session_state import state
-
-            passed, reason, warnings = state.check_report_preconditions(
-                _chart_registry
-            )
-            if not passed:
-                return CallToolResult(
-                    content=[TextContent(
-                        type="text",
-                        text=f"Error: Report quality gate failed: {reason}",
-                    )],
-                    isError=True,
-                )
-
-            # Find chart placeholders
-            chart_ids_in_content = re.findall(
-                r"\{\{chart:(\w+)\}\}", content_markdown
-            )
-
-            # --- Grid layout enforcement ---
-            has_grid = "{{grid:" in content_markdown
-            kpi_count = sum(
-                1 for cid in chart_ids_in_content
-                if _chart_registry.get(cid, {}).get("chart_type") == "numberDisplay"
-            )
-            if not has_grid and kpi_count >= 2:
-                return CallToolResult(
-                    content=[TextContent(
-                        type="text",
-                        text=(
-                            f"Error: Layout rejected: Found {kpi_count} KPI/counter "
-                            f"charts but no {{{{grid:N}}}} directives. "
-                            f"KPI counters MUST be grouped in a grid row "
-                            f"(e.g., {{{{grid:3}}}} ... {{{{/grid}}}}). "
-                            f"Breakdowns should use {{{{grid:2}}}}. "
-                            f"Restructure the markdown and retry."
-                        ),
-                    )],
-                    isError=True,
-                )
-
-            # Collect chart specs and SQL queries for referenced charts
-            chart_specs: dict = {}
-            chart_queries: dict = {}
-            missing = []
-            for cid in chart_ids_in_content:
-                if cid in _chart_registry:
-                    chart_specs[cid] = _chart_registry[cid]["option"]
-                    chart_queries[cid] = {
-                        "sql": _chart_registry[cid].get("sql", ""),
-                        "database": _chart_registry[cid].get("database", "dbt"),
-                        "title": _chart_registry[cid].get("title", ""),
-                    }
-                else:
-                    missing.append(cid)
-
-            if missing:
-                return CallToolResult(
-                    content=[TextContent(
-                        type="text",
-                        text=(
-                            f"Error: Chart IDs not found in registry: {', '.join(missing)}. "
-                            f"Available: {', '.join(_chart_registry.keys()) or 'none'}. "
-                            f"Use `generate_chart` to create charts first."
-                        ),
-                    )],
-                    isError=True,
-                )
-
-            # Convert markdown to HTML
-            rendered_html = _markdown_to_html(content_markdown)
-
-            # Generate timestamp (real UTC)
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-            # Build structured data for MCP App
-            structured = {
-                "title": title,
-                "timestamp": timestamp,
-                "charts": chart_specs,
-                "sections_html": rendered_html,
-                "queries": chart_queries,
-            }
-
-            # Build standalone HTML for disk saves
-            html = _build_standalone_html(title, timestamp, chart_specs, rendered_html, chart_queries)
-
-            # Cache the report
-            report_id = str(uuid.uuid4())
-
-            # Save to persistent directory
-            report_dir = _get_report_dir()
-            report_path = report_dir / _report_filename(report_id, title)
-            report_path.write_text(html, encoding="utf-8")
-
-            file_uri = _get_report_link(report_path)
-            structured["file_uri"] = file_uri
-
-            with _REPORT_LOCK:
-                _prune_report_cache()
-                _REPORT_CACHE[report_id] = {
-                    "html": html,
-                    "structured": structured,
-                    "expires": datetime.now(timezone.utc) + _REPORT_TTL,
-                    "path": report_path,
-                    "title": title,
-                }
-
-            # Reset workflow state for the next analysis cycle
-            state.reset()
-
-            # Reply text for the assistant
-            reply_text = (
-                f"**Report:** {title}\n\n"
-                f"Report ID: `{report_id[:8]}` | "
-                f"Charts: {len(chart_specs)}\n\n"
-                f"To reopen: `open_report(\"{report_id[:8]}\")`\n"
-                f"To export HTML: `export_report(\"{report_id[:8]}\")`\n\n"
-                f"_Ask if they want the HTML exported or conversion to docx/pdf/pptx._"
+            report = create_report_artifact(
+                title,
+                content_markdown,
+                enforce_quality_gate=True,
+                reset_session_state=True,
             )
 
             return CallToolResult(
                 content=[
                     TextContent(
                         type="text",
-                        text=reply_text,
+                        text=report["reply_text"],
                         annotations=Annotations(
                             audience=["assistant"],
                             priority=1.0,
@@ -1683,12 +1839,12 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                         type="text",
                         text=(
                             f"Report generated: {title} "
-                            f"({len(chart_specs)} charts). "
-                            f"Report ID: `{report_id[:8]}`"
+                            f"({report['chart_count']} charts). "
+                            f"Report ID: `{report['report_id'][:8]}`"
                         ),
                     ),
                 ],
-                structuredContent=structured,
+                structuredContent=report["structured"],
             )
 
         except Exception as e:

@@ -1,6 +1,17 @@
 import importlib.resources
+import json
 
 from mcp.server.fastmcp.prompts import base as prompt_base
+
+from cerebro_mcp.research_models import PeerReviewResult
+
+
+def load_reality_checker_markdown() -> str:
+    return (
+        importlib.resources.files("cerebro_mcp.prompts.agents")
+        .joinpath("reality_checker.md")
+        .read_text("utf-8")
+    )
 
 
 def register_prompts(mcp):
@@ -13,7 +24,7 @@ def register_prompts(mcp):
 
         Loads strict operational rules for the Data Science Lead agent:
         ClickHouse SQL with statistical functions, EDA workflow, outlier detection,
-        and the generate_chart pipeline.
+        and the batch report chart pipeline.
         """
         content = (
             importlib.resources.files("cerebro_mcp.prompts.agents")
@@ -43,11 +54,35 @@ def register_prompts(mcp):
         Loads strict operational rules for the Reality Checker agent:
         SQL safety, data validation, chart spec verification, and report integrity.
         """
-        content = (
-            importlib.resources.files("cerebro_mcp.prompts.agents")
-            .joinpath("reality_checker.md")
-            .read_text("utf-8")
+        content = load_reality_checker_markdown()
+        return [prompt_base.Message(role="user", content=content)]
+
+    @mcp.prompt()
+    def conduct_research_peer_review(packet_json: str) -> list[prompt_base.Message]:
+        """Review a research packet and return the result via `record_peer_review`."""
+        schema = json.dumps(
+            PeerReviewResult.model_json_schema(),
+            indent=2,
+            ensure_ascii=False,
         )
+        content = f"""{load_reality_checker_markdown()}
+
+RESEARCH PEER REVIEW MODE
+
+You are reviewing a structured blockchain research project.
+You must return your review by calling `record_peer_review`.
+The payload must conform to this schema:
+
+```json
+{schema}
+```
+
+Review packet:
+
+```json
+{packet_json}
+```
+"""
         return [prompt_base.Message(role="user", content=content)]
 
     # --- Onboarding Prompt ---
@@ -80,15 +115,24 @@ Once you find a model or table:
 
 ### 3. Generate Interactive Reports
 For visual analysis with charts:
-1. `generate_chart` — create a chart (line, area, bar, pie, numberDisplay) from a SQL query
-2. Repeat for each metric you want to visualize
+1. `generate_charts` — create all report charts in one batch call
+2. Use single-row SQL for `numberDisplay` KPI cards and separate time-series SQL for trend charts
 3. `generate_report` — assemble charts into an interactive HTML report with Gnosis branding
 
-### 4. Explore DeFi Protocols
+### 4. Run Long-Horizon Research
+For durable, phase-driven investigations:
+1. `start_research_project` — create a persistent research project
+2. `plan_research_phase` / `execute_research_phase` — move through mapping, hypothesis, and execution
+3. `execute_query(..., research_project_id=..., persist_result=True)` — capture query evidence
+4. `verify_research_phase` — validate evidence before review
+5. `prepare_peer_review` + `conduct_research_peer_review` — run adversarial review
+6. `publish_research_report` — publish the final report artifact
+
+### 5. Explore DeFi Protocols
 - `search_models(module='contracts')` — find decoded event/call tables for 15+ protocols
 - Supported: Aave, Balancer, Uniswap, Swapr, Circles, Gnosis Pay, CoW Protocol, and more
 
-### 5. Look Up Addresses & Tokens
+### 6. Look Up Addresses & Tokens
 - `resolve_address('Uniswap')` — search 5.3M labeled addresses
 - `get_token_metadata('GNO')` — get address, decimals, and price data availability
 
@@ -249,9 +293,9 @@ TASK 2: [Data Engineer] Query data from TASK 1 models
   Output: Raw data tables
 
 TASK 3: [Visualization Agent] Generate charts from TASK 2 data
-  Goal: Create ECharts visualizations for each metric
+  Goal: Create all report charts in one batch with valid KPI and trend query shapes
   Input: Query results from TASK 2
-  Tools: generate_chart
+  Tools: generate_charts
   Output: Chart IDs (chart_1, chart_2, ...)
 
 TASK 4: [Visualization Agent] Build final output
@@ -280,6 +324,7 @@ If thinking mode is enabled, call `log_reasoning(step, content)` at each decisio
 - You do NOT create charts. Delegate visualization to the Visualization Agent.
 - Always start with data discovery before analysis.
 - Prefer dbt mart models (api_*/fct_*) over raw table queries.
+- For reports, KPI cards must come from single-row SQL and multi-series trend charts must use either comma-separated `y_field` values or long-form data with `series_field`.
 """
 
     @mcp.prompt()
@@ -407,7 +452,8 @@ and structured output (HTML reports or markdown).{data_section}
 {task}
 
 ## Available Tools
-- `generate_chart` — Create ECharts JSON specs (line, area, bar, pie, numberDisplay)
+- `generate_charts` — Create multiple report charts in one batch call
+- `generate_chart` — Create a single ad-hoc chart when batch mode is not needed
 - `generate_report` — Produce interactive UI resource with charts and Gnosis branding
 - `list_charts` — View all registered chart IDs
 - `search_docs` — Search platform documentation for context
@@ -415,7 +461,7 @@ and structured output (HTML reports or markdown).{data_section}
 ## Output Mode Selection
 
 **MODE 1: INTERACTIVE UI** (reports, charts, plots, visual analysis, trends)
-Workflow: `generate_chart` for each metric → write markdown with `{{{{chart:CHART_ID}}}}` placeholders → `generate_report(title, content_markdown)`
+Workflow: `generate_charts([...])` in one batch call → write markdown with `{{{{chart:CHART_ID}}}}` placeholders → `generate_report(title, content_markdown)`
 - `generate_report` returns an interactive UI resource rendered natively in the chat client
 - It also opens the report in the user's browser for terminal-based clients
 - After report is generated, ask user if they want conversion to docx/pdf/pptx
@@ -435,7 +481,9 @@ Structure: ### Objective → ### Results (table) → ### Key Insights (bullets)
 - Always choose the correct chart type based on the data structure.
 - Include a title for every chart.
 - Map x_field to the time/category column and y_field to the value column.
-- Use series_field when data has multiple categories to compare.
+- `numberDisplay` charts require single-row SQL. For latest-period KPIs, use queries like `ORDER BY month DESC LIMIT 1`.
+- For multi-metric trend charts, either use comma-separated `y_field` values or reshape to long form and use `series_field`.
+- Use `series_field` when data has multiple categories to compare.
 - Gnosis owl watermark is applied automatically in HTML output.
 - Round financial values to 2 decimal places.
 - Dates in YYYY-MM-DD format.
@@ -470,7 +518,7 @@ Structure: ### Objective → ### Results (table) → ### Key Insights (bullets)
 
         return f"""\
 **CRITICAL OUTPUT RULES:**
-- This report MUST use `generate_chart` for each metric and `generate_report` for final output.
+- This report MUST use `generate_charts([...])` for report charts and `generate_report` for final output.
 - `generate_report` produces an interactive UI resource and opens the report in the browser.
 - After `generate_report` succeeds, do NOT repeat the report markdown or {{{{chart:...}}}} placeholders as text. Only share the tool's text summary, your key insights, and ask about docx/pdf/pptx conversion.
 - To reopen a past report, use `open_report(report_id)` or `list_reports()` to find it.
@@ -484,9 +532,10 @@ Use `search_models` to find relevant dbt `api_*/fct_*` models for each section.
 Use `describe_table` to verify column names. Query data with `execute_query`.
 
 ### Step 2: Generate Charts
-For each section with trend data, call `generate_chart` with the SQL query.
-Each call returns a **chart ID** (e.g., `chart_1`, `chart_2`).
-Generate at least 3 charts. Note each chart ID for Step 3.
+Call `generate_charts([...])` once with all chart specs for the report.
+Each chart spec returns a **chart ID** (e.g., `chart_1`, `chart_2`).
+Generate at least 3 charts in the batch. For KPI cards, use single-row SQL only.
+For multi-metric trend charts, either use comma-separated `y_field` values or reshape to long form with `series_field`.
 
 ### Step 3: Write Markdown Content
 Write the report as markdown. Insert `{{{{chart:CHART_ID}}}}` placeholders
@@ -529,11 +578,14 @@ For longer periods (monthly), emphasize trends and comparisons.
 ## Rules
 - Use dbt `api_*/fct_*` models when available
 - Always include date filters for the specified period
+- KPI `numberDisplay` charts must come from single-row SQL, never raw time series
+- For monthly reports, latest-period headline KPIs should use `ORDER BY month DESC LIMIT 1`
+- Use separate time-series queries for trend charts
 - Round financial values to 2 decimal places
 - Verify token decimals via `get_token_metadata`
 
 ## Completion Criteria
-- [ ] At least 3 charts generated via `generate_chart`
+- [ ] At least 3 charts generated via `generate_charts`
 - [ ] `generate_report` called with all chart placeholders
 - [ ] Report renders as interactive UI resource (opens in browser for terminal clients)
 """

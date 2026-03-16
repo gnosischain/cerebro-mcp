@@ -15,6 +15,7 @@ class QueryResult(BaseModel):
     truncated: bool
     fetch_mode: Literal["rows", "arrow"]
     elapsed_seconds: float
+    result_ref_id: str | None = None
     warnings: list[str] = Field(default_factory=list)
     summary_markdown: str = ""
 

@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
+from cerebro_mcp.research_store import ResearchStore
 from cerebro_mcp.safety import validate_query
 from cerebro_mcp.tool_models import ExplainResult, QueryResult
 from cerebro_mcp.tool_output import (
     build_explain_summary,
     build_query_summary,
     format_results_table,
+    normalize_rows,
     truncate_response,
     truncate_sql as _truncate_sql,
 )
@@ -16,12 +20,20 @@ _last_nudge_time: float = 0.0
 _NUDGE_COOLDOWN = 300  # seconds between nudges (5 min)
 
 
-def register_query_tools(mcp, ch: ClickHouseManager):
+def register_query_tools(
+    mcp,
+    ch: ClickHouseManager,
+    research_store: ResearchStore | None = None,
+):
     @mcp.tool()
     def execute_query(
         sql: str,
         database: str = "dbt",
         max_rows: int = 100,
+        research_project_id: str = "",
+        persist_result: bool = False,
+        evidence_title: str = "",
+        persist_max_rows: int | None = None,
     ) -> QueryResult | str:
         """Execute a read-only SQL query against a Gnosis Chain ClickHouse database.
 
@@ -31,54 +43,95 @@ def register_query_tools(mcp, ch: ClickHouseManager):
         `txs` not `transactions`). Never guess column names.
         """
         try:
-            global _query_count
-            _query_count += 1
+            in_research = bool(research_project_id)
+            if persist_result and not research_project_id:
+                return (
+                    "Error: `persist_result=True` requires `research_project_id` so "
+                    "the query snapshot can be stored in a research project."
+                )
+            if research_project_id and research_store is None:
+                return "Error: Research storage is not configured on this server."
 
-            from cerebro_mcp.tools.session_state import state
+            if research_project_id and research_store is not None:
+                research_store.load_project(research_project_id)
 
-            state.record_execute_query(sql)
-
+            extra_notes: list[str] = []
             executed = ch.run_query(
                 sql,
                 database,
-                requested_max_rows=max_rows,
-                audience="tool",
+                requested_max_rows=(
+                    min(
+                        persist_max_rows or settings.MAX_ROWS,
+                        settings.MAX_ROWS,
+                    )
+                    if persist_result
+                    else max_rows
+                ),
+                audience="internal" if persist_result else "tool",
                 fetch_mode="auto",
             )
             result = ch.build_query_result(executed, max_rows=max_rows)
 
-            extra_notes: list[str] = []
+            result_ref_id: str | None = None
+            if persist_result and research_store is not None:
+                persist_cap = min(
+                    persist_max_rows or settings.MAX_ROWS,
+                    settings.MAX_ROWS,
+                )
+                artifact_rows = normalize_rows(executed.rows[:persist_cap])
+                result_ref_id = research_store.save_query_result_artifact(
+                    project_id=research_project_id,
+                    title=evidence_title.strip(),
+                    sql=executed.sql,
+                    database=executed.database,
+                    columns=executed.columns,
+                    rows=artifact_rows,
+                    row_count=executed.row_count,
+                )
+                extra_notes.append(
+                    f"**Research Snapshot:** `{result_ref_id}` stored for project "
+                    f"`{research_project_id}`."
+                )
 
-            if _query_count >= 2:
-                import time as _time
+            if not in_research:
+                global _query_count
+                _query_count += 1
 
-                global _last_nudge_time
-                now = _time.monotonic()
-                if now - _last_nudge_time > _NUDGE_COOLDOWN:
-                    nudge_text = state.suggest_statistical_functions(sql)
-                    if nudge_text:
-                        extra_notes.append(f"> **Tip:** {nudge_text}")
+                from cerebro_mcp.tools.session_state import state
 
-                    if _query_count >= 3:
-                        from cerebro_mcp.tools.visualization import _chart_registry
+                state.record_execute_query(sql)
 
-                        if _chart_registry:
-                            extra_notes.append(
-                                f"> **Reminder:** You have {len(_chart_registry)} "
-                                "chart(s) registered. Call "
-                                "`generate_report(title, content_markdown)` with "
-                                "`{{chart:CHART_ID}}` placeholders to produce the "
-                                "interactive report."
-                            )
-                        else:
-                            extra_notes.append(
-                                "> **Tip:** To create charts and a visual report, "
-                                "use `generate_chart(sql, chart_type, x_field, "
-                                "y_field, title)` for each metric, then "
-                                "`generate_report(title, content_markdown)`."
-                            )
-                    if extra_notes and _query_count >= 3:
-                        _last_nudge_time = now
+                if _query_count >= 2:
+                    import time as _time
+
+                    global _last_nudge_time
+                    now = _time.monotonic()
+                    if now - _last_nudge_time > _NUDGE_COOLDOWN:
+                        nudge_text = state.suggest_statistical_functions(sql)
+                        if nudge_text:
+                            extra_notes.append(f"> **Tip:** {nudge_text}")
+
+                        if _query_count >= 3:
+                            from cerebro_mcp.tools.visualization import _chart_registry
+
+                            if _chart_registry:
+                                extra_notes.append(
+                                    f"> **Reminder:** You have {len(_chart_registry)} "
+                                    "chart(s) registered. Call "
+                                    "`generate_report(title, content_markdown)` with "
+                                    "`{{chart:CHART_ID}}` placeholders to produce the "
+                                    "interactive report."
+                                )
+                            else:
+                                extra_notes.append(
+                                    "> **Tip:** To create charts and a visual report, "
+                                    "use `generate_charts([...])` in one batch call, "
+                                    "use single-row SQL for `numberDisplay` KPI cards, "
+                                    "use separate time-series queries for trend charts, "
+                                    "then `generate_report(title, content_markdown)`."
+                                )
+                        if extra_notes and _query_count >= 3:
+                            _last_nudge_time = now
 
             summary = build_query_summary(
                 columns=result.columns,
@@ -91,7 +144,12 @@ def register_query_tools(mcp, ch: ClickHouseManager):
                 warnings=result.warnings,
                 extra_notes=extra_notes,
             )
-            return result.model_copy(update={"summary_markdown": summary})
+            return result.model_copy(
+                update={
+                    "summary_markdown": summary,
+                    "result_ref_id": result_ref_id,
+                }
+            )
         except Exception as e:
             error_msg = str(e)
             if "UNKNOWN_IDENTIFIER" in error_msg or "Unknown expression" in error_msg:

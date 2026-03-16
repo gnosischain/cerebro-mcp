@@ -2,478 +2,646 @@
 
 ![Cerebro MCP](img/header-banner.png)
 
-**Model Context Protocol server for Gnosis Chain on-chain analytics.**
+Model Context Protocol server for Gnosis Chain analytics on top of ClickHouse and dbt.
 
-Cerebro MCP connects AI assistants (Claude Desktop, VS Code, Claude Code) to Gnosis Chain's ClickHouse data warehouse and dbt model layer, enabling natural-language queries, interactive reports, and automated data analysis.
+Cerebro MCP exposes query, schema, visualization, report, and long-horizon research tools to MCP hosts such as Claude Desktop, Claude Code, and VS Code. It is designed for three distinct usage patterns:
 
----
+1. Quick exploratory analysis and factual lookups
+2. Interactive chart and report generation
+3. Durable, phase-driven research projects
 
-## Architecture
-
-```
-                          ┌─────────────────────────────────────────┐
-                          │            MCP Host (Client)            │
-                          │  Claude Desktop / VS Code / Claude Code │
-                          └────────────────┬────────────────────────┘
-                                           │ MCP Protocol
-                                           │ (stdio / SSE)
-                          ┌────────────────▼────────────────────────┐
-                          │          cerebro-mcp (FastMCP)          │
-                          │                                         │
-                          │  ┌──────────┐ ┌──────────┐ ┌────────┐   │
-                          │  │  Query   │ │  Schema  │ │  dbt   │   │
-                          │  │  Tools   │ │  Tools   │ │  Tools │   │
-                          │  └────┬─────┘ └────┬─────┘ └───┬────┘   │
-                          │       │            │           │        │
-                          │  ┌────▼────────────▼───────────▼────┐   │
-                          │  │       ClickHouse Client          │   │
-                          │  │    (clickhouse-connect + cache)  │   │
-                          │  └────────────────┬─────────────────┘   │
-                          │                   │                     │
-                          │  ┌────────────────┴─────────────────┐   │
-                          │  │  Visualization  │  Reasoning     │   │
-                          │  │  Tools          │  Tracing       │   │
-                          │  └────────┬────────┘────────────────┘   │
-                          │           │                             │
-                          │  ┌────────▼──────────────────────────┐  │
-                          │  │  React Report UI (Vite bundle)    │  │
-                          │  │  ECharts + Sidebar + Theme toggle │  │
-                          │  └───────────────────────────────────┘  │
-                          └────────────────┬────────────────────────┘
-                                           │
-                          ┌────────────────▼────────────────────────┐
-                          │     ClickHouse Cloud (Gnosis Chain)     │
-                          │                                         │
-                          │  execution │ consensus │ crawlers_data  │
-                          │  nebula    │ nebula_discv4 │ dbt        │
-                          └─────────────────────────────────────────┘
-```
+This README is intentionally implementation-oriented. It describes what the server actually does today, how the MCP flows work, and which tools to use for each job.
 
 ---
 
-## Data Pipeline
+## What Cerebro MCP Actually Is
 
-```
-  Raw Blockchain Data           dbt-cerebro Models              Cerebro MCP
-  ─────────────────        ────────────────────────        ──────────────────
+Cerebro MCP is a FastMCP server with:
 
-  Execution Layer    ──►   stg_execution_*      ──►   ┌─────────────────────┐
-   - blocks                int_execution_*      ──►   │  search_models      │
-   - transactions          fct_execution_*      ──►   │  describe_table     │
-   - logs, traces          api_execution_*      ──►   │  execute_query      │
-   - contracts                                        │  generate_chart     │
-                                                      │  generate_report    │
-  Consensus Layer    ──►   stg_consensus_*      ──►   │                     │
-   - validators            int_consensus_*      ──►   │  ┌───────────────┐  │
-   - attestations          api_consensus_*      ──►   │  │  Interactive  │  │
-   - rewards                                          │  │  Report UI    │  │
-                                                      │  │  (React +     │  │
-  Off-Chain Data     ──►   stg_crawlers_*       ──►   │  │   ECharts)    │  │
-   - dune_labels           int_bridges_*        ──►   │  └───────────────┘  │
-   - dune_prices           fct_bridges_*        ──►   │                     │
-   - bridge flows          api_bridges_*        ──►   └─────────────────────┘
-                                                              │
-  P2P Network        ──►   stg_p2p_*            ──►           ▼
-   - crawls, visits        int_p2p_*            ──►    ~/.cerebro/reports/
-                           api_p2p_*            ──►    (standalone HTML)
-```
+- ClickHouse access for read-only SQL
+- dbt manifest search and lineage lookup
+- interactive chart and report generation
+- reasoning/tracing utilities
+- durable research project storage
+- MCP prompts and resources that guide clients, but do not run automatically on their own
 
-**dbt model tiers** (always prefer higher tiers for speed):
-- `api_*` -- Pre-aggregated daily/weekly views (fastest)
-- `fct_*` -- Fact tables: immutable events
-- `int_*` -- Intermediate: business logic joins
-- `stg_*` -- Staging: minimal cleaning of raw tables
+Important distinction:
+
+- Tools execute logic on the server
+- Prompts return guidance text to the client
+- Resources expose static reference material
+- The server does not run an internal autonomous LLM loop
+
+If a client wants to use personas or peer review, it must explicitly call the prompt or tool flow that supports it.
 
 ---
 
-## Report Workflow
+## How The MCP Works
 
-```
-  User: "Give me a weekly Gnosis Chain report"
-         │
-         ▼
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  Phase 1: Analytics Reporter                                    │
-  │                                                                 │
-  │  search_models("transactions daily")                            │
-  │       │                                                         │
-  │       ▼                                                         │
-  │  describe_table("api_execution_transactions_daily")             │
-  │       │                                                         │
-  │       ▼                                                         │
-  │  execute_query("SELECT dt, txs FROM ... WHERE dt >= ...")       │
-  │       │                                                         │
-  │       ▼                                                         │
-  │  generate_chart(sql=..., chart_type="line", title="Daily Txs")  │
-  │       │                                     Returns: chart_1    │
-  │       ▼                                                         │
-  │  (repeat for each metric: validators, gas, bridges, etc.)       │
-  │       Returns: chart_2, chart_3, chart_4, ...                   │
-  └───────┬─────────────────────────────────────────────────────────┘
-          │
-          ▼
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  Phase 2: UI Designer                                           │
-  │                                                                 │
-  │  Assembles markdown with {{chart:chart_1}} placeholders:        │
-  │                                                                 │
-  │    ## Overview                                                  │
-  │    Key metrics for the week ending 2026-03-10.                  │
-  │    {{chart:chart_1}}                                            │
-  │                                                                 │
-  │    ## Network Activity                                          │
-  │    {{chart:chart_2}}                                            │
-  │    ...                                                          │
-  │                                                                 │
-  │  generate_report(title="Weekly Report", content_markdown=...)   │
-  └───────┬─────────────────────────────────────────────────────────┘
-          │
-          ▼
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  Phase 3: Reality Checker                                       │
-  │                                                                 │
-  │  Validates: correct column names, date ranges, chart types,     │
-  │  data integrity, no emojis, report structure, narrative matches │
-  └───────┬─────────────────────────────────────────────────────────┘
-          │
-          ▼
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  Output                                                         │
-  │                                                                 │
-  │  1. Standalone HTML saved to ~/.cerebro/reports/                │
-  │  2. Interactive UI rendered in MCP App iframe (Claude Desktop)  │
-  │  3. Chat shows: title, file:// link, report ID                  │
-  │  4. User can reopen with: open_report("abc12345")               │
-  └─────────────────────────────────────────────────────────────────┘
-```
+At runtime the system looks like this:
+
+1. Your MCP host connects over `stdio` or `SSE`
+2. The host asks the model to solve a task
+3. The model chooses tools, prompts, and resources from this server
+4. The server executes ClickHouse/dbt/report/research logic and returns structured data
+5. For report tools, MCP App compatible clients can render the returned `structuredContent` inline
+
+Core runtime components:
+
+- `clickhouse_client.py`: shared execution pipeline, limit enforcement, JSON-safe normalization, schema cache
+- `tools/query.py`: sync SQL execution
+- `tools/query_async.py`: async query jobs with paginated result previews
+- `tools/schema.py`: table listing and schema inspection
+- `tools/dbt.py`: model search and lineage/context lookup
+- `tools/visualization.py`: chart registry, report rendering, report persistence
+- `tools/research.py`: durable research projects, evidence, verification, peer review, publication
+
+Artifacts created by the server:
+
+- saved reports on disk
+- saved query SQL snippets
+- async query result pages
+- research projects and evidence snapshots
+- reasoning traces
 
 ---
 
-## Report UI
+## Choose The Right Workflow
 
-```
-  ┌──────────────────────────────────────────────────────────────┐
-  │  ┌───────────┐  ┌─────────────────────────────────────────┐  │
-  │  │           │  │  [owl] Weekly Report       [sun] toggle │  │
-  │  │ Sidebar   │  │  2026-03-10 12:00 UTC                   │  │
-  │  │           │  ├─────────────────────────────────────────┤  │
-  │  │ Overview  │  │                                         │  │
-  │  │ Network   │  │  ## Overview                            │  │
-  │  │ Validators│  │                                         │  │
-  │  │ Bridges   │  │  ┌──────────────────────────────────┐   │  │
-  │  │           │  │  │  Daily Transactions    [img][tbl]│   │  │
-  │  │  [<] hide │  │  │  ┌─────────────────────────┐     │   │  │
-  │  │           │  │  │  │      Line Chart         │     │   │  │
-  │  │           │  │  │  │                         │     │   │  │
-  │  │           │  │  │  │                    [owl]│     │   │  │
-  │  │           │  │  │  └─────────────────────────┘     │   │  │
-  │  │           │  │  └──────────────────────────────────┘   │  │
-  │  │           │  │                                         │  │
-  │  │           │  │  Key highlights:                        │  │
-  │  │           │  │  - Transactions increased by +12.3%     │  │
-  │  │           │  │  - Gas usage decreased by -5.1%         │  │
-  │  │           │  │                                         │  │
-  │  └───────────┘  └─────────────────────────────────────────┘  │
-  └──────────────────────────────────────────────────────────────┘
+| Workflow | Use it for | Core tools | Output |
+|---|---|---|---|
+| Quick exploration | answering a direct question, checking a metric, testing a hypothesis quickly | `discover_models`, `describe_table`, `execute_query`, `explain_query`, `get_sample_data` | markdown summary plus structured query payload |
+| Report workflow | visual analysis, KPI packs, weekly or monthly summaries, chart-heavy deliverables | `discover_models`, `describe_table`, `execute_query`, `generate_charts`, `generate_report` | interactive report artifact plus saved HTML |
+| Research workflow | multi-step investigations that need memory, evidence, review, and publication | `start_research_project`, phase tools, evidence tools, verification, peer review, `publish_research_report` | durable research project plus report artifact |
 
-  [img] = Save chart as PNG       [tbl] = View raw data
-  [owl] = Gnosis watermark        [<]   = Collapse sidebar
-  +12.3% rendered in green        -5.1% rendered in red
-```
-
-### Report UI Features
-
-- **Collapsible sidebar** (224px expanded / 56px collapsed) with section navigation
-- **Light/dark theme** toggle (light by default), syncs with MCP host
-- **Gnosis owl watermark** on every chart (theme-aware)
-- **Chart toolbar**: save as PNG image (2x resolution), view raw data table
-- **Value coloring**: `+` values in green, `-` values in red
-- **Responsive layout**, print-friendly (sidebar hidden when printing)
-- **Three rendering modes**: MCP App (iframe), standalone HTML (browser), dev server (hot reload)
+Use quick exploration when you do not need charts or durable state. Use reports when the deliverable is a visual artifact. Use research when the work spans multiple phases or needs explicit evidence and review.
 
 ---
 
-## Databases
+## End-To-End Workflows
 
+### 1. Exploratory Chat
+
+Use this when the user asks something like:
+
+- "How many transactions were there yesterday?"
+- "What tables cover validator activity?"
+- "Compare bridge inflows over the last 7 days"
+
+Recommended sequence:
+
+1. Find the right data source
+   - Prefer `discover_models(query, detail_top_n=5)` as the first step
+   - Use `search_models` + `get_model_details` only when you want broader manual triage
+2. Verify the actual schema
+   - Call `describe_table` before writing SQL
+3. Run a bounded query
+   - Use `execute_query`
+   - Use `explain_query` first if you are unsure about the SQL shape
+4. If the query is large or slow
+   - Use `start_query`
+   - Poll with `get_query_results`
+
+Minimal pattern:
+
+```text
+discover_models("bridge volume daily", detail_top_n=5)
+describe_table("api_bridges_volume_daily", database="dbt")
+execute_query("SELECT dt, volume_usd FROM dbt.api_bridges_volume_daily WHERE dt >= today() - 7 ORDER BY dt", database="dbt", max_rows=30)
 ```
-  ┌─────────────────────────────────────────────────────────────┐
-  │                    ClickHouse Cloud                         │
-  │                                                             │
-  │  ┌──────────────┐  ┌─────────────┐  ┌───────────────────┐   │
-  │  │  execution   │  │  consensus  │  │  crawlers_data    │   │
-  │  │              │  │             │  │                   │   │
-  │  │  blocks      │  │  validators │  │  dune_labels (5M) │   │
-  │  │  transactions│  │  attestation│  │  dune_prices      │   │
-  │  │  logs        │  │  rewards    │  │  bridge_flows     │   │
-  │  │  traces      │  │  deposits   │  │  gno_supply       │   │
-  │  │  contracts   │  │  blobs      │  │  probelab_*       │   │
-  │  │  transfers   │  │  specs      │  │  gpay_wallets     │   │
-  │  └──────────────┘  └─────────────┘  └───────────────────┘   │
-  │                                                             │
-  │  ┌──────────────┐  ┌─────────────┐  ┌───────────────────┐   │
-  │  │  nebula      │  │ nebula_     │  │  dbt              │   │
-  │  │              │  │  discv4     │  │                   │   │
-  │  │  crawls      │  │  (variant)  │  │  ~400 models      │   │
-  │  │  visits      │  │             │  │  8 modules:       │   │
-  │  │  (P2P data)  │  │             │  │   execution (208) │   │
-  │  │              │  │             │  │   consensus (54)  │   │
-  │  │              │  │             │  │   contracts (44)  │   │
-  │  │              │  │             │  │   p2p (27)        │   │
-  │  │              │  │             │  │   bridges (18)    │   │
-  │  │              │  │             │  │   ESG (18)        │   │
-  │  │              │  │             │  │   probelab (9)    │   │
-  │  │              │  │             │  │   crawlers (9)    │   │
-  │  └──────────────┘  └─────────────┘  └───────────────────┘   │
-  └─────────────────────────────────────────────────────────────┘
+
+What to expect from `execute_query`:
+
+- structured payload with `columns`, `rows`, `row_count`, `rows_returned`, `warnings`
+- `summary_markdown` for a human-readable table
+- automatic row and payload truncation to protect MCP/LLM context
+
+When to use async instead:
+
+- expected result set is large
+- query may take longer than a normal chat turn
+- you want paginated result retrieval
+
+Async flow:
+
+```text
+start_query(...)
+get_query_results(query_id)
+get_query_results(query_id, page_token="...")
 ```
+
+Important behavior:
+
+- async jobs are in-process, not permanent
+- restarting the server loses pending/finished async job state
+- completed async jobs are cleaned up after a short retention window
+
+### 2. Report Workflow
+
+Use this when the user wants:
+
+- a weekly or monthly summary
+- charts, trends, dashboards, or visual comparisons
+- a report artifact that can be reopened or exported
+
+Recommended sequence:
+
+1. Discover relevant models
+   - Prefer `discover_models(query, detail_top_n=5)`
+2. Verify a real table with `describe_table`
+3. Run exploratory queries with `execute_query`
+4. Build charts
+   - Preferred: `generate_charts`
+   - Secondary: `generate_chart`
+   - For a one-off plot with no gates: `quick_chart`
+5. Write markdown with chart placeholders
+6. Call `generate_report`
+7. Optionally use `open_report`, `list_reports`, or `export_report`
+
+Preferred report chart flow:
+
+```text
+generate_charts([
+  {...},
+  {...},
+  {...}
+])
+generate_report(title="Gnosis Chain Weekly Report", content_markdown="...")
+```
+
+#### Which chart tool to use
+
+| Tool | Use when | Notes |
+|---|---|---|
+| `quick_chart` | one-off exploratory plot | bypasses report/discovery gates |
+| `generate_chart` | you need one chart at a time | gated; useful for a single additional chart |
+| `generate_charts` | you are building a real report | preferred; creates multiple charts in one call |
+
+#### Report markdown syntax
+
+The report renderer understands:
+
+- `## Heading` for major sections
+- `{{chart:chart_id}}` to place a chart
+- `{{grid:N}} ... {{/grid}}` to group charts into a grid row
+
+Example:
+
+```markdown
+## Executive Summary
+
+{{grid:3}}
+{{chart:chart_1}}
+{{chart:chart_2}}
+{{chart:chart_3}}
+{{/grid}}
+
+Key takeaways from the week.
+
+## Activity Trend
+
+{{chart:chart_4}}
+
+## Breakdown
+
+{{grid:2}}
+{{chart:chart_5}}
+{{chart:chart_6}}
+{{/grid}}
+```
+
+#### What is actually enforced vs recommended
+
+Hard gates for chart creation:
+
+- `generate_chart` and `generate_charts` require:
+  - at least one discovery call (`search_models` or `discover_models`)
+  - at least `MIN_MODELS_DETAILED` model detail explorations
+  - at least `MIN_TABLES_VERIFIED` table schema checks
+
+Hard gates for report creation:
+
+- at least `MIN_CHARTS_FOR_REPORT` registered charts
+- at least one trend or breakdown chart
+- at least `MIN_EXPLORATORY_QUERIES` prior query executions
+- at least one dimensional breakdown
+- at least one relational analysis signal:
+  - a scatter or heatmap chart, or
+  - a correlation query
+
+Soft warnings only:
+
+- lack of statistical queries
+- lack of explicit correlation/regression queries
+- shallow exploration before charting
+- no scatter chart in a larger report
+
+Layout enforcement:
+
+- if the report contains two or more `numberDisplay` charts and no `{{grid:N}}` block, report generation is rejected
+- other layout guidance is recommended through prompts and personas, but not hard-blocked by the renderer
+
+This matters because older documentation may imply stricter layout or persona enforcement than the server actually performs.
+
+#### Report outputs
+
+`generate_report` does three things:
+
+- saves a standalone HTML report to disk
+- returns `structuredContent` for MCP App capable clients
+- returns a text summary containing the report ID and reopen/export hints
+
+Useful report tools after creation:
+
+- `open_report(report_id)` to reopen a saved report
+- `list_reports()` to browse saved reports
+- `export_report(report_id)` to get a file path or SSE download URL
+
+### 3. Research Workflow
+
+Use this when the user wants:
+
+- a deep-dive investigation
+- a multi-turn, multi-phase analysis
+- durable memory and evidence
+- explicit verification and peer review
+
+The research system is MCP-native and client-orchestrated. It is not an autonomous background scientist. The assistant must explicitly drive the project through its phases.
+
+Research phases:
+
+1. `mapping`
+2. `hypothesis`
+3. `execution`
+4. `verification`
+5. `publication`
+
+Recommended sequence:
+
+```text
+start_research_project(...)
+plan_research_phase(..., phase="mapping")
+execute_research_phase(..., phase="mapping")
+capture_schema_snapshot(...)
+record_research_memory(...)
+
+plan_research_phase(..., phase="hypothesis")
+execute_research_phase(..., phase="hypothesis")
+
+plan_research_phase(..., phase="execution")
+execute_research_phase(..., phase="execution")
+execute_query(..., research_project_id=..., persist_result=True)
+attach_research_evidence(...)
+record_research_finding(...)
+
+verify_research_phase(...)
+prepare_peer_review(...)
+conduct_research_peer_review(...)
+record_peer_review(...)
+publish_research_report(...)
+```
+
+#### Research project behavior
+
+`get_research_project(project_id)` returns a compact summary only:
+
+- current phase
+- status
+- evidence count
+- memory count
+- findings count
+- peer review status
+- artifact count
+
+For detail, use the paginated retrieval tools:
+
+- `get_research_memory`
+- `get_research_evidence`
+- `get_research_findings`
+
+#### Research evidence rules
+
+Durable evidence kinds:
+
+- `query_result`
+- `schema_snapshot`
+- `chart`
+- `report`
+
+Important:
+
+- `save_query` is not evidence
+- `save_query` stores reusable SQL only
+- durable sync query evidence must come from `execute_query(..., persist_result=True)`
+
+When you run:
+
+```text
+execute_query(
+  sql=...,
+  research_project_id="rp_...",
+  persist_result=True,
+  evidence_title="Daily bridge volume",
+  persist_max_rows=10000
+)
+```
+
+the server does two separate things:
+
+- returns a tool-budgeted preview payload to the model
+- stores a larger durable result artifact on disk and returns `result_ref_id`
+
+You can then attach that result to the project:
+
+```text
+attach_research_evidence(
+  project_id="rp_...",
+  kind="query_result",
+  ref_id="qry_...",
+  phase="execution"
+)
+```
+
+#### Research memory vs findings
+
+Use `record_research_memory` for reusable domain facts:
+
+- decimals and units
+- caveats about tables
+- join constraints
+- protocol-specific notes
+
+Use `record_research_finding` for project-specific claims:
+
+- "Bridge inflows increased after proposal X"
+- "Median validator count remained stable"
+
+#### Verification and peer review
+
+`verify_research_phase` is a structural check. It verifies things like:
+
+- execution evidence exists
+- statistical depth exists in the evidence set
+- evidence references resolve cleanly
+
+If verification fails, publication stays blocked.
+
+Peer review is explicitly client-driven:
+
+1. call `prepare_peer_review`
+2. feed the packet into `conduct_research_peer_review(packet_json)`
+3. call `record_peer_review`
+
+The review result is structured and stored as `PeerReviewResult`.
+
+#### Publishing research
+
+`publish_research_report` reuses the normal report renderer but applies research-phase gating instead of report-mode session gating.
+
+Use it after:
+
+- verification passes
+- peer review is recorded
+- peer review decision is not `rejected`
 
 ---
 
-## Agent Personas
+## Tool Guide
 
-Cerebro MCP uses three specialized agent personas for complex report generation:
+### Query And Schema Tools
 
-```
-  ┌────────────────────┐    ┌─────────────────────┐    ┌───────────────────┐
-  │ Analytics Reporter │    │    UI Designer      │    │  Reality Checker  │
-  │                    │    │                     │    │                   │
-  │ - search_models    │    │ - Chart type        │    │ - SQL safety      │
-  │ - describe_table   │──► │   selection         │──► │ - Data validation │
-  │ - execute_query    │    │ - Markdown layout   │    │ - Chart specs     │
-  │ - generate_chart   │    │ - generate_report   │    │ - Report structure│
-  │                    │    │                     │    │ - Formatting QA   │
-  │ SOP: DISCOVER →    │    │ Enforces:           │    │                   │
-  │   VERIFY → SAMPLE  │    │ - Min 2 h2 sections │    │ Zero tolerance:   │
-  │   → EXECUTE →      │    │ - Descriptive titles│    │ - Wrong columns   │
-  │   VISUALIZE        │    │ - No emojis         │    │ - Missing dates   │
-  │                    │    │ - Report link       │    │ - Bad chart types │
-  └────────────────────┘    └─────────────────────┘    └───────────────────┘
-```
+| Tool | Use when | Notes |
+|---|---|---|
+| `discover_models` | best first step for analysis | search plus top model expansion in one call |
+| `search_models` | broader search/triage | returns search list only |
+| `get_model_details` | you already know the model name | full lineage, SQL, columns, dependencies |
+| `list_tables` | browsing raw databases | paginated |
+| `describe_table` | verifying exact ClickHouse schema | should happen before writing SQL |
+| `get_sample_data` | checking real row shape quickly | lightweight shape inspection |
+| `execute_query` | sync bounded SQL preview | structured output, truncation, optional research snapshotting |
+| `explain_query` | checking query plan without running the full query | useful for troubleshooting |
+| `start_query` / `get_query_results` | long-running or wider queries | paginated async result preview |
 
-Each persona is loaded via `get_agent_persona(role)` and provides strict operational rules, success metrics, and BAD/GOOD formatting examples.
+### Visualization And Report Tools
 
-### Persona Details
+| Tool | Use when | Notes |
+|---|---|---|
+| `quick_chart` | one fast chart | bypasses workflow gates |
+| `generate_chart` | one gated chart | okay for single additions |
+| `generate_charts` | report chart batches | preferred for report workflows |
+| `list_charts` | inspecting the current chart registry | charts are session-scoped |
+| `generate_report` | final report assembly | consumes chart placeholders |
+| `open_report` | reopen a saved report | works with saved report IDs |
+| `list_reports` | browse disk reports | persistent across sessions if the directory persists |
+| `export_report` | get a shareable file path or URL | SSE deployments can return HTTP download URLs |
 
-| Persona | Key Rules | Enforces |
-|---------|-----------|----------|
-| **Analytics Reporter** | Discover-first, verify columns, EDA before analysis, medians over means, outlier detection | Min 7 charts for full reports, date filters on all time-series, partition pruning, statistical context |
-| **UI Designer** | Chart type matches data semantics, grid layout rules, accessibility | Min 2 `h2` sections, descriptive titles, no emojis, responsive layout, report link in output |
-| **Reality Checker** | SQL safety audit, data validation, chart/report structure QA | Zero wrong columns, zero missing date filters, zero bad chart types, coverage audit |
+### Research Tools
 
----
+| Tool | Use when | Notes |
+|---|---|---|
+| `start_research_project` | start a durable investigation | creates project state on disk |
+| `get_research_project` | check project status | compact summary only |
+| `plan_research_phase` | lock the plan for the current phase | phase must be current and pending |
+| `execute_research_phase` | mark the phase complete and advance | deterministic state transition only |
+| `attach_research_evidence` | link an artifact into the project | validates the ref first |
+| `capture_schema_snapshot` | make schema inspection durable | good for mapping phase |
+| `record_research_memory` | save reusable domain knowledge | backed by evidence refs |
+| `record_research_finding` | save a project claim | backed by evidence refs |
+| `get_research_memory` | browse stored memory | paginated |
+| `get_research_evidence` | browse evidence | paginated, optional phase filter |
+| `get_research_findings` | browse findings | paginated |
+| `verify_research_phase` | run structural validation | publication gate |
+| `prepare_peer_review` | build the review packet | client then applies review prompt |
+| `record_peer_review` | persist the review result | publication remains blocked on rejection |
+| `publish_research_report` | generate the final research artifact | requires verification and peer review |
 
-## Enforcement Gates
+### Metadata And Utility Tools
 
-Cerebro MCP enforces a structured workflow via process-global session state tracking. Tools are gated to ensure data quality and analytical rigor.
-
-```
-  ┌─────────────────────────────────────────────────────────────┐
-  │  Session State Tracker (thread-safe singleton)              │
-  │                                                             │
-  │  Discovery:                                                 │
-  │    search_models_count, explored_models, explored_tables    │
-  │                                                             │
-  │  Execution:                                                 │
-  │    execute_query_count, statistical_query_count,            │
-  │    correlation_query_count, chart_types_generated           │
-  │                                                             │
-  │  ┌──────────────────────┐  ┌─────────────────────────────┐  │
-  │  │  generate_chart gate │  │  generate_report gate       │  │
-  │  │                      │  │                             │  │
-  │  │  - search_models >= 1│  │  - charts >= 3              │  │
-  │  │  - models detailed>=3│  │  - trend OR breakdown chart │  │
-  │  │  - tables verified>=1│  │  - queries >= 2             │  │
-  │  │                      │  │  - dimensional breakdown    │  │
-  │  │  (quick_chart bypasses│  │  - relational analysis     │  │
-  │  │   all gates)         │  │                             │  │
-  │  └──────────────────────┘  └─────────────────────────────┘  │
-  │                                                             │
-  │  State resets after each successful generate_report         │
-  └─────────────────────────────────────────────────────────────┘
-```
-
-### Hard Gates (block tool execution)
-
-| Gate | Tool | Condition |
-|------|------|-----------|
-| Discovery | `generate_chart` | Must call `search_models` at least once |
-| Lineage | `generate_chart` | Must explore >= 3 models via `get_model_details` |
-| Schema | `generate_chart` | Must verify >= 1 table via `describe_table` |
-| Chart count | `generate_report` | Must have >= 3 charts registered |
-| Chart diversity | `generate_report` | At least one trend (line/area) or breakdown (bar/pie) |
-| Exploration | `generate_report` | At least 2 `execute_query` calls |
-| Dimensional | `generate_report` | At least 1 chart with `series_field` or pie/treemap/heatmap/sankey |
-| Relational | `generate_report` | At least 1 scatter/heatmap chart or correlation query |
-
-### Soft Warnings (logged, do not block)
-
-- No statistical queries (quantiles, stddev, corr) detected
-- No correlation/regression queries in multi-chart reports
-- Few exploratory queries before charting
-- No scatter chart for visualizing correlations
-
-All gates are configurable via environment variables (see [Configuration](#configuration)). Set `ENFORCE_CHART_PRECONDITIONS=False` to disable all gates.
+| Tool | Use when | Notes |
+|---|---|---|
+| `list_databases` | inspect available ClickHouse databases | includes descriptions |
+| `system_status` | debug server state | ClickHouse, manifest, docs, cache, tracing, transport |
+| `resolve_address` | map names to addresses or labels | backed by `dune_labels` |
+| `get_token_metadata` | verify token decimals and metadata | useful before interpreting amounts |
+| `search_models_by_address` | find dbt models around a contract | contract-centric analysis |
+| `search_docs` / `get_doc_chunk` | query platform docs | supplementary context |
+| `get_platform_constants` | chain constants and fixed references | useful before querying raw execution data |
+| `save_query` / `run_saved_query` / `list_saved_queries` | reusable SQL snippets | not evidence storage |
 
 ---
 
-## Tools
+## Prompts, Personas, And Resources
 
-### Query & Schema
+Prompts are guidance text returned by the MCP server. They do not execute analysis by themselves.
 
-| Tool | Description |
-|------|-------------|
-| `execute_query` | Run read-only SQL against ClickHouse and return structured rows plus `summary_markdown` |
-| `start_query` | Submit long-running query, returns query ID |
-| `get_query_results` | Poll async query status and paginated preview results |
-| `explain_query` | Show ClickHouse execution plan as structured lines plus `summary_markdown` |
-| `list_tables` | Paginated table listing with row counts and `next_page_token` |
-| `describe_table` | Structured column schema with dbt descriptions |
-| `get_sample_data` | Sample rows to understand data shape |
+Prompts available today:
 
-Query and schema tools now return structured payloads for agentic use while preserving a human-readable `summary_markdown` field. `list_tables` is cursor-paginated (`page_token`, `page_size`) to avoid oversized responses on large databases.
+- `getting_started`
+- `analyze_data(topic)`
+- `explore_protocol(protocol)`
+- `write_query(question, database="dbt")`
+- `report(period, topics, focus)`
+- `adopt_persona_analytics_reporter`
+- `adopt_persona_ui_designer`
+- `adopt_persona_reality_checker`
+- `conduct_research_peer_review(packet_json)`
 
-### dbt Models
+Personas are guidance, not automation:
 
-| Tool | Description |
-|------|-------------|
-| `search_models` | Search ~400 dbt models by name, description, tags, or module |
-| `discover_models` | Search + return full details for top N matches in one call |
-| `get_model_details` | Full model info: SQL, columns, lineage, dependencies |
+- `analytics_reporter`: analysis and EDA discipline
+- `ui_designer`: chart selection and report composition
+- `reality_checker`: QA and adversarial review rules
 
-### Visualization
+Resources expose stable reference material:
 
-| Tool | Description |
-|------|-------------|
-| `generate_chart` | Create single ECharts visualization (line, area, bar, pie, scatter, heatmap, numberDisplay, and more) |
-| `generate_charts` | **Batch** -- create multiple charts in one call (preferred for reports) |
-| `quick_chart` | Ad-hoc chart without precondition gates |
-| `generate_report` | Assemble interactive report with `{{chart:ID}}` placeholders |
-| `export_report` | Export report as download URL (SSE mode) or file path (stdio) |
-| `list_charts` | Show registered charts in current session |
-| `open_report` | Reopen a saved report by ID |
-| `list_reports` | List all saved reports on disk |
+- platform overview
+- ClickHouse SQL guide
+- chain parameters
+- address directory
+- metric definitions
+- query cookbook
 
-### Metadata
-
-| Tool | Description |
-|------|-------------|
-| `list_databases` | All ClickHouse databases with descriptions |
-| `system_status` | Server health: ClickHouse, manifest, config |
-| `resolve_address` | Look up address labels (5.3M entries from Dune) |
-| `get_token_metadata` | Token info: address, decimals, price data |
-| `search_models_by_address` | Find dbt models related to a contract |
-| `search_docs` | Search platform documentation and references |
-| `get_doc_chunk` | Retrieve full text of a documentation page by location path |
-| `get_help` | Overview of all tools, prompts, and resources |
-| `get_platform_constants` | Chain parameters, event signatures, core contracts, partition keys |
-
-### Saved Queries
-
-| Tool | Description |
-|------|-------------|
-| `save_query` | Save a query for reuse |
-| `list_saved_queries` | Show all saved queries |
-| `run_saved_query` | Execute a saved query by name |
-
-### Reasoning & Tracing
-
-| Tool | Description |
-|------|-------------|
-| `set_thinking_mode` | Enable/disable reasoning capture |
-| `log_reasoning` | Record a decision point for audit |
-| `get_reasoning_log` | Retrieve trace for a session |
-| `get_performance_stats` | Aggregate metrics across sessions |
-
-### Prompts
-
-Guided workflows available in the prompt selector (Claude Desktop / VS Code):
-
-| Prompt | Description |
-|--------|-------------|
-| `getting_started` | Onboarding guide with example workflows |
-| `analyze_data(topic)` | Guided data analysis on any topic |
-| `explore_protocol(protocol)` | Explore a DeFi protocol's on-chain data |
-| `write_query(question)` | Step-by-step SQL query writing |
-| `report(period, topics, focus)` | Generate interactive reports with charts |
-| `adopt_persona_*` | Load agent personas (analytics_reporter, ui_designer, reality_checker) |
-
-### Resources
-
-Reference materials available via MCP resource protocol:
-
-| Resource URI | Description |
-|-------------|-------------|
-| `gnosis://platform-overview` | Architecture, databases, dbt modules |
-| `gnosis://clickhouse-sql-guide` | ClickHouse syntax and common patterns |
-| `gnosis://chain-parameters` | Block time, tokens, validators, specs |
-| `gnosis://address-directory` | Token addresses, DeFi protocols |
-| `gnosis://metric-definitions` | Standard metric formulas (DAU, gas, TVL) |
-| `gnosis://query-cookbook` | 12 optimized SQL templates with examples |
+If a client wants to use a persona, it should explicitly load the prompt or call `get_agent_persona`.
 
 ---
 
-## MCP App (Interactive Reports)
+## Reports, Charts, And Artifact Lifetime
 
-Cerebro MCP implements the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) standard to deliver interactive reports as native UI within MCP clients.
+This part is easy to misunderstand, so the distinctions matter.
 
-```
-  generate_chart() ──► chart_registry (in-memory, 2h TTL)
-       (repeat)                │
-                               ▼
-  generate_report() ──► CallToolResult
-                         ├── content: TextContent (summary + file:// link)
-                         └── structuredContent: { title, charts, sections_html }
-                                │
-                   ┌────────────┼────────────────┐
-                   ▼            ▼                ▼
-              Claude Desktop   VS Code      Claude Code
-              (MCP App iframe) (MCP App)    (file:// link)
-                   │            │                │
-                   ▼            ▼                ▼
-              React Report UI renders      Browser opens
-              via ontoolresult callback    standalone HTML
-```
+### Chart registry
 
-### Rendering by Client
+- charts are stored in memory
+- chart IDs are session-scoped
+- chart registry entries are pruned after a TTL
+- if the server restarts, chart IDs are lost
 
-| Client | Behavior |
-|--------|----------|
-| **Claude Desktop** | Renders MCP App inline in conversation |
-| **VS Code** | Renders MCP App inline in chat panel |
-| **Claude Code** | Returns summary text with `file://` link |
+Use charts when you are actively building a report in the current session.
 
-### Report Storage
+### Reports
 
-Reports are saved as self-contained HTML files at `~/.cerebro/reports/` with embedded JSON data. They can be reopened anytime with `open_report("8charID")` or shared as standalone files.
+- reports are saved as standalone HTML on disk
+- reports can be reopened later by report ID
+- in SSE mode, reports can be exposed through `/reports/{id}`
+- `export_report` can return a local path or a download URL
+
+Use reports for durable visual deliverables.
+
+### Saved queries
+
+- saved queries store SQL and metadata
+- they do not store the executed result set
+- they are useful for reuse, not as evidence snapshots
+
+### Research evidence snapshots
+
+- persisted sync query results are saved inside the research project
+- these are the right artifact for durable SQL evidence
+- they are created by `execute_query(..., persist_result=True)`
 
 ---
 
-## Quickstart
+## Running Cerebro MCP
 
 ### Prerequisites
 
 - Python 3.10+
-- Node.js 20+ (for UI build)
-- ClickHouse Cloud credentials (Gnosis Chain instance)
+- Node.js 20+ for building the bundled report UI
+- ClickHouse credentials for the Gnosis analytics warehouse
 
-### Install
+### Local Development Setup
 
 ```bash
 git clone https://github.com/gnosischain/cerebro-mcp.git
 cd cerebro-mcp
 
-# Configure
 cp .env.example .env
-# Edit .env with your CLICKHOUSE_PASSWORD
-
-# Build UI and install
-make install
-# Runs: npm ci && npm run build → pip install -e .
 ```
 
-### Connect to Claude Desktop
+For local development, the code default is already a writable local path: `.cerebro/research_projects`.
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Recommended local overrides in `.env`:
+
+```dotenv
+CLICKHOUSE_PASSWORD=your_password_here
+CEREBRO_RESEARCH_DIR=.cerebro/research_projects
+THINKING_LOG_DIR=.cerebro/logs
+ASYNC_RESULT_DIR=.cerebro/query_results
+```
+
+Then build and install:
+
+```bash
+make install
+```
+
+What `make install` does:
+
+- builds the report UI bundle
+- copies it into `src/cerebro_mcp/static/report.html`
+- installs the Python package in editable mode
+
+### Run With stdio
+
+This is the default mode for local desktop MCP hosts:
+
+```bash
+cerebro-mcp
+```
+
+### Run With SSE
+
+Use this for remote or browser-accessed MCP clients:
+
+```bash
+export MCP_AUTH_TOKEN=replace_me
+cerebro-mcp --sse
+```
+
+SSE behavior:
+
+- binds to `FASTMCP_HOST` / `FASTMCP_PORT`
+- requires `Authorization: Bearer <token>` by default
+- `/health` is public
+- `/reports/{id}` accepts bearer auth or `?token=...`
+
+To disable auth for local testing only:
+
+```dotenv
+ALLOW_INSECURE_REMOTE_TRANSPORT=True
+```
+
+### Run With Docker
+
+Build:
+
+```bash
+docker build -t cerebro-mcp .
+```
+
+Run:
+
+```bash
+docker run \
+  --env-file .env \
+  -p 8000:8000 \
+  -v "$(pwd)/data:/data" \
+  cerebro-mcp
+```
+
+Important for Docker:
+
+- the image uses `/data` for persistent storage
+- mounted `/data` must be writable by container user `uid 1000`
+- reports, saved queries, logs, and research projects all live under `/data` in the image defaults
+
+---
+
+## Connecting MCP Clients
+
+### Claude Desktop
+
+If `cerebro-mcp` is on your `PATH`:
 
 ```json
 {
@@ -481,16 +649,17 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
     "cerebro": {
       "command": "cerebro-mcp",
       "env": {
-        "CLICKHOUSE_PASSWORD": "your_password"
+        "CLICKHOUSE_PASSWORD": "your_password",
+        "CEREBRO_RESEARCH_DIR": ".cerebro/research_projects"
       }
     }
   }
 }
 ```
 
-### Connect to Claude Code
+### Claude Code
 
-Add to `.mcp.json` in your project or `~/.claude/.mcp.json` for global access:
+Using `uv` from a checked-out repo:
 
 ```json
 {
@@ -503,9 +672,7 @@ Add to `.mcp.json` in your project or `~/.claude/.mcp.json` for global access:
 }
 ```
 
-### Connect to VS Code
-
-Add to `.vscode/mcp.json`:
+### VS Code
 
 ```json
 {
@@ -518,87 +685,7 @@ Add to `.vscode/mcp.json`:
 }
 ```
 
-### Docker
-
-```bash
-docker build -t cerebro-mcp .
-docker run --env-file .env cerebro-mcp
-```
-
----
-
-## Deployment
-
-### CI/CD
-
-Push to `main` triggers GitHub Actions to build and push multi-arch Docker images:
-
-```
-ghcr.io/gnosischain/gc-cerebro-mcp:latest
-ghcr.io/gnosischain/gc-cerebro-mcp:<commit-sha>
-```
-
-### SSE Transport
-
-The `--sse` flag starts an HTTP server (uvicorn) for remote MCP clients:
-
-```bash
-cerebro-mcp --sse
-# Listens on http://0.0.0.0:8000 (configurable via FASTMCP_HOST / FASTMCP_PORT)
-```
-
-Without `--sse`, the server uses stdio transport (default for local Claude Desktop).
-
-### Authentication
-
-Remote SSE transport requires `MCP_AUTH_TOKEN` by default:
-
-```bash
-export MCP_AUTH_TOKEN=$(openssl rand -hex 32)
-cerebro-mcp --sse
-```
-
-- All MCP/SSE endpoints require `Authorization: Bearer <token>` header
-- `/health` bypasses auth (for K8s probes)
-- `/reports/{id}` supports both Bearer header and `?token=<token>` query param (browser-friendly)
-- Startup fails if `MCP_AUTH_TOKEN` is unset, unless `ALLOW_INSECURE_REMOTE_TRANSPORT=True`
-- `stdio` transport is unchanged and does not require `MCP_AUTH_TOKEN`
-
-### Health Endpoint
-
-`/health` now performs a real ClickHouse connectivity check:
-
-- `200` when ClickHouse is reachable
-- Includes `clickhouse_version` and `ssl_trust_injected`
-- `503` when ClickHouse is unreachable or misconfigured
-
-### Report Download Endpoint
-
-In SSE mode, reports can be downloaded directly via HTTP:
-
-```
-GET /reports/{report_id}
-```
-
-- `report_id`: Full UUID or 8-character prefix
-- Auth: `Authorization: Bearer <token>` header or `?token=<token>` query param
-- Returns: Full standalone HTML (`Content-Type: text/html`)
-- `404` if not found, `409` if ambiguous prefix
-
-```bash
-# With Bearer header
-curl -H "Authorization: Bearer $TOKEN" \
-  https://mcp.analytics.gnosis.io/reports/1fd3979f -o report.html
-
-# With query param (browser-friendly)
-open "https://mcp.analytics.gnosis.io/reports/1fd3979f?token=$TOKEN"
-```
-
-The `export_report` MCP tool automatically returns the download URL when running in SSE mode. Set `REPORT_BASE_URL` for production deployments (e.g., `https://mcp.analytics.gnosis.io/reports`).
-
-### Hosted Endpoint
-
-The team instance is deployed on EKS at `mcp.analytics.gnosis.io`:
+### Remote SSE Client
 
 ```json
 {
@@ -613,155 +700,243 @@ The team instance is deployed on EKS at `mcp.analytics.gnosis.io`:
 }
 ```
 
-Terraform deployment details are in the [infrastructure repo](https://github.com/gnosischain/infrastructure-gnosis-analytics-deployments/tree/main/aws/deployments/gnosis-analytics/mcp).
+---
+
+## Deployment Notes
+
+### Health Endpoint
+
+`/health` performs a real ClickHouse connectivity check and returns:
+
+- `200` when ClickHouse is reachable
+- `503` when ClickHouse is not reachable
+- `clickhouse_version`
+- `ssl_trust_injected`
+
+### Report Download Endpoint
+
+In SSE mode:
+
+```text
+GET /reports/{report_id}
+```
+
+Behavior:
+
+- accepts full UUID or unique short prefix
+- returns standalone HTML
+- supports bearer header or `?token=...`
+
+### Manifest And Docs Loading
+
+At startup the server tries to load:
+
+- the dbt manifest
+- the external docs index
+
+If these fail, dbt and docs-assisted capabilities degrade, but the server can still start.
+
+Important for stdio clients:
+
+- the MCP transport expects JSON-RPC on `stdout` only
+- any plain-text startup logging sent to `stdout` will break the connection
+- Cerebro sends startup diagnostics through logging/stderr instead
 
 ---
 
 ## Configuration
 
-All settings via environment variables or `.env` file:
+All settings are environment variables or `.env` values.
+
+### ClickHouse and SQL limits
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+|---|---|---|
 | `CLICKHOUSE_HOST` | `ujt1j3jrk0.eu-central-1.aws.clickhouse.cloud` | ClickHouse server |
 | `CLICKHOUSE_PORT` | `8443` | ClickHouse port |
 | `CLICKHOUSE_USER` | `default` | ClickHouse user |
-| `CLICKHOUSE_PASSWORD` | *(required)* | ClickHouse password |
+| `CLICKHOUSE_PASSWORD` | empty | ClickHouse password |
 | `CLICKHOUSE_SECURE` | `True` | Use TLS |
 | `CLICKHOUSE_VERIFY` | `True` | Verify TLS certificates |
-| `CLICKHOUSE_CONNECT_TIMEOUT` | `30` | Connection timeout (seconds) |
-| `CLICKHOUSE_SEND_RECEIVE_TIMEOUT` | `300` | Socket send/receive timeout (seconds) |
-| `CLICKHOUSE_QUERY_TIMEOUT_SECONDS` | `30` | Server-side `max_execution_time` |
-| `DBT_MANIFEST_URL` | `https://gnosischain.github.io/dbt-cerebro/manifest.json` | dbt manifest |
-| `DBT_MANIFEST_PATH` | -- | Local manifest fallback |
-| `MAX_ROWS` | `10000` | Max rows per query |
-| `QUERY_TIMEOUT_SECONDS` | `30` | Deprecated fallback for query timeout |
-| `MAX_QUERY_LENGTH` | `10000` | Max SQL length |
-| `TOOL_RESULT_MAX_ROWS` | `200` | Max rows exposed to sync tool responses |
-| `TOOL_RESULT_MAX_CHARS` | `40000` | Max serialized size for structured tool responses |
-| `TOOL_SUMMARY_BUDGET_RATIO` | `0.9` | Fraction of the tool budget reserved for `summary_markdown` |
-| `TOOL_RESPONSE_MAX_CHARS` | `40000` | Legacy fallback when `TOOL_RESULT_MAX_CHARS` is unset |
-| `ASYNC_RESULT_PAGE_SIZE` | `200` | Page size for async query result previews |
-| `ASYNC_RESULT_MEMORY_THRESHOLD_BYTES` | `5000000` | Spill async result pages to disk above this size |
-| `ASYNC_RESULT_DIR` | `.cerebro/query_results` | On-disk storage for large async result pages |
-| `THINKING_ALWAYS_ON` | `True` | Auto-capture all tool calls |
-| `THINKING_LOG_DIR` | `.cerebro/logs` | Trace log directory |
-| `THINKING_LOG_RETENTION_DAYS` | `30` | Log retention |
-| `CEREBRO_REPORT_DIR` | `~/.cerebro/reports` | Saved report directory |
-| `CEREBRO_SAVED_QUERIES_DIR` | `~/.cerebro-mcp` | Saved queries directory |
-| `REPORT_BASE_URL` | -- | URL prefix for report downloads (e.g. `https://host/reports`) |
-| `MCP_AUTH_TOKEN` | -- | Bearer token required for SSE unless insecure mode is enabled |
-| `ALLOW_INSECURE_REMOTE_TRANSPORT` | `False` | Allow unauthenticated SSE startup for local/dev use only |
-| `FASTMCP_HOST` | `0.0.0.0` | SSE server bind address |
-| `FASTMCP_PORT` | `8000` | SSE server port |
-| `ENFORCE_CHART_PRECONDITIONS` | `True` | Enable/disable workflow gates |
-| `MIN_MODELS_DETAILED` | `3` | Models to explore via `get_model_details` before charting |
-| `MIN_TABLES_VERIFIED` | `1` | Tables to verify via `describe_table` before charting |
-| `MIN_CHARTS_FOR_REPORT` | `3` | Minimum charts for `generate_report` |
-| `MIN_EXPLORATORY_QUERIES` | `2` | Minimum `execute_query` calls before report |
-| `REQUIRE_DIMENSIONAL_BREAKDOWN` | `True` | Require series_field or pie/treemap/heatmap/sankey |
-| `REQUIRE_RELATIONAL_CHART` | `True` | Require scatter/heatmap chart or correlation query |
+| `CLICKHOUSE_CONNECT_TIMEOUT` | `30` | connect timeout |
+| `CLICKHOUSE_SEND_RECEIVE_TIMEOUT` | `300` | socket timeout |
+| `CLICKHOUSE_QUERY_TIMEOUT_SECONDS` | `30` | server-side execution timeout |
+| `QUERY_TIMEOUT_SECONDS` | `30` | deprecated fallback |
+| `MAX_ROWS` | `10000` | max query result rows for internal execution |
+| `MAX_QUERY_LENGTH` | `10000` | max accepted SQL length |
+
+### Tool response budgets
+
+| Variable | Default | Description |
+|---|---|---|
+| `TOOL_RESULT_MAX_ROWS` | `200` | max rows returned to sync tool consumers |
+| `TOOL_RESULT_MAX_CHARS` | `40000` | max serialized sync tool payload size |
+| `TOOL_SUMMARY_BUDGET_RATIO` | `0.9` | fraction reserved for `summary_markdown` |
+| `TOOL_RESPONSE_MAX_CHARS` | `40000` | legacy fallback if `TOOL_RESULT_MAX_CHARS` is unset |
+
+### Async query storage
+
+| Variable | Default | Description |
+|---|---|---|
+| `ASYNC_RESULT_PAGE_SIZE` | `200` | async result preview page size |
+| `ASYNC_RESULT_MEMORY_THRESHOLD_BYTES` | `5000000` | spill large async results to disk |
+| `ASYNC_RESULT_DIR` | `.cerebro/query_results` | async result storage |
+
+### Research storage
+
+| Variable | Default | Description |
+|---|---|---|
+| `CEREBRO_RESEARCH_DIR` | `.cerebro/research_projects` | durable research project root for local/dev; Docker overrides to `/data/research_projects` |
+| `RESEARCH_PAGE_SIZE_DEFAULT` | `20` | default page size for research listings |
+| `RESEARCH_PAGE_SIZE_MAX` | `100` | max page size for research listings |
+
+### Reports, tracing, and transport
+
+| Variable | Default | Description |
+|---|---|---|
+| `CEREBRO_REPORT_DIR` | code fallback `~/.cerebro/reports`, Docker override `/data/reports` | report storage |
+| `CEREBRO_SAVED_QUERIES_DIR` | tool fallback `~/.cerebro-mcp`, Docker override `/data/saved-queries` | saved SQL snippets |
+| `THINKING_LOG_DIR` | `.cerebro/logs` | reasoning trace directory |
+| `THINKING_ALWAYS_ON` | `True` | auto capture tool calls |
+| `THINKING_LOG_RETENTION_DAYS` | `30` | trace retention |
+| `REPORT_BASE_URL` | empty | URL prefix for exported reports |
+| `MCP_AUTH_TOKEN` | empty | required for SSE unless insecure mode is enabled |
+| `ALLOW_INSECURE_REMOTE_TRANSPORT` | `False` | disable SSE auth for local testing |
+| `FASTMCP_HOST` | `0.0.0.0` | SSE bind host |
+| `FASTMCP_PORT` | `8000` | SSE bind port |
+
+### Chart and report gates
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENFORCE_CHART_PRECONDITIONS` | `True` | enable chart/report gates |
+| `MIN_MODELS_DETAILED` | `3` | model detail explorations required before gated charting |
+| `MIN_TABLES_VERIFIED` | `1` | tables to verify before gated charting |
+| `MIN_CHARTS_FOR_REPORT` | `3` | minimum registered charts before report creation |
+| `MIN_EXPLORATORY_QUERIES` | `2` | minimum prior query executions before report creation |
+| `REQUIRE_DIMENSIONAL_BREAKDOWN` | `True` | require a dimensional breakdown in report flow |
+| `REQUIRE_RELATIONAL_CHART` | `True` | require relational analysis in report flow |
+
+Use `system_status()` to inspect the live resolved configuration, cache sizes, transport mode, and ClickHouse connectivity.
 
 ---
 
-## Safety
+## Safety And Guardrails
 
-All SQL is validated before execution:
+The server enforces the following at the execution layer:
 
-- **Read-only**: Only `SELECT`, `EXPLAIN`, `DESCRIBE`, `SHOW` allowed
-- **No writes**: `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `TRUNCATE` blocked
-- **No escape hatches**: `FORMAT`, `SETTINGS`, and external readers like `s3(...)`, `url(...)`, and `remote(...)` are blocked
-- **No injection**: Identifiers validated (alphanumeric + underscore only), LIKE filters parameterized
-- **Execution caps**: Queries are forcibly wrapped/capped even when they already include `LIMIT`
-- **Payload caps**: Sync tool responses are truncated to row and serialized-size budgets to protect MCP/LLM context limits
-- **TLS trust**: Best-effort `truststore` injection uses OS certificate stores before ClickHouse/HTTP client initialization
+- read-only SQL only
+- blocked DDL and DML
+- blocked `FORMAT`, `SETTINGS`, and external reader functions such as `s3(...)`, `url(...)`, `remote(...)`
+- database allowlist
+- identifier validation
+- forced result capping even when a query already contains `LIMIT`
+- JSON-safe normalization for ClickHouse values
+- best-effort OS trust-store injection for TLS
 
-### Recommended: Read-Only ClickHouse User
+Recommended operational hardening:
 
-```sql
-CREATE USER mcp_reader IDENTIFIED BY '...';
-GRANT SELECT ON execution.* TO mcp_reader;
-GRANT SELECT ON consensus.* TO mcp_reader;
-GRANT SELECT ON crawlers_data.* TO mcp_reader;
-GRANT SELECT ON nebula.* TO mcp_reader;
-GRANT SELECT ON dbt.* TO mcp_reader;
-GRANT SELECT ON system.tables TO mcp_reader;
-GRANT SELECT ON system.columns TO mcp_reader;
-```
+- use a least-privilege ClickHouse user
+- keep `CLICKHOUSE_VERIFY=True`
+- require `MCP_AUTH_TOKEN` on remote SSE
+
+Saved-query reminder:
+
+- `save_query` is for reusable SQL
+- it is not evidence storage
+- use research snapshots when you need durable query evidence
 
 ---
 
-## Reasoning & Tracing
+## Typical User Requests And What To Do
 
-Built-in tracing records every tool call and reasoning step as JSON session traces.
+### "What data is available for X?"
 
-```
-  Tool Call ──► Auto-capture ──► Session Trace (.cerebro/logs/)
-                                  │
-                  ┌───────────────┼───────────────┐
-                  │               │               │
-                  ▼               ▼               ▼
-              tool_name       duration_ms     success/error
-              tool_args       timestamp       (redacted secrets)
-              tool_result     step_number
-```
+Use:
 
-- **Auto-capture**: Every tool call recorded when `THINKING_ALWAYS_ON=True`
-- **Sensitive data redaction**: passwords, tokens, API keys automatically stripped
-- **30-day retention**: Old traces auto-pruned
-- **Performance stats**: Aggregate metrics across sessions via `get_performance_stats`
+1. `discover_models`
+2. `get_model_details` if needed
+3. `describe_table`
+
+### "Give me the number or trend"
+
+Use:
+
+1. `discover_models`
+2. `describe_table`
+3. `execute_query`
+
+If the result is large or slow:
+
+1. `start_query`
+2. `get_query_results`
+
+### "Make me a chart"
+
+Use:
+
+- `quick_chart` for a one-off plot
+- `generate_chart` if you are already in report mode and only need one chart
+
+### "Make me a report"
+
+Use:
+
+1. `discover_models`
+2. `describe_table`
+3. `execute_query` for EDA and support queries
+4. `generate_charts`
+5. `generate_report`
+
+### "Investigate this over several steps"
+
+Use the research workflow:
+
+1. `start_research_project`
+2. phase planning and execution
+3. persisted evidence capture
+4. verification
+5. peer review
+6. publication
 
 ---
 
 ## Project Structure
 
-```
+```text
 cerebro-mcp/
 ├── src/cerebro_mcp/
-│   ├── server.py                    # FastMCP server, tool registration
-│   ├── bootstrap.py                 # TLS truststore + transport auth bootstrap
-│   ├── config.py                    # Settings from env vars
-│   ├── clickhouse_client.py         # ClickHouse connection pool + cache
-│   ├── tool_models.py               # Structured MCP tool response models
-│   ├── tool_output.py               # JSON-safe normalization + markdown summaries
-│   ├── manifest_loader.py           # dbt manifest loading + indexing
-│   ├── safety.py                    # SQL validation + injection prevention
+│   ├── server.py
+│   ├── bootstrap.py
+│   ├── config.py
+│   ├── clickhouse_client.py
+│   ├── tool_models.py
+│   ├── tool_output.py
+│   ├── safety.py
+│   ├── manifest_loader.py
+│   ├── docs_loader.py
+│   ├── research_models.py
+│   ├── research_store.py
+│   ├── research_workflow.py
 │   ├── tools/
-│   │   ├── query.py                 # execute_query, explain_query
-│   │   ├── query_async.py           # start_query, get_query_results
-│   │   ├── schema.py                # list_tables, describe_table, get_sample_data
-│   │   ├── dbt.py                   # search_models, get_model_details
-│   │   ├── metadata.py              # list_databases, resolve_address, tokens
-│   │   ├── saved_queries.py         # save/list/run saved queries
-│   │   ├── visualization.py         # generate_chart, generate_report, export
-│   │   ├── session_state.py         # Workflow enforcement gates
-│   │   ├── reasoning.py             # tracing, performance stats
-│   │   └── agents.py                # get_agent_persona
+│   │   ├── query.py
+│   │   ├── query_async.py
+│   │   ├── schema.py
+│   │   ├── dbt.py
+│   │   ├── metadata.py
+│   │   ├── saved_queries.py
+│   │   ├── visualization.py
+│   │   ├── research.py
+│   │   ├── session_state.py
+│   │   ├── reasoning.py
+│   │   └── agents.py
 │   ├── prompts/
-│   │   ├── templates.py             # MCP prompts
-│   │   └── agents/                  # Agent persona definitions
-│   │       ├── analytics_reporter.md
-│   │       ├── ui_designer.md
-│   │       └── reality_checker.md
 │   ├── resources/
-│   │   ├── context.py               # Platform overview, SQL guide
-│   │   └── reference.py             # Chain params, addresses, metrics
 │   └── static/
-│       └── report.html              # Built React UI (generated by make build-ui)
-├── ui/                              # React + Vite frontend
-│   ├── src/
-│   │   ├── App.tsx                  # Dashboard layout with sidebar
-│   │   ├── components/              # ChartCard, Sidebar, ReportHeader, ...
-│   │   ├── hooks/                   # useReportData, useTheme
-│   │   ├── themes/                  # tokens.css, global.css, ECharts themes
-│   │   └── assets/                  # Gnosis watermark PNGs (base64)
-│   ├── package.json
-│   └── vite.config.ts               # Single-file HTML build (vite-plugin-singlefile)
-├── tests/                           # pytest suite (131 tests)
-├── pyproject.toml
-├── Dockerfile                       # Multi-stage: Node UI build + Python
-├── Makefile                         # build-ui, install, dev
-├── CLAUDE.md                        # Client-side instructions for Claude Code
+├── ui/
+├── tests/
+├── Dockerfile
+├── Makefile
 └── .env.example
 ```
 
@@ -770,79 +945,49 @@ cerebro-mcp/
 ## Development
 
 ```bash
-# UI dev server with hot reload
-make dev
-
-# Build UI only
 make build-ui
-
-# Run tests
-pytest -v
-
-# Full install (build UI + pip install)
 make install
+make dev
+pytest -v
 ```
 
-### Testing with MCP Inspector
+Useful local checks:
 
 ```bash
-# Spawn server with Inspector UI
-uv run mcp dev src/cerebro_mcp/server.py
-
-# Or run with SSE transport
-uv run cerebro-mcp --sse
+python -m compileall src tests
+cerebro-mcp
+cerebro-mcp --sse
 ```
 
----
+MCP Inspector example:
 
-## Usage Examples
-
-### Quick Queries (Markdown Output)
-- "How many transactions were there on Gnosis Chain yesterday?"
-- "What's the GNO token price trend this week?"
-- "Show me the top addresses by gas usage in the last 7 days"
-
-### Visual Reports (Interactive HTML)
-- "Give me a weekly report on Gnosis Chain activity with charts"
-- "Show me DeFi TVL trends over the past month"
-- "Create a report comparing bridge flow volumes by chain"
-- "Analyze validator performance trends"
-
-### Protocol Exploration
-- "Explore the Circles protocol data"
-- "What Balancer pools exist on Gnosis Chain?"
-- "Find all models related to bridge flows"
-
----
-
-## Gnosis Chain Reference
-
-| Parameter | Value |
-|-----------|-------|
-| Chain ID | 100 |
-| Block time | 5 seconds (~17,280 blocks/day) |
-| Gas token | xDAI (18 decimals) |
-| Staking token | GNO (18 decimals, 1 per validator) |
-| Slots per epoch | 16 |
-| USDC/USDT decimals | 6 |
+```bash
+uv run mcp dev src/cerebro_mcp/server.py
+```
 
 ---
 
 ## Dependencies
 
 | Package | Purpose |
-|---------|---------|
-| `mcp[cli]` >= 1.2.0 | MCP Python SDK (FastMCP) |
-| `clickhouse-connect` >= 0.7.0 | ClickHouse client |
-| `truststore` >= 0.10 | Native OS trust store integration for TLS |
-| `pydantic-settings` >= 2.0 | Settings management |
-| `python-dotenv` >= 1.0 | .env file loading |
-| `requests` >= 2.31 | HTTP client for manifest |
+|---|---|
+| `mcp[cli]` | FastMCP server and MCP protocol support |
+| `clickhouse-connect` | ClickHouse client |
+| `pyarrow` | Arrow fetch path for ClickHouse |
+| `pydantic-settings` | environment-backed settings |
+| `python-dotenv` | `.env` loading |
+| `requests` | manifest/docs HTTP fetching |
+| `truststore` | OS trust-store TLS integration |
 
-**Frontend**: React 19, ECharts 5.6, Tailwind CSS 4, Lucide React, `@modelcontextprotocol/ext-apps`
+Frontend stack:
+
+- React
+- ECharts
+- Tailwind
+- `@modelcontextprotocol/ext-apps`
 
 ---
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE).

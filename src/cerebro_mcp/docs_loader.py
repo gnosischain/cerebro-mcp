@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -8,6 +9,8 @@ from typing import Optional
 import requests
 
 from cerebro_mcp.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class DocsLoader:
@@ -68,8 +71,9 @@ class DocsLoader:
                     self._last_refresh_error = None
                     content_hash = self._hash_bytes(resp.content)
                     if not conditional:
-                        print(
-                            f"Loaded docs index from {settings.DOCS_SEARCH_INDEX_URL}"
+                        logger.info(
+                            "Loaded docs index from %s",
+                            settings.DOCS_SEARCH_INDEX_URL,
                         )
                     return resp.json(), content_hash
 
@@ -79,13 +83,13 @@ class DocsLoader:
                 if conditional:
                     self._last_refresh_error = error_msg
                     return None
-                print(error_msg)
+                logger.warning(error_msg)
             except Exception as e:
                 error_msg = f"Error fetching docs index URL: {e}"
                 if conditional:
                     self._last_refresh_error = error_msg
                     return None
-                print(error_msg)
+                logger.warning(error_msg)
 
         if conditional:
             return None
@@ -99,16 +103,16 @@ class DocsLoader:
                     raw = f.read()
                 content_hash = self._hash_bytes(raw)
                 data = json.loads(raw)
-                print(
-                    f"Loaded docs index from {settings.DOCS_SEARCH_INDEX_PATH}"
+                logger.info(
+                    "Loaded docs index from %s",
+                    settings.DOCS_SEARCH_INDEX_PATH,
                 )
                 return data, content_hash
             except Exception as e:
-                print(f"Error loading local docs index: {e}")
+                logger.warning("Error loading local docs index: %s", e)
 
-        print(
-            "Warning: No docs index loaded. "
-            "External docs search will be unavailable."
+        logger.warning(
+            "No docs index loaded. External docs search will be unavailable."
         )
         return None
 

@@ -42,6 +42,92 @@ def _decode_page_token(
     return last_name
 
 
+def build_table_schema(
+    ch: ClickHouseManager,
+    *,
+    table: str,
+    database: str = "dbt",
+    record_state: bool = True,
+) -> TableSchema:
+    sql = (
+        "SELECT name, type, default_kind, comment "
+        "FROM system.columns "
+        "WHERE database = {db:String} AND table = {tbl:String} "
+        "ORDER BY position"
+    )
+    cache_key = f"columns:{database}.{table}"
+    result = ch.execute_raw_cached(
+        sql,
+        database,
+        cache_key,
+        parameters={"db": database, "tbl": table},
+    )
+
+    if not result["rows"]:
+        raise ValueError(f"Table '{database}.{table}' not found or has no columns.")
+
+    model = manifest.get_model(table)
+    model_description = ""
+    materialization = ""
+    if model:
+        model_description = model.get("description", "")
+        materialization = model.get("config", {}).get("materialized", "")
+
+    dbt_columns = {}
+    if model:
+        dbt_columns = {
+            key.lower(): value
+            for key, value in model.get("columns", {}).items()
+        }
+
+    columns = []
+    enriched_rows = []
+    for row in result["rows"]:
+        col_name = str(row[0] or "")
+        col_type = str(row[1] or "")
+        default = str(row[2] or "")
+        dbt_col = dbt_columns.get(col_name.lower(), {})
+        description = str(
+            dbt_col.get("description", "")
+            or (row[3] if len(row) > 3 and row[3] else "")
+        )
+        columns.append(
+            ColumnSchema(
+                name=col_name,
+                type=col_type,
+                default_kind=default,
+                description=description,
+            )
+        )
+        enriched_rows.append([col_name, col_type, default, description])
+
+    summary_parts = [f"## {database}.{table}\n"]
+    if model_description:
+        summary_parts.append(f"**Description:** {model_description}")
+    if materialization:
+        summary_parts.append(f"**Materialization:** {materialization}")
+    summary_parts.append(
+        format_results_table(
+            ["name", "type", "default_kind", "description"],
+            enriched_rows,
+        )
+    )
+
+    if record_state:
+        from cerebro_mcp.tools.session_state import state
+
+        state.record_describe_table(table)
+
+    return TableSchema(
+        database=database,
+        table=table,
+        model_description=model_description,
+        materialization=materialization,
+        columns=columns,
+        summary_markdown=truncate_response("\n\n".join(summary_parts)),
+    )
+
+
 def register_schema_tools(mcp, ch: ClickHouseManager):
     @mcp.tool()
     def list_tables(
@@ -177,82 +263,11 @@ LIMIT {limit:UInt32}
             valid, err = validate_identifier(database)
             if not valid:
                 return f"Error: {err}"
-
-            sql = (
-                "SELECT name, type, default_kind, comment "
-                "FROM system.columns "
-                "WHERE database = {db:String} AND table = {tbl:String} "
-                "ORDER BY position"
-            )
-            cache_key = f"columns:{database}.{table}"
-            result = ch.execute_raw_cached(
-                sql,
-                database,
-                cache_key,
-                parameters={"db": database, "tbl": table},
-            )
-
-            if not result["rows"]:
-                return f"Table '{database}.{table}' not found or has no columns."
-
-            model = manifest.get_model(table)
-            model_description = ""
-            materialization = ""
-            if model:
-                model_description = model.get("description", "")
-                materialization = model.get("config", {}).get("materialized", "")
-
-            dbt_columns = {}
-            if model:
-                dbt_columns = {
-                    k.lower(): v
-                    for k, v in model.get("columns", {}).items()
-                }
-
-            columns = []
-            enriched_rows = []
-            for row in result["rows"]:
-                col_name = str(row[0] or "")
-                col_type = str(row[1] or "")
-                default = str(row[2] or "")
-                dbt_col = dbt_columns.get(col_name.lower(), {})
-                description = str(
-                    dbt_col.get("description", "")
-                    or (row[3] if len(row) > 3 and row[3] else "")
-                )
-                columns.append(
-                    ColumnSchema(
-                        name=col_name,
-                        type=col_type,
-                        default_kind=default,
-                        description=description,
-                    )
-                )
-                enriched_rows.append([col_name, col_type, default, description])
-
-            summary_parts = [f"## {database}.{table}\n"]
-            if model_description:
-                summary_parts.append(f"**Description:** {model_description}")
-            if materialization:
-                summary_parts.append(f"**Materialization:** {materialization}")
-            summary_parts.append(
-                format_results_table(
-                    ["name", "type", "default_kind", "description"],
-                    enriched_rows,
-                )
-            )
-
-            from cerebro_mcp.tools.session_state import state
-
-            state.record_describe_table(table)
-
-            return TableSchema(
-                database=database,
+            return build_table_schema(
+                ch,
                 table=table,
-                model_description=model_description,
-                materialization=materialization,
-                columns=columns,
-                summary_markdown=truncate_response("\n\n".join(summary_parts)),
+                database=database,
+                record_state=True,
             )
         except Exception as e:
             return f"Error: {e}"

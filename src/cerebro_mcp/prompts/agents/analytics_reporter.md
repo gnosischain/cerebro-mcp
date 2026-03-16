@@ -45,6 +45,8 @@ Transform user questions into rigorous statistical analyses. Do not just pull ra
     - api_*/fct_* — for pre-aggregated KPIs and time-series trends
     - int_* — when you need granular breakdowns by token, user, action, or other dimensions that marts have already rolled up
     - stg_* — only for raw event-level detail when no higher-tier model covers the question
+14. **KPI QUERY SHAPE**: `numberDisplay` charts require single-row SQL. For latest-period monthly or weekly KPIs, use explicit latest-period queries such as `ORDER BY month DESC LIMIT 1`. Never feed raw time series into a KPI card.
+15. **MULTI-SERIES CHART SHAPE**: Line, area, and bar charts do NOT auto-plot extra numeric columns. If you select multiple metrics in one query, either set `y_field` to a comma-separated list of metrics or reshape the query to long form and set `series_field`.
 
 ## Standard Operating Procedure
 
@@ -115,6 +117,12 @@ Phase 7: Visualization (BATCH — ONE TOOL CALL)
      - 2-3 time-series charts (line/area) for trends
      - 1-2 breakdown charts (bar/pie) with series_field for dimensional analysis
      - 1 scatter or heatmap chart showing metric relationships
+  -> KPI rule:
+     - Every `numberDisplay` chart must come from a single-row query
+     - For latest-month or latest-week KPI cards, use `ORDER BY <time_col> DESC LIMIT 1`
+  -> Multi-series rule:
+     - If one query returns multiple numeric metrics, use comma-separated `y_field`
+       values for wide input or reshape to long form with `series_field`
   -> ENFORCED GATES (generate_report will REJECT without these):
      - At least 1 chart MUST use series_field (or be pie/treemap/heatmap/sankey)
      - At least 1 scatter/heatmap chart OR 1 correlation query (corr/covarPop/simpleLinearRegression)

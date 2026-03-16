@@ -3,6 +3,7 @@
 import json
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -396,6 +397,159 @@ class TestTimeSeriesOrdering:
 
 
 # ---------------------------------------------------------------------------
+# Chart input shape validation
+# ---------------------------------------------------------------------------
+
+class TestChartInputShapeValidation:
+    def _make_mcp(self, executed_result):
+        from mcp.server.fastmcp import FastMCP
+
+        mcp = FastMCP("test-chart-validation")
+        ch = MagicMock()
+        ch.run_query.return_value = executed_result
+        viz.register_visualization_tools(mcp, ch)
+        return mcp
+
+    def test_number_display_rejects_time_series_input(self):
+        executed = SimpleNamespace(
+            sql="SELECT month, active_users FROM analytics.monthly_kpis ORDER BY month",
+            database="dbt",
+            columns=["month", "active_users"],
+            rows=[["2026-01-01", 148], ["2026-02-01", 9065]],
+            elapsed_seconds=0.01,
+        )
+        mcp = self._make_mcp(executed)
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+
+        result = fn(
+            sql=executed.sql,
+            database="dbt",
+            chart_type="numberDisplay",
+            x_field="month",
+            y_field="active_users",
+            title="Current Active Users",
+        )
+
+        assert "single-row query" in result
+        assert "ORDER BY month DESC LIMIT 1" in result
+        assert viz._chart_registry == {}
+
+    def test_number_display_latest_row_query_succeeds(self):
+        executed = SimpleNamespace(
+            sql="SELECT month, active_users FROM analytics.monthly_kpis ORDER BY month DESC LIMIT 1",
+            database="dbt",
+            columns=["month", "active_users"],
+            rows=[["2026-02-01", 9065]],
+            elapsed_seconds=0.01,
+        )
+        mcp = self._make_mcp(executed)
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+
+        result = fn(
+            sql=executed.sql,
+            database="dbt",
+            chart_type="numberDisplay",
+            x_field="month",
+            y_field="active_users",
+            title="Current Active Users",
+        )
+
+        assert "Chart ID" in result
+        assert viz._chart_registry["chart_1"]["option"]["value"] == 9065
+        assert viz._chart_registry["chart_1"]["input_shape"] == "scalar_kpi_input"
+
+    def test_line_chart_rejects_ambiguous_wide_query(self):
+        executed = SimpleNamespace(
+            sql="SELECT month, active_users, paying_users, retained_users FROM analytics.monthly_kpis ORDER BY month",
+            database="dbt",
+            columns=["month", "active_users", "paying_users", "retained_users"],
+            rows=[
+                ["2026-01-01", 148, 120, 90],
+                ["2026-02-01", 9065, 8700, 5400],
+            ],
+            elapsed_seconds=0.01,
+        )
+        mcp = self._make_mcp(executed)
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+
+        result = fn(
+            sql=executed.sql,
+            database="dbt",
+            chart_type="line",
+            x_field="month",
+            y_field="active_users",
+            title="Monthly Users by Segment",
+        )
+
+        assert "do not auto-plot extra numeric columns" in result
+        assert 'y_field="active_users,paying_users,retained_users"' in result
+        assert viz._chart_registry == {}
+
+    def test_line_chart_accepts_comma_separated_y_fields(self):
+        executed = SimpleNamespace(
+            sql="SELECT month, active_users, paying_users FROM analytics.monthly_kpis ORDER BY month",
+            database="dbt",
+            columns=["month", "active_users", "paying_users"],
+            rows=[
+                ["2026-01-01", 148, 120],
+                ["2026-02-01", 9065, 8700],
+            ],
+            elapsed_seconds=0.01,
+        )
+        mcp = self._make_mcp(executed)
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+
+        result = fn(
+            sql=executed.sql,
+            database="dbt",
+            chart_type="line",
+            x_field="month",
+            y_field="active_users,paying_users",
+            title="Monthly Users by Segment",
+        )
+
+        assert "Chart ID" in result
+        assert viz._chart_registry["chart_1"]["input_shape"] == "multi_series_wide_input"
+        assert [series["name"] for series in viz._chart_registry["chart_1"]["option"]["series"]] == [
+            "active_users",
+            "paying_users",
+        ]
+
+    def test_line_chart_accepts_long_format_series_field(self):
+        executed = SimpleNamespace(
+            sql="SELECT month, series, value FROM some_long_table ORDER BY month",
+            database="dbt",
+            columns=["month", "series", "value"],
+            rows=[
+                ["2026-01-01", "active_users", 148],
+                ["2026-01-01", "paying_users", 120],
+                ["2026-02-01", "active_users", 9065],
+                ["2026-02-01", "paying_users", 8700],
+            ],
+            elapsed_seconds=0.01,
+        )
+        mcp = self._make_mcp(executed)
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+
+        result = fn(
+            sql=executed.sql,
+            database="dbt",
+            chart_type="line",
+            x_field="month",
+            y_field="value",
+            series_field="series",
+            title="Monthly Users by Segment",
+        )
+
+        assert "Chart ID" in result
+        assert viz._chart_registry["chart_1"]["input_shape"] == "long_format_series_input"
+        assert [series["name"] for series in viz._chart_registry["chart_1"]["option"]["series"]] == [
+            "active_users",
+            "paying_users",
+        ]
+
+
+# ---------------------------------------------------------------------------
 # open_report
 # ---------------------------------------------------------------------------
 
@@ -625,11 +779,11 @@ class TestExecuteQueryNudge:
 
         r1 = fn(sql="SELECT 1", database="dbt", max_rows=10)
         r2 = fn(sql="SELECT 2", database="dbt", max_rows=10)
-        assert "generate_chart" not in r1.summary_markdown
-        assert "generate_chart" not in r2.summary_markdown
+        assert "generate_charts([...])" not in r1.summary_markdown
+        assert "generate_charts([...])" not in r2.summary_markdown
 
         r3 = fn(sql="SELECT 3", database="dbt", max_rows=10)
-        assert "generate_chart" in r3.summary_markdown
+        assert "generate_charts([...])" in r3.summary_markdown
 
     def test_nudge_with_charts_shows_reminder(self):
         """Nudge shows chart count when charts exist in registry."""
@@ -667,10 +821,10 @@ class TestExecuteQueryNudge:
         fn(sql="SELECT 1", database="dbt", max_rows=10)
         fn(sql="SELECT 2", database="dbt", max_rows=10)
         r3 = fn(sql="SELECT 3", database="dbt", max_rows=10)
-        assert "generate_chart" in r3.summary_markdown
+        assert "generate_charts([...])" in r3.summary_markdown
 
         r4 = fn(sql="SELECT 4", database="dbt", max_rows=10)
-        assert "generate_chart" not in r4.summary_markdown
+        assert "generate_charts([...])" not in r4.summary_markdown
 
 
 # ---------------------------------------------------------------------------
@@ -700,8 +854,9 @@ class TestSearchModelsHint:
         fn = mcp._tool_manager._tools["search_models"].fn
 
         result = fn(query="weekly report trends")
-        assert "generate_chart" in result
+        assert "generate_charts" in result
         assert "generate_report" in result
+        assert "single-row SQL" in result
 
     def test_non_report_query_no_hint(self, monkeypatch):
         """search_models does NOT add workflow hint for non-report queries."""
@@ -725,4 +880,35 @@ class TestSearchModelsHint:
         fn = mcp._tool_manager._tools["search_models"].fn
 
         result = fn(query="validator performance")
-        assert "generate_chart" not in result
+        assert "generate_charts" not in result
+
+
+class TestReportPrompts:
+    def test_report_prompt_uses_batch_chart_workflow(self):
+        from mcp.server.fastmcp import FastMCP
+        from cerebro_mcp.prompts.templates import register_prompts
+
+        mcp = FastMCP("test-report-prompts")
+        register_prompts(mcp)
+
+        fn = mcp._prompt_manager._prompts["report"].fn
+        text = fn(period="March 2026")
+
+        assert "generate_charts([...])" in text
+        assert "single-row SQL" in text
+        assert "ORDER BY month DESC LIMIT 1" in text
+        assert "generate_chart` for each metric" not in text
+
+    def test_frontend_agent_prompt_explains_chart_query_shapes(self):
+        from mcp.server.fastmcp import FastMCP
+        from cerebro_mcp.prompts.templates import register_prompts
+
+        mcp = FastMCP("test-frontend-prompt")
+        register_prompts(mcp)
+
+        fn = mcp._prompt_manager._prompts["frontend_agent"].fn
+        text = fn(task="Build a monthly activity report")
+
+        assert "generate_charts([...])" in text
+        assert "numberDisplay` charts require single-row SQL" in text
+        assert "comma-separated `y_field` values" in text

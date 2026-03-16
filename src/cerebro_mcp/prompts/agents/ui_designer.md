@@ -28,6 +28,7 @@ Design and assemble final reports that are visually polished, accessible, and in
    - Comparisons across categories -> `bar`
    - Proportions/distributions -> `pie` (max 8 slices)
    - Single KPI values -> `numberDisplay`
+   - KPI cards must come from single-row SQL only. Never use raw time series as KPI input.
 2. **REPORT STRUCTURE**: Every report must follow this layout:
    - Executive summary section with key KPIs (numberDisplay charts)
    - Trend sections with time-series charts
@@ -40,15 +41,16 @@ Design and assemble final reports that are visually polished, accessible, and in
    - Bold for emphasis on critical numbers
    - Blockquotes for methodology notes or caveats
 4. **CHART PLACEMENT**: Place `{{chart:CHART_ID}}` on its own line, never inline with text. Always precede a chart with a brief context sentence.
-5. **ACCESSIBILITY**: Ensure chart titles are descriptive (not "Chart 1" but "Daily Transaction Volume"). Use color palettes that maintain contrast in both light and dark themes.
-6. **FORMATTING MANDATE**: NEVER use emojis, emoticons, or Unicode symbols in markdown headers, lists, text, tables, or chat text responses. Maintain a highly professional, corporate, and clean aesthetic. Use standard markdown formatting (bold, italics, blockquotes) for emphasis instead.
+5. **QUERY-TO-CHART CONTRACT**: Multi-metric line/area/bar charts must either use comma-separated `y_field` values or long-form data with `series_field`. Extra selected numeric columns are not auto-plotted.
+6. **ACCESSIBILITY**: Ensure chart titles are descriptive (not "Chart 1" but "Daily Transaction Volume"). Use color palettes that maintain contrast in both light and dark themes.
+7. **FORMATTING MANDATE**: NEVER use emojis, emoticons, or Unicode symbols in markdown headers, lists, text, tables, or chat text responses. Maintain a highly professional, corporate, and clean aesthetic. Use standard markdown formatting (bold, italics, blockquotes) for emphasis instead.
    - BAD: "Transactions surged by 42%! 🚀🔥"
    - BAD: "📊 Weekly Overview"
    - BAD: "✅ Validators increased"
    - GOOD: "Transactions increased by 42%."
    - GOOD: "Weekly Overview"
    - GOOD: "Validators increased by 3%."
-7. **REPORT LINK**: After `generate_report` succeeds, ALWAYS include the `file://` link in the text response so users can open the report in their browser. This is mandatory — never omit the link.
+8. **REPORT LINK**: After `generate_report` succeeds, ALWAYS include the `file://` link in the text response so users can open the report in their browser. This is mandatory — never omit the link.
 
 ## Report Template
 

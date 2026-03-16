@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -8,6 +9,8 @@ from typing import Any, Optional
 import requests
 
 from cerebro_mcp.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class ManifestLoader:
@@ -78,20 +81,23 @@ class ManifestLoader:
                     self._last_refresh_error = None
                     content_hash = self._hash_bytes(resp.content)
                     if not conditional:
-                        print(f"Loaded manifest from {settings.DBT_MANIFEST_URL}")
+                        logger.info(
+                            "Loaded manifest from %s",
+                            settings.DBT_MANIFEST_URL,
+                        )
                     return resp.json(), content_hash
 
                 error_msg = f"Failed to fetch manifest: HTTP {resp.status_code}"
                 if conditional:
                     self._last_refresh_error = error_msg
                     return None
-                print(error_msg)
+                logger.warning(error_msg)
             except Exception as e:
                 error_msg = f"Error fetching manifest URL: {e}"
                 if conditional:
                     self._last_refresh_error = error_msg
                     return None
-                print(error_msg)
+                logger.warning(error_msg)
 
         if conditional:
             # Don't fall back to local file during refresh
@@ -104,12 +110,17 @@ class ManifestLoader:
                     raw = f.read()
                 content_hash = self._hash_bytes(raw)
                 data = json.loads(raw)
-                print(f"Loaded manifest from {settings.DBT_MANIFEST_PATH}")
+                logger.info(
+                    "Loaded manifest from %s",
+                    settings.DBT_MANIFEST_PATH,
+                )
                 return data, content_hash
             except Exception as e:
-                print(f"Error loading local manifest: {e}")
+                logger.warning("Error loading local manifest: %s", e)
 
-        print("Warning: No manifest loaded. dbt context tools will be unavailable.")
+        logger.warning(
+            "No manifest loaded. dbt context tools will be unavailable."
+        )
         return None
 
     @staticmethod
@@ -180,11 +191,12 @@ class ManifestLoader:
         parent_map = data.get("parent_map", {})
         child_map = data.get("child_map", {})
 
-        print(
-            f"Indexed {len(models)} models, "
-            f"{len(sources)} sources, "
-            f"{len(tags_index)} tags, "
-            f"{len(module_index)} modules"
+        logger.info(
+            "Indexed %s models, %s sources, %s tags, %s modules",
+            len(models),
+            len(sources),
+            len(tags_index),
+            len(module_index),
         )
 
         return {

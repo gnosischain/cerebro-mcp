@@ -79,12 +79,14 @@ def register_dbt_tools(mcp):
 
         if len(results) >= 5:
             result += (
-                "\n\n> **Next steps (enforced by generate_chart):**\n"
+                "\n\n> **Next steps (enforced by report charting):**\n"
                 "> 1. Call `get_model_details` for the top models "
                 "(minimum 3-5, ideally 10+ if available).\n"
                 "> 2. Identify dimensions: token, action, user segment, "
                 "time grain.\n"
-                "> 3. Run EDA with quantiles/stddev before charting."
+                "> 3. Run EDA with quantiles/stddev before charting.\n"
+                "> 4. For KPI cards, use single-row SQL. For trend charts, "
+                "use separate time-series queries."
             )
 
         # Append report workflow hint for report-oriented queries
@@ -94,8 +96,11 @@ def register_dbt_tools(mcp):
         }
         if query and any(kw in query.lower() for kw in _report_keywords):
             result += (
-                "\n\n> **Workflow:** query data → `generate_chart` per metric → "
-                "`generate_report` for interactive report."
+                "\n\n> **Workflow:** query data → `generate_charts([...])` in one batch call → "
+                "`generate_report` for interactive report.\n"
+                "> Use single-row SQL for `numberDisplay` KPI charts "
+                "(for monthly summaries: `ORDER BY month DESC LIMIT 1`) and "
+                "use separate time-series queries for trend charts."
             )
 
         return result
