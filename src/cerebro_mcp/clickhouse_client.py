@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -7,6 +8,10 @@ from typing import Any, Literal
 import clickhouse_connect
 
 from cerebro_mcp.config import settings
+from cerebro_mcp.observability import (
+    log_event,
+    observe_clickhouse_query,
+)
 from cerebro_mcp.safety import (
     enforce_result_limit,
     validate_identifier,
@@ -14,6 +19,8 @@ from cerebro_mcp.safety import (
 )
 from cerebro_mcp.tool_output import fit_rows_to_budget, normalize_rows
 from cerebro_mcp.tool_models import QueryResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -169,12 +176,51 @@ class ClickHouseManager:
 
         client = self.get_client(database)
         start = time.time()
-        columns, rows, actual_fetch_mode, fetch_warnings = self._fetch_rows(
-            client, executed_sql, fetch_mode
-        )
+        try:
+            columns, rows, actual_fetch_mode, fetch_warnings = self._fetch_rows(
+                client, executed_sql, fetch_mode
+            )
+        except Exception:
+            elapsed = time.time() - start
+            observe_clickhouse_query(
+                database=database,
+                audience=audience,
+                fetch_mode=fetch_mode,
+                status="error",
+                elapsed_seconds=elapsed,
+            )
+            log_event(
+                logger,
+                "clickhouse_query",
+                database=database,
+                audience=audience,
+                fetch_mode=fetch_mode,
+                elapsed_seconds=round(elapsed, 3),
+                success=False,
+            )
+            raise
+
         rows = rows[:effective_fetch_cap]
         elapsed = time.time() - start
         warnings.extend(fetch_warnings)
+        observe_clickhouse_query(
+            database=database,
+            audience=audience,
+            fetch_mode=actual_fetch_mode,
+            status="success",
+            elapsed_seconds=elapsed,
+            row_count=len(rows),
+        )
+        log_event(
+            logger,
+            "clickhouse_query",
+            database=database,
+            audience=audience,
+            fetch_mode=actual_fetch_mode,
+            elapsed_seconds=round(elapsed, 3),
+            row_count=len(rows),
+            success=True,
+        )
 
         return ExecutedQuery(
             sql=sql,

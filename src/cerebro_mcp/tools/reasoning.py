@@ -6,6 +6,7 @@ automatic reasoning/performance analysis across MCP sessions.
 
 import atexit
 import json
+import logging
 import threading
 import time
 import uuid
@@ -16,6 +17,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from cerebro_mcp.config import settings
+from cerebro_mcp.observability import (
+    log_event,
+    observe_mcp_request,
+    observe_tool_call,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -373,6 +381,18 @@ def _extract_error_text(payload: Any) -> str | None:
         if "message" in payload and isinstance(payload["message"], str):
             return payload["message"]
 
+        if isinstance(payload.get("isError"), bool) and payload["isError"]:
+            content = payload.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("type") == "text"
+                        and isinstance(item.get("text"), str)
+                    ):
+                        return item["text"]
+            return "MCP call returned an error result."
+
         root = payload.get("root")
         if isinstance(root, dict):
             if isinstance(root.get("isError"), bool) and root["isError"]:
@@ -500,6 +520,14 @@ def _install_tool_manager_tracing(mcp) -> None:
             )
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
+            observe_tool_call(name, status="error", duration_ms=elapsed_ms)
+            log_event(
+                logger,
+                "mcp_tool_call",
+                tool_name=name,
+                duration_ms=elapsed_ms,
+                success=False,
+            )
             _record_auto_tool_step(
                 name,
                 arguments,
@@ -510,6 +538,14 @@ def _install_tool_manager_tracing(mcp) -> None:
             raise
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
+        observe_tool_call(name, status="success", duration_ms=elapsed_ms)
+        log_event(
+            logger,
+            "mcp_tool_call",
+            tool_name=name,
+            duration_ms=elapsed_ms,
+            success=True,
+        )
         _record_auto_tool_step(
             name,
             arguments,
@@ -566,6 +602,19 @@ def _install_request_handler_tracing(mcp) -> None:
                 response = await _handler(req)
             except Exception as exc:
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
+                request_name = method or _request_type.__name__
+                observe_mcp_request(
+                    request_name,
+                    status="error",
+                    duration_ms=elapsed_ms,
+                )
+                log_event(
+                    logger,
+                    "mcp_request",
+                    request_method=request_name,
+                    duration_ms=elapsed_ms,
+                    success=False,
+                )
                 _record_mcp_request_step(
                     request_type=_request_type.__name__,
                     request_method=method,
@@ -577,6 +626,20 @@ def _install_request_handler_tracing(mcp) -> None:
                 raise
 
             elapsed_ms = int((time.perf_counter() - started) * 1000)
+            extracted_error = _extract_error_text(_prepare_payload(response))
+            request_name = method or _request_type.__name__
+            observe_mcp_request(
+                request_name,
+                status="error" if extracted_error else "success",
+                duration_ms=elapsed_ms,
+            )
+            log_event(
+                logger,
+                "mcp_request",
+                request_method=request_name,
+                duration_ms=elapsed_ms,
+                success=extracted_error is None,
+            )
             _record_mcp_request_step(
                 request_type=_request_type.__name__,
                 request_method=method,

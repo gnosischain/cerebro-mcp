@@ -8,6 +8,7 @@ dependencies = [
     "clickhouse-connect>=0.7.0,<1.0",
     "pyarrow>=13.0",
     "pydantic-settings>=2.0",
+    "prometheus-client>=0.20",
     "python-dotenv>=1.0",
     "requests>=2.31",
     "truststore>=0.10",

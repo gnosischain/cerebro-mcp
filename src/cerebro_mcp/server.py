@@ -1,9 +1,11 @@
+import logging
 import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from cerebro_mcp import runtime_state
 from cerebro_mcp.bootstrap import (
@@ -15,6 +17,12 @@ from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
 from cerebro_mcp.docs_loader import docs_index
 from cerebro_mcp.manifest_loader import manifest
+from cerebro_mcp.observability import (
+    PrometheusMiddleware,
+    log_event,
+    metrics_response,
+    setup_logging,
+)
 from cerebro_mcp.research_store import ResearchStore
 from cerebro_mcp.tools.query import register_query_tools
 from cerebro_mcp.tools.schema import register_schema_tools
@@ -36,6 +44,7 @@ from cerebro_mcp.tools.agents import register_agent_tools
 
 runtime_state.ssl_trust_injected = init_ssl_trust()
 RESEARCH_DIR = Path(settings.CEREBRO_RESEARCH_DIR).expanduser()
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
     "cerebro-mcp",
@@ -201,6 +210,11 @@ async def health_check(request: Request) -> JSONResponse:
         )
 
 
+@mcp.custom_route("/metrics", methods=["GET"])
+async def metrics(request: Request) -> Response:
+    return metrics_response()
+
+
 @mcp.custom_route("/reports/{report_id}", methods=["GET"])
 async def download_report(request: Request) -> JSONResponse | HTMLResponse:
     """Serve a report HTML file by ID (full UUID or 8-char prefix)."""
@@ -233,7 +247,9 @@ async def download_report(request: Request) -> JSONResponse | HTMLResponse:
 def main():
     import sys
 
+    setup_logging()
     transport = "sse" if "--sse" in sys.argv else "stdio"
+    log_event(logger, "transport_selected", transport=transport)
     ensure_writable_dir(RESEARCH_DIR)
     manifest.load()
     docs_index.load()
@@ -245,40 +261,59 @@ def main():
         mcp.run(transport="stdio")
 
 
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, auth_token: str):
+        super().__init__(app)
+        self._auth_token = auth_token
+
+    async def dispatch(self, request, call_next):
+        if (
+            request.url.path == "/health"
+            or request.url.path == "/metrics"
+            or request.url.path.startswith("/reports/")
+        ):
+            return await call_next(request)
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header != f"Bearer {self._auth_token}":
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+
+def build_sse_app(auth_token: str | None = None):
+    starlette_app = mcp.sse_app()
+    if auth_token:
+        starlette_app.add_middleware(BearerAuthMiddleware, auth_token=auth_token)
+    starlette_app.add_middleware(PrometheusMiddleware)
+    return starlette_app
+
+
 def _run_sse_with_auth():
     """Run SSE transport, optionally wrapped with Bearer token auth."""
     import anyio
     import uvicorn
 
     os.environ["CEREBRO_TRANSPORT"] = "sse"
-    from starlette.middleware.base import BaseHTTPMiddleware
 
     auth_token = os.environ.get("MCP_AUTH_TOKEN")
     validate_remote_transport_auth(auth_token)
-
-    class BearerAuthMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):
-            # Health and reports endpoints handle auth themselves
-            if request.url.path == "/health" or request.url.path.startswith(
-                "/reports/"
-            ):
-                return await call_next(request)
-            auth_header = request.headers.get("Authorization", "")
-            if auth_header != f"Bearer {auth_token}":
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return await call_next(request)
-
-    starlette_app = mcp.sse_app()
-
-    if auth_token:
-        starlette_app.add_middleware(BearerAuthMiddleware)
+    log_event(logger, "auth_middleware_enabled", enabled=bool(auth_token))
+    starlette_app = build_sse_app(auth_token)
 
     async def _serve():
+        host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
+        port = int(os.environ.get("FASTMCP_PORT", "8000"))
+        log_event(
+            logger,
+            "sse_server_starting",
+            host=host,
+            port=port,
+        )
         config = uvicorn.Config(
             starlette_app,
-            host=os.environ.get("FASTMCP_HOST", "0.0.0.0"),
-            port=int(os.environ.get("FASTMCP_PORT", "8000")),
+            host=host,
+            port=port,
             log_level=mcp.settings.log_level.lower(),
+            log_config=None,
         )
         server = uvicorn.Server(config)
         await server.serve()
