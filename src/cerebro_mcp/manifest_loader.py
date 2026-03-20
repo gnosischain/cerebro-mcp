@@ -24,6 +24,8 @@ class ManifestLoader:
         self._tags_index: dict[str, list[str]] = {}
         self._module_index: dict[str, list[str]] = {}
         self._search_index: dict[str, str] = {}
+        self._tests_by_model: dict[str, list[dict]] = {}
+        self._owner_index: dict[str, list[str]] = {}
         self._loaded = False
 
         # Conditional GET state
@@ -163,9 +165,13 @@ class ManifestLoader:
         tags_index: dict[str, list[str]] = {}
         module_index: dict[str, list[str]] = {}
         search_index: dict[str, str] = {}
+        tests_by_model: dict[str, list[dict]] = {}
+        owner_index: dict[str, list[str]] = {}
 
         for key, node in data.get("nodes", {}).items():
-            if node.get("resource_type") == "model":
+            resource_type = node.get("resource_type")
+
+            if resource_type == "model":
                 name = node["name"]
                 models[name] = node
 
@@ -177,12 +183,59 @@ class ManifestLoader:
                     module = path.split("/")[0].lower()
                     module_index.setdefault(module, []).append(name)
 
-                # Precompute lowercase searchable text
+                # Index by owner from meta
+                meta = node.get("config", {}).get("meta", {})
+                if not meta:
+                    meta = node.get("meta", {})
+                owner = meta.get("owner", "") if meta else ""
+                if owner:
+                    owner_index.setdefault(owner, []).append(name)
+
+                # Include owner in searchable text
                 desc = node.get("description", "")
                 tags_str = " ".join(node.get("tags", []))
                 search_index[name] = (
                     f"{name.lower()} {desc.lower()} {tags_str.lower()}"
+                    f" {owner.lower()}"
                 )
+
+            elif resource_type == "test":
+                # Index tests by the model they reference
+                test_meta = node.get("test_metadata", {})
+                test_name = test_meta.get("name", "") if test_meta else ""
+                depends = node.get("depends_on", {}).get("nodes", [])
+                for dep in depends:
+                    # dep format: "model.gnosis_dbt.model_name"
+                    parts = dep.split(".")
+                    if parts[0] == "model" and len(parts) >= 3:
+                        model_name = parts[-1]
+                        test_info = {
+                            "test_name": test_name,
+                            "test_type": test_meta.get("namespace", "")
+                            if test_meta
+                            else "",
+                            "severity": node.get("config", {}).get(
+                                "severity", "warn"
+                            ),
+                            "tags": node.get("tags", []),
+                            "column_name": node.get("column_name", ""),
+                        }
+                        # Add Elementary-specific config
+                        if test_meta and test_meta.get("namespace") == "elementary":
+                            kwargs = test_meta.get("kwargs", {})
+                            if kwargs.get("timestamp_column"):
+                                test_info["timestamp_column"] = kwargs[
+                                    "timestamp_column"
+                                ]
+                            if kwargs.get("time_bucket"):
+                                test_info["time_bucket"] = kwargs["time_bucket"]
+                            if kwargs.get("anomaly_sensitivity"):
+                                test_info["anomaly_sensitivity"] = kwargs[
+                                    "anomaly_sensitivity"
+                                ]
+                        tests_by_model.setdefault(model_name, []).append(
+                            test_info
+                        )
 
         for key, node in data.get("sources", {}).items():
             source_key = f"{node.get('schema', '')}.{node.get('name', '')}"
@@ -191,10 +244,12 @@ class ManifestLoader:
         parent_map = data.get("parent_map", {})
         child_map = data.get("child_map", {})
 
+        test_count = sum(len(v) for v in tests_by_model.values())
         logger.info(
-            "Indexed %s models, %s sources, %s tags, %s modules",
+            "Indexed %s models, %s sources, %s tests, %s tags, %s modules",
             len(models),
             len(sources),
+            test_count,
             len(tags_index),
             len(module_index),
         )
@@ -207,6 +262,8 @@ class ManifestLoader:
             "tags_index": tags_index,
             "module_index": module_index,
             "search_index": search_index,
+            "tests_by_model": tests_by_model,
+            "owner_index": owner_index,
         }
 
     def _apply_indexes(self, indexes: dict) -> None:
@@ -218,6 +275,8 @@ class ManifestLoader:
         self._tags_index = indexes["tags_index"]
         self._module_index = indexes["module_index"]
         self._search_index = indexes["search_index"]
+        self._tests_by_model = indexes["tests_by_model"]
+        self._owner_index = indexes["owner_index"]
 
     @property
     def is_loaded(self) -> bool:
@@ -247,6 +306,14 @@ class ManifestLoader:
 
     def _model_summary(self, node: dict) -> dict[str, Any]:
         """Build a summary dict for a model node."""
+        meta = node.get("config", {}).get("meta", {})
+        if not meta:
+            meta = node.get("meta", {})
+
+        tests = self._tests_by_model.get(node["name"], [])
+        test_count = len(tests)
+        elementary_tests = [t for t in tests if t.get("test_type") == "elementary"]
+
         return {
             "name": node["name"],
             "description": node.get("description", ""),
@@ -254,6 +321,9 @@ class ManifestLoader:
             "tags": node.get("tags", []),
             "schema": node.get("schema", ""),
             "path": node.get("path", ""),
+            "owner": meta.get("owner", "") if meta else "",
+            "test_count": test_count,
+            "elementary_test_count": len(elementary_tests),
         }
 
     def search_models(
@@ -336,6 +406,19 @@ class ManifestLoader:
         schema = node.get("schema", "dbt")
         alias = node.get("alias", model_name)
 
+        # Extract model meta (owner, authoritative, full_refresh)
+        meta = node.get("config", {}).get("meta", {})
+        if not meta:
+            meta = node.get("meta", {})
+        model_meta = {}
+        if meta:
+            for key in ("owner", "authoritative", "full_refresh", "inference_notes"):
+                if key in meta:
+                    model_meta[key] = meta[key]
+
+        # Collect tests for this model
+        tests = self._tests_by_model.get(model_name, [])
+
         return {
             "name": model_name,
             "unique_id": unique_id,
@@ -344,7 +427,9 @@ class ManifestLoader:
             "materialized": node.get("config", {}).get("materialized", ""),
             "tags": node.get("tags", []),
             "path": node.get("path", ""),
+            "meta": model_meta,
             "columns": columns,
+            "tests": tests,
             "raw_sql": node.get("raw_code", ""),
             "compiled_sql": node.get("compiled_code", ""),
             "upstream": parents,
@@ -435,13 +520,66 @@ class ManifestLoader:
                         "data_type": col_meta.get("data_type", ""),
                         "description": col_meta.get("description", ""),
                     }
-                results.append({
+                source_info: dict[str, Any] = {
                     "name": node.get("name", ""),
                     "identifier": node.get("identifier", node.get("name", "")),
                     "description": node.get("description", ""),
                     "columns": columns,
-                })
+                }
+                # Include freshness config if present
+                freshness = node.get("freshness", {})
+                if freshness:
+                    source_info["freshness"] = freshness
+                loaded_at = node.get("loaded_at_field", "")
+                if loaded_at:
+                    source_info["loaded_at_field"] = loaded_at
+                # Include source meta
+                meta = node.get("source_meta", {})
+                if meta:
+                    source_info["meta"] = {
+                        k: v
+                        for k, v in meta.items()
+                        if k in ("owner", "authoritative")
+                    }
+                results.append(source_info)
         return results
+
+    def get_tests_for_model(self, model_name: str) -> list[dict]:
+        """Return all tests associated with a model."""
+        return self._tests_by_model.get(model_name, [])
+
+    def get_observability_summary(self) -> dict[str, Any]:
+        """Return a summary of observability coverage across all models."""
+        total = len(self._models)
+        models_with_tests = sum(
+            1 for name in self._models if name in self._tests_by_model
+        )
+        elementary_models = sum(
+            1
+            for tests in self._tests_by_model.values()
+            if any(t.get("test_type") == "elementary" for t in tests)
+        )
+
+        # Count by Elementary test type
+        elem_type_counts: dict[str, int] = {}
+        for tests in self._tests_by_model.values():
+            for t in tests:
+                if t.get("test_type") == "elementary":
+                    tname = t.get("test_name", "unknown")
+                    elem_type_counts[tname] = elem_type_counts.get(tname, 0) + 1
+
+        # Count by owner
+        owner_counts = {
+            owner: len(names) for owner, names in self._owner_index.items()
+        }
+
+        return {
+            "total_models": total,
+            "models_with_tests": models_with_tests,
+            "models_with_elementary": elementary_models,
+            "elementary_test_types": elem_type_counts,
+            "owner_distribution": owner_counts,
+        }
 
 
 # Singleton instance

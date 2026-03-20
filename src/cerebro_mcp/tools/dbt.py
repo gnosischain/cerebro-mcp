@@ -65,10 +65,16 @@ def register_dbt_tools(mcp):
         lines = [f"Found {len(results)} model(s):\n"]
         for m in results:
             tags_str = ", ".join(m["tags"]) if m["tags"] else ""
+            owner_str = f" | Owner: {m['owner']}" if m.get("owner") else ""
+            test_str = ""
+            if m.get("test_count", 0) > 0:
+                test_str = f" | Tests: {m['test_count']}"
+                if m.get("elementary_test_count", 0) > 0:
+                    test_str += f" ({m['elementary_test_count']} elementary)"
             lines.append(
                 f"- **{m['name']}** ({m['materialized']})\n"
                 f"  {m['description'][:200]}\n"
-                f"  Tags: {tags_str} | Path: {m['path']}"
+                f"  Tags: {tags_str}{owner_str}{test_str} | Path: {m['path']}"
             )
 
         result = truncate_response("\n".join(lines))
@@ -183,12 +189,32 @@ def register_dbt_tools(mcp):
                 f"**Tags:** {', '.join(details['tags'])}"
             )
 
+            # Meta
+            meta = details.get("meta", {})
+            if meta:
+                meta_parts = []
+                if meta.get("owner"):
+                    meta_parts.append(f"Owner: {meta['owner']}")
+                if meta.get("full_refresh"):
+                    meta_parts.append("Has full_refresh config")
+                if meta_parts:
+                    lines.append(f"**Meta:** {' | '.join(meta_parts)}")
+
             if details["columns"]:
                 lines.append("\n**Columns:**")
                 for col_name, col_info in details["columns"].items():
                     dtype = col_info["data_type"] or "?"
                     desc = col_info["description"]
                     lines.append(f"- `{col_name}` ({dtype}): {desc}")
+
+            # Tests summary
+            tests = details.get("tests", [])
+            if tests:
+                elem = [t for t in tests if t.get("test_type") == "elementary"]
+                lines.append(
+                    f"**Tests:** {len(tests)} total"
+                    + (f" ({len(elem)} elementary)" if elem else "")
+                )
 
             if details["raw_sql"]:
                 # Truncate very long SQL
@@ -262,6 +288,27 @@ def register_dbt_tools(mcp):
             f"**Path:** {details['path']}\n",
         ]
 
+        # Meta (owner, authoritative, full_refresh)
+        meta = details.get("meta", {})
+        if meta:
+            meta_parts = []
+            if meta.get("owner"):
+                meta_parts.append(f"Owner: {meta['owner']}")
+            if "authoritative" in meta:
+                meta_parts.append(
+                    f"Authoritative: {meta['authoritative']}"
+                )
+            if meta.get("full_refresh"):
+                fr = meta["full_refresh"]
+                fr_desc = f"start={fr.get('start_date', '?')}"
+                if fr.get("batch_months"):
+                    fr_desc += f", batch={fr['batch_months']}mo"
+                if fr.get("stages"):
+                    fr_desc += f", {len(fr['stages'])} stages"
+                meta_parts.append(f"Full refresh: {fr_desc}")
+            if meta_parts:
+                parts.append(f"**Meta:** {' | '.join(meta_parts)}\n")
+
         # Columns
         if details["columns"]:
             parts.append("\n## Columns\n")
@@ -271,6 +318,31 @@ def register_dbt_tools(mcp):
                 parts.append(f"- `{col_name}` ({dtype}): {desc}")
         else:
             parts.append("\n*No column documentation available.*\n")
+
+        # Tests
+        tests = details.get("tests", [])
+        if tests:
+            parts.append(f"\n## Tests ({len(tests)})\n")
+            elementary_tests = [
+                t for t in tests if t.get("test_type") == "elementary"
+            ]
+            other_tests = [
+                t for t in tests if t.get("test_type") != "elementary"
+            ]
+            if elementary_tests:
+                parts.append("**Elementary observability:**")
+                for t in elementary_tests:
+                    col = f" on `{t['column_name']}`" if t.get("column_name") else ""
+                    sev = t.get("severity", "warn")
+                    ts = f", ts={t['timestamp_column']}" if t.get("timestamp_column") else ""
+                    parts.append(
+                        f"- `{t['test_name']}`{col} (severity={sev}{ts})"
+                    )
+            if other_tests:
+                parts.append("**Standard tests:**")
+                for t in other_tests:
+                    col = f" on `{t['column_name']}`" if t.get("column_name") else ""
+                    parts.append(f"- `{t['test_name']}`{col}")
 
         # SQL
         if details["raw_sql"]:
