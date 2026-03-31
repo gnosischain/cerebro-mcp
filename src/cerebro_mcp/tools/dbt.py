@@ -18,6 +18,88 @@ def _maybe_refresh_manifest():
         manifest.reload_if_changed()
 
 
+def _semantic_nudge_for_query(query: str) -> str:
+    if not query:
+        return ""
+
+    try:
+        from cerebro_mcp.tools.semantic import get_semantic_preflight
+
+        route = get_semantic_preflight(query, mode="answer")
+    except Exception:
+        return ""
+
+    if route.route != "semantic_ready" or not route.recommended_metrics:
+        return ""
+
+    metrics = ", ".join(f"`{name}`" for name in route.recommended_metrics[:3])
+    dimensions = ", ".join(f"`{name}`" for name in route.recommended_dimensions)
+    dimension_line = (
+        f" Recommended dimensions: {dimensions}."
+        if dimensions
+        else ""
+    )
+    return (
+        "\n\n> **Approved semantic match detected:** "
+        f"{metrics}. Prefer `preflight_analytics_request` followed by "
+        "`discover_metrics`, `query_metrics`, `quick_metric_chart`, or "
+        f"`generate_metric_charts` before raw SQL.{dimension_line}"
+    )
+
+
+def _semantic_discovery_gate(query: str) -> str:
+    if not settings.SEMANTIC_ENABLED or not query:
+        return ""
+
+    try:
+        from cerebro_mcp.tools.semantic import get_semantic_preflight
+        from cerebro_mcp.tools.session_state import state
+
+        preview = get_semantic_preflight(query, mode="answer")
+    except Exception:
+        return ""
+
+    metrics = ", ".join(f"`{name}`" for name in preview.recommended_metrics[:3])
+    metrics_line = f" Approved metrics: {metrics}." if metrics else ""
+
+    if not state.semantic_preflight_ran:
+        return (
+            "Semantic preflight required: call "
+            "`preflight_analytics_request(query, mode=\"answer\")` before "
+            "raw model discovery when semantic is enabled."
+            f"{metrics_line}"
+        )
+
+    if state.semantic_route_last == "semantic_ready" and not state.semantic_execution_attempted:
+        return (
+            "Approved semantic coverage already exists for this request. "
+            "Use `discover_metrics`, `query_metrics`, "
+            "`quick_metric_chart`, or `generate_metric_charts` before raw "
+            f"model discovery.{metrics_line}"
+        )
+
+    return ""
+
+
+def _semantic_nudge_for_model(model_name: str) -> str:
+    try:
+        from cerebro_mcp.tools.semantic import get_executable_metrics_for_model
+
+        metrics = get_executable_metrics_for_model(model_name)
+    except Exception:
+        return ""
+
+    if not metrics:
+        return ""
+
+    names = ", ".join(f"`{metric['name']}`" for metric in metrics[:3])
+    return (
+        "\n\n> **Approved semantic match detected:** "
+        f"{names}. Prefer `discover_metrics` / `query_metrics` before "
+        "dropping to raw SQL for this model."
+    )
+
+
 def register_dbt_tools(mcp):
     @mcp.tool()
     def search_models(
@@ -46,6 +128,10 @@ def register_dbt_tools(mcp):
 
         if not manifest.is_loaded:
             return "Error: dbt manifest not loaded. dbt context is unavailable."
+
+        gate_reason = _semantic_discovery_gate(query)
+        if gate_reason:
+            return gate_reason
 
         capped_limit = min(max(limit, 1), 200)
         results = manifest.search_models(
@@ -95,6 +181,8 @@ def register_dbt_tools(mcp):
                 "use separate time-series queries."
             )
 
+        result += _semantic_nudge_for_query(query)
+
         # Append report workflow hint for report-oriented queries
         _report_keywords = {
             "report", "trend", "weekly", "daily", "monthly",
@@ -138,6 +226,10 @@ def register_dbt_tools(mcp):
 
         if not manifest.is_loaded:
             return "Error: dbt manifest not loaded. dbt context is unavailable."
+
+        gate_reason = _semantic_discovery_gate(query)
+        if gate_reason:
+            return gate_reason
 
         from cerebro_mcp.tools.session_state import state
 
@@ -243,7 +335,7 @@ def register_dbt_tools(mcp):
             "to verify exact column names, then run EDA queries."
         )
 
-        return truncate_response("\n".join(lines))
+        return truncate_response("\n".join(lines)) + _semantic_nudge_for_query(query)
 
     @mcp.tool()
     def get_model_details(model_name: str) -> str:
@@ -358,5 +450,7 @@ def register_dbt_tools(mcp):
             parts.append("\n## Downstream Consumers")
             for dep in details["downstream"][:20]:
                 parts.append(f"- {dep}")
+
+        parts.append(_semantic_nudge_for_model(model_name))
 
         return truncate_response("\n".join(parts))

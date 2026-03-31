@@ -258,11 +258,33 @@ body {
   vertical-align: middle;
   padding: 0.75rem;
 }
+.report-html td.kpi-cell .kpi-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+}
 .report-html td.kpi-cell .kpi-value {
-  font-size: 1.5rem;
+  font-size: 1.35rem;
   font-weight: 700;
   color: var(--primary);
   font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  letter-spacing: -0.03em;
+}
+.report-html td.kpi-cell .kpi-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--accent-softer);
+  padding: 0.18rem 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+.report-html td.kpi-cell .kpi-change-label {
+  color: var(--text-muted);
+  font-weight: 600;
 }
 
 /* --- Value coloring (positive/negative) --- */
@@ -273,6 +295,60 @@ body {
 .report-html .number-change.negative {
   color: var(--error);
   font-weight: 600;
+}
+.report-html .number-change.neutral {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.number-display {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 1rem 1.1rem 1.05rem;
+  min-height: 96px;
+}
+.number-display__eyebrow {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.number-display__value {
+  color: var(--text-primary);
+  font-size: clamp(1.65rem, 2.6vw, 2.1rem);
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+}
+.number-display__change {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--accent-softer);
+  padding: 0.22rem 0.55rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+}
+.number-display__change--positive {
+  color: var(--success);
+}
+.number-display__change--negative {
+  color: var(--error);
+}
+.number-display__change--neutral {
+  color: var(--text-secondary);
+}
+.number-display__change-label {
+  color: var(--text-muted);
 }
 
 /* --- Chart Grid Layout --- */

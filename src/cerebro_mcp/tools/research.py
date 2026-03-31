@@ -146,6 +146,16 @@ def _validate_evidence_ref(
         )
         return title, summary
 
+    if kind == "semantic_query_result":
+        artifact = store.load_query_result_artifact(project_id, ref_id)
+        title = artifact.get("title") or ref_id
+        planner_mode = artifact.get("semantic_plan", {}).get("planner_mode", "")
+        summary = (
+            f"{artifact.get('database', 'dbt')} | {artifact.get('row_count', 0)} rows"
+            + (f" | planner={planner_mode}" if planner_mode else "")
+        )
+        return title, summary
+
     if kind == "schema_snapshot":
         if not store.artifact_exists(project_id, "schema_snapshot", ref_id):
             raise ValueError(

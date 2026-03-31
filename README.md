@@ -70,6 +70,7 @@ Artifacts created by the server:
 
 | Workflow | Use it for | Core tools | Output |
 |---|---|---|---|
+| Semantic analytics | governed metrics, multi-hop dimension reachability, explainable metric SQL, research evidence with provenance | `discover_metrics`, `get_metric_details`, `explain_metric_query`, `query_metrics` | semantic query result, compiled SQL, retry traces, semantic provenance |
 | Quick exploration | answering a direct question, checking a metric, testing a hypothesis quickly | `discover_models`, `describe_table`, `execute_query`, `explain_query`, `get_sample_data` | markdown summary plus structured query payload |
 | Report workflow | visual analysis, KPI packs, weekly or monthly summaries, chart-heavy deliverables | `discover_models`, `describe_table`, `execute_query`, `generate_charts`, `generate_report` | interactive report artifact plus saved HTML |
 | Research workflow | multi-step investigations that need memory, evidence, review, and publication | `start_research_project`, phase tools, evidence tools, verification, peer review, `publish_research_report` | durable research project plus report artifact |
@@ -135,6 +136,35 @@ Important behavior:
 - async jobs are in-process, not permanent
 - restarting the server loses pending/finished async job state
 - completed async jobs are cleaned up after a short retention window
+
+### 1b. Semantic Analytics Workflow
+
+Use this when the user is really asking for a governed metric question, for example:
+
+- "Show transaction count by sector over the last 30 days"
+- "Which dimensions can I slice validator rewards by?"
+- "Explain how this metric query was planned"
+
+Recommended sequence:
+
+1. Discover the metric surface
+   - call `discover_metrics(query, module=..., limit=...)`
+2. Inspect the resolved metric
+   - call `get_metric_details(metric_name)`
+3. Explain before execution when the path is non-trivial
+   - call `explain_metric_query(...)`
+4. Execute through the semantic layer
+   - call `query_metrics(...)`
+5. If semantic execution is unavailable or unsupported
+   - surface the returned fallback reason
+   - move to raw SQL with `describe_table`, `get_model_details`, `execute_query`, and `get_clickhouse_query_rules`
+
+Important behavior:
+
+- semantic execution is deployment-gated by `SEMANTIC_ENABLED`
+- when semantic is enabled but artifacts are stale or unavailable, semantic tools stay registered but execution returns graceful unavailable guidance
+- `query_metrics` performs one deterministic server-side repair retry for known-safe ClickHouse errors
+- raw `execute_query` remains agent-guided rather than auto-healed by the server
 
 ### 2. Report Workflow
 
@@ -324,6 +354,7 @@ For detail, use the paginated retrieval tools:
 Durable evidence kinds:
 
 - `query_result`
+- `semantic_query_result`
 - `schema_snapshot`
 - `chart`
 - `report`
@@ -468,6 +499,16 @@ Use it after:
 | `get_platform_constants` | chain constants and fixed references | useful before querying raw execution data |
 | `save_query` / `run_saved_query` / `list_saved_queries` | reusable SQL snippets | not evidence storage |
 
+### Semantic Tools
+
+| Tool | Use when | Notes |
+|---|---|---|
+| `discover_metrics` | first step for governed metric questions | scores canonical names, synonyms, docs keywords, and module hints |
+| `get_metric_details` | you already know the metric name | shows root model, allowed dimensions, supported grains, docs, and reachability hints |
+| `explain_metric_query` | you want the plan without execution | returns planner mode, selected/rejected paths, warnings, and compiled SQL |
+| `query_metrics` | execute governed metrics with semantic provenance | uses the semantic planner, ClickHouse compiler, and one safe retry loop |
+| `get_clickhouse_query_rules` | raw SQL fallback help | only registered when a valid vendored ClickHouse bundle is present |
+
 ---
 
 ## Prompts, Personas, And Resources
@@ -482,6 +523,7 @@ Prompts available today:
 - `write_query(question, database="dbt")`
 - `report(period, topics, focus)`
 - `adopt_persona_analytics_reporter`
+- `adopt_persona_gnosis_research_analyst`
 - `adopt_persona_ui_designer`
 - `adopt_persona_reality_checker`
 - `conduct_research_peer_review(packet_json)`
@@ -489,6 +531,7 @@ Prompts available today:
 Personas are guidance, not automation:
 
 - `analytics_reporter`: analysis and EDA discipline
+- `gnosis_research_analyst`: semantic-first research workflow and evidence discipline
 - `ui_designer`: chart selection and report composition
 - `reality_checker`: QA and adversarial review rules
 
@@ -500,6 +543,11 @@ Resources expose stable reference material:
 - address directory
 - metric definitions
 - query cookbook
+- `gnosis://semantic-model/{name}`
+- `gnosis://semantic-metric/{name}`
+- `gnosis://semantic-relationship/{name}`
+- `gnosis://semantic-module/{module}`
+- `gnosis://semantic-graph-overview`
 
 If a client wants to use a persona, it should explicitly load the prompt or call `get_agent_persona`.
 
@@ -567,6 +615,7 @@ CLICKHOUSE_PASSWORD=your_password_here
 CEREBRO_RESEARCH_DIR=.cerebro/research_projects
 THINKING_LOG_DIR=.cerebro/logs
 ASYNC_RESULT_DIR=.cerebro/query_results
+SEMANTIC_ENABLED=False
 ```
 
 Then build and install:
@@ -580,6 +629,41 @@ What `make install` does:
 - builds the report UI bundle
 - copies it into `src/cerebro_mcp/static/report.html`
 - installs the Python package in editable mode
+
+### Enable Semantic Mode
+
+Semantic is opt-in at deployment time. The single control surface is:
+
+```dotenv
+SEMANTIC_ENABLED=True
+```
+
+When semantic is enabled, the server also needs access to:
+
+- `manifest.json`
+- `catalog.json`
+- `semantic_registry.json`
+- `semantic_docs_index.json`
+
+The default hosted URLs already point at the published `dbt-cerebro` artifacts. For local or private deployments, switch to filesystem paths or alternate URLs:
+
+```dotenv
+DBT_MANIFEST_PATH=/absolute/path/to/manifest.json
+DBT_CATALOG_PATH=/absolute/path/to/catalog.json
+SEMANTIC_REGISTRY_PATH=/absolute/path/to/semantic_registry.json
+SEMANTIC_DOCS_INDEX_PATH=/absolute/path/to/semantic_docs_index.json
+```
+
+Semantic runtime states are intentionally narrow:
+
+1. `SEMANTIC_ENABLED=False`
+   - semantic tools and semantic resources are not registered
+2. `SEMANTIC_ENABLED=True` with healthy artifacts
+   - semantic tools and resources are registered and executable
+3. `SEMANTIC_ENABLED=True` with stale or unavailable artifacts
+   - semantic tools and resources stay registered
+   - semantic discovery and docs still work when possible
+   - semantic execution returns a graceful unavailable or fallback response instead of silently switching to raw SQL
 
 ### Run With stdio
 
@@ -634,6 +718,7 @@ Important for Docker:
 - the image uses `/data` for persistent storage
 - mounted `/data` must be writable by container user `uid 1000`
 - reports, saved queries, logs, and research projects all live under `/data` in the image defaults
+- if you use local semantic artifact paths instead of published URLs, mount those files into the container and point the corresponding `*_PATH` settings at the mounted location
 
 ---
 
@@ -732,9 +817,18 @@ Behavior:
 At startup the server tries to load:
 
 - the dbt manifest
+- the dbt catalog
+- the semantic registry when semantic is enabled
+- the semantic docs index when semantic is enabled
 - the external docs index
 
 If these fail, dbt and docs-assisted capabilities degrade, but the server can still start.
+
+Semantic-specific behavior:
+
+- semantic loading only happens in `main()`, not at import time
+- when the semantic registry hash is stale against the manifest or catalog, semantic execution is disabled but semantic discovery/docs can remain available
+- semantic snapshot reloads happen off-thread and the runtime swaps to the new snapshot under a lock
 
 Important for stdio clients:
 
@@ -742,11 +836,49 @@ Important for stdio clients:
 - any plain-text startup logging sent to `stdout` will break the connection
 - Cerebro sends startup diagnostics through logging/stderr instead
 
+### Vendoring ClickHouse agent-skills
+
+`get_clickhouse_query_rules` is intentionally strict. It is registered only when a valid vendored bundle exists under `CLICKHOUSE_AGENT_SKILLS_PATH`.
+
+The canonical sync flow is:
+
+```bash
+python scripts/sync_clickhouse_skills.py /path/to/local/agent-skills-checkout --ref <pinned_commit>
+```
+
+The sync script copies only the required upstream content:
+
+- `skills/clickhouse-best-practices/**`
+- `LICENSE`
+- `NOTICE`
+- a local `bundle_manifest.json` containing the pinned source ref and deterministic compiled rules path
+
+The implementation environment can stay offline as long as the operator provides a local checkout of the upstream repo. The server will not register `get_clickhouse_query_rules` from a partially copied directory.
+
 ---
 
 ## Configuration
 
 All settings are environment variables or `.env` values.
+
+### dbt and semantic artifacts
+
+| Variable | Default | Description |
+|---|---|---|
+| `DBT_MANIFEST_URL` | published `dbt-cerebro` manifest URL | remote manifest source; takes precedence over local path |
+| `DBT_MANIFEST_PATH` | empty | local manifest fallback |
+| `DBT_CATALOG_URL` | published `dbt-cerebro` catalog URL | remote catalog source; takes precedence over local path |
+| `DBT_CATALOG_PATH` | empty | local catalog fallback |
+| `DOCS_SEARCH_INDEX_URL` | published docs search URL | external platform docs index |
+| `DOCS_SEARCH_INDEX_PATH` | empty | local docs index fallback |
+| `DOCS_REFRESH_INTERVAL_SECONDS` | `3600` | docs index refresh cadence |
+| `SEMANTIC_ENABLED` | `False` | deployment-level semantic switch; the only semantic on/off control |
+| `SEMANTIC_REGISTRY_URL` | published `dbt-cerebro` registry URL | remote semantic registry source |
+| `SEMANTIC_REGISTRY_PATH` | empty | local semantic registry fallback |
+| `SEMANTIC_DOCS_INDEX_URL` | published `dbt-cerebro` semantic docs URL | remote semantic docs index source |
+| `SEMANTIC_DOCS_INDEX_PATH` | empty | local semantic docs index fallback |
+| `SEMANTIC_REFRESH_INTERVAL_SECONDS` | `300` | semantic snapshot refresh cadence |
+| `CLICKHOUSE_AGENT_SKILLS_PATH` | `src/cerebro_mcp/static/clickhouse_agent_skills` | vendored ClickHouse rules bundle root |
 
 ### ClickHouse and SQL limits
 
@@ -819,6 +951,8 @@ All settings are environment variables or `.env` values.
 
 Use `system_status()` to inspect the live resolved configuration, cache sizes, transport mode, and ClickHouse connectivity.
 
+Semantic observability is also exposed through Prometheus counters, histograms, and structured reasoning traces. Low-cardinality metrics track tool calls, planner failures, retries, fallbacks, docs reads, snapshot reloads, and research semantic evidence by agent role and planner mode. High-cardinality details such as resolved metrics, chosen paths, SQL hash, fallback reason, and ClickHouse error text remain in logs and reasoning traces rather than metric labels.
+
 ---
 
 ## Safety And Guardrails
@@ -862,9 +996,12 @@ Use:
 
 Use:
 
-1. `discover_models`
-2. `describe_table`
-3. `execute_query`
+1. `discover_metrics` and `query_metrics` first if the request maps cleanly to a governed metric
+2. otherwise `discover_models`
+3. `describe_table`
+4. `execute_query`
+
+If semantic execution is unavailable or unsupported, follow the returned fallback reason and use raw SQL.
 
 If the result is large or slow:
 
@@ -910,11 +1047,19 @@ cerebro-mcp/
 │   ├── bootstrap.py
 │   ├── config.py
 │   ├── clickhouse_client.py
+│   ├── artifact_loader.py
+│   ├── catalog_loader.py
 │   ├── tool_models.py
 │   ├── tool_output.py
 │   ├── safety.py
 │   ├── manifest_loader.py
 │   ├── docs_loader.py
+│   ├── semantic_loader.py
+│   ├── semantic_models.py
+│   ├── semantic_index.py
+│   ├── semantic_graph.py
+│   ├── semantic_planner.py
+│   ├── semantic_sql_compiler.py
 │   ├── research_models.py
 │   ├── research_store.py
 │   ├── research_workflow.py
@@ -929,10 +1074,12 @@ cerebro-mcp/
 │   │   ├── research.py
 │   │   ├── session_state.py
 │   │   ├── reasoning.py
-│   │   └── agents.py
+│   │   ├── agents.py
+│   │   └── semantic.py
 │   ├── prompts/
 │   ├── resources/
 │   └── static/
+├── scripts/
 ├── ui/
 ├── tests/
 ├── Dockerfile
@@ -957,6 +1104,7 @@ Useful local checks:
 python -m compileall src tests
 cerebro-mcp
 cerebro-mcp --sse
+python scripts/sync_clickhouse_skills.py /path/to/local/agent-skills-checkout --ref <pinned_commit>
 ```
 
 MCP Inspector example:
@@ -964,6 +1112,63 @@ MCP Inspector example:
 ```bash
 uv run mcp dev src/cerebro_mcp/server.py
 ```
+
+### Local Semantic Testing Against `dbt-cerebro`
+
+You can test semantic MCP features locally before publishing any artifacts remotely.
+
+1. Build fresh artifacts in `dbt-cerebro`:
+
+```bash
+cd /path/to/dbt-cerebro
+dbt docs generate
+python scripts/semantic/build_registry.py --validate --target-dir target
+python scripts/semantic/build_semantic_docs.py --target-dir target
+```
+
+2. Point `cerebro-mcp` at the local artifact paths and clear the remote URLs:
+
+```bash
+SEMANTIC_ENABLED=true
+DBT_MANIFEST_URL=
+DBT_CATALOG_URL=
+SEMANTIC_REGISTRY_URL=
+SEMANTIC_DOCS_INDEX_URL=
+
+DBT_MANIFEST_PATH=/absolute/path/to/dbt-cerebro/target/manifest.json
+DBT_CATALOG_PATH=/absolute/path/to/dbt-cerebro/target/catalog.json
+SEMANTIC_REGISTRY_PATH=/absolute/path/to/dbt-cerebro/target/semantic_registry.json
+SEMANTIC_DOCS_INDEX_PATH=/absolute/path/to/dbt-cerebro/target/semantic_docs_index.json
+```
+
+3. Start the server and validate semantic behavior:
+
+```bash
+cerebro-mcp
+```
+
+Recommended checks:
+
+- `discover_metrics`
+- `get_metric_details`
+- `explain_metric_query`
+- `query_metrics`
+
+Runtime behavior:
+
+- `SEMANTIC_ENABLED=false`: semantic tools and resources are not registered
+- `SEMANTIC_ENABLED=true` with healthy local artifacts: semantic tools are registered and executable
+- `SEMANTIC_ENABLED=true` with stale or mismatched artifacts: semantic tools remain available, but execution returns graceful unavailable or coverage-gap guidance
+
+### Approved-Only Semantic Execution
+
+`cerebro-mcp` now treats semantic execution as approved-only:
+
+- approved metrics can be discovered and executed
+- candidate metrics remain visible in the registry/docs layer but are not executable
+- when semantic coverage is missing, MCP returns a structured semantic coverage gap and falls back to the raw SQL path instead of silently mixing candidate assets into execution
+
+Semantic resources now prefer the generated semantic page bodies referenced by `semantic_docs_index.json`, with JSON fallback only when a page body is unavailable.
 
 ---
 

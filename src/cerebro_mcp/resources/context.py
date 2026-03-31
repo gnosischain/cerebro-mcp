@@ -8,7 +8,7 @@ PLATFORM_OVERVIEW = """\
 ```
 Blockchain RPCs --> cryo-indexer --> ClickHouse (execution, consensus)
 External APIs  --> click-runner --> ClickHouse (crawlers_data)
-P2P Crawlers   --> nebula       --> ClickHouse (nebula)
+P2P Crawlers   --> nebula       --> ClickHouse (nebula, nebula_discv4)
                                         |
                                    dbt-cerebro (387 models)
                                         |
@@ -25,7 +25,8 @@ P2P Crawlers   --> nebula       --> ClickHouse (nebula)
 | execution | On-chain L1 data | blocks, transactions, logs, traces, native_transfers, contracts, balance/code/nonce/storage_diffs, withdrawals |
 | consensus | Beacon chain | blocks, attestations, validators, withdrawals, deposits, rewards, blob_commitments, blob_sidecars |
 | crawlers_data | Off-chain data | dune_labels, dune_prices, dune_bridge_flows, dune_gno_supply, ember_electricity_data, probelab stats |
-| nebula | P2P network | crawls, visits |
+| nebula | P2P network (discv5)| crawls, visits, neighbors, visits, discovery_id_prefixes_x_peer_ids |
+| nebula_discv4 | P2P network (discv4) | crawls, visits, neighbors, visits, discovery_id_prefixes_x_peer_ids |
 | dbt | Transformed models | ~400 views/tables organized in 8 modules |
 
 ## dbt Model Naming Convention

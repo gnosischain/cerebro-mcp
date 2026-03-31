@@ -50,6 +50,14 @@ def _build_test_mcp() -> FastMCP:
     def explode(secret: str = "") -> dict:
         raise ValueError(f"boom:{secret}")
 
+    @mcp.tool()
+    def soft_error() -> str:
+        return "Error: semantic coverage gap"
+
+    @mcp.tool()
+    def ok_with_message() -> dict:
+        return {"message": "all good", "value": 1}
+
     reasoning.register_reasoning_tools(mcp)
     reasoning.install_auto_tool_tracing(mcp)
     return mcp
@@ -172,6 +180,33 @@ def test_auto_logs_failed_tool_call_with_error_payload():
     assert step.tool_args["secret"] == reasoning._REDACTED_VALUE
     assert step.tool_error["type"]
     assert "boom:" in step.tool_error["message"]
+
+
+def test_auto_logs_string_error_results_as_failed_steps():
+    mcp = _build_test_mcp()
+
+    _call_tool(mcp, "soft_error", {})
+
+    steps = _auto_steps_for_action("soft_error")
+    assert len(steps) == 1
+    step = steps[0]
+    assert step.success is False
+    assert step.error == "Error: semantic coverage gap"
+    assert step.tool_error["type"] == "ToolError"
+
+
+def test_success_payload_with_message_field_is_not_treated_as_error():
+    mcp = _build_test_mcp()
+
+    _call_tool(mcp, "ok_with_message", {})
+
+    steps = _auto_steps_for_action("ok_with_message")
+    assert len(steps) == 1
+    step = steps[0]
+    assert step.success is True
+    assert step.error is None
+    payload = _extract_result_payload(step)
+    assert payload["message"] == "all good"
 
 
 def test_redacts_sensitive_keys_in_args_and_results():
@@ -382,3 +417,170 @@ def test_session_file_contains_auto_capture_payloads(tmp_path):
     assert first_auto["tool_name"] == "echo"
     assert first_auto["tool_args"]["password"] == reasoning._REDACTED_VALUE
     assert "tool_result" in first_auto
+
+
+def test_session_summary_distinguishes_semantic_availability_from_use(tmp_path):
+    mcp = FastMCP("semantic-summary-test")
+
+    @mcp.tool()
+    def discover_metrics(query: str) -> dict:
+        return {"query": query, "results": []}
+
+    reasoning.register_reasoning_tools(mcp)
+    reasoning.install_auto_tool_tracing(mcp)
+
+    _call_request(mcp, types.ListToolsRequest())
+    reasoning.record_trace_event(
+        "semantic_route_decision",
+        content="Semantic route decided.",
+        payload={"route": "semantic_ready"},
+        event_kind="semantic_routing",
+    )
+    _call_tool(mcp, "set_thinking_mode", {"enabled": False})
+
+    files = _session_files(tmp_path / ".cerebro" / "logs")
+    assert files
+    data = json.loads(files[-1].read_text())
+    summary = data["summary"]
+    assert summary["semantic_tools_available"] is True
+    assert summary["semantic_tool_calls"] == 0
+    assert summary["semantic_path_used"] == "none"
+    assert summary["semantic_route_last"] == "semantic_ready"
+
+
+def test_session_summary_updates_before_finalize(tmp_path):
+    mcp = FastMCP("semantic-summary-live-test")
+
+    @mcp.tool()
+    def discover_metrics(query: str) -> dict:
+        return {"query": query, "results": []}
+
+    reasoning.register_reasoning_tools(mcp)
+    reasoning.install_auto_tool_tracing(mcp)
+
+    _call_request(mcp, types.ListToolsRequest())
+    reasoning.record_trace_event(
+        "semantic_route_decision",
+        content="Semantic route decided.",
+        payload={"route": "semantic_ready"},
+        event_kind="semantic_routing",
+    )
+
+    files = _session_files(tmp_path / ".cerebro" / "logs")
+    assert files
+    data = json.loads(files[-1].read_text())
+    summary = data["summary"]
+    assert summary["semantic_tools_available"] is True
+    assert summary["semantic_route_last"] == "semantic_ready"
+
+
+def test_blocked_raw_attempts_do_not_count_as_raw_usage(tmp_path):
+    mcp = FastMCP("semantic-raw-gate-test")
+
+    @mcp.tool()
+    def discover_models(query: str) -> str:
+        return (
+            "Semantic preflight required: call "
+            "`preflight_analytics_request(query, mode=\"answer\")` before raw "
+            "model discovery when semantic is enabled."
+        )
+
+    @mcp.tool()
+    def quick_metric_chart(metric: str) -> dict:
+        return {"metric": metric}
+
+    reasoning.register_reasoning_tools(mcp)
+    reasoning.install_auto_tool_tracing(mcp)
+
+    _call_tool(mcp, "discover_models", {"query": "active validators"})
+    _call_tool(mcp, "quick_metric_chart", {"metric": "validators_active"})
+    _call_tool(mcp, "set_thinking_mode", {"enabled": False})
+
+    files = _session_files(tmp_path / ".cerebro" / "logs")
+    assert files
+    data = json.loads(files[-1].read_text())
+    summary = data["summary"]
+    assert summary["semantic_path_used"] == "semantic"
+    assert summary["raw_blocked_attempts"] == 1
+    assert summary["raw_execution_steps"] == 0
+    assert summary["workflow_blocked_steps"] == 1
+    assert summary["successful_steps"] < summary["total_steps"]
+    assert summary["wall_duration_ms"] >= 0
+    assert summary["tool_duration_ms"] >= 0
+    assert summary["transport_duration_ms"] >= 0
+
+
+def test_summary_counts_generated_charts_and_models_used():
+    session = reasoning.SessionTrace(
+        session_id="summary-test",
+        started_at="2026-03-29T22:33:09.000000+00:00",
+    )
+    session.steps = [
+        reasoning.ReasoningStep(
+            step_number=1,
+            timestamp="2026-03-29T22:33:10.000000+00:00",
+            step="auto_tool_call",
+            content="blocked batch",
+            action="generate_charts",
+            output_summary="**Analysis depth check failed:** Insufficient schema verification.",
+            success=True,
+            auto_captured=True,
+            event_kind="tool_call",
+            tool_name="generate_charts",
+            tool_args={"charts": [{"sql": "SELECT * FROM dbt.int_execution_gpay_wallet_owners"}]},
+        ),
+        reasoning.ReasoningStep(
+            step_number=2,
+            timestamp="2026-03-29T22:33:11.000000+00:00",
+            step="auto_tool_call",
+            content="model details",
+            action="get_model_details",
+            success=True,
+            auto_captured=True,
+            event_kind="tool_call",
+            tool_name="get_model_details",
+            tool_args={"model_name": "int_consensus_validators_labels"},
+        ),
+        reasoning.ReasoningStep(
+            step_number=3,
+            timestamp="2026-03-29T22:33:12.000000+00:00",
+            step="auto_tool_call",
+            content="query",
+            action="execute_query",
+            success=True,
+            auto_captured=True,
+            event_kind="tool_call",
+            tool_name="execute_query",
+            tool_args={"sql": "SELECT * FROM dbt.fct_execution_gpay_user_lifetime_metrics"},
+        ),
+        reasoning.ReasoningStep(
+            step_number=4,
+            timestamp="2026-03-29T22:33:13.000000+00:00",
+            step="auto_tool_call",
+            content="chart batch",
+            action="generate_charts",
+            output_summary="Generated 11/11 charts:\n",
+            success=True,
+            auto_captured=True,
+            event_kind="tool_call",
+            tool_name="generate_charts",
+            tool_args={
+                "charts": [
+                    {
+                        "sql": "SELECT * FROM dbt.int_execution_gpay_wallet_owners",
+                    },
+                    {
+                        "sql": "SELECT * FROM dbt.fct_execution_gpay_user_lifetime_metrics",
+                    },
+                ]
+            },
+        ),
+    ]
+
+    summary = reasoning._compute_session_summary(session)
+
+    assert summary["charts_generated"] == 11
+    assert summary["workflow_blocked_steps"] == 1
+    assert "int_consensus_validators_labels" in summary["models_used"]
+    assert "int_execution_gpay_wallet_owners" in summary["models_used"]
+    assert "fct_execution_gpay_user_lifetime_metrics" in summary["models_used"]

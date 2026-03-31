@@ -11,6 +11,8 @@ import pytest
 import cerebro_mcp.tools.visualization as viz
 import cerebro_mcp.tools.query as query_mod
 import cerebro_mcp.tools.dbt as dbt_mod
+import cerebro_mcp.tools.session_state as session_state_mod
+from cerebro_mcp.tools.session_state import state
 from cerebro_mcp.tool_models import QueryResult
 
 
@@ -31,6 +33,7 @@ def reset_visualization_state(monkeypatch):
     # Query nudge state
     monkeypatch.setattr(query_mod, "_query_count", 0)
     monkeypatch.setattr(query_mod, "_last_nudge_time", 0.0)
+    state.reset()
 
     yield
 
@@ -345,6 +348,29 @@ class TestGenerateReport:
         assert tool.meta is not None
         assert tool.meta.get("ui", {}).get("resourceUri") == viz.REPORT_URI
 
+    def test_answer_mode_can_render_lightweight_visualization(self, monkeypatch, tmp_path):
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        state.record_semantic_preflight(route="semantic_ready", mode="answer")
+        state.record_semantic_tool_call("query_metrics", execution=True)
+
+        mcp = FastMCP("test-answer-mode-visual")
+        ch = MagicMock()
+        viz.register_visualization_tools(mcp, ch)
+        self._setup_chart("chart_1")
+
+        fn = mcp._tool_manager._tools["generate_report"].fn
+        result = fn(
+            title="Mode Gate",
+            content_markdown="{{chart:chart_1}}",
+        )
+
+        assert result.isError is False
+        assert "Visualization:" in result.content[0].text
+        assert result.structuredContent["presentation_mode"] == "visual_answer"
+
 
 # ---------------------------------------------------------------------------
 # Time series ordering
@@ -458,6 +484,102 @@ class TestChartInputShapeValidation:
         assert viz._chart_registry["chart_1"]["option"]["value"] == 9065
         assert viz._chart_registry["chart_1"]["input_shape"] == "scalar_kpi_input"
 
+    def test_number_display_single_value_query_auto_detects_metric_column(self):
+        executed = SimpleNamespace(
+            sql="SELECT 59 AS value",
+            database="dbt",
+            columns=["value"],
+            rows=[[59]],
+            elapsed_seconds=0.01,
+        )
+        mcp = self._make_mcp(executed)
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+
+        result = fn(
+            sql=executed.sql,
+            database="dbt",
+            chart_type="numberDisplay",
+            title="Validator-Owned Wallets",
+        )
+
+        assert "Chart ID" in result
+        assert viz._chart_registry["chart_1"]["option"]["value"] == 59
+        assert viz._chart_registry["chart_1"]["input_shape"] == "scalar_kpi_input"
+
+    def test_number_display_explicit_change_field_preserves_value_and_delta(self):
+        executed = SimpleNamespace(
+            sql="SELECT 59 AS wallet_count, -4.5 AS change_pct",
+            database="dbt",
+            columns=["wallet_count", "change_pct"],
+            rows=[[59, -4.5]],
+            elapsed_seconds=0.01,
+        )
+        mcp = self._make_mcp(executed)
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+
+        result = fn(
+            sql=executed.sql,
+            database="dbt",
+            chart_type="numberDisplay",
+            y_field="wallet_count",
+            change_field="change_pct",
+            title="Validator-Owned Wallets",
+        )
+
+        assert "Chart ID" in result
+        option = viz._chart_registry["chart_1"]["option"]
+        assert option["value"] == 59
+        assert option["change"]["value"] == -4.5
+        assert option["change"]["direction"] == "negative"
+
+    def test_number_display_rejects_ambiguous_multi_value_query_without_change_field(self):
+        executed = SimpleNamespace(
+            sql="SELECT 59 AS wallet_count, -4.5 AS change_pct",
+            database="dbt",
+            columns=["wallet_count", "change_pct"],
+            rows=[[59, -4.5]],
+            elapsed_seconds=0.01,
+        )
+        mcp = self._make_mcp(executed)
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+
+        result = fn(
+            sql=executed.sql,
+            database="dbt",
+            chart_type="numberDisplay",
+            title="Validator-Owned Wallets",
+        )
+
+        assert "multiple numeric columns" in result
+        assert "change_field" in result
+        assert viz._chart_registry == {}
+
+    def test_markdown_to_html_renders_number_display_change_inline(self):
+        viz._chart_registry["chart_1"] = {
+            "option": {
+                "type": "numberDisplay",
+                "title": "Validator-Owned Wallets",
+                "value": 59,
+                "format": "formatNumber",
+                "change": {
+                    "value": -4.5,
+                    "direction": "negative",
+                },
+            },
+            "title": "Validator-Owned Wallets",
+            "chart_type": "numberDisplay",
+            "data_points": 1,
+            "created_at": datetime.now(),
+        }
+
+        html = viz._markdown_to_html(
+            "| KPI |\n| --- |\n| {{chart:chart_1}} |"
+        )
+
+        assert 'class="kpi-value">59<' in html
+        assert 'class="kpi-change number-change negative"' in html
+        assert '-4.5' in html
+
     def test_line_chart_rejects_ambiguous_wide_query(self):
         executed = SimpleNamespace(
             sql="SELECT month, active_users, paying_users, retained_users FROM analytics.monthly_kpis ORDER BY month",
@@ -543,10 +665,328 @@ class TestChartInputShapeValidation:
 
         assert "Chart ID" in result
         assert viz._chart_registry["chart_1"]["input_shape"] == "long_format_series_input"
+
+
+class TestSemanticChartRouting:
+    def _semantic_result(self):
+        return SimpleNamespace(
+            sql="SELECT day, validators_active FROM semantic_query",
+            database="dbt",
+            columns=["day", "validators_active"],
+            rows=[["2026-03-01", 101], ["2026-03-02", 104]],
+            row_count=2,
+            rows_returned=2,
+            truncated=False,
+            fetch_mode="rows",
+            elapsed_seconds=0.02,
+            warnings=[],
+            requested_metrics=["validators_active"],
+            resolved_metrics=["validators_active"],
+            requested_dimensions=["day"],
+            resolved_dimensions=["day"],
+            planner_mode="single_model",
+            root_models=["api_consensus_validators_active_daily"],
+            repair_traces=[],
+            semantic_plan={},
+            result_ref_id=None,
+            summary_markdown="semantic summary",
+        )
+
+    def test_quick_chart_requires_preflight_when_semantic_enabled(self, monkeypatch):
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        mcp = FastMCP("test-semantic-gate")
+        ch = MagicMock()
+        viz.register_visualization_tools(mcp, ch)
+
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+        result = fn(
+            sql="SELECT day, cnt FROM dbt.api_consensus_validators_active_daily",
+            chart_type="line",
+            x_field="day",
+            y_field="cnt",
+        )
+
+        assert "Semantic preflight required" in result
+
+    def test_quick_chart_uses_non_semantic_wording_after_explicit_fallback(self, monkeypatch):
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        state.record_semantic_preflight(
+            route="semantic_unavailable",
+            mode="chart",
+            fallback_reason="manifest_hash_mismatch",
+        )
+        state.record_search_models("active validators", 1)
+        state.record_get_model_details("api_consensus_validators_active_daily")
+        state.record_get_model_details("api_consensus_validators_active_weekly")
+        state.record_get_model_details("api_consensus_validators_active_monthly")
+
+        mcp = FastMCP("test-semantic-fallback-wording")
+        ch = MagicMock()
+        viz.register_visualization_tools(mcp, ch)
+
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+        result = fn(
+            sql="SELECT day, cnt FROM dbt.api_consensus_validators_active_daily",
+            chart_type="line",
+            x_field="day",
+            y_field="cnt",
+        )
+
+        assert "Chart workflow check failed" in result
+        assert "Insufficient schema verification" in result
+        assert "Semantic routing check failed" not in result
+
+    def test_quick_metric_chart_uses_semantic_result(self, monkeypatch):
+        from mcp.server.fastmcp import FastMCP
+        import cerebro_mcp.tools.semantic as semantic_tools
+
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        state.record_semantic_preflight(route="semantic_ready", mode="chart")
+        monkeypatch.setattr(
+            semantic_tools,
+            "execute_metric_query",
+            lambda **kwargs: self._semantic_result(),
+        )
+
+        mcp = FastMCP("test-quick-metric-chart")
+        ch = MagicMock()
+        viz.register_visualization_tools(mcp, ch)
+
+        fn = mcp._tool_manager._tools["quick_metric_chart"].fn
+        result = fn(
+            metrics=["validators_active"],
+            dimensions=["day"],
+            chart_type="line",
+            x_field="day",
+            y_field="validators_active",
+            title="Active Validators",
+        )
+
+        assert "Chart ID" in result
+        assert viz._chart_registry["chart_1"]["chart_type"] == "line"
+        assert state.semantic_path_used == "semantic"
+
+    def test_quick_metric_chart_requires_dimension_for_line_chart(self, monkeypatch):
+        from mcp.server.fastmcp import FastMCP
+        import cerebro_mcp.tools.semantic as semantic_tools
+
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        state.record_semantic_preflight(route="semantic_ready", mode="chart")
+        monkeypatch.setattr(
+            semantic_tools,
+            "execute_metric_query",
+            lambda **kwargs: self._semantic_result(),
+        )
+
+        mcp = FastMCP("test-quick-metric-chart-dimension-check")
+        ch = MagicMock()
+        viz.register_visualization_tools(mcp, ch)
+
+        fn = mcp._tool_manager._tools["quick_metric_chart"].fn
+        result = fn(
+            metrics=["validators_active"],
+            chart_type="line",
+            title="Active Validators",
+        )
+
+        assert "require at least one dimension" in result
+        assert "numberDisplay" in result
+
+    def test_generate_metric_charts_requires_common_depth(self, monkeypatch):
+        from mcp.server.fastmcp import FastMCP
+        import cerebro_mcp.tools.semantic as semantic_tools
+
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        state.record_semantic_preflight(route="semantic_ready", mode="report")
+        monkeypatch.setattr(
+            semantic_tools,
+            "execute_metric_query",
+            lambda **kwargs: self._semantic_result(),
+        )
+
+        mcp = FastMCP("test-generate-metric-charts")
+        ch = MagicMock()
+        viz.register_visualization_tools(mcp, ch)
+        fn = mcp._tool_manager._tools["generate_metric_charts"].fn
+
+        blocked = fn(
+            charts=[
+                {
+                    "metrics": ["validators_active"],
+                    "dimensions": ["day"],
+                    "chart_type": "line",
+                    "x_field": "day",
+                    "y_field": "validators_active",
+                    "title": "Trend",
+                }
+            ]
+        )
+        assert "Discovery skipped" in blocked
+
+        state.record_search_models("active validators", 1, source="semantic")
+        state.record_get_model_details(
+            "api_consensus_validators_active_daily",
+            source="semantic",
+        )
+        state.record_get_model_details(
+            "api_consensus_validators_active_weekly",
+            source="semantic",
+        )
+        state.record_get_model_details(
+            "api_consensus_validators_active_monthly",
+            source="semantic",
+        )
+        state.record_describe_table(
+            "api_consensus_validators_active_daily",
+            source="semantic",
+        )
+
+        result = fn(
+            charts=[
+                {
+                    "metrics": ["validators_active"],
+                    "dimensions": ["day"],
+                    "chart_type": "line",
+                    "x_field": "day",
+                    "y_field": "validators_active",
+                    "title": "Trend",
+                }
+            ]
+        )
+
+        assert "Generated 1/1 semantic charts" in result
         assert [series["name"] for series in viz._chart_registry["chart_1"]["option"]["series"]] == [
-            "active_users",
-            "paying_users",
+            "validators_active",
         ]
+
+    def test_generate_metric_charts_normalizes_date_alias(self, monkeypatch):
+        from mcp.server.fastmcp import FastMCP
+        import cerebro_mcp.tools.semantic as semantic_tools
+
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        state.record_semantic_preflight(route="semantic_ready", mode="report")
+        state.record_search_models("active validators", 1, source="semantic")
+        state.record_get_model_details(
+            "api_consensus_validators_active_daily",
+            source="semantic",
+        )
+        state.record_get_model_details(
+            "api_consensus_validators_active_weekly",
+            source="semantic",
+        )
+        state.record_get_model_details(
+            "api_consensus_validators_active_monthly",
+            source="semantic",
+        )
+        state.record_describe_table(
+            "api_consensus_validators_active_daily",
+            source="semantic",
+        )
+        monkeypatch.setattr(
+            semantic_tools,
+            "execute_metric_query",
+            lambda **kwargs: self._semantic_result(),
+        )
+
+        mcp = FastMCP("test-generate-metric-charts-date-alias")
+        ch = MagicMock()
+        viz.register_visualization_tools(mcp, ch)
+        fn = mcp._tool_manager._tools["generate_metric_charts"].fn
+
+        result = fn(
+            charts=[
+                {
+                    "metrics": ["validators_active"],
+                    "dimensions": ["date"],
+                    "chart_type": "line",
+                    "x_field": "date",
+                    "title": "Trend",
+                }
+            ]
+        )
+
+        assert "Generated 1/1 semantic charts" in result
+        assert "chart_1" in viz._chart_registry
+        assert viz._chart_registry["chart_1"]["chart_type"] == "line"
+
+    def test_generate_chart_uses_global_state_without_name_error(self, monkeypatch):
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setattr(session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", False)
+
+        executed = SimpleNamespace(
+            sql="SELECT day, cnt FROM dbt.api_consensus_validators_active_daily ORDER BY day",
+            database="dbt",
+            columns=["day", "cnt"],
+            rows=[["2026-03-01", 101], ["2026-03-02", 104]],
+            elapsed_seconds=0.01,
+        )
+        ch = MagicMock()
+        ch.run_query.return_value = executed
+
+        mcp = FastMCP("test-generate-chart-state")
+        viz.register_visualization_tools(mcp, ch)
+
+        fn = mcp._tool_manager._tools["generate_chart"].fn
+        result = fn(
+            sql=executed.sql,
+            chart_type="line",
+            x_field="day",
+            y_field="cnt",
+            title="Validators",
+        )
+
+        assert "Chart ID" in result
+        assert "name 'state' is not defined" not in result
+
+    def test_generate_charts_accepts_successful_raw_query_as_schema_verification(self, monkeypatch):
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        state.record_semantic_preflight(
+            route="semantic_coverage_gap",
+            mode="report",
+            fallback_reason="semantic_coverage_gap",
+        )
+        state.record_search_models("gnosis pay wallet", 1)
+        state.record_get_model_details("int_execution_gpay_wallet_owners")
+        state.record_get_model_details("int_consensus_validators_labels")
+        state.record_get_model_details("fct_execution_gpay_user_lifetime_metrics")
+        state.record_execute_query(
+            "SELECT * FROM dbt.fct_execution_gpay_user_lifetime_metrics LIMIT 5"
+        )
+
+        executed = SimpleNamespace(
+            sql="SELECT wallet_address, total_payment_volume_usd FROM dbt.fct_execution_gpay_user_lifetime_metrics ORDER BY total_payment_volume_usd DESC LIMIT 5",
+            database="dbt",
+            columns=["wallet_address", "total_payment_volume_usd"],
+            rows=[["0x1", 10.0], ["0x2", 9.0]],
+            elapsed_seconds=0.01,
+        )
+        ch = MagicMock()
+        ch.run_query.return_value = executed
+
+        mcp = FastMCP("test-generate-charts-raw-query-verifies-schema")
+        viz.register_visualization_tools(mcp, ch)
+        fn = mcp._tool_manager._tools["generate_charts"].fn
+
+        result = fn(
+            charts=[
+                {
+                    "sql": executed.sql,
+                    "chart_type": "bar",
+                    "x_field": "wallet_address",
+                    "y_field": "total_payment_volume_usd",
+                    "title": "Top Wallets",
+                }
+            ]
+        )
+
+        assert "Generated 1/1 charts" in result
 
 
 # ---------------------------------------------------------------------------
@@ -832,6 +1272,37 @@ class TestExecuteQueryNudge:
 # ---------------------------------------------------------------------------
 
 class TestSearchModelsHint:
+    def test_search_models_requires_preflight_before_raw_discovery(self, monkeypatch):
+        """search_models is blocked until semantic preflight runs."""
+        from mcp.server.fastmcp import FastMCP
+        from cerebro_mcp.manifest_loader import ManifestLoader, manifest
+
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        monkeypatch.setattr(dbt_mod.settings, "SEMANTIC_ENABLED", True)
+        monkeypatch.setattr(
+            ManifestLoader, "is_loaded", property(lambda self: True)
+        )
+        monkeypatch.setattr(
+            manifest, "search_models",
+            lambda **kwargs: [
+                {"name": "api_consensus_validators_active_daily", "description": "Test model",
+                 "materialized": "view", "tags": ["consensus"], "path": "test.sql"}
+            ],
+        )
+        monkeypatch.setattr(
+            dbt_mod,
+            "_semantic_discovery_gate",
+            lambda query: "Semantic preflight required: call `preflight_analytics_request(query, mode=\"answer\")` before raw model discovery when semantic is enabled. Approved metrics: `validators_active`.",
+        )
+
+        mcp = FastMCP("test-search-preflight-gate")
+        dbt_mod.register_dbt_tools(mcp)
+        fn = mcp._tool_manager._tools["search_models"].fn
+
+        result = fn(query="active validators over time")
+        assert "Semantic preflight required" in result
+        assert "validators_active" in result
+
     def test_report_keyword_appends_workflow_hint(self, monkeypatch):
         """search_models adds workflow hint for report-related queries."""
         from mcp.server.fastmcp import FastMCP

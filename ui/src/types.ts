@@ -1,10 +1,18 @@
 import type { EChartsOption } from "echarts";
 
+export interface NumberDisplayChangeSpec {
+  value: number | string;
+  format?: string;
+  direction?: "positive" | "negative" | "neutral";
+  label?: string;
+}
+
 export interface NumberDisplaySpec {
   type: "numberDisplay";
   title: string;
   value: number | string;
   format?: string;
+  change?: NumberDisplayChangeSpec;
 }
 
 export type ChartSpec = EChartsOption | NumberDisplaySpec;

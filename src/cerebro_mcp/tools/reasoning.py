@@ -7,6 +7,7 @@ automatic reasoning/performance analysis across MCP sessions.
 import atexit
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -100,6 +101,49 @@ _AUTO_TRACE_TOOL_MANAGER_ORIGINAL_ATTR = "_cerebro_original_tool_manager_call_to
 _AUTO_TRACE_TOOL_MANAGER_INSTALLED_ATTR = "_cerebro_tool_manager_tracing_installed"
 _AUTO_TRACE_REQUEST_HANDLERS_INSTALLED_ATTR = "_cerebro_request_handlers_tracing_installed"
 _AUTO_TRACE_REQUEST_HANDLERS_ORIGINAL_ATTR = "_cerebro_original_request_handlers"
+_SEMANTIC_TOOL_NAMES = {
+    "preflight_analytics_request",
+    "discover_metrics",
+    "get_metric_details",
+    "explain_metric_query",
+    "query_metrics",
+    "quick_metric_chart",
+    "generate_metric_charts",
+}
+_RAW_EXECUTION_ACTIONS = {
+    "search_models",
+    "discover_models",
+    "get_model_details",
+    "describe_table",
+    "execute_query",
+    "generate_chart",
+    "generate_charts",
+    "quick_chart",
+}
+_SINGLE_CHART_ACTIONS = {
+    "generate_chart",
+    "quick_chart",
+    "quick_metric_chart",
+}
+_BATCH_CHART_ACTIONS = {
+    "generate_charts",
+    "generate_metric_charts",
+}
+_BATCH_CHART_COUNT_RE = re.compile(
+    r"Generated\s+(\d+)/(\d+)\s+(?:semantic\s+)?charts",
+    re.IGNORECASE,
+)
+_WORKFLOW_BLOCK_PATTERNS = (
+    "Semantic preflight required:",
+    "Approved semantic coverage already exists for this request.",
+    "**Analysis depth check failed:**",
+    "**Chart workflow check failed:**",
+    "**Semantic routing check failed:**",
+)
+_SQL_MODEL_RE = re.compile(
+    r"\b(?:from|join)\s+`?(?:[a-zA-Z0-9_]+)`?\.`?([a-zA-Z0-9_]+)`?",
+    re.IGNORECASE,
+)
 
 
 def _atexit_finalize():
@@ -317,11 +361,39 @@ def _record_step(entry: ReasoningStep) -> int | None:
 
         entry.step_number = len(_current_session.steps) + 1
         _current_session.steps.append(entry)
+        _current_session.summary = _compute_session_summary(_current_session)
 
         # Save after each step for crash safety
         _maybe_prune_old_sessions_unlocked()
         _save_session(_current_session)
         return entry.step_number
+
+
+def record_trace_event(
+    action: str,
+    *,
+    content: str,
+    payload: Any | None = None,
+    success: bool = True,
+    error: str = "",
+    event_kind: str = "trace_event",
+) -> None:
+    """Persist a non-tool trace event inside the active session."""
+    safe_payload = _prepare_payload(payload) if payload is not None else None
+    entry = ReasoningStep(
+        step_number=0,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        step=action,
+        content=content,
+        action=action,
+        output_summary=_summarize_payload(safe_payload) if safe_payload is not None else "",
+        success=success,
+        error=error or None,
+        auto_captured=True,
+        event_kind=event_kind,
+        tool_result=safe_payload,
+    )
+    _record_step(entry)
 
 
 def _record_auto_tool_step(
@@ -330,6 +402,7 @@ def _record_auto_tool_step(
     *,
     result: Any = None,
     error: Exception | None = None,
+    error_text: str | None = None,
     duration_ms: int,
     success: bool,
 ) -> None:
@@ -341,7 +414,10 @@ def _record_auto_tool_step(
         return
 
     safe_args = _prepare_payload(arguments or {})
-    safe_result = _prepare_payload(result) if success else None
+    normalized_result = _prepare_payload(result) if result is not None else None
+    effective_error_text = error_text or _extract_error_text(normalized_result)
+    effective_success = success and effective_error_text is None
+    safe_result = normalized_result if effective_success else None
     safe_error = (
         _prepare_payload(
             {
@@ -350,10 +426,19 @@ def _record_auto_tool_step(
             }
         )
         if error is not None
-        else None
+        else (
+            _prepare_payload(
+                {
+                    "type": "ToolError",
+                    "message": effective_error_text,
+                }
+            )
+            if effective_error_text
+            else None
+        )
     )
 
-    output_payload = safe_result if success else safe_error
+    output_payload = safe_result if effective_success else safe_error
     entry = ReasoningStep(
         step_number=0,
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -363,8 +448,8 @@ def _record_auto_tool_step(
         input_summary=_summarize_payload(safe_args),
         output_summary=_summarize_payload(output_payload),
         duration_ms=duration_ms,
-        success=success,
-        error=str(error) if error else None,
+        success=effective_success,
+        error=str(error) if error else effective_error_text,
         auto_captured=True,
         event_kind="tool_call",
         tool_name=tool_name,
@@ -377,9 +462,32 @@ def _record_auto_tool_step(
 
 def _extract_error_text(payload: Any) -> str | None:
     """Extract a human-readable error from a normalized payload."""
+    if isinstance(payload, str):
+        stripped = payload.strip()
+        if stripped.startswith("Error:"):
+            return stripped
+        return None
+
+    if isinstance(payload, list):
+        for item in payload:
+            extracted = _extract_error_text(item)
+            if extracted:
+                return extracted
+        return None
+
     if isinstance(payload, dict):
-        if "message" in payload and isinstance(payload["message"], str):
+        error_type = str(payload.get("type", "")).lower()
+        if error_type in {"error", "toolerror", "exception"} and isinstance(
+            payload.get("message"),
+            str,
+        ):
             return payload["message"]
+
+        if isinstance(payload.get("error"), str):
+            return payload["error"]
+
+        if payload.get("type") == "text" and isinstance(payload.get("text"), str):
+            return _extract_error_text(payload.get("text"))
 
         if isinstance(payload.get("isError"), bool) and payload["isError"]:
             content = payload.get("content")
@@ -395,17 +503,9 @@ def _extract_error_text(payload: Any) -> str | None:
 
         root = payload.get("root")
         if isinstance(root, dict):
-            if isinstance(root.get("isError"), bool) and root["isError"]:
-                content = root.get("content")
-                if isinstance(content, list):
-                    for item in content:
-                        if (
-                            isinstance(item, dict)
-                            and item.get("type") == "text"
-                            and isinstance(item.get("text"), str)
-                        ):
-                            return item["text"]
-                return "MCP call returned an error result."
+            extracted = _extract_error_text(root)
+            if extracted:
+                return extracted
     return None
 
 
@@ -538,20 +638,26 @@ def _install_tool_manager_tracing(mcp) -> None:
             raise
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        observe_tool_call(name, status="success", duration_ms=elapsed_ms)
+        extracted_error = _extract_error_text(_prepare_payload(result))
+        observe_tool_call(
+            name,
+            status="error" if extracted_error else "success",
+            duration_ms=elapsed_ms,
+        )
         log_event(
             logger,
             "mcp_tool_call",
             tool_name=name,
             duration_ms=elapsed_ms,
-            success=True,
+            success=extracted_error is None,
         )
         _record_auto_tool_step(
             name,
             arguments,
             result=result,
+            error_text=extracted_error,
             duration_ms=elapsed_ms,
-            success=True,
+            success=extracted_error is None,
         )
         return result
 
@@ -666,42 +772,241 @@ def install_auto_tool_tracing(mcp) -> None:
     setattr(mcp, _AUTO_TRACE_INSTALLED_ATTR, True)
 
 
-def _finalize_session(session: SessionTrace) -> None:
-    """Compute summary stats and save the session."""
+def _parse_iso_ts(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _compute_wall_duration_ms(session: SessionTrace) -> int:
+    started_at = _parse_iso_ts(session.started_at)
+    if started_at is None:
+        return 0
+    if session.steps:
+        ended_at = _parse_iso_ts(session.steps[-1].timestamp)
+        if ended_at is not None:
+            return max(int((ended_at - started_at).total_seconds() * 1000), 0)
+    return max(int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000), 0)
+
+
+def _extract_step_text(step: ReasoningStep) -> str:
+    chunks: list[str] = []
+    for value in (step.output_summary, step.content, step.error):
+        if isinstance(value, str) and value:
+            chunks.append(value)
+    if isinstance(step.tool_result, str) and step.tool_result:
+        chunks.append(step.tool_result)
+    return "\n".join(chunks)
+
+
+def _is_semantic_gate_redirect(step: ReasoningStep) -> bool:
+    if step.action not in _RAW_EXECUTION_ACTIONS:
+        return False
+    text = _extract_step_text(step)
+    return (
+        "Semantic preflight required:" in text
+        or "Approved semantic coverage already exists for this request." in text
+    )
+
+
+def _is_workflow_blocked(step: ReasoningStep) -> bool:
+    text = _extract_step_text(step)
+    return any(pattern in text for pattern in _WORKFLOW_BLOCK_PATTERNS)
+
+
+def _count_generated_charts(step: ReasoningStep) -> int:
+    if step.event_kind != "tool_call" or not step.success:
+        return 0
+    text = _extract_step_text(step)
+    if step.action in _SINGLE_CHART_ACTIONS:
+        return 1 if "Chart ID:" in text else 0
+    if step.action in _BATCH_CHART_ACTIONS:
+        match = _BATCH_CHART_COUNT_RE.search(text)
+        if match:
+            return int(match.group(1))
+    return 0
+
+
+def _extract_models_from_sql(sql: str) -> set[str]:
+    return {
+        match
+        for match in _SQL_MODEL_RE.findall(sql or "")
+        if match
+    }
+
+
+def _collect_models_used(steps: list[ReasoningStep]) -> list[str]:
+    models: set[str] = set()
+    for step in steps:
+        args = step.tool_args if isinstance(step.tool_args, dict) else {}
+        if step.action == "get_model_details":
+            model_name = args.get("model_name")
+            if isinstance(model_name, str) and model_name:
+                models.add(model_name)
+        elif step.action == "describe_table":
+            table_name = args.get("table")
+            if isinstance(table_name, str) and table_name:
+                models.add(table_name)
+
+        sql_fragments: list[str] = []
+        sql_value = args.get("sql")
+        if isinstance(sql_value, str) and sql_value:
+            sql_fragments.append(sql_value)
+        charts = args.get("charts")
+        if isinstance(charts, list):
+            for chart in charts:
+                if isinstance(chart, dict):
+                    chart_sql = chart.get("sql")
+                    if isinstance(chart_sql, str) and chart_sql:
+                        sql_fragments.append(chart_sql)
+        for sql in sql_fragments:
+            models.update(_extract_models_from_sql(sql))
+    return sorted(models)
+
+
+def _compute_session_summary(session: SessionTrace) -> dict[str, Any]:
+    """Compute summary stats for a session trace."""
     steps = session.steps
-    successful = sum(1 for s in steps if s.success)
-    failed = sum(1 for s in steps if not s.success)
+    workflow_blocked_steps = sum(
+        1
+        for s in steps
+        if s.event_kind == "tool_call" and _is_workflow_blocked(s)
+    )
+    successful = sum(
+        1
+        for s in steps
+        if s.success and not (s.event_kind == "tool_call" and _is_workflow_blocked(s))
+    )
+    failed = sum(1 for s in steps if not s.success) + workflow_blocked_steps
+    failed_tool_steps = sum(
+        1
+        for s in steps
+        if s.event_kind == "tool_call" and not s.success
+    )
     total_ms = sum(s.duration_ms for s in steps)
+    wall_ms = _compute_wall_duration_ms(session)
+    tool_ms = sum(
+        s.duration_ms
+        for s in steps
+        if s.event_kind == "tool_call"
+    )
+    transport_ms = sum(
+        s.duration_ms
+        for s in steps
+        if s.event_kind == "mcp_request" and s.request_method == "tools/call"
+    )
+    mcp_request_ms = sum(
+        s.duration_ms
+        for s in steps
+        if s.event_kind == "mcp_request"
+    )
 
     # Count actions and models
     actions = Counter(s.action for s in steps if s.action)
-    charts = sum(1 for s in steps if s.action == "generate_chart" and s.success)
+    charts = sum(_count_generated_charts(s) for s in steps)
     queries = sum(
         1
         for s in steps
         if s.action in ("execute_query", "start_query") and s.success
     )
+    semantic_tool_calls = sum(
+        1
+        for s in steps
+        if s.event_kind == "tool_call" and s.action in _SEMANTIC_TOOL_NAMES
+    )
+    semantic_tools_available = any(
+        s.action in _SEMANTIC_TOOL_NAMES
+        or (
+            s.event_kind == "mcp_request"
+            and s.request_method == "tools/list"
+            and isinstance(s.response_payload, dict)
+            and any(
+                isinstance(tool, dict) and tool.get("name") in _SEMANTIC_TOOL_NAMES
+                for tool in (
+                    s.response_payload.get("root", s.response_payload).get("tools", [])
+                    if isinstance(s.response_payload.get("root", s.response_payload), dict)
+                    else []
+                )
+            )
+        )
+        for s in steps
+    )
+    used_semantic = any(
+        s.action in {"query_metrics", "quick_metric_chart", "generate_metric_charts"}
+        or (
+            s.action == "semantic_path_used"
+            and isinstance(s.tool_result, dict)
+            and s.tool_result.get("path") == "semantic"
+        )
+        for s in steps
+    )
+    raw_blocked_attempts = sum(
+        1
+        for s in steps
+        if s.action in _RAW_EXECUTION_ACTIONS and _is_semantic_gate_redirect(s)
+    )
+    raw_execution_steps = sum(
+        1
+        for s in steps
+        if (
+            s.action in _RAW_EXECUTION_ACTIONS
+            and not _is_semantic_gate_redirect(s)
+            and not _is_workflow_blocked(s)
+        )
+    )
+    used_raw = any(
+        (
+            s.action in _RAW_EXECUTION_ACTIONS
+            and not _is_semantic_gate_redirect(s)
+            and not _is_workflow_blocked(s)
+        )
+        for s in steps
+    )
+    if used_semantic and used_raw:
+        semantic_path_used = "mixed"
+    elif used_semantic:
+        semantic_path_used = "semantic"
+    elif used_raw:
+        semantic_path_used = "raw_only"
+    else:
+        semantic_path_used = "none"
 
-    # Extract model names from input summaries
-    models: list[str] = []
-    for s in steps:
-        if s.action in ("describe_table", "get_model_details", "get_sample_data"):
-            # Try to extract table/model name from input_summary
-            for part in s.input_summary.split(","):
-                part = part.strip()
-                if part.startswith("table=") or part.startswith("model="):
-                    models.append(part.split("=", 1)[1].strip("'\""))
+    semantic_route_last = ""
+    for step in reversed(steps):
+        if step.action == "semantic_route_decision" and isinstance(step.tool_result, dict):
+            semantic_route_last = str(step.tool_result.get("route", ""))
+            break
 
-    session.summary = {
+    return {
         "total_duration_ms": total_ms,
+        "wall_duration_ms": wall_ms,
+        "tool_duration_ms": tool_ms,
+        "transport_duration_ms": transport_ms,
+        "mcp_request_duration_ms": mcp_request_ms,
         "total_steps": len(steps),
         "successful_steps": successful,
         "failed_steps": failed,
+        "failed_tool_steps": failed_tool_steps,
+        "workflow_blocked_steps": workflow_blocked_steps,
         "charts_generated": charts,
         "queries_executed": queries,
-        "models_used": list(set(models)),
+        "models_used": _collect_models_used(steps),
         "actions": dict(actions),
+        "semantic_tools_available": semantic_tools_available,
+        "semantic_tool_calls": semantic_tool_calls,
+        "semantic_path_used": semantic_path_used,
+        "semantic_route_last": semantic_route_last,
+        "raw_blocked_attempts": raw_blocked_attempts,
+        "raw_execution_steps": raw_execution_steps,
     }
+
+
+def _finalize_session(session: SessionTrace) -> None:
+    """Compute summary stats and save the session."""
+    session.summary = _compute_session_summary(session)
     _maybe_prune_old_sessions_unlocked(force=True)
     _save_session(session)
 
@@ -916,9 +1221,21 @@ def register_reasoning_tools(mcp):
                 f"| Total Steps | {summary.get('total_steps', 0)} |\n"
                 f"| Successful | {summary.get('successful_steps', 0)} |\n"
                 f"| Failed | {summary.get('failed_steps', 0)} |\n"
-                f"| Total Duration | {summary.get('total_duration_ms', 0)}ms |\n"
+                f"| Failed Tool Steps | {summary.get('failed_tool_steps', 0)} |\n"
+                f"| Workflow Blocked Steps | {summary.get('workflow_blocked_steps', 0)} |\n"
+                f"| Wall Duration | {summary.get('wall_duration_ms', 0)}ms |\n"
+                f"| Tool Duration | {summary.get('tool_duration_ms', 0)}ms |\n"
+                f"| Transport Duration | {summary.get('transport_duration_ms', 0)}ms |\n"
+                f"| MCP Request Duration | {summary.get('mcp_request_duration_ms', 0)}ms |\n"
+                f"| Cumulative Traced Duration | {summary.get('total_duration_ms', 0)}ms |\n"
                 f"| Charts Generated | {summary.get('charts_generated', 0)} |\n"
-                f"| Queries Executed | {summary.get('queries_executed', 0)} |"
+                f"| Queries Executed | {summary.get('queries_executed', 0)} |\n"
+                f"| Semantic Tools Available | {summary.get('semantic_tools_available', False)} |\n"
+                f"| Semantic Tool Calls | {summary.get('semantic_tool_calls', 0)} |\n"
+                f"| Semantic Path Used | {summary.get('semantic_path_used', 'none')} |\n"
+                f"| Semantic Route Last | {summary.get('semantic_route_last', '')} |\n"
+                f"| Raw Blocked Attempts | {summary.get('raw_blocked_attempts', 0)} |\n"
+                f"| Raw Execution Steps | {summary.get('raw_execution_steps', 0)} |"
             )
             if summary.get("models_used"):
                 lines.append(
@@ -974,7 +1291,9 @@ def register_reasoning_tools(mcp):
             steps = s.get("steps", [])
             all_steps.extend(steps)
 
-            if summary.get("total_duration_ms"):
+            if summary.get("wall_duration_ms"):
+                all_durations.append(summary["wall_duration_ms"])
+            elif summary.get("total_duration_ms"):
                 all_durations.append(summary["total_duration_ms"])
             charts_total += summary.get("charts_generated", 0)
             queries_total += summary.get("queries_executed", 0)
@@ -1059,7 +1378,7 @@ def register_reasoning_tools(mcp):
             started = s.get("started_at", "?")[:19]
             summary = s.get("summary", {})
             n_steps = summary.get("total_steps", len(s.get("steps", [])))
-            dur = summary.get("total_duration_ms", 0)
+            dur = summary.get("wall_duration_ms", summary.get("total_duration_ms", 0))
             ok = summary.get("successful_steps", 0)
             total = ok + summary.get("failed_steps", 0)
             rate = f"{round(ok / total * 100)}%" if total else "N/A"

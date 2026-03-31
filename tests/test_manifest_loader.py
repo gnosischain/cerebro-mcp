@@ -573,3 +573,97 @@ class TestStartupLogging:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "Loaded manifest from http://test.com/manifest.json" in caplog.text
+
+
+class TestLocalArtifactPreference:
+    def test_load_prefers_local_manifest_over_remote_url(self, monkeypatch, tmp_path):
+        import cerebro_mcp.manifest_loader as manifest_mod
+
+        loader = ManifestLoader()
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "nodes": {
+                        "model.test.local_model": {
+                            "resource_type": "model",
+                            "unique_id": "model.test.local_model",
+                            "name": "local_model",
+                            "description": "Local manifest model",
+                            "schema": "dbt",
+                            "alias": "local_model",
+                            "path": "test/local_model.sql",
+                            "tags": [],
+                            "config": {"materialized": "view"},
+                            "columns": {},
+                            "raw_code": "",
+                            "compiled_code": "",
+                        }
+                    },
+                    "sources": {},
+                    "parent_map": {},
+                    "child_map": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(manifest_mod.settings, "DBT_MANIFEST_PATH", str(manifest_path))
+        monkeypatch.setattr(manifest_mod.settings, "DBT_CATALOG_PATH", "")
+        monkeypatch.setattr(manifest_mod.settings, "SEMANTIC_REGISTRY_PATH", "")
+        monkeypatch.setattr(manifest_mod.settings, "SEMANTIC_DOCS_INDEX_PATH", "")
+        monkeypatch.setattr(
+            manifest_mod.settings,
+            "DBT_MANIFEST_URL",
+            "http://test.com/manifest.json",
+        )
+
+        with patch("cerebro_mcp.manifest_loader.requests.get") as mock_get:
+            loader.load()
+
+        assert loader.get_model("local_model") is not None
+        mock_get.assert_not_called()
+
+    def test_load_recovers_when_manifest_path_points_to_catalog(self, monkeypatch, tmp_path):
+        import cerebro_mcp.manifest_loader as manifest_mod
+
+        loader = ManifestLoader()
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "nodes": {
+                        "model.test.recovered_model": {
+                            "resource_type": "model",
+                            "unique_id": "model.test.recovered_model",
+                            "name": "recovered_model",
+                            "description": "Recovered via sibling manifest",
+                            "schema": "dbt",
+                            "alias": "recovered_model",
+                            "path": "test/recovered_model.sql",
+                            "tags": [],
+                            "config": {"materialized": "view"},
+                            "columns": {},
+                            "raw_code": "",
+                            "compiled_code": "",
+                        }
+                    },
+                    "sources": {},
+                    "parent_map": {},
+                    "child_map": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        catalog_path = tmp_path / "catalog.json"
+        catalog_path.write_text(json.dumps({"nodes": {}, "sources": {}}), encoding="utf-8")
+
+        monkeypatch.setattr(manifest_mod.settings, "DBT_MANIFEST_PATH", str(catalog_path))
+        monkeypatch.setattr(manifest_mod.settings, "DBT_CATALOG_PATH", "")
+        monkeypatch.setattr(manifest_mod.settings, "SEMANTIC_REGISTRY_PATH", "")
+        monkeypatch.setattr(manifest_mod.settings, "SEMANTIC_DOCS_INDEX_PATH", "")
+        monkeypatch.setattr(manifest_mod.settings, "DBT_MANIFEST_URL", None)
+
+        loader.load()
+
+        assert loader.get_model("recovered_model") is not None

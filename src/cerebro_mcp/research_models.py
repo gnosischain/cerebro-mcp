@@ -25,7 +25,13 @@ PHASE_ORDER: tuple[PhaseName, ...] = (
 
 
 class EvidenceRef(BaseModel):
-    kind: Literal["query_result", "chart", "report", "schema_snapshot"]
+    kind: Literal[
+        "query_result",
+        "chart",
+        "report",
+        "schema_snapshot",
+        "semantic_query_result",
+    ]
     ref_id: str
     phase: PhaseName | None = None
     title: str = ""

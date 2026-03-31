@@ -17,11 +17,17 @@ class Settings(BaseSettings):
     CLICKHOUSE_PASSWORD: str = ""
     CLICKHOUSE_SECURE: bool = True
 
-    # dbt manifest source (URL takes precedence over local path)
+    # dbt manifest source (local path takes precedence when configured)
     DBT_MANIFEST_URL: Optional[str] = (
         "https://gnosischain.github.io/dbt-cerebro/manifest.json"
     )
     DBT_MANIFEST_PATH: str = ""
+
+    # dbt catalog source (local path takes precedence when configured)
+    DBT_CATALOG_URL: Optional[str] = (
+        "https://gnosischain.github.io/dbt-cerebro/catalog.json"
+    )
+    DBT_CATALOG_PATH: str = ""
 
     # External Docs index source
     DOCS_SEARCH_INDEX_URL: Optional[str] = (
@@ -29,6 +35,19 @@ class Settings(BaseSettings):
     )
     DOCS_SEARCH_INDEX_PATH: str = ""
     DOCS_REFRESH_INTERVAL_SECONDS: int = 3600
+
+    # Semantic artifacts
+    SEMANTIC_ENABLED: bool = False
+    SEMANTIC_REGISTRY_URL: Optional[str] = (
+        "https://gnosischain.github.io/dbt-cerebro/semantic_registry.json"
+    )
+    SEMANTIC_REGISTRY_PATH: str = ""
+    SEMANTIC_DOCS_INDEX_URL: Optional[str] = (
+        "https://gnosischain.github.io/dbt-cerebro/semantic_docs_index.json"
+    )
+    SEMANTIC_DOCS_INDEX_PATH: str = ""
+    SEMANTIC_REFRESH_INTERVAL_SECONDS: int = 300
+    CLICKHOUSE_AGENT_SKILLS_PATH: str = "src/cerebro_mcp/static/clickhouse_agent_skills"
 
     # Safety limits
     MAX_ROWS: int = 10000

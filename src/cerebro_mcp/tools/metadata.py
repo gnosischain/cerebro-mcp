@@ -44,11 +44,15 @@ DATABASE_DESCRIPTIONS = {
     "crawlers_data": (
         "Off-chain enrichment data: dune_labels, dune_prices, dune_bridge_flows, "
         "dune_gno_supply, ember_electricity_data, probelab network stats, "
-        "gpay_wallets. Populated by click-runner."
+        "GC_Key_Validators, ipinfo, country_codes. Populated by click-runner."
     ),
     "nebula": (
         "P2P network discovery data: crawls, visits (peer connectivity, agent info, "
-        "protocol versions). From Discv5 network crawlers."
+        "protocol versions), neighbors, discovery_id_prefixes_x_peer_ids. From Discv5 network crawlers."
+    ),
+     "nebula_discv4": (
+        "P2P network discovery data: crawls, visits (peer connectivity, agent info, "
+        "protocol versions), neighbors, discovery_id_prefixes_x_peer_ids. From Discv4 network crawlers."
     ),
     "dbt": (
         "Transformed/modeled data from dbt-cerebro: ~400 models as views and tables. "

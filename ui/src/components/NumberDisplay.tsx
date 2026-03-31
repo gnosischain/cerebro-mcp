@@ -5,41 +5,65 @@ interface Props {
 }
 
 export function NumberDisplay({ spec }: Props) {
-  const formatted =
-    typeof spec.value === "number" ? spec.value.toLocaleString() : spec.value;
+  const formattedValue = formatScalar(spec.value, spec.format);
+  const changeDirection = spec.change?.direction ?? inferDirection(spec.change?.value);
+  const formattedChange = spec.change
+    ? formatScalar(spec.change.value, spec.change.format, true)
+    : "";
 
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "1.5rem",
-        minHeight: "120px",
-      }}
-    >
-      <div style={{ textAlign: "center" }}>
+    <div className="number-display">
+      {spec.title && <div className="number-display__eyebrow">{spec.title}</div>}
+      <div className="number-display__value">{formattedValue}</div>
+      {spec.change && (
         <div
-          style={{
-            fontSize: "2.5rem",
-            fontWeight: 700,
-            color: "var(--primary)",
-          }}
+          className={[
+            "number-display__change",
+            `number-display__change--${changeDirection}`,
+          ].join(" ")}
         >
-          {formatted}
+          <span className="number-display__change-value">{formattedChange}</span>
+          {spec.change.label && (
+            <span className="number-display__change-label">{spec.change.label}</span>
+          )}
         </div>
-        {spec.title && (
-          <div
-            style={{
-              fontSize: "0.875rem",
-              color: "var(--text-muted)",
-              marginTop: "0.25rem",
-            }}
-          >
-            {spec.title}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
+}
+
+function formatScalar(
+  value: number | string,
+  _format?: string,
+  signed = false
+): string {
+  if (typeof value !== "number") {
+    return value;
+  }
+
+  const maximumFractionDigits = Number.isInteger(value) ? 0 : 2;
+  const formatted = value.toLocaleString(undefined, {
+    maximumFractionDigits,
+  });
+
+  if (signed && value > 0) {
+    return `+${formatted}`;
+  }
+
+  return formatted;
+}
+
+function inferDirection(
+  value: number | string | undefined
+): "positive" | "negative" | "neutral" {
+  if (typeof value === "number") {
+    if (value > 0) return "positive";
+    if (value < 0) return "negative";
+    return "neutral";
+  }
+
+  const text = String(value ?? "").trim();
+  if (text.startsWith("+")) return "positive";
+  if (text.startsWith("-")) return "negative";
+  return "neutral";
 }

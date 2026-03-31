@@ -1,0 +1,14 @@
+{
+  "compiled_rules_path": "skills/clickhouse-best-practices/AGENTS.md",
+  "generated_at": "2026-03-28T17:08:02.541876+00:00",
+  "required_files": [
+    "skills/clickhouse-best-practices/AGENTS.md",
+    "skills/clickhouse-best-practices/SKILL.md",
+    "skills/clickhouse-best-practices/metadata.json",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "skill_directory": "skills/clickhouse-best-practices",
+  "source_ref": "fab8c0077a42aad93069dbc2b65170191edbf52a",
+  "source_repo_url": "https://github.com/ClickHouse/agent-skills"
+}

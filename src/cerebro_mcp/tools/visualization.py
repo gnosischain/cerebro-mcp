@@ -1,5 +1,6 @@
 import importlib.resources
 import json
+import logging
 import os
 import re
 import threading
@@ -16,7 +17,16 @@ else:
 from mcp.types import Annotations, CallToolResult, TextContent
 
 from cerebro_mcp.clickhouse_client import ClickHouseManager
+from cerebro_mcp.observability import (
+    log_event,
+    observe_semantic_bypass,
+    observe_semantic_tool_call,
+)
 from cerebro_mcp.tools.query import truncate_response, _truncate_sql
+from cerebro_mcp.tools.session_state import state
+
+
+logger = logging.getLogger(__name__)
 
 
 class ChartSpec(TypedDict):
@@ -26,9 +36,31 @@ class ChartSpec(TypedDict):
     chart_type: NotRequired[str]
     x_field: NotRequired[str]
     y_field: NotRequired[str]
+    change_field: NotRequired[str]
     series_field: NotRequired[str]
     title: NotRequired[str]
     max_rows: NotRequired[int]
+
+
+class MetricChartSpec(TypedDict):
+    """Typed specification for a single semantic chart in a batch call."""
+
+    metrics: list[str]
+    dimensions: NotRequired[list[str]]
+    filters: NotRequired[list[dict]]
+    order_by: NotRequired[list[str]]
+    limit: NotRequired[int]
+    chart_type: NotRequired[str]
+    x_field: NotRequired[str]
+    y_field: NotRequired[str]
+    change_field: NotRequired[str]
+    series_field: NotRequired[str]
+    title: NotRequired[str]
+
+
+_SEMANTIC_DIMENSION_ALIASES = {
+    "date": "day",
+}
 
 
 # --- Bundled React UI (Vite single-file build) ---
@@ -262,6 +294,11 @@ def create_report_artifact(
 ) -> dict:
     from cerebro_mcp.tools.session_state import state
 
+    semantic_mode = state.semantic_summary().get("semantic_mode_last", "")
+    presentation_mode = (
+        "visual_answer" if semantic_mode in {"answer", "chart"} else "report"
+    )
+
     if enforce_quality_gate:
         passed, reason, _warnings = state.check_report_preconditions(
             _chart_registry
@@ -311,6 +348,7 @@ def create_report_artifact(
     structured = {
         "title": title,
         "timestamp": timestamp,
+        "presentation_mode": presentation_mode,
         "charts": chart_specs,
         "sections_html": rendered_html,
         "queries": chart_queries,
@@ -345,14 +383,22 @@ def create_report_artifact(
     if reset_session_state:
         state.reset()
 
-    reply_text = (
-        f"**Report:** {title}\n\n"
-        f"Report ID: `{report_id[:8]}` | "
-        f"Charts: {len(chart_specs)}\n\n"
-        f"To reopen: `open_report(\"{report_id[:8]}\")`\n"
-        f"To export HTML: `export_report(\"{report_id[:8]}\")`\n\n"
-        f"_Ask if they want the HTML exported or conversion to docx/pdf/pptx._"
-    )
+    if presentation_mode == "visual_answer":
+        reply_text = (
+            f"**Visualization:** {title}\n\n"
+            f"View ID: `{report_id[:8]}` | "
+            f"Charts: {len(chart_specs)}\n\n"
+            f"To reopen: `open_report(\"{report_id[:8]}\")`"
+        )
+    else:
+        reply_text = (
+            f"**Report:** {title}\n\n"
+            f"Report ID: `{report_id[:8]}` | "
+            f"Charts: {len(chart_specs)}\n\n"
+            f"To reopen: `open_report(\"{report_id[:8]}\")`\n"
+            f"To export HTML: `export_report(\"{report_id[:8]}\")`\n\n"
+            f"_Ask if they want the HTML exported or conversion to docx/pdf/pptx._"
+        )
 
     return {
         "report_id": report_id,
@@ -429,6 +475,119 @@ def _numeric_value_columns(
     return numeric_columns
 
 
+def _classify_change_direction(value) -> str:
+    """Infer change direction from a numeric or signed string value."""
+    serialized = _serialize_value(value)
+    if _is_numeric_value(serialized):
+        if serialized > 0:
+            return "positive"
+        if serialized < 0:
+            return "negative"
+        return "neutral"
+
+    text = str(serialized).strip()
+    if text.startswith("+"):
+        return "positive"
+    if text.startswith("-"):
+        return "negative"
+    return "neutral"
+
+
+def _format_number_display_scalar(value, *, signed: bool = False) -> str:
+    """Format scalar KPI values consistently for inline HTML rendering."""
+    serialized = _serialize_value(value)
+    if _is_numeric_value(serialized):
+        if isinstance(serialized, float) and not serialized.is_integer():
+            formatted = f"{serialized:,.2f}".rstrip("0").rstrip(".")
+        else:
+            formatted = f"{serialized:,.0f}"
+        if signed and serialized > 0:
+            return f"+{formatted}"
+        return formatted
+    return str(serialized)
+
+
+def _resolve_number_display_fields(
+    *,
+    columns: list[str],
+    rows: list,
+    x_field: str,
+    y_field: str,
+    change_field: str,
+    series_field: str,
+) -> tuple[str, str, str]:
+    """Resolve explicit value/change fields for KPI cards without guessing."""
+    resolved_y = y_field.strip()
+    resolved_change = change_field.strip()
+
+    if resolved_y and "," in resolved_y:
+        return "", "", (
+            "Error: `numberDisplay` requires a single main KPI column. "
+            "Use one `y_field` and optionally one `change_field`."
+        )
+    if resolved_change and "," in resolved_change:
+        return "", "", (
+            "Error: `numberDisplay` supports at most one `change_field`. "
+            "Pass a single explicit delta column."
+        )
+    if resolved_change and resolved_change == resolved_y:
+        return "", "", (
+            "Error: `change_field` must differ from `y_field` for `numberDisplay`."
+        )
+
+    candidate_fields = [
+        name for name in columns
+        if name not in {x_field, series_field, resolved_change}
+    ]
+    numeric_columns = _numeric_value_columns(
+        columns,
+        rows,
+        exclude_fields={x_field, series_field},
+    )
+    numeric_candidates = [
+        name for name in numeric_columns
+        if name != resolved_change
+    ]
+
+    if not resolved_y:
+        if len(columns) == 1:
+            resolved_y = columns[0]
+        elif len(candidate_fields) == 1:
+            resolved_y = candidate_fields[0]
+        elif len(numeric_candidates) == 1 and len(candidate_fields) <= 2:
+            resolved_y = numeric_candidates[0]
+        else:
+            available = ", ".join(columns)
+            return "", "", (
+                "Error: `numberDisplay` requires an explicit main KPI column when "
+                "the query returns multiple fields. Set `y_field=\"...\"` for the "
+                "main value and optionally `change_field=\"...\"` for the delta, "
+                f"or reduce the query to a single KPI column. Available columns: {available}"
+            )
+
+    extra_numeric = [
+        name for name in numeric_columns
+        if name not in {resolved_y, resolved_change}
+    ]
+    if extra_numeric:
+        available = ", ".join(numeric_columns)
+        if resolved_change:
+            extra = ", ".join(f"`{name}`" for name in extra_numeric)
+            return "", "", (
+                "Error: `numberDisplay` found extra numeric columns beyond the explicit "
+                f"`y_field=\"{resolved_y}\"` and `change_field=\"{resolved_change}\"`: {extra}. "
+                f"Available numeric columns: {available}. Reduce the query or choose a single value/change pair."
+            )
+        return "", "", (
+            "Error: `numberDisplay` found multiple numeric columns "
+            f"({available}) but no `change_field` was provided. Set `y_field=\"{resolved_y}\"` "
+            "for the main KPI and `change_field=\"...\"` for the delta, or reduce the query "
+            "to a single KPI column."
+        )
+
+    return resolved_y, resolved_change, ""
+
+
 def _validate_chart_input_shape(
     *,
     chart_type: str,
@@ -436,6 +595,7 @@ def _validate_chart_input_shape(
     rows: list,
     x_field: str,
     y_field: str,
+    change_field: str,
     series_field: str,
 ) -> tuple[str | None, str]:
     """Validate chart/query contracts and classify the input shape."""
@@ -450,6 +610,12 @@ def _validate_chart_input_shape(
             return (
                 "Error: `numberDisplay` requires a single metric column. "
                 "Use one `y_field` and return exactly one row.",
+                "",
+            )
+        if change_field and "," in change_field:
+            return (
+                "Error: `numberDisplay` supports a single explicit `change_field`. "
+                "Pass one delta column only.",
                 "",
             )
         if len(rows) != 1:
@@ -716,17 +882,32 @@ def _build_number_display(
     col_index: dict[str, int],
     y_field: str,
     title: str,
+    change_field: str = "",
 ) -> dict:
     """Build a KPI number display spec."""
     y_idx = col_index[y_field]
     value = _serialize_value(rows[0][y_idx]) if rows else 0
 
-    return {
+    option = {
         "type": "numberDisplay",
         "title": title,
         "value": value,
-        "format": "formatNumber",
     }
+    if _is_numeric_value(value):
+        option["format"] = "formatNumber"
+
+    if change_field:
+        change_idx = col_index[change_field]
+        change_value = _serialize_value(rows[0][change_idx]) if rows else 0
+        change_payload = {
+            "value": change_value,
+            "direction": _classify_change_direction(change_value),
+        }
+        if _is_numeric_value(change_value):
+            change_payload["format"] = "formatNumber"
+        option["change"] = change_payload
+
+    return option
 
 
 def _build_scatter_chart(
@@ -1228,13 +1409,32 @@ def _markdown_to_html(text: str) -> str:
                     # Render numberDisplay values inline in table cells
                     if chart_opt.get("type") == "numberDisplay":
                         val = chart_opt.get("value", "")
-                        if isinstance(val, (int, float)):
-                            formatted = f"{val:,.0f}" if val == int(val) else f"{val:,.2f}"
-                        else:
-                            formatted = str(val)
+                        formatted = _format_number_display_scalar(val)
+                        change = chart_opt.get("change") if isinstance(chart_opt.get("change"), dict) else None
+                        change_html = ""
+                        if change:
+                            change_value = _format_number_display_scalar(
+                                change.get("value", ""),
+                                signed=True,
+                            )
+                            change_label = change.get("label", "")
+                            change_direction = change.get("direction", "neutral")
+                            label_html = (
+                                f'<span class="kpi-change-label">{_escape_html(str(change_label))}</span>'
+                                if change_label
+                                else ""
+                            )
+                            change_html = (
+                                f'<span class="kpi-change number-change {change_direction}">'
+                                f'{_escape_html(change_value)}{label_html}'
+                                f'</span>'
+                            )
                         html_lines.append(
                             f'<td class="kpi-cell">'
+                            f'<div class="kpi-metric">'
                             f'<span class="kpi-value">{_escape_html(formatted)}</span>'
+                            f'{change_html}'
+                            f'</div>'
                             f'</td>'
                         )
                     else:
@@ -1355,25 +1555,27 @@ def _build_standalone_html(
 def register_visualization_tools(mcp, ch: ClickHouseManager):
     """Register chart generation and report tools."""
 
-    @mcp.tool()
-    # ── Shared chart builder ───────────────────────────────────────
-
-    def _build_and_register_chart(
+    def _register_chart_from_dataset(
+        *,
+        columns: list[str],
+        rows: list[list],
         sql: str,
         database: str,
         chart_type: str,
         x_field: str,
         y_field: str,
+        change_field: str,
         series_field: str,
         title: str,
-        max_rows: int,
+        elapsed_seconds: float,
+        source: str,
         return_metadata_only: bool = False,
     ) -> str:
-        """Internal helper: execute SQL, build ECharts spec, register chart.
+        """Build ECharts spec from tabular data and register the chart.
 
         When return_metadata_only=True, returns only a compact metadata line
         (chart ID, type, title, data points, query time) without the full
-        ECharts JSON or SQL echo. Used by generate_charts batch tool.
+        ECharts JSON or SQL echo. Used by batch chart tools.
         """
         from cerebro_mcp.tools.session_state import state
 
@@ -1382,25 +1584,36 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             return f"Error: Unknown chart type '{chart_type}'. Supported: {supported}"
 
         try:
-            executed = ch.run_query(
-                sql,
-                database,
-                requested_max_rows=max_rows,
-                audience="internal",
-            )
-            columns = executed.columns
-            rows = executed.rows
-
             if not rows:
                 return "Error: Query returned no data. Cannot generate chart."
 
             col_index = _build_col_index(columns)
 
             # Auto-detect fields if not specified
-            if not x_field and columns:
-                x_field = columns[0]
-            if not y_field and len(columns) > 1:
-                y_field = columns[1]
+            if chart_type == "numberDisplay":
+                y_field, change_field, number_display_error = _resolve_number_display_fields(
+                    columns=columns,
+                    rows=rows,
+                    x_field=x_field,
+                    y_field=y_field,
+                    change_field=change_field,
+                    series_field=series_field,
+                )
+                if number_display_error:
+                    return number_display_error
+            else:
+                if not x_field and columns:
+                    x_field = columns[0]
+                if not y_field and len(columns) > 1:
+                    y_field = columns[1]
+                if chart_type in {"line", "area", "bar"} and not y_field:
+                    available = ", ".join(columns)
+                    return (
+                        f"Error: `{chart_type}` charts require a dimension column and at least one "
+                        f"value column. This query returned columns: {available}. Use "
+                        "`numberDisplay` for a single aggregated metric or include a dimension such "
+                        "as `day`."
+                    )
 
             # Validate fields exist
             if x_field and x_field not in col_index:
@@ -1415,6 +1628,9 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     return (
                         f"Error: y_field '{missing}' not found in columns: {available}"
                     )
+            if change_field and change_field not in col_index:
+                available = ", ".join(columns)
+                return f"Error: change_field '{change_field}' not found in columns: {available}"
             if series_field and series_field not in col_index:
                 available = ", ".join(columns)
                 return f"Error: series_field '{series_field}' not found in columns: {available}"
@@ -1425,14 +1641,24 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 rows=rows,
                 x_field=x_field,
                 y_field=y_field,
+                change_field=change_field,
                 series_field=series_field,
             )
             if shape_error:
                 return shape_error
 
             builder = CHART_BUILDERS[chart_type]
-            option = builder(rows, col_index, x_field, y_field, series_field, title)
-            state.record_generate_chart(chart_type, sql, series_field)
+            if chart_type == "numberDisplay":
+                option = _build_number_display(
+                    rows,
+                    col_index,
+                    y_field,
+                    title,
+                    change_field,
+                )
+            else:
+                option = builder(rows, col_index, x_field, y_field, series_field, title)
+            state.record_generate_chart(chart_type, sql, series_field, source=source)
 
             # Register chart in registry (with TTL tracking)
             chart_id = _next_chart_id()
@@ -1447,6 +1673,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     "sql": sql,
                     "database": database,
                     "series_field": series_field,
+                    "change_field": change_field,
                     "input_shape": input_shape,
                 }
 
@@ -1455,7 +1682,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 series_tag = f" | series: {series_field}" if series_field else ""
                 return (
                     f"OK|{chart_id}|{chart_type}|{title or chart_type}"
-                    f"|{len(rows)}|{executed.elapsed_seconds}s{series_tag}"
+                    f"|{len(rows)}|{elapsed_seconds}s{series_tag}"
                 )
 
             output = json.dumps(option, default=str, indent=2)
@@ -1465,7 +1692,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 f"`{{{{chart:{chart_id}}}}}`) | "
                 f"Type: {chart_type} | "
                 f"Data points: {len(rows)} | "
-                f"Query time: {executed.elapsed_seconds}s"
+                f"Query time: {elapsed_seconds}s"
             )
 
             metadata += f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
@@ -1491,7 +1718,220 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     "Use `describe_table` to verify exact column names before writing SQL. "
                     "Do NOT guess — most tables use generic names like `value`, `cnt`, `date`."
                 )
-            return f"Error: {e}"
+            available = ", ".join(columns) if "columns" in locals() else ""
+            selected = (
+                f"chart_type={chart_type}, x_field={x_field or '<auto>'}, "
+                f"y_field={y_field or '<auto>'}, series_field={series_field or '<none>'}"
+            )
+            detail = error_msg or e.__class__.__name__
+            return (
+                f"Error: Chart rendering failed ({e.__class__.__name__}): {detail}\n\n"
+                f"Context: {selected}\n"
+                f"Available columns: {available or '<unknown>'}"
+            )
+
+    def _build_and_register_chart(
+        sql: str,
+        database: str,
+        chart_type: str,
+        x_field: str,
+        y_field: str,
+        change_field: str,
+        series_field: str,
+        title: str,
+        max_rows: int,
+        return_metadata_only: bool = False,
+    ) -> str:
+        """Internal helper: execute SQL, build ECharts spec, register chart."""
+        try:
+            executed = ch.run_query(
+                sql,
+                database,
+                requested_max_rows=max_rows,
+                audience="internal",
+            )
+            return _register_chart_from_dataset(
+                columns=executed.columns,
+                rows=executed.rows,
+                sql=sql,
+                database=database,
+                chart_type=chart_type,
+                x_field=x_field,
+                y_field=y_field,
+                change_field=change_field,
+                series_field=series_field,
+                title=title,
+                elapsed_seconds=executed.elapsed_seconds,
+                source="raw",
+                return_metadata_only=return_metadata_only,
+            )
+        except Exception as e:
+            error_msg = str(e)
+            if "UNKNOWN_IDENTIFIER" in error_msg or "Unknown expression" in error_msg:
+                return (
+                    f"Error: {error_msg}\n\n"
+                    "**Hint**: Wrong column name in the SQL query. "
+                    "Use `describe_table` to verify exact column names before writing SQL. "
+                    "Do NOT guess — most tables use generic names like `value`, `cnt`, `date`."
+                )
+            return f"Error: {error_msg or e.__class__.__name__}"
+
+    def _semantic_gate_error(stage: str, reason: str) -> str:
+        observe_semantic_bypass(stage=stage, reason=reason)
+        log_event(
+            logger,
+            "semantic_bypass",
+            stage=stage,
+            reason=reason,
+        )
+        return reason
+
+    def _check_raw_chart_gate(stage: str) -> str:
+        from cerebro_mcp.tools.session_state import state
+
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        if passed:
+            return ""
+        if (
+            reason.startswith("Semantic")
+            or reason.startswith("Approved semantic coverage")
+        ):
+            return _semantic_gate_error(stage, reason)
+        return reason
+
+    def _format_raw_chart_gate_failure(reason: str) -> str:
+        if (
+            reason.startswith("Semantic")
+            or reason.startswith("Approved semantic coverage")
+        ):
+            return (
+                f"**Semantic routing check failed:** {reason}\n\n"
+                "Call `preflight_analytics_request` first, then use "
+                "`quick_metric_chart` / `generate_metric_charts` when the "
+                "route is `semantic_ready`, or retry raw charting after an "
+                "explicit semantic fallback."
+            )
+        return (
+            f"**Chart workflow check failed:** {reason}\n\n"
+            "Verify the required schema or discovery context, then retry "
+            "`quick_chart`."
+        )
+
+    def _check_semantic_chart_gate(stage: str, *, require_common_depth: bool) -> str:
+        if require_common_depth:
+            passed, reason = state.check_chart_preconditions(raw_path=False)
+            if passed:
+                return ""
+            if reason.startswith("Semantic"):
+                return _semantic_gate_error(stage, reason)
+            return reason
+
+        if not state.semantic_preflight_ran:
+            return _semantic_gate_error(
+                stage,
+                "Semantic preflight required: call `preflight_analytics_request(query, mode=\"chart\")` before semantic charting.",
+            )
+        if state.semantic_route_last != "semantic_ready":
+            return _semantic_gate_error(
+                stage,
+                "Semantic charting requires a `semantic_ready` route from `preflight_analytics_request`.",
+            )
+        return ""
+
+    def _normalize_semantic_field_name(field_name: str) -> str:
+        cleaned = (field_name or "").strip()
+        if not cleaned:
+            return ""
+        return _SEMANTIC_DIMENSION_ALIASES.get(cleaned.lower(), cleaned)
+
+    def _validate_semantic_chart_request(
+        *,
+        chart_type: str,
+        dimensions: list[str] | None,
+    ) -> str:
+        if chart_type in {"line", "area", "bar"} and not dimensions:
+            return (
+                f"Error: Semantic `{chart_type}` charts require at least one dimension for the X axis. "
+                "Add `dimensions=['day']` (or another allowed dimension) or use "
+                "`chart_type='numberDisplay'` for a single aggregated metric."
+            )
+        return ""
+
+    def _resolve_semantic_chart_fields(
+        *,
+        chart_type: str,
+        result,
+        requested_dimensions: list[str] | None,
+        x_field: str,
+        y_field: str,
+        change_field: str,
+    ) -> tuple[str, str, str]:
+        normalized_dimensions = [
+            _normalize_semantic_field_name(name)
+            for name in (requested_dimensions or result.resolved_dimensions or [])
+        ]
+        resolved_x = _normalize_semantic_field_name(x_field)
+        resolved_y = y_field.strip()
+        resolved_change = change_field.strip()
+
+        if chart_type in {"line", "area", "bar"}:
+            if not resolved_x:
+                resolved_x = normalized_dimensions[0] if normalized_dimensions else ""
+            if not resolved_x:
+                return "", "", (
+                    f"Error: Semantic `{chart_type}` charts require a real X-axis dimension. "
+                    "Add `dimensions=['day']` or use `chart_type='numberDisplay'`."
+                )
+            if resolved_x not in result.columns:
+                available = ", ".join(result.columns)
+                return "", "", (
+                    f"Error: Semantic `{chart_type}` charts require a real X-axis dimension. "
+                    f"Requested `{resolved_x}`, available columns: {available}."
+                )
+            if len(result.columns) == 1:
+                return "", "", (
+                    f"Error: Semantic `{chart_type}` charts cannot render a single aggregated metric "
+                    f"without a dimension. Use `chart_type='numberDisplay'` or add `dimensions=['day']`."
+                )
+            if not resolved_y:
+                candidate_metrics = [
+                    column_name
+                    for column_name in result.columns
+                    if column_name != resolved_x
+                ]
+                if not candidate_metrics:
+                    return "", "", (
+                        f"Error: Semantic `{chart_type}` charts require at least one numeric value column "
+                        "in addition to the X-axis dimension."
+                    )
+                resolved_y = (
+                    ",".join(candidate_metrics)
+                    if len(candidate_metrics) > 1
+                    else candidate_metrics[0]
+                )
+        elif chart_type == "numberDisplay":
+            resolved_x = ""
+            if resolved_change and resolved_change not in result.columns:
+                available = ", ".join(result.columns)
+                return "", "", (
+                    f"Error: change_field '{resolved_change}' not found in semantic result columns: {available}"
+                )
+            if not resolved_y:
+                candidate_metrics = [
+                    column_name
+                    for column_name in result.columns
+                    if column_name not in normalized_dimensions and column_name != resolved_change
+                ]
+                if len(candidate_metrics) == 1:
+                    resolved_y = candidate_metrics[0]
+                else:
+                    available = ", ".join(candidate_metrics or result.columns)
+                    return "", "", (
+                        "Error: Semantic `numberDisplay` requires an explicit main value column when the "
+                        f"result contains multiple fields. Set `y_field` and optionally `change_field`. Available columns: {available}."
+                    )
+
+        return resolved_x, resolved_y, ""
 
     # ── Gated chart tool (for reports) ──────────────────────────────
 
@@ -1502,6 +1942,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         chart_type: str = "line",
         x_field: str = "",
         y_field: str = "",
+        change_field: str = "",
         series_field: str = "",
         title: str = "",
         max_rows: int = 500,
@@ -1520,8 +1961,10 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         Supported chart types: line, area, bar, pie, numberDisplay, scatter, heatmap, calendar, gauge, treemap, sankey, graph, funnel.
 
         Chart/query contract:
-        - `numberDisplay` requires a single-row SQL result. For latest-period
-          KPIs, use queries such as `ORDER BY month DESC LIMIT 1`.
+        - `numberDisplay` requires a single-row SQL result.
+        - KPI cards do not guess value vs. delta columns. Use `y_field` for the
+          main KPI and optional `change_field` for the delta.
+        - For latest-period KPIs, use queries such as `ORDER BY month DESC LIMIT 1`.
         - `line`, `area`, and `bar` charts do NOT auto-plot extra numeric
           columns. If your query returns multiple metrics, either set
           `y_field="metric_a,metric_b"` or reshape to long form and provide
@@ -1534,6 +1977,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             chart_type: Chart type (line, area, bar, pie, numberDisplay, scatter, heatmap, calendar, gauge, treemap, sankey, graph, funnel). Default: line.
             x_field: Column name for the X axis (categories/dates).
             y_field: Column name for the Y axis (values).
+            change_field: Optional explicit delta/change column for `numberDisplay`.
             series_field: Optional column name to split data into multiple series.
             title: Chart title.
             max_rows: Maximum data points. Default: 500.
@@ -1541,17 +1985,15 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         Returns:
             ECharts option JSON string. Render with: echarts.setOption(JSON.parse(result))
         """
-        from cerebro_mcp.tools.session_state import state
-
-        passed, reason = state.check_chart_preconditions()
-        if not passed:
+        reason = _check_raw_chart_gate("generate_chart")
+        if reason:
             return (
                 f"**Analysis depth check failed:** {reason}\n\n"
                 "Complete the missing steps, then retry `generate_chart`."
             )
 
         result = _build_and_register_chart(
-            sql, database, chart_type, x_field, y_field,
+            sql, database, chart_type, x_field, y_field, change_field,
             series_field, title, max_rows,
         )
 
@@ -1577,6 +2019,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         chart_type: str = "line",
         x_field: str = "",
         y_field: str = "",
+        change_field: str = "",
         series_field: str = "",
         title: str = "",
         max_rows: int = 500,
@@ -1614,8 +2057,11 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         Returns:
             ECharts option JSON string. Render with: echarts.setOption(JSON.parse(result))
         """
+        reason = _check_raw_chart_gate("quick_chart")
+        if reason:
+            return _format_raw_chart_gate_failure(reason)
         return _build_and_register_chart(
-            sql, database, chart_type, x_field, y_field,
+            sql, database, chart_type, x_field, y_field, change_field,
             series_field, title, max_rows,
         )
 
@@ -1638,6 +2084,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
 
         Chart/query contract:
         - Every `numberDisplay` chart must come from a single-row query.
+        - KPI cards do not guess value vs. delta columns. Use `y_field` for the
+          main KPI and optional `change_field` for the delta.
           Do not pass raw time series into KPI cards.
         - For latest-period monthly or weekly KPIs, use queries such as
           `ORDER BY month DESC LIMIT 1`.
@@ -1652,20 +2100,17 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         Args:
             charts: List of chart specifications. Each spec has:
                 sql (required), database (default "dbt"),
-                chart_type (default "line"), x_field, y_field,
+                chart_type (default "line"), x_field, y_field, change_field,
                 series_field, title, max_rows (default 500).
 
         Returns:
             Summary table mapping input index to chart IDs for report placement.
         """
-        from cerebro_mcp.tools.session_state import state
-
         if not charts:
             return "Error: No chart specs provided. Pass a non-empty list."
 
-        # Run precondition check once
-        passed, reason = state.check_chart_preconditions()
-        if not passed:
+        reason = _check_raw_chart_gate("generate_charts")
+        if reason:
             return (
                 f"**Analysis depth check failed:** {reason}\n\n"
                 "Complete the missing steps, then retry `generate_charts`."
@@ -1686,6 +2131,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 chart_type=spec.get("chart_type", "line"),
                 x_field=spec.get("x_field", ""),
                 y_field=spec.get("y_field", ""),
+                change_field=spec.get("change_field", ""),
                 series_field=spec.get("series_field", ""),
                 title=spec.get("title", ""),
                 max_rows=spec.get("max_rows", 500),
@@ -1732,6 +2178,215 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             "with `{{chart:ID}}` placeholders."
         )
 
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def quick_metric_chart(
+        metrics: list[str],
+        dimensions: list[str] | None = None,
+        filters: list[dict] | None = None,
+        order_by: list[str] | None = None,
+        limit: int = 100,
+        chart_type: str = "line",
+        x_field: str = "",
+        y_field: str = "",
+        change_field: str = "",
+        series_field: str = "",
+        title: str = "",
+        agent_role: str = "",
+    ) -> str:
+        """Generate a one-off semantic chart without writing SQL."""
+        reason = _check_semantic_chart_gate("quick_metric_chart", require_common_depth=False)
+        if reason:
+            return f"Error: {reason}"
+        request_error = _validate_semantic_chart_request(
+            chart_type=chart_type,
+            dimensions=dimensions,
+        )
+        if request_error:
+            return request_error
+
+        from cerebro_mcp.tools.semantic import execute_metric_query
+
+        role = agent_role or "unknown"
+        state.record_semantic_tool_call("quick_metric_chart", execution=True)
+
+        result = execute_metric_query(
+            ch=ch,
+            research_store=None,
+            metrics=metrics,
+            dimensions=dimensions,
+            filters=filters,
+            order_by=order_by,
+            limit=limit,
+            agent_role=role,
+        )
+        if isinstance(result, str):
+            observe_semantic_tool_call(
+                tool_name="quick_metric_chart",
+                status="error",
+                agent_role=role,
+                entrypoint="semantic_chart",
+            )
+            return result
+
+        resolved_x_field, resolved_y_field, field_error = _resolve_semantic_chart_fields(
+            chart_type=chart_type,
+            result=result,
+            requested_dimensions=dimensions,
+            x_field=x_field,
+            y_field=y_field,
+            change_field=change_field,
+        )
+        if field_error:
+            observe_semantic_tool_call(
+                tool_name="quick_metric_chart",
+                status="error",
+                agent_role=role,
+                entrypoint="semantic_chart",
+            )
+            return field_error
+
+        observe_semantic_tool_call(
+            tool_name="quick_metric_chart",
+            status="success",
+            agent_role=role,
+            entrypoint="semantic_chart",
+        )
+
+        return _register_chart_from_dataset(
+            columns=result.columns,
+                rows=result.rows,
+                sql=result.sql,
+                database=result.database,
+                chart_type=chart_type,
+                x_field=resolved_x_field,
+                y_field=resolved_y_field,
+                change_field=change_field,
+                series_field=series_field,
+                title=title,
+                elapsed_seconds=result.elapsed_seconds,
+                source="semantic",
+            )
+
+    @mcp.tool()
+    def generate_metric_charts(charts: list[MetricChartSpec], agent_role: str = "") -> str:
+        """Create multiple semantic charts in one batch call."""
+        if not charts:
+            return "Error: No semantic chart specs provided. Pass a non-empty list."
+
+        reason = _check_semantic_chart_gate("generate_metric_charts", require_common_depth=True)
+        if reason:
+            return (
+                f"**Semantic routing check failed:** {reason}\n\n"
+                "Complete the required semantic discovery steps, then retry "
+                "`generate_metric_charts`."
+            )
+
+        from cerebro_mcp.tools.semantic import execute_metric_query
+
+        role = agent_role or "unknown"
+        state.record_semantic_tool_call("generate_metric_charts", execution=True)
+        succeeded = []
+        failed = []
+
+        for i, spec in enumerate(charts, 1):
+            metric_names = spec.get("metrics", [])
+            if not metric_names:
+                failed.append((i, spec.get("title", "untitled"), "No metrics provided"))
+                continue
+            request_error = _validate_semantic_chart_request(
+                chart_type=spec.get("chart_type", "line"),
+                dimensions=spec.get("dimensions"),
+            )
+            if request_error:
+                failed.append((i, spec.get("title", "untitled"), request_error))
+                continue
+
+            result = execute_metric_query(
+                ch=ch,
+                research_store=None,
+                metrics=metric_names,
+                dimensions=spec.get("dimensions"),
+                filters=spec.get("filters"),
+                order_by=spec.get("order_by"),
+                limit=spec.get("limit", 100),
+                agent_role=role,
+            )
+            if isinstance(result, str):
+                failed.append((i, spec.get("title", "untitled"), result))
+                continue
+
+            resolved_x_field, resolved_y_field, field_error = _resolve_semantic_chart_fields(
+                chart_type=spec.get("chart_type", "line"),
+                result=result,
+                requested_dimensions=spec.get("dimensions"),
+                x_field=spec.get("x_field", ""),
+                y_field=spec.get("y_field", ""),
+                change_field=spec.get("change_field", ""),
+            )
+            if field_error:
+                failed.append((i, spec.get("title", "untitled"), field_error))
+                continue
+
+            chart_result = _register_chart_from_dataset(
+                columns=result.columns,
+                rows=result.rows,
+                sql=result.sql,
+                database=result.database,
+                chart_type=spec.get("chart_type", "line"),
+                x_field=resolved_x_field,
+                y_field=resolved_y_field,
+                change_field=spec.get("change_field", ""),
+                series_field=spec.get("series_field", ""),
+                title=spec.get("title", ""),
+                elapsed_seconds=result.elapsed_seconds,
+                source="semantic",
+                return_metadata_only=True,
+            )
+            if chart_result.startswith("OK|"):
+                parts = chart_result.split("|")
+                succeeded.append({
+                    "index": i,
+                    "chart_id": parts[1],
+                    "chart_type": parts[2],
+                    "title": parts[3],
+                    "data_points": parts[4],
+                    "query_time": parts[5],
+                })
+            else:
+                failed.append((i, spec.get("title", "untitled"), chart_result))
+
+        observe_semantic_tool_call(
+            tool_name="generate_metric_charts",
+            status="error" if failed and not succeeded else "success",
+            agent_role=role,
+            entrypoint="semantic_chart",
+        )
+
+        total = len(charts)
+        ok_count = len(succeeded)
+        lines = [f"Generated {ok_count}/{total} semantic charts:\n"]
+        lines.append("| # | Chart ID | Title | Type | Points | Time |")
+        lines.append("|---|----------|-------|------|--------|------|")
+        for s in succeeded:
+            lines.append(
+                f"| {s['index']} | {s['chart_id']} | {s['title']} "
+                f"| {s['chart_type']} | {s['data_points']} "
+                f"| {s['query_time']} |"
+            )
+
+        if failed:
+            lines.append(f"\nFailed ({len(failed)}):")
+            for idx, title, err in failed:
+                lines.append(f"- Input #{idx} (\"{title}\"): {err}")
+
+        chart_list = ", ".join(_chart_registry.keys())
+        lines.append(
+            f"\n**Registered charts ({len(_chart_registry)}):** {chart_list}\n"
+            "**Next step:** Call `generate_report(title, content_markdown)` "
+            "with `{{chart:ID}}` placeholders."
+        )
         return "\n".join(lines)
 
     @mcp.tool()

@@ -212,6 +212,38 @@ class ResearchStore:
                 )
             return json.loads(path.read_text(encoding="utf-8"))
 
+    def save_semantic_query_result_artifact(
+        self,
+        *,
+        project_id: str,
+        title: str,
+        sql: str,
+        database: str,
+        columns: list[str],
+        rows: list[list],
+        row_count: int,
+        semantic_plan: dict[str, Any],
+    ) -> str:
+        with self._lock:
+            self.load_project(project_id)
+            ref_id = f"semqry_{uuid.uuid4().hex[:12]}"
+            artifact = {
+                "ref_id": ref_id,
+                "kind": "semantic_query_result",
+                "project_id": project_id,
+                "title": title,
+                "sql": sql,
+                "database": database,
+                "columns": columns,
+                "rows": rows,
+                "row_count": row_count,
+                "semantic_plan": semantic_plan,
+            }
+            path = self._artifact_dir(project_id, "query_results") / f"{ref_id}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_json_atomic(path, artifact)
+            return ref_id
+
     def save_schema_snapshot_artifact(
         self,
         *,
@@ -240,7 +272,7 @@ class ResearchStore:
 
     def artifact_exists(self, project_id: str, kind: str, ref_id: str) -> bool:
         with self._lock:
-            if kind == "query_result":
+            if kind in {"query_result", "semantic_query_result"}:
                 path = self._artifact_dir(project_id, "query_results") / f"{ref_id}.json"
                 return path.exists()
             if kind == "schema_snapshot":

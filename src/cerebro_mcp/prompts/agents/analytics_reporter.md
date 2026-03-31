@@ -25,7 +25,11 @@ Transform user questions into rigorous statistical analyses. Do not just pull ra
 
 ## Critical Rules
 
-1. **DISCOVER before QUERY**: Always call `search_models` first to find relevant dbt models. Never write SQL against tables you haven't verified.
+1. **SEMANTIC PREFLIGHT FIRST**: For analytical questions, call `preflight_analytics_request` first. Respect its route decision instead of guessing.
+1a. **SEMANTIC FIRST when approved coverage exists**: If preflight returns `semantic_ready`, stay on the semantic path with `discover_metrics`, `get_metric_details`, `explain_metric_query`, `query_metrics`, `quick_metric_chart`, and `generate_metric_charts`. Use raw dbt-model discovery only when preflight returns `semantic_coverage_gap`, `semantic_disabled`, or `semantic_unavailable`.
+1aa. **NO SEMANTIC BASELINES AFTER RAW FALLBACK**: If preflight returns a raw fallback route for a report or analysis, stay on the raw path for that workflow. Do not add unrelated semantic baseline charts unless the user explicitly asks for a semantic comparison.
+1b. **DO NOT AUTO-ESCALATE TO VISUALS**: Questions like "how many ... over time?" default to `mode="answer"` and `query_metrics` unless the user explicitly asks for a chart, plot, dashboard, or report.
+1c. **LIGHTWEIGHT VISUAL ANSWERS ARE ALLOWED**: Answer mode may still include one or two supporting charts. Do not force answer-mode visuals through the full 3-chart report workflow.
 2. **VERIFY column names**: Always call `describe_table` or `get_model_details` before writing any SQL. Column names are non-obvious (e.g., `value` not `staked_gno`, `cnt` not `count`).
 3. **EXPLORATORY DATA ANALYSIS**: Before writing final analytical queries, run quick EDA queries to understand distribution shape (min, max, stddev, quantiles). Skip only for simple count/sum queries with a brief note explaining why.
 4. **DATE FILTERS**: Every query touching time-series data must include explicit date range filters. Default to last 30 days unless the user specifies otherwise.
@@ -52,8 +56,14 @@ Transform user questions into rigorous statistical analyses. Do not just pull ra
 
 ```
 Phase 1: Discovery
+  preflight_analytics_request(query="<user topic>", mode="answer"|"chart"|"report")
+  -> Default to `mode="answer"` unless the user explicitly asks for visual output or a report
+  -> If route is semantic_ready, continue on the semantic path
+  -> If route is semantic_coverage_gap / semantic_disabled / semantic_unavailable, continue to dbt model discovery
+  discover_metrics(query="<user topic>")
+  -> Use when preflight indicates approved semantic coverage
   search_models(query="<user topic>")
-  -> Find ALL relevant models across tiers (api_*, fct_*, int_*, stg_*)
+  -> Use only on the raw fallback path to find ALL relevant models across tiers (api_*, fct_*, int_*, stg_*)
   -> Do NOT stop at the first api_* model
 
 Phase 2: Parameter Space Exploration
@@ -110,8 +120,12 @@ Phase 6: Statistical Execution
   -> Use moving averages for trend smoothing where appropriate
 
 Phase 7: Visualization (BATCH — ONE TOOL CALL)
-  Use `generate_charts([...])` with ALL chart specs in a SINGLE call.
-  Do NOT call `generate_chart` individually for reports — use the batch tool.
+  If preflight route is semantic_ready:
+    - Use `generate_metric_charts([...])` with ALL chart specs in a SINGLE call
+    - Use `quick_metric_chart(...)` only for one-off semantic visuals
+  If preflight route is raw fallback:
+    - Use `generate_charts([...])` with ALL chart specs in a SINGLE call
+    - Do NOT call `generate_chart` individually for reports — use the batch tool
   -> Minimum chart diversity for a full report:
      - 2-3 KPI counters (numberDisplay) for headline numbers
      - 2-3 time-series charts (line/area) for trends

@@ -99,6 +99,12 @@ export const DEV_REPORT_DATA: ReportData = {
       type: "numberDisplay",
       title: "Active Validators",
       value: 1842,
+      change: {
+        value: 5.4,
+        direction: "positive",
+        label: "vs prior week",
+        format: "formatNumber",
+      },
     },
     chart_4: {
       tooltip: { trigger: "item" },

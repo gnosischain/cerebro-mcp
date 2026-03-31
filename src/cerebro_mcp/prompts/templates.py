@@ -14,6 +14,14 @@ def load_reality_checker_markdown() -> str:
     )
 
 
+def load_gnosis_research_analyst_markdown() -> str:
+    return (
+        importlib.resources.files("cerebro_mcp.prompts.agents")
+        .joinpath("gnosis_research_analyst.md")
+        .read_text("utf-8")
+    )
+
+
 def register_prompts(mcp):
 
     # --- Agent Persona Prompts (user-facing, supplementary) ---
@@ -55,6 +63,12 @@ def register_prompts(mcp):
         SQL safety, data validation, chart spec verification, and report integrity.
         """
         content = load_reality_checker_markdown()
+        return [prompt_base.Message(role="user", content=content)]
+
+    @mcp.prompt()
+    def adopt_persona_gnosis_research_analyst() -> list[prompt_base.Message]:
+        """Adopt the semantic-first Gnosis Research Analyst persona."""
+        content = load_gnosis_research_analyst_markdown()
         return [prompt_base.Message(role="user", content=content)]
 
     @mcp.prompt()
@@ -306,7 +320,9 @@ TASK 4: [Visualization Agent] Build final output
 ```
 
 ## Output Mode Selection
-- If the user asks for a **report, charts, plots, visual analysis, or trends** → TASK 4 MUST use `generate_report` (returns interactive UI resource)
+- If the user explicitly asks for a **report, chart, plot, graph, dashboard, or visual analysis** → TASK 4 MUST use `generate_report` (returns interactive UI resource)
+- If the user asks for a time-series answer such as "over time", "daily", "weekly", or "monthly" WITHOUT explicitly asking for visuals → stay in markdown output mode
+- Answer-mode replies may still include one or two supporting charts without satisfying the full multi-chart report workflow
 - If the user asks for **raw data, numbers, or a simple text explanation** → TASK 4 outputs markdown
 - If the user asks to **reopen or view a past report** → use `list_reports()` and `open_report(id)`
 - After `generate_report` or `open_report` succeeds, do NOT echo the markdown. Only summarize insights and share the file:// link.
@@ -518,7 +534,11 @@ Structure: ### Objective → ### Results (table) → ### Key Insights (bullets)
 
         return f"""\
 **CRITICAL OUTPUT RULES:**
-- This report MUST use `generate_charts([...])` for report charts and `generate_report` for final output.
+- This report MUST call `preflight_analytics_request(..., mode="report")` first.
+- If preflight returns `semantic_ready`, use `generate_metric_charts([...])` for report charts.
+- If preflight returns a raw fallback route, use `generate_charts([...])` for report charts.
+- If preflight returns a raw fallback route, do NOT add unrelated semantic baseline charts unless the user explicitly asks for a semantic comparison.
+- In all cases, use `generate_report` for final output.
 - `generate_report` produces an interactive UI resource and opens the report in the browser.
 - After `generate_report` succeeds, do NOT repeat the report markdown or {{{{chart:...}}}} placeholders as text. Only share the tool's text summary, your key insights, and ask about docx/pdf/pptx conversion.
 - To reopen a past report, use `open_report(report_id)` or `list_reports()` to find it.
@@ -528,11 +548,13 @@ Generate a comprehensive Gnosis Chain report covering **{period}**.{extra}
 ## Workflow — FOLLOW ALL 4 STEPS IN ORDER
 
 ### Step 1: Discover & Query Data
-Use `search_models` to find relevant dbt `api_*/fct_*` models for each section.
-Use `describe_table` to verify column names. Query data with `execute_query`.
+Call `preflight_analytics_request`.
+If the route is `semantic_ready`, use `discover_metrics`, `get_metric_details`, and `query_metrics`.
+If the route falls back to raw SQL, use `search_models`, `describe_table`, and `execute_query`.
 
 ### Step 2: Generate Charts
-Call `generate_charts([...])` once with all chart specs for the report.
+Call `generate_metric_charts([...])` once when preflight is `semantic_ready`, or
+`generate_charts([...])` once when preflight falls back to raw SQL.
 Each chart spec returns a **chart ID** (e.g., `chart_1`, `chart_2`).
 Generate at least 3 charts in the batch. For KPI cards, use single-row SQL only.
 For multi-metric trend charts, either use comma-separated `y_field` values or reshape to long form with `series_field`.

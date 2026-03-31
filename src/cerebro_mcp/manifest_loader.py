@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 import requests
 
+from cerebro_mcp.artifact_loader import local_artifact_candidates
 from cerebro_mcp.config import settings
 
 logger = logging.getLogger(__name__)
@@ -49,16 +50,22 @@ class ManifestLoader:
     def _fetch_manifest(
         self, conditional: bool = False
     ) -> Optional[tuple[dict, str]]:
-        """Fetch manifest from URL with local file fallback.
+        """Fetch manifest from local file or URL.
 
         Args:
-            conditional: If True, use conditional GET (If-None-Match/If-Modified-Since)
-                        with a short timeout. Only applies to URL source.
+            conditional: If True, use a local hash check or conditional GET.
 
         Returns:
             Tuple of (parsed_data, content_hash) or None if unchanged/unavailable.
         """
-        # Try URL first
+        local_result = self._load_local_manifest()
+        if local_result is not None:
+            data, content_hash, source = local_result
+            self._last_refresh_error = None
+            if not conditional:
+                logger.info("Loaded manifest from %s", source)
+            return data, content_hash
+
         if settings.DBT_MANIFEST_URL:
             try:
                 headers = {}
@@ -101,25 +108,6 @@ class ManifestLoader:
                     return None
                 logger.warning(error_msg)
 
-        if conditional:
-            # Don't fall back to local file during refresh
-            return None
-
-        # Fallback to local file (initial load only, for dev convenience)
-        if settings.DBT_MANIFEST_PATH and os.path.exists(settings.DBT_MANIFEST_PATH):
-            try:
-                with open(settings.DBT_MANIFEST_PATH, "rb") as f:
-                    raw = f.read()
-                content_hash = self._hash_bytes(raw)
-                data = json.loads(raw)
-                logger.info(
-                    "Loaded manifest from %s",
-                    settings.DBT_MANIFEST_PATH,
-                )
-                return data, content_hash
-            except Exception as e:
-                logger.warning("Error loading local manifest: %s", e)
-
         logger.warning(
             "No manifest loaded. dbt context tools will be unavailable."
         )
@@ -127,8 +115,8 @@ class ManifestLoader:
 
     @staticmethod
     def _hash_bytes(data: bytes) -> str:
-        """Compute MD5 hash of bytes for content dedup."""
-        return hashlib.md5(data).hexdigest()
+        """Compute SHA-256 hash of bytes for content matching/dedup."""
+        return hashlib.sha256(data).hexdigest()
 
     def reload_if_changed(self) -> tuple[bool, str | None]:
         """Check if manifest has changed and reload if so.
@@ -136,11 +124,10 @@ class ManifestLoader:
         Returns:
             Tuple of (changed, error). changed is True if indexes were updated.
         """
-        if not settings.DBT_MANIFEST_URL:
-            return False, None
-
         result = self._fetch_manifest(conditional=True)
         if result is None:
+            if not settings.DBT_MANIFEST_URL and self._load_local_manifest() is None:
+                return False, None
             return False, self._last_refresh_error
 
         data, new_hash = result
@@ -154,6 +141,44 @@ class ManifestLoader:
         self._last_load_time = time.time()
         self._last_refresh_error = None
         return True, None
+
+    @staticmethod
+    def _looks_like_manifest(data: Any) -> bool:
+        return (
+            isinstance(data, dict)
+            and isinstance(data.get("nodes"), dict)
+            and isinstance(data.get("parent_map"), dict)
+            and isinstance(data.get("child_map"), dict)
+        )
+
+    def _local_manifest_candidates(self) -> list[str]:
+        return local_artifact_candidates(
+            "manifest.json",
+            settings.DBT_MANIFEST_PATH,
+            settings.DBT_CATALOG_PATH,
+            settings.SEMANTIC_REGISTRY_PATH,
+            settings.SEMANTIC_DOCS_INDEX_PATH,
+        )
+
+    def _load_local_manifest(self) -> Optional[tuple[dict, str, str]]:
+        for candidate in self._local_manifest_candidates():
+            if not os.path.exists(candidate):
+                continue
+            try:
+                with open(candidate, "rb") as f:
+                    raw = f.read()
+                data = json.loads(raw)
+            except Exception as exc:
+                logger.warning("Error loading local manifest from %s: %s", candidate, exc)
+                continue
+            if not self._looks_like_manifest(data):
+                logger.warning(
+                    "Ignoring local manifest candidate %s because it does not look like a dbt manifest.",
+                    candidate,
+                )
+                continue
+            return data, self._hash_bytes(raw), candidate
+        return None
 
     def _build_indexes_internal(self, data: dict) -> dict:
         """Build lookup indexes from manifest data without mutating self.

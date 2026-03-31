@@ -1,5 +1,7 @@
 import importlib.resources
 
+from cerebro_mcp import runtime_state
+
 
 _VALID_ROLES = {"analytics_reporter", "ui_designer", "reality_checker"}
 
@@ -22,6 +24,7 @@ def register_agent_tools(mcp):
                 f"Unknown role: {role}. "
                 f"Valid roles: {', '.join(sorted(_VALID_ROLES))}"
             )
+        runtime_state.current_agent_role = role
         content = (
             importlib.resources.files("cerebro_mcp.prompts.agents")
             .joinpath(f"{role}.md")

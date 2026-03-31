@@ -14,6 +14,7 @@ from cerebro_mcp.bootstrap import (
     validate_remote_transport_auth,
 )
 from cerebro_mcp.clickhouse_client import ClickHouseManager
+from cerebro_mcp.catalog_loader import catalog
 from cerebro_mcp.config import settings
 from cerebro_mcp.docs_loader import docs_index
 from cerebro_mcp.manifest_loader import manifest
@@ -24,6 +25,7 @@ from cerebro_mcp.observability import (
     setup_logging,
 )
 from cerebro_mcp.research_store import ResearchStore
+from cerebro_mcp.semantic_loader import semantic_runtime
 from cerebro_mcp.tools.query import register_query_tools
 from cerebro_mcp.tools.schema import register_schema_tools
 from cerebro_mcp.tools.dbt import register_dbt_tools
@@ -35,6 +37,7 @@ from cerebro_mcp.tools.query_async import register_async_query_tools
 from cerebro_mcp.tools.saved_queries import register_saved_query_tools
 from cerebro_mcp.tools.visualization import register_visualization_tools
 from cerebro_mcp.tools.research import register_research_tools
+from cerebro_mcp.tools.semantic import register_semantic_tools
 from cerebro_mcp.tools.reasoning import (
     install_auto_tool_tracing,
     register_reasoning_tools,
@@ -53,11 +56,16 @@ mcp = FastMCP(
         "Gnosis Chain data platform MCP server.\n\n"
 
         "RESPONSE RULES (ALWAYS FOLLOW):\n"
-        "1. After generate_report, summarize insights and ask if they want the HTML exported "
-        "(via `export_report`) or converted to docx/pdf/pptx.\n"
+        "1. After a full report-mode `generate_report`, summarize insights and ask if they want "
+        "the HTML exported (via `export_report`) or converted to docx/pdf/pptx. "
+        "For lightweight visual answers, just summarize the insight.\n"
         "2. No emojis or Unicode symbols — use clean, professional markdown only.\n\n"
 
         "ENFORCEMENT GATES (CANNOT BE BYPASSED):\n"
+        "- When `SEMANTIC_ENABLED=true`, analytical chart/report workflows MUST call "
+        "`preflight_analytics_request` first. If the route is `semantic_ready`, use "
+        "`quick_metric_chart`, `generate_metric_charts`, `query_metrics`, or "
+        "`explain_metric_query` before any raw charting.\n"
         "- `generate_charts` (batch) and `generate_chart` (single) are BLOCKED until you run "
         "`search_models` (or `discover_models`), explore at least 3 models via "
         "`get_model_details`, AND verify at least 1 table via `describe_table`.\n"
@@ -72,14 +80,23 @@ mcp = FastMCP(
         "You have two output modes. ALWAYS use the correct mode:\n\n"
 
         "MODE 1: REPORTS & VISUALIZATIONS (INTERACTIVE UI)\n"
-        "TRIGGER: User asks for a report, charts, plots, visual analysis, trends, "
-        "or any weekly/daily/monthly summary.\n"
+        "TRIGGER: User EXPLICITLY asks for a report, chart, plot, graph, dashboard, "
+        "or visual output.\n"
+        "NOTE: Questions like 'how many ... over time?' or requests mentioning "
+        "daily/weekly/monthly trends do NOT automatically mean report mode.\n"
         "REQUIRED WORKFLOW:\n"
-        "  1. Discover & Verify: `discover_models(query, detail_top_n=5)` then "
-        "`describe_table` to verify columns.\n"
-        "  2. Query data with `execute_query` (use medians/percentiles over means). "
-        "Include at least 1 statistical query and 1 correlation query.\n"
-        "  3. Call `generate_charts` (batch) with ALL chart specs in ONE call. "
+        "  1. Call `preflight_analytics_request(query, mode=\"report\")` first.\n"
+        "  2. If the route is `semantic_ready`, stay on the semantic path: use "
+        "`discover_metrics`, `get_metric_details`, `query_metrics`, and "
+        "`generate_metric_charts` (or `quick_metric_chart` for one-offs). "
+        "Only fall back to raw SQL if preflight returns `semantic_coverage_gap`, "
+        "`semantic_disabled`, or `semantic_unavailable`.\n"
+        "  3. On the raw fallback path, use `discover_models(query, detail_top_n=5)`, "
+        "`describe_table`, and `execute_query` (use medians/percentiles over means). "
+        "Include at least 1 statistical query and 1 correlation query when you are on "
+        "the raw SQL path.\n"
+        "  4. Call `generate_metric_charts` for semantic report charts or "
+        "`generate_charts` for raw-SQL report charts, with ALL chart specs in ONE call. "
         "Do NOT use individual `generate_chart` calls for reports — use the batch tool. "
         "Minimum 3 charts: KPIs + trends + dimensional breakdowns. "
         "KPI `numberDisplay` charts MUST come from single-row SQL only. "
@@ -96,7 +113,15 @@ mcp = FastMCP(
 
         "MODE 2: QUICK QUERIES & RAW DATA (MARKDOWN OUTPUT)\n"
         "TRIGGER: User asks for raw data, numbers, or a simple text explanation WITHOUT charts.\n"
-        "- Workflow: Query data → output a Markdown response.\n"
+        "- Default here for plain analytical questions, including time-series questions, "
+        "unless the user explicitly asks for visual output.\n"
+        "- Workflow: if this is a business-metric question and semantic is enabled, call "
+        "`preflight_analytics_request(query, mode=\"answer\")` first, then use "
+        "`query_metrics` when the route is `semantic_ready`. Otherwise query data and "
+        "output a Markdown response.\n"
+        "- Answer mode MAY include one or two supporting visualizations. If you already "
+        "have an answer-mode or chart-mode chart, you may render it in the visual UI "
+        "without satisfying the full report-quality gate.\n"
         "- Structure: ### Objective → ### Query (SQL block) → ### Results (Markdown table) → "
         "### Key Insights.\n\n"
 
@@ -123,9 +148,11 @@ mcp = FastMCP(
         "- Do NOT publish before verification and peer review.\n\n"
 
         "STANDARD OPERATING PROCEDURE:\n"
-        "1. DISCOVER: Use `discover_models(query, detail_top_n=5)` for combined search + details "
-        "in one call. Only use separate `search_models` + `get_model_details` when you need "
-        "more than 5 models detailed.\n"
+        "1. DISCOVER: For analytical questions, call `preflight_analytics_request` first. "
+        "If the route is `semantic_ready`, continue with `discover_metrics` and "
+        "`get_metric_details`; otherwise use `discover_models(query, detail_top_n=5)` "
+        "for combined search + details in one call. Only use separate `search_models` + "
+        "`get_model_details` when you need more than 5 models detailed.\n"
         "2. EXPLORE: Ensure at least 3 models explored via `get_model_details` "
         "(discover_models counts). Map lineage. Identify all dimensions "
         "(token, action, user segment). Use int_* models when marts lack needed breakdowns.\n"
@@ -180,6 +207,7 @@ register_async_query_tools(mcp, ch)
 register_saved_query_tools(mcp, ch)
 register_visualization_tools(mcp, ch)
 register_research_tools(mcp, ch, research_store)
+register_semantic_tools(mcp, ch, research_store)
 register_reasoning_tools(mcp)
 register_agent_tools(mcp)
 install_auto_tool_tracing(mcp)
@@ -252,7 +280,9 @@ def main():
     log_event(logger, "transport_selected", transport=transport)
     ensure_writable_dir(RESEARCH_DIR)
     manifest.load()
+    catalog.load()
     docs_index.load()
+    semantic_runtime.load()
 
     if transport == "sse":
         validate_remote_transport_auth(os.environ.get("MCP_AUTH_TOKEN"))
