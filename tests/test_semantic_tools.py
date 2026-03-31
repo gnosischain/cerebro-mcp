@@ -252,6 +252,22 @@ def test_preflight_routes_unknown_request_to_coverage_gap(semantic_runtime_ready
     assert "validators_active" not in result.recommended_metrics
 
 
+def test_preflight_routes_partial_coverage_to_hybrid_ready(semantic_runtime_ready):
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-preflight-hybrid-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["preflight_analytics_request"].fn
+    # "transaction count" is covered, "bridge volume" is not
+    result = fn(query="transaction count and bridge volume weekly report", mode="report")
+
+    assert result.route == "hybrid_ready"
+    assert result.hybrid_ready is True
+    assert len(result.covered_topics) >= 1
+    assert len(result.uncovered_topics) >= 1
+    assert result.recommended_metrics[0] == "transaction_count"
+
+
 def test_preflight_routes_active_validators_question_to_semantic_ready(semantic_runtime_ready):
     _semantic_tools, _snapshot = semantic_runtime_ready
     mcp = FastMCP("semantic-preflight-validators-test")

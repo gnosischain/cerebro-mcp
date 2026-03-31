@@ -21,6 +21,7 @@ export interface QueryInfo {
   sql: string;
   database: string;
   title: string;
+  source?: "semantic" | "raw";
 }
 
 export interface ReportData {
@@ -30,6 +31,7 @@ export interface ReportData {
   sections_html: string;
   queries?: Record<string, QueryInfo>;
   file_uri?: string;
+  analysis_path?: string;
 }
 
 export interface HtmlSection {

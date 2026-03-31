@@ -536,8 +536,9 @@ Structure: ### Objective → ### Results (table) → ### Key Insights (bullets)
 **CRITICAL OUTPUT RULES:**
 - This report MUST call `preflight_analytics_request(..., mode="report")` first.
 - If preflight returns `semantic_ready`, use `generate_metric_charts([...])` for report charts.
+- If preflight returns `hybrid_ready`, use `generate_metric_charts([...])` for covered topics and `generate_charts([...])` for uncovered topics. Both sources combine into one report.
 - If preflight returns a raw fallback route, use `generate_charts([...])` for report charts.
-- If preflight returns a raw fallback route, do NOT add unrelated semantic baseline charts unless the user explicitly asks for a semantic comparison.
+- In a pure raw session, do NOT add unrelated semantic baseline charts unless the user explicitly asks for a semantic comparison.
 - In all cases, use `generate_report` for final output.
 - `generate_report` produces an interactive UI resource and opens the report in the browser.
 - After `generate_report` succeeds, do NOT repeat the report markdown or {{{{chart:...}}}} placeholders as text. Only share the tool's text summary, your key insights, and ask about docx/pdf/pptx conversion.
@@ -550,11 +551,12 @@ Generate a comprehensive Gnosis Chain report covering **{period}**.{extra}
 ### Step 1: Discover & Query Data
 Call `preflight_analytics_request`.
 If the route is `semantic_ready`, use `discover_metrics`, `get_metric_details`, and `query_metrics`.
+If the route is `hybrid_ready`, use semantic tools for covered topics and raw discovery for uncovered topics.
 If the route falls back to raw SQL, use `search_models`, `describe_table`, and `execute_query`.
 
 ### Step 2: Generate Charts
-Call `generate_metric_charts([...])` once when preflight is `semantic_ready`, or
-`generate_charts([...])` once when preflight falls back to raw SQL.
+Call `generate_metric_charts([...])` when preflight is `semantic_ready` or for semantic-covered topics in `hybrid_ready`.
+Call `generate_charts([...])` for raw topics (in `hybrid_ready` or pure raw sessions).
 Each chart spec returns a **chart ID** (e.g., `chart_1`, `chart_2`).
 Generate at least 3 charts in the batch. For KPI cards, use single-row SQL only.
 For multi-metric trend charts, either use comma-separated `y_field` values or reshape to long form with `series_field`.

@@ -446,6 +446,7 @@ def test_session_summary_distinguishes_semantic_availability_from_use(tmp_path):
     assert summary["semantic_tool_calls"] == 0
     assert summary["semantic_path_used"] == "none"
     assert summary["semantic_route_last"] == "semantic_ready"
+    assert summary["analysis_path"] == "semantic_only"
 
 
 def test_session_summary_updates_before_finalize(tmp_path):
@@ -584,3 +585,36 @@ def test_summary_counts_generated_charts_and_models_used():
     assert "int_consensus_validators_labels" in summary["models_used"]
     assert "int_execution_gpay_wallet_owners" in summary["models_used"]
     assert "fct_execution_gpay_user_lifetime_metrics" in summary["models_used"]
+
+
+def test_analysis_path_hybrid_when_route_is_hybrid_ready(tmp_path):
+    mcp = FastMCP("hybrid-analysis-path-test")
+
+    @mcp.tool()
+    def discover_metrics(query: str) -> dict:
+        return {"query": query, "results": []}
+
+    @mcp.tool()
+    def search_models(query: str) -> str:
+        return "Found 3 models."
+
+    reasoning.register_reasoning_tools(mcp)
+    reasoning.install_auto_tool_tracing(mcp)
+
+    _call_request(mcp, types.ListToolsRequest())
+    reasoning.record_trace_event(
+        "semantic_route_decision",
+        content="Semantic route decided.",
+        payload={"route": "hybrid_ready"},
+        event_kind="semantic_routing",
+    )
+    _call_tool(mcp, "discover_metrics", {"query": "transactions"})
+    _call_tool(mcp, "search_models", {"query": "bridge volume"})
+    _call_tool(mcp, "set_thinking_mode", {"enabled": False})
+
+    files = _session_files(tmp_path / ".cerebro" / "logs")
+    assert files
+    data = json.loads(files[-1].read_text())
+    summary = data["summary"]
+    assert summary["analysis_path"] == "hybrid"
+    assert summary["semantic_route_last"] == "hybrid_ready"

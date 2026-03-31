@@ -73,6 +73,9 @@ class AnalyticsPreflightResult(BaseModel):
     query: str
     mode: str
     route: str
+    hybrid_ready: bool = False
+    covered_topics: list[str] = Field(default_factory=list)
+    uncovered_topics: list[str] = Field(default_factory=list)
     recommended_metrics: list[str] = Field(default_factory=list)
     recommended_dimensions: list[str] = Field(default_factory=list)
     recommended_next_tool: str = ""

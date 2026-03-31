@@ -1,5 +1,6 @@
 import type { ReportData, ChartSpec, QueryInfo } from "../types";
 import type { HtmlSection } from "../types";
+import { isNumberDisplay } from "../types";
 import { ChartCard } from "./ChartCard";
 
 interface SectionContentProps {
@@ -37,13 +38,13 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
           {chartIds.map((chartId) => {
             const spec = charts[chartId];
             if (!spec) return null;
-            const chartData = findChartTitle(chartId, html);
+            const chartTitle = queries?.[chartId]?.title || findChartTitle(chartId, spec);
             return (
               <ChartCard
                 key={chartId}
                 chartId={chartId}
                 spec={spec}
-                title={chartData}
+                title={chartTitle}
                 sql={queries?.[chartId]?.sql}
               />
             );
@@ -128,8 +129,9 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
   return <>{elements}</>;
 }
 
-/** Extract chart title — title comes from the chart spec via Python backend */
-function findChartTitle(_chartId: string, _html: string): string {
+/** Extract chart title from the chart spec itself. */
+function findChartTitle(_chartId: string, spec: ChartSpec): string {
+  if (isNumberDisplay(spec)) return spec.title || "";
   return "";
 }
 

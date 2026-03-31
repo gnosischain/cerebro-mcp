@@ -11,25 +11,25 @@ export const ECHARTS_LIGHT = {
   title: { textStyle: { color: "#0F172A", fontFamily: FONT } },
   legend: { textStyle: { color: "#334155" } },
   tooltip: {
-    backgroundColor: "rgba(255,255,255,0.96)",
-    borderColor: "#E2E8F0",
+    backgroundColor: "rgba(251,250,247,0.97)",
+    borderColor: "rgba(15,23,42,0.08)",
     borderWidth: 1,
-    borderRadius: 8,
-    extraCssText: "box-shadow:0 12px 24px -12px rgba(15,23,42,0.3);",
+    borderRadius: 10,
+    extraCssText: "box-shadow:0 4px 12px -4px rgba(15,23,42,0.12);",
     textStyle: { color: "#0F172A", fontFamily: FONT },
   },
   categoryAxis: {
-    axisLine: { lineStyle: { color: "#CBD5E1" } },
-    axisLabel: { color: "#64748B" },
+    axisLine: { lineStyle: { color: "rgba(148,163,184,0.3)" } },
+    axisLabel: { color: "#94A3B8" },
     splitLine: {
-      lineStyle: { color: "rgba(148,163,184,0.24)", type: "dashed" as const },
+      lineStyle: { color: "rgba(148,163,184,0.15)", type: "dashed" as const },
     },
   },
   valueAxis: {
-    axisLine: { lineStyle: { color: "#CBD5E1" } },
-    axisLabel: { color: "#64748B" },
+    axisLine: { lineStyle: { color: "rgba(148,163,184,0.3)" } },
+    axisLabel: { color: "#94A3B8" },
     splitLine: {
-      lineStyle: { color: "rgba(148,163,184,0.24)", type: "dashed" as const },
+      lineStyle: { color: "rgba(148,163,184,0.15)", type: "dashed" as const },
     },
   },
 };

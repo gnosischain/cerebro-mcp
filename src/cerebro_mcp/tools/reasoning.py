@@ -1001,7 +1001,25 @@ def _compute_session_summary(session: SessionTrace) -> dict[str, Any]:
         "semantic_route_last": semantic_route_last,
         "raw_blocked_attempts": raw_blocked_attempts,
         "raw_execution_steps": raw_execution_steps,
+        "analysis_path": _infer_analysis_path(semantic_route_last, used_semantic, used_raw),
     }
+
+
+def _infer_analysis_path(
+    semantic_route_last: str,
+    used_semantic: bool,
+    used_raw: bool,
+) -> str:
+    """Derive analysis_path from trace evidence."""
+    if semantic_route_last == "hybrid_ready":
+        return "hybrid"
+    if semantic_route_last == "semantic_ready" and not used_raw:
+        return "semantic_only"
+    if used_semantic and used_raw:
+        return "hybrid"
+    if used_raw:
+        return "raw_only"
+    return "undecided"
 
 
 def _finalize_session(session: SessionTrace) -> None:
@@ -1235,7 +1253,8 @@ def register_reasoning_tools(mcp):
                 f"| Semantic Path Used | {summary.get('semantic_path_used', 'none')} |\n"
                 f"| Semantic Route Last | {summary.get('semantic_route_last', '')} |\n"
                 f"| Raw Blocked Attempts | {summary.get('raw_blocked_attempts', 0)} |\n"
-                f"| Raw Execution Steps | {summary.get('raw_execution_steps', 0)} |"
+                f"| Raw Execution Steps | {summary.get('raw_execution_steps', 0)} |\n"
+                f"| Analysis Path | {summary.get('analysis_path', 'undecided')} |"
             )
             if summary.get("models_used"):
                 lines.append(

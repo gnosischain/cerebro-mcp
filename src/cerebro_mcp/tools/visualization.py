@@ -332,6 +332,7 @@ def create_report_artifact(
                 "sql": _chart_registry[cid].get("sql", ""),
                 "database": _chart_registry[cid].get("database", "dbt"),
                 "title": _chart_registry[cid].get("title", ""),
+                "source": _chart_registry[cid].get("source", "raw"),
             }
         else:
             missing.append(cid)
@@ -352,6 +353,7 @@ def create_report_artifact(
         "charts": chart_specs,
         "sections_html": rendered_html,
         "queries": chart_queries,
+        "analysis_path": state.analysis_path,
     }
 
     html = _build_standalone_html(
@@ -441,6 +443,43 @@ def _build_col_index(columns: list[str]) -> dict[str, int]:
 def _extract_column(rows: list, index: int) -> list:
     """Extract a column from rows and serialize values."""
     return [_serialize_value(row[index]) for row in rows]
+
+
+# Epoch-day offset: date.toordinal() for 1970-01-01
+_EPOCH_ORDINAL = 719163
+
+
+def _auto_format_dates(values: list) -> list:
+    """Detect epoch-day or Unix-timestamp integers and convert to ISO dates.
+
+    Handles two common ClickHouse patterns:
+    - Date columns stored as UInt16 (epoch days since 1970-01-01): range ~17000-25000
+    - DateTime columns returned as Unix timestamps: range ~1.4e9-2.2e9
+    """
+    if not values:
+        return values
+    nums = [v for v in values if isinstance(v, (int, float)) and v > 0]
+    if len(nums) < len(values) * 0.8:
+        return values  # not predominantly numeric
+
+    sample = nums[:min(10, len(nums))]
+    # Epoch days: ~17000 (2016-07) to ~25000 (2038-06)
+    if all(17000 <= v <= 25000 for v in sample):
+        return [
+            date.fromordinal(int(v) + _EPOCH_ORDINAL).isoformat()
+            if isinstance(v, (int, float))
+            else v
+            for v in values
+        ]
+    # Unix timestamps: ~1.4e9 (2014-05) to ~2.2e9 (2039-09)
+    if all(1_400_000_000 <= v <= 2_200_000_000 for v in sample):
+        return [
+            datetime.utcfromtimestamp(int(v)).strftime("%Y-%m-%d")
+            if isinstance(v, (int, float))
+            else v
+            for v in values
+        ]
+    return values
 
 
 def _first_non_null_value(rows: list, index: int):
@@ -684,7 +723,7 @@ def _build_line_chart(
     y_fields = [f.strip() for f in y_field.split(",")]
     if len(y_fields) > 1:
         rows_sorted = sorted(rows, key=lambda r: r[x_idx])
-        x_values = _extract_column(rows_sorted, x_idx)
+        x_values = _auto_format_dates(_extract_column(rows_sorted, x_idx))
         series_list = []
         for i, yf in enumerate(y_fields):
             yi = col_index[yf]
@@ -742,11 +781,11 @@ def _build_line_chart(
 
         legend_data = list(series_data.keys())
         # Sort x-axis chronologically (ISO dates sort correctly as strings)
-        x_values = sorted(x_values_set)
+        x_values = _auto_format_dates(sorted(x_values_set))
     else:
         # Sort rows by x_field for chronological ordering
         rows = sorted(rows, key=lambda r: r[x_idx])
-        x_values = _extract_column(rows, x_idx)
+        x_values = _auto_format_dates(_extract_column(rows, x_idx))
         y_values = _extract_column(rows, y_idx)
         s = {
             "name": y_field,
@@ -785,7 +824,7 @@ def _build_bar_chart(
     # Dual y-axis: comma-separated y_field
     y_fields = [f.strip() for f in y_field.split(",")]
     if len(y_fields) > 1:
-        x_values = _extract_column(rows, x_idx)
+        x_values = _auto_format_dates(_extract_column(rows, x_idx))
         series_list = []
         for i, yf in enumerate(y_fields):
             yi = col_index[yf]
@@ -828,9 +867,9 @@ def _build_bar_chart(
             for s_name, data_map in series_data.items()
         ]
         legend_data = list(series_data.keys())
-        x_values = x_values_set
+        x_values = _auto_format_dates(x_values_set)
     else:
-        x_values = _extract_column(rows, x_idx)
+        x_values = _auto_format_dates(_extract_column(rows, x_idx))
         y_values = _extract_column(rows, y_idx)
         series_list = [{"name": y_field, "type": "bar", "data": y_values}]
         legend_data = [y_field]
@@ -1675,6 +1714,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     "series_field": series_field,
                     "change_field": change_field,
                     "input_shape": input_shape,
+                    "source": source,
                 }
 
             # Metadata-only mode: compact single line for batch tool
@@ -1831,10 +1871,10 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 stage,
                 "Semantic preflight required: call `preflight_analytics_request(query, mode=\"chart\")` before semantic charting.",
             )
-        if state.semantic_route_last != "semantic_ready":
+        if state.semantic_route_last not in ("semantic_ready", "hybrid_ready"):
             return _semantic_gate_error(
                 stage,
-                "Semantic charting requires a `semantic_ready` route from `preflight_analytics_request`.",
+                "Semantic charting requires a `semantic_ready` or `hybrid_ready` route from `preflight_analytics_request`.",
             )
         return ""
 

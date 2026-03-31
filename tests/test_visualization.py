@@ -1383,3 +1383,82 @@ class TestReportPrompts:
         assert "generate_charts([...])" in text
         assert "numberDisplay` charts require single-row SQL" in text
         assert "comma-separated `y_field` values" in text
+
+
+class TestHybridRouting:
+    """Tests for hybrid_ready routing and mixed chart registries."""
+
+    def test_raw_chart_allowed_in_hybrid_mode(self, monkeypatch):
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        monkeypatch.setattr(session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", True)
+        state.record_semantic_preflight(route="hybrid_ready", mode="report")
+        assert state.analysis_path == "hybrid"
+
+        # Provide minimum discovery depth
+        state.record_search_models("bridge volume", 1)
+        state.record_get_model_details("model_a")
+        state.record_get_model_details("model_b")
+        state.record_get_model_details("model_c")
+        state.record_describe_table("table_a")
+
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert passed, f"Raw chart should be allowed in hybrid mode: {reason}"
+
+    def test_semantic_chart_allowed_in_hybrid_mode(self, monkeypatch):
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        monkeypatch.setattr(session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", True)
+        state.record_semantic_preflight(route="hybrid_ready", mode="report")
+
+        # Semantic chart gate only needs preflight + route
+        passed, reason = state.check_chart_preconditions(raw_path=False)
+        # Should pass the semantic route check (may still fail common depth)
+        # The important thing is it doesn't fail with "Semantic charting requires semantic_ready"
+        if not passed:
+            assert "semantic_ready" not in reason.lower() or "hybrid_ready" in reason.lower()
+
+    def test_chart_registry_carries_source_field(self):
+        viz._chart_registry["chart_1"] = {
+            "option": {"xAxis": {"data": ["Mon"]}, "series": [{"data": [1]}]},
+            "title": "Test Chart",
+            "chart_type": "line",
+            "data_points": 1,
+            "created_at": datetime.now(),
+            "sql": "SELECT 1",
+            "database": "dbt",
+            "series_field": "",
+            "change_field": "",
+            "input_shape": {},
+            "source": "raw",
+        }
+        assert viz._chart_registry["chart_1"]["source"] == "raw"
+
+        viz._chart_registry["chart_2"] = {
+            "option": {"xAxis": {"data": ["Mon"]}, "series": [{"data": [2]}]},
+            "title": "Semantic Chart",
+            "chart_type": "line",
+            "data_points": 1,
+            "created_at": datetime.now(),
+            "sql": "SELECT 1",
+            "database": "dbt",
+            "series_field": "",
+            "change_field": "",
+            "input_shape": {},
+            "source": "semantic",
+        }
+        assert viz._chart_registry["chart_2"]["source"] == "semantic"
+
+    def test_analysis_path_reset_on_state_reset(self):
+        state.record_semantic_preflight(route="hybrid_ready", mode="report")
+        assert state.analysis_path == "hybrid"
+        state.reset()
+        assert state.analysis_path == "undecided"
+
+    def test_raw_chart_blocked_in_pure_semantic_before_execution(self, monkeypatch):
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        monkeypatch.setattr(session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", True)
+        state.record_semantic_preflight(route="semantic_ready", mode="report")
+        assert state.analysis_path == "semantic_only"
+
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert not passed
+        assert "semantic coverage" in reason.lower()

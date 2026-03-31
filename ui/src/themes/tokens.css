@@ -4,10 +4,10 @@
 @import "@fontsource/plus-jakarta-sans/700.css";
 
 :root {
-  --bg: transparent;
-  --surface: #1e293b;
-  --border: #334155;
-  --border-hover: #475569;
+  --bg: #0f141b;
+  --surface: #151c24;
+  --border: rgba(226, 232, 240, 0.08);
+  --border-hover: rgba(226, 232, 240, 0.16);
   --primary: #818cf8;
   --primary-hover: #a5b4fc;
   --success: #34d399;
@@ -18,14 +18,13 @@
   --text-muted: #94a3b8;
   --accent-soft: rgba(99, 102, 241, 0.16);
   --accent-softer: rgba(99, 102, 241, 0.1);
-  --table-header: #1e293b;
+  --table-header: #151c24;
   --table-stripe: rgba(255, 255, 255, 0.02);
-  --shadow-sm: 0 1px 2px 0 rgba(2, 6, 23, 0.45);
-  --shadow-base: 0 4px 8px -2px rgba(2, 6, 23, 0.5),
-    0 2px 6px -2px rgba(2, 6, 23, 0.4);
+  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.12);
+  --shadow-base: 0 2px 6px -1px rgba(0, 0, 0, 0.15);
   --radius-sm: 4px;
   --radius-base: 8px;
-  --radius-lg: 12px;
+  --radius-lg: 14px;
   --radius-xl: 16px;
   --sidebar-width: 224px;
   --sidebar-collapsed: 56px;
@@ -33,10 +32,10 @@
 }
 
 [data-theme="light"] {
-  --bg: transparent;
-  --surface: #ffffff;
-  --border: #e2e8f0;
-  --border-hover: #cbd5e1;
+  --bg: #f7f5f0;
+  --surface: #fbfaf7;
+  --border: rgba(15, 23, 42, 0.08);
+  --border-hover: rgba(15, 23, 42, 0.14);
   --primary: #4f46e5;
   --primary-hover: #4338ca;
   --success: #10b981;
@@ -47,9 +46,8 @@
   --text-muted: #94a3b8;
   --accent-soft: rgba(79, 70, 229, 0.1);
   --accent-softer: rgba(79, 70, 229, 0.06);
-  --table-header: #f1f5f9;
+  --table-header: #f5f4f0;
   --table-stripe: rgba(0, 0, 0, 0.02);
-  --shadow-sm: 0 1px 2px 0 rgba(15, 23, 42, 0.06);
-  --shadow-base: 0 4px 6px -1px rgba(15, 23, 42, 0.08),
-    0 2px 4px -2px rgba(15, 23, 42, 0.05);
+  --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.04);
+  --shadow-base: 0 2px 6px -1px rgba(15, 23, 42, 0.06);
 }

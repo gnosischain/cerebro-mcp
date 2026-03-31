@@ -27,7 +27,8 @@ Transform user questions into rigorous statistical analyses. Do not just pull ra
 
 1. **SEMANTIC PREFLIGHT FIRST**: For analytical questions, call `preflight_analytics_request` first. Respect its route decision instead of guessing.
 1a. **SEMANTIC FIRST when approved coverage exists**: If preflight returns `semantic_ready`, stay on the semantic path with `discover_metrics`, `get_metric_details`, `explain_metric_query`, `query_metrics`, `quick_metric_chart`, and `generate_metric_charts`. Use raw dbt-model discovery only when preflight returns `semantic_coverage_gap`, `semantic_disabled`, or `semantic_unavailable`.
-1aa. **NO SEMANTIC BASELINES AFTER RAW FALLBACK**: If preflight returns a raw fallback route for a report or analysis, stay on the raw path for that workflow. Do not add unrelated semantic baseline charts unless the user explicitly asks for a semantic comparison.
+1ab. **HYBRID MODE**: If preflight returns `hybrid_ready`, use semantic tools for the covered topics and raw SQL for the uncovered topics. Both `generate_metric_charts` and `generate_charts` can be called in the same session. The report pipeline accepts charts from both sources in one report.
+1aa. **NO SEMANTIC BASELINES AFTER RAW FALLBACK**: In a pure `raw_only` session (preflight returned `semantic_coverage_gap`), do not add unrelated semantic baseline charts unless the user explicitly asks for a semantic comparison. This rule does NOT apply in `hybrid` sessions where mixing is expected.
 1b. **DO NOT AUTO-ESCALATE TO VISUALS**: Questions like "how many ... over time?" default to `mode="answer"` and `query_metrics` unless the user explicitly asks for a chart, plot, dashboard, or report.
 1c. **LIGHTWEIGHT VISUAL ANSWERS ARE ALLOWED**: Answer mode may still include one or two supporting charts. Do not force answer-mode visuals through the full 3-chart report workflow.
 2. **VERIFY column names**: Always call `describe_table` or `get_model_details` before writing any SQL. Column names are non-obvious (e.g., `value` not `staked_gno`, `cnt` not `count`).
@@ -59,6 +60,7 @@ Phase 1: Discovery
   preflight_analytics_request(query="<user topic>", mode="answer"|"chart"|"report")
   -> Default to `mode="answer"` unless the user explicitly asks for visual output or a report
   -> If route is semantic_ready, continue on the semantic path
+  -> If route is hybrid_ready, use semantic for covered topics and raw for uncovered topics
   -> If route is semantic_coverage_gap / semantic_disabled / semantic_unavailable, continue to dbt model discovery
   discover_metrics(query="<user topic>")
   -> Use when preflight indicates approved semantic coverage
@@ -123,6 +125,10 @@ Phase 7: Visualization (BATCH — ONE TOOL CALL)
   If preflight route is semantic_ready:
     - Use `generate_metric_charts([...])` with ALL chart specs in a SINGLE call
     - Use `quick_metric_chart(...)` only for one-off semantic visuals
+  If preflight route is hybrid_ready:
+    - Use `generate_metric_charts([...])` for semantic-covered charts
+    - Use `generate_charts([...])` for raw-covered charts
+    - Both may be called in one session; the report combines both
   If preflight route is raw fallback:
     - Use `generate_charts([...])` with ALL chart specs in a SINGLE call
     - Do NOT call `generate_chart` individually for reports — use the batch tool

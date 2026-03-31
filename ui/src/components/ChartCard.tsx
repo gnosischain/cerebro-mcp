@@ -90,7 +90,7 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
         style={{
           background: "var(--surface)",
           border: "1px solid var(--border)",
-          borderRadius: "var(--radius-base)",
+          borderRadius: "var(--radius-lg)",
           boxShadow: "var(--shadow-sm)",
           overflow: "hidden",
           margin: "0.75rem 0",
@@ -180,7 +180,7 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
       style={{
         background: "var(--surface)",
         border: "1px solid var(--border)",
-        borderRadius: "var(--radius-base)",
+        borderRadius: "var(--radius-lg)",
         boxShadow: "var(--shadow-sm)",
         overflow: "hidden",
         margin: "0.75rem 0",

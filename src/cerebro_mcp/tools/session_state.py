@@ -54,6 +54,7 @@ class SessionState:
     semantic_fallback_reason: str = ""
     semantic_path_used: str = "none"
     semantic_preflight_cache: dict[str, dict[str, object]] = field(default_factory=dict)
+    analysis_path: str = "undecided"
 
     # Thread safety
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -202,6 +203,12 @@ class SessionState:
             self.semantic_mode_last = mode
             self.semantic_fallback_reason = fallback_reason
             self.semantic_fallback_recorded = route == "semantic_coverage_gap"
+            if route == "semantic_ready":
+                self.analysis_path = "semantic_only"
+            elif route == "hybrid_ready":
+                self.analysis_path = "hybrid"
+            elif route in ("semantic_coverage_gap", "semantic_disabled", "semantic_unavailable"):
+                self.analysis_path = "raw_only"
 
     def get_cached_semantic_preflight(
         self,
@@ -281,23 +288,28 @@ class SessionState:
                         "before charting when semantic is enabled."
                     )
 
-                if raw_path and self.semantic_route_last == "semantic_ready" and not self.semantic_execution_attempted:
-                    return False, (
-                        "Approved semantic coverage already exists for this "
-                        "request. Use `quick_metric_chart`, "
-                        "`generate_metric_charts`, `query_metrics`, or "
-                        "`explain_metric_query` before raw charting."
-                    )
+                if raw_path:
+                    # In hybrid mode, allow raw charts alongside semantic
+                    if self.analysis_path == "hybrid":
+                        pass  # raw allowed in hybrid
+                    elif self.semantic_route_last == "semantic_ready" and not self.semantic_execution_attempted:
+                        return False, (
+                            "Approved semantic coverage already exists for this "
+                            "request. Use `quick_metric_chart`, "
+                            "`generate_metric_charts`, `query_metrics`, or "
+                            "`explain_metric_query` before raw charting."
+                        )
 
-                if not raw_path and self.semantic_route_last != "semantic_ready":
+                if not raw_path and self.semantic_route_last not in ("semantic_ready", "hybrid_ready"):
                     fallback = (
                         f" Fallback reason: {self.semantic_fallback_reason}."
                         if self.semantic_fallback_reason
                         else ""
                     )
                     return False, (
-                        "Semantic charting requires a `semantic_ready` route "
-                        f"from `preflight_analytics_request`. Current route: "
+                        "Semantic charting requires a `semantic_ready` or "
+                        "`hybrid_ready` route from "
+                        f"`preflight_analytics_request`. Current route: "
                         f"`{self.semantic_route_last or 'unknown'}`.{fallback}"
                     )
 
@@ -322,7 +334,7 @@ class SessionState:
                         "before generating a report when semantic is enabled."
                     ), []
 
-                if self.semantic_route_last == "semantic_ready" and not self.semantic_execution_attempted:
+                if self.analysis_path == "semantic_only" and not self.semantic_execution_attempted:
                     return False, (
                         "Approved semantic coverage already exists for this "
                         "request. Use `query_metrics`, `quick_metric_chart`, "
@@ -447,6 +459,7 @@ class SessionState:
                 "semantic_fallback_reason": self.semantic_fallback_reason,
                 "semantic_preflight_cache_size": len(self.semantic_preflight_cache),
                 "verified_query_surfaces": len(self.verified_query_surfaces),
+                "analysis_path": self.analysis_path,
             }
 
     # ── Reset ───────────────────────────────────────────────────────
@@ -473,6 +486,7 @@ class SessionState:
             self.semantic_fallback_reason = ""
             self.semantic_path_used = "none"
             self.semantic_preflight_cache.clear()
+            self.analysis_path = "undecided"
 
 
 # Global singleton

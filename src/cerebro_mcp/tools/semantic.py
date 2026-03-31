@@ -197,13 +197,62 @@ def _build_explanation(plan: dict[str, Any], sql: str, warnings: list[str], repa
 
 
 def _recommended_semantic_next_tool(route: str, mode: str, hit_count: int) -> str:
-    if route != "semantic_ready":
+    if route not in ("semantic_ready", "hybrid_ready"):
         return "execute_query"
     if mode == "chart":
         return "quick_metric_chart" if hit_count <= 1 else "discover_metrics"
     if mode == "report":
+        if route == "hybrid_ready":
+            return "discover_metrics"
         return "generate_metric_charts" if hit_count <= 1 else "discover_metrics"
     return "query_metrics" if hit_count <= 1 else "discover_metrics"
+
+
+def _extract_topic_labels(
+    query: str,
+    accepted: list[tuple[int, str, dict[str, Any]]],
+    scored_but_rejected: list[tuple[int, str, dict[str, Any]]],
+) -> tuple[list[str], list[str]]:
+    """Extract covered and uncovered topic labels from the query.
+
+    Covered topics are metric labels/names that matched.
+    Uncovered topics are significant query token clusters that didn't match
+    any accepted metric.
+    """
+    covered: list[str] = []
+    covered_tokens: set[str] = set()
+
+    for _score, metric_name, metric in accepted:
+        label = metric.get("label") or metric_name.replace("_", " ")
+        covered.append(label)
+        covered_tokens.update(_metric_tokens(metric))
+        # Dimensions are also covered by the metric
+        for dim in metric.get("allowed_dimensions", []):
+            covered_tokens.update(_query_tokens(dim))
+
+    query_toks = {t.rstrip("?.,!;:") for t in _query_tokens(query)}
+    # Remove stop words and very short tokens from uncovered detection
+    _STOP_WORDS = {
+        "the", "a", "an", "and", "or", "for", "in", "on", "of", "to",
+        "by", "is", "it", "at", "as", "be", "do", "so", "if", "up",
+        "with", "from", "this", "that", "what", "how", "when", "where",
+        "are", "was", "were", "been", "being", "have", "has", "had",
+        "not", "but", "all", "each", "every", "both", "few", "more",
+        "most", "other", "some", "such", "than", "too", "very", "can",
+        "will", "just", "should", "now", "also", "into", "only",
+        "many", "much", "any", "our", "its", "their", "there", "here",
+        "report", "show", "give", "me", "please", "want", "need",
+        "last", "past", "recent", "current", "latest", "over", "time",
+        "weekly", "daily", "monthly", "trend", "trends", "vs",
+        "about", "between", "during", "since", "until", "after",
+        "before", "top", "total", "overall", "summary", "breakdown",
+        "analysis", "compare", "comparison", "across", "per",
+    }
+    significant_uncovered = query_toks - covered_tokens - _STOP_WORDS
+    significant_uncovered = {t for t in significant_uncovered if len(t) > 2}
+
+    uncovered: list[str] = sorted(significant_uncovered) if significant_uncovered else []
+    return covered, uncovered
 
 
 def _query_tokens(text: str) -> set[str]:
@@ -447,14 +496,32 @@ def get_semantic_preflight(
         for score, metric_name, metric in scored
         if _is_preflight_ready_match(query, metric, score)
     ]
+    rejected = [
+        (score, metric_name, metric)
+        for score, metric_name, metric in scored
+        if not _is_preflight_ready_match(query, metric, score)
+    ]
 
     recommended_metrics = [metric_name for _score, metric_name, _metric in accepted[:5]]
     recommended_dimensions: list[str] = []
     if accepted:
         recommended_dimensions = _infer_dimensions_from_query(query, accepted[0][2])
 
-    route = "semantic_ready" if accepted else "semantic_coverage_gap"
-    fallback_reason = "" if route == "semantic_ready" else "semantic_coverage_gap"
+    # Topic-level hybrid routing
+    covered_topics, uncovered_topics = _extract_topic_labels(query, accepted, rejected)
+    hybrid_ready = False
+
+    if accepted and uncovered_topics:
+        route = "hybrid_ready"
+        hybrid_ready = True
+        fallback_reason = ""
+    elif accepted:
+        route = "semantic_ready"
+        fallback_reason = ""
+    else:
+        route = "semantic_coverage_gap"
+        fallback_reason = "semantic_coverage_gap"
+
     next_tool = _recommended_semantic_next_tool(route, normalized_mode, len(accepted))
 
     lines = [
@@ -463,6 +530,9 @@ def get_semantic_preflight(
         f"Recommended dimensions: {', '.join(recommended_dimensions) or 'none'}",
         f"Recommended next tool: `{next_tool}`",
     ]
+    if hybrid_ready:
+        lines.append(f"Covered topics (semantic): {', '.join(covered_topics)}")
+        lines.append(f"Uncovered topics (use raw): {', '.join(uncovered_topics)}")
     if fallback_reason:
         lines.append(f"Fallback reason: `{fallback_reason}`")
 
@@ -470,6 +540,9 @@ def get_semantic_preflight(
         query=query,
         mode=normalized_mode,
         route=route,
+        hybrid_ready=hybrid_ready,
+        covered_topics=covered_topics,
+        uncovered_topics=uncovered_topics,
         recommended_metrics=recommended_metrics,
         recommended_dimensions=recommended_dimensions,
         recommended_next_tool=next_tool,
