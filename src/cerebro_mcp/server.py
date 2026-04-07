@@ -46,6 +46,7 @@ from cerebro_mcp.tools.agents import register_agent_tools
 from cerebro_mcp.tools.dashboard_builder import register_dashboard_tools
 from cerebro_mcp.tools.custom_queries import register_custom_query_tools
 from cerebro_mcp.tools.cross_check import register_cross_check_tools
+from cerebro_mcp.tools.storyteller import register_storyteller_tools
 
 
 runtime_state.ssl_trust_injected = init_ssl_trust()
@@ -225,7 +226,42 @@ mcp = FastMCP(
 
         "GNOSIS CHAIN SPECIFICS:\n"
         "- Call `get_platform_constants()` for infrastructure details.\n"
-        "- Key: Block time 5s, xDAI (gas), GNO (staking), Chain ID 100.\n"
+        "- Key: Block time 5s, xDAI (gas), GNO (staking), Chain ID 100.\n\n"
+
+        "MODE 4: STORYTELLER (OPT-IN, DO NOT AUTO-UPGRADE)\n"
+        "TRIGGER: User EXPLICITLY asks for a story, narrative, memo, "
+        "executive brief, pitch, recommendation, decision artifact, or uses "
+        "`/storyteller`. Do NOT silently upgrade a standard report request "
+        "into a storyteller run; ask if ambiguous.\n"
+        "WORKFLOW (multi-agent, gated):\n"
+        "  1. `storyteller_start_session`\n"
+        "  2. `get_agent_persona(\"storyteller_orchestrator\")` and "
+        "`get_agent_persona(\"storyteller_context\")`; collect audience, "
+        "required action, mechanism, tone, background, biases, weakens_case.\n"
+        "  3. `storyteller_record_context_brief(...)` — gate for all downstream agents.\n"
+        "  4. Explore data with the normal Cerebro tools to gather evidence.\n"
+        "  5. `get_agent_persona(\"storyteller_narrative\")`; write one-sentence "
+        "big idea with stakes. `storyteller_record_big_idea(...)`.\n"
+        "  6. Build setup -> tension -> resolution storyboard. "
+        "`storyteller_record_storyboard(...)`.\n"
+        "  7. `get_agent_persona(\"storyteller_visual_designer\")`; one "
+        "`storyteller_record_visual_spec` per scene. Relationship-first. "
+        "One focal element per scene.\n"
+        "  8. Render charts with `generate_charts` (standard tool) and attach "
+        "`chart_id` values back via `storyteller_record_visual_spec`.\n"
+        "  9. `get_agent_persona(\"storyteller_writer\")`; assemble the final "
+        "story with `{{chart:CHART_ID}}` placeholders and grid directives. "
+        "`storyteller_record_final_story(title, content_markdown)`.\n"
+        "  10. `get_agent_persona(\"storyteller_critic\")`; run four clarity "
+        "tests and four audits. `storyteller_run_clarity_checks(checks=[...])`. "
+        "On failure, loop back to the earliest failing phase.\n"
+        "  11. `get_agent_persona(\"storyteller_accessibility\")`; check "
+        "colorblind palette, contrast, language, tone. "
+        "`storyteller_record_accessibility_pass(passed, notes)`.\n"
+        "  12. `storyteller_generate_story_report()` to render the final artifact.\n"
+        "GATES: context_brief -> big_idea -> storyboard -> visual_specs -> "
+        "final_story -> review -> accessibility -> handoff. Skipping any gate "
+        "raises an error. Standard mode is unaffected.\n"
     ),
 )
 
@@ -255,6 +291,7 @@ register_agent_tools(mcp)
 register_dashboard_tools(mcp)
 register_custom_query_tools(mcp, ch)
 register_cross_check_tools(mcp, ch)
+register_storyteller_tools(mcp, ch)
 install_auto_tool_tracing(mcp)
 
 

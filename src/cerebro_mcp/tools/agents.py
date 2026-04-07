@@ -3,7 +3,19 @@ import importlib.resources
 from cerebro_mcp import runtime_state
 
 
-_VALID_ROLES = {"analytics_reporter", "ui_designer", "reality_checker"}
+_VALID_ROLES = {
+    "analytics_reporter",
+    "ui_designer",
+    "reality_checker",
+    # Storyteller mode personas (opt-in; standard mode is unaffected)
+    "storyteller_orchestrator",
+    "storyteller_context",
+    "storyteller_narrative",
+    "storyteller_visual_designer",
+    "storyteller_writer",
+    "storyteller_critic",
+    "storyteller_accessibility",
+}
 
 
 def register_agent_tools(mcp):
@@ -17,7 +29,12 @@ def register_agent_tools(mcp):
         critical rules, and success metrics.
 
         Args:
-            role: One of 'analytics_reporter', 'ui_designer', 'reality_checker'.
+            role: One of the standard roles ('analytics_reporter',
+                'ui_designer', 'reality_checker') or a storyteller role
+                ('storyteller_orchestrator', 'storyteller_context',
+                'storyteller_narrative', 'storyteller_visual_designer',
+                'storyteller_writer', 'storyteller_critic',
+                'storyteller_accessibility').
         """
         if role not in _VALID_ROLES:
             return (
