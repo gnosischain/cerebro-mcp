@@ -77,6 +77,7 @@ Artifacts created by the server:
 | Quick exploration | answering a direct question, checking a metric, testing a hypothesis quickly | `discover_models`, `describe_table`, `execute_query`, `explain_query`, `get_sample_data` | markdown summary plus structured query payload |
 | Report workflow | visual analysis, KPI packs, weekly or monthly summaries, chart-heavy deliverables | `discover_models`, `describe_table`, `execute_query`, `generate_charts`, `generate_report` | interactive report artifact plus saved HTML |
 | Research workflow | multi-step investigations that need memory, evidence, review, and publication | `start_research_project`, phase tools, evidence tools, verification, peer review, `publish_research_report` | durable research project plus report artifact |
+| Storyteller workflow | decision-oriented narratives, executive briefs, stakeholder memos, recommendation artifacts where an audience must be moved to action | `storyteller_start_session`, `storyteller_record_*`, `storyteller_run_clarity_checks`, `storyteller_generate_story_report` | gated, narrative-first report artifact with action titles, focal-point design, and adversarial clarity review |
 | Custom query tools | common domain questions with known parameters | `get_validator_balance_history`, `get_token_transfers_for_address`, etc. | parameterized query result |
 | Dashboard scaffolding | creating new dashboard tabs from semantic metrics | `discover_dashboard_metrics`, `scaffold_dashboard_tab` | JS query files + YAML config |
 | Number verification | any computed numbers before reporting to user | `verify_numbers` | PASS/MISMATCH verdict |
@@ -517,6 +518,149 @@ The scaffold tool generates JS query files in `metrics-dashboard/src/queries/` a
 
 Important: The LLM never writes React/JSX directly. Only the scaffold tool generates UI code from structured JSON blueprints validated by Pydantic.
 
+### 5. Storyteller Workflow
+
+Use this when the user explicitly asks for a **story, narrative, executive brief, decision memo, stakeholder pitch, or recommendation artifact** — anything where an audience must be moved to action rather than just shown the data. Do **not** auto-upgrade a standard report request into a storyteller run; if the user asks for "a report" and the scope is ambiguous, ask which mode they want.
+
+The storyteller is an opt-in, multi-agent pipeline grounded in Cole Nussbaumer Knaflic's *Storytelling with Data* (Wiley, 2015). It sits alongside the standard report workflow and leaves `generate_report` untouched. Standard mode remains the default for dashboards, KPI packs, trend reports, and ad-hoc analysis.
+
+#### Why it exists
+
+Standard report mode answers "show me the data." Storyteller mode answers "convince this specific audience to take this specific action." The two have different shapes:
+
+- Standard mode pushes charts as fast as the discovery/EDA gates allow.
+- Storyteller mode refuses to touch data until it has a named audience, a required action, and a one-sentence big idea with stakes.
+
+If the user has not named a decision-maker and a concrete ask, the storyteller pauses and asks — guessing the audience is the single most common failure mode in decision communication.
+
+#### Agent pipeline
+
+The storyteller is structured as seven cooperating personas coordinated by an orchestrator. Each persona has a narrow contract, produces a specific artifact, and hands off to the next. Gates are enforced in code (`storyteller_state.py`), not by convention — skipping a gate raises `RuntimeError`.
+
+```text
+┌────────────────────┐
+│    Orchestrator    │  Mode selection + gate enforcement (no content)
+└─────────┬──────────┘
+          │
+┌─────────▼──────────┐
+│   Context Agent    │  audience, required action, mechanism, tone
+└─────────┬──────────┘  produces: ContextBrief
+          │
+┌─────────▼──────────┐
+│      Explorer      │  runs through standard Cerebro tools
+└─────────┬──────────┘  produces: candidate findings (feed, never shipped)
+          │
+┌─────────▼──────────┐
+│  Narrative Agent   │  one-sentence big idea with stakes
+└─────────┬──────────┘  produces: BigIdea, Storyboard (setup → tension → resolution)
+          │
+┌─────────▼──────────┐
+│  Visual Designer   │  relationship-first chart choice, one focal point per scene
+└─────────┬──────────┘  produces: VisualSpec per scene (action titles, de-emphasis)
+          │
+┌─────────▼──────────┐
+│       Writer       │  action titles, annotations, prose, medium adaptation
+└─────────┬──────────┘  produces: final_story markdown with chart placeholders
+          │
+┌─────────▼──────────┐
+│       Critic       │  adversarial, cold-reader review (four clarity tests)
+└─────────┬──────────┘  produces: ReviewReport (ready_for_handoff + blocking_issues)
+          │
+┌─────────▼──────────┐
+│  Accessibility &   │  colorblind palette, contrast, language, tone match
+│    Tone Agent      │
+└─────────┬──────────┘  produces: pass/fail verdict
+          │
+┌─────────▼──────────┐
+│      Handoff       │  storyteller_generate_story_report
+└────────────────────┘  renders via the existing generate_report pipeline
+```
+
+Each arrow is a hard gate. On critic failure, the pipeline loops back to the earliest phase implicated in the blocking issues (a failed reverse storyboard sends work back to Narrative, not Writer).
+
+Why seven personas and not one monolith like `analytics_reporter`? The storyteller is an **artifact-handoff pipeline** — each phase produces a typed Pydantic artifact the next phase consumes as its entire input. Persona separation matches real information boundaries: the Critic must read the work cold, without the Writer's "make it pretty" bias. The analytics reporter is a **state-accumulation pipeline** where later phases need the full upstream history, so monolithic is correct there. Different shapes, different layouts.
+
+#### Workflow
+
+```text
+1. storyteller_start_session
+2. get_agent_persona("storyteller_orchestrator") and ("storyteller_context")
+3. Collect audience, required action, mechanism, tone, background, biases
+4. storyteller_record_context_brief(...)         # Gate 1: context
+5. Explore data with standard Cerebro tools (discover_models, execute_query, etc.)
+6. get_agent_persona("storyteller_narrative")
+7. storyteller_record_big_idea(sentence, stakes) # Gate 2: big idea
+8. storyteller_record_storyboard(scenes, ...)    # Gate 3: storyboard
+9. get_agent_persona("storyteller_visual_designer")
+10. storyteller_record_visual_spec(scene_index, ...)   # one per scene
+    generate_charts([...])                             # render via standard tool
+    storyteller_record_visual_spec(..., chart_id=...)  # attach chart_id
+11. get_agent_persona("storyteller_writer")
+12. storyteller_record_final_story(title, content_markdown)  # Gate 4: final story
+13. get_agent_persona("storyteller_critic")
+14. storyteller_run_clarity_checks(checks=[...])  # Gate 5: clarity review
+    # On failure: loop back to earliest failing phase
+15. get_agent_persona("storyteller_accessibility")
+16. storyteller_record_accessibility_pass(passed, notes)  # Gate 6: accessibility
+17. storyteller_generate_story_report()          # renders via generate_report
+```
+
+Minimal pattern the calling LLM follows:
+
+```text
+storyteller_start_session()
+storyteller_record_context_brief(
+  audience="Q2 budget committee",
+  required_action="Approve $250k to continue the summer pilot next year",
+  mechanism="memo",
+  tone="recommendation"
+)
+# ... normal Cerebro discovery, EDA, correlation queries ...
+storyteller_record_big_idea(
+  sentence="The pilot lifted perception of science by 28 points, so the committee should fund a full-year rollout."
+)
+storyteller_record_storyboard(
+  scenes=[
+    {"index": 0, "intent": "Set up the pilot's goal", "role": "setup"},
+    {"index": 1, "intent": "Show the pre-pilot baseline gap", "role": "tension"},
+    {"index": 2, "intent": "Show the 28-point lift", "role": "evidence"},
+    {"index": 3, "intent": "Ask for full-year funding", "role": "resolution"},
+  ],
+  narrative_order="lead_with_ending"
+)
+# ... record one visual_spec per scene; render charts via generate_charts ...
+storyteller_record_final_story(title, content_markdown)
+storyteller_run_clarity_checks(checks=[...])
+storyteller_record_accessibility_pass(passed=True)
+storyteller_generate_story_report()
+```
+
+#### What the gates enforce
+
+- **Context gate.** Vague audiences like "stakeholders" or "leadership" are rejected at the Pydantic layer. Required actions shorter than 10 characters are rejected. Mechanism must be one of `live_presentation`, `slide_deck_leave_behind`, `emailed_deck`, `memo`, `brief`, `dashboard_excerpt`, `script`.
+- **Big idea gate.** Must be a complete declarative sentence with point of view and stakes. Labels ("Q3 revenue"), single words, and strings ending in a colon are rejected.
+- **Storyboard gate.** Must contain at least one `tension` scene and at least one `resolution` scene. Flat "everything is fine" narratives are rejected.
+- **Visual spec gate.** `pie`, `donut`, `3d`, and `dual_axis` chart families are rejected. Action titles must be sentences, not labels. Every scene index must match a scene in the recorded storyboard.
+- **Clarity review gate.** `ready_for_handoff` is `True` only if every clarity check passes. Failures drop the pipeline back to the earliest failing phase, tagged via the `blocking_issues` list.
+- **Accessibility gate.** Hard failures (colorblind-hostile encoding, unreadable contrast) block handoff. Soft failures warn but do not block.
+
+All gates are code, not convention. The relevant modules are:
+
+- `src/cerebro_mcp/storyteller_models.py` — Pydantic contracts and validators
+- `src/cerebro_mcp/storyteller_state.py` — phase cursor and gate enforcement
+- `src/cerebro_mcp/tools/storyteller.py` — 11 MCP tools
+
+#### Relationship to standard mode
+
+The storyteller does **not** replace the standard report pipeline. Both modes coexist:
+
+- Standard mode (default): `discover_models` → `execute_query` → `generate_charts` → `generate_report`. Unchanged.
+- Storyteller mode (opt-in): wraps the standard pipeline with gated persona handoffs. `storyteller_generate_story_report` renders the final artifact through the same `create_report_artifact` used by `generate_report`, but bypasses the standard quality gate because the storyteller has its own.
+
+The standard session state (`search_models_count`, `explored_models`, chart registry) is preserved across a storyteller run so users can continue exploring after the story is rendered.
+
+Do not auto-upgrade. If the user asks "give me a report on bridge activity", ask whether they want a standard report or a decision-oriented story.
+
 ---
 
 ## Tool Guide
@@ -617,6 +761,26 @@ Dashboard tools are registered when `DASHBOARD_BUILDER_ENABLED=True` and `METRIC
 
 The agent provides its computation logic (formula + component values) and the tool independently verifies the math. If a `check_query` is provided, it also cross-references against an independent data source.
 
+### Storyteller Tools
+
+Opt-in, gated pipeline for decision-oriented narratives. See the Storyteller Workflow section above for the full agent pipeline. Do not auto-upgrade a standard report request into a storyteller run.
+
+| Tool | Use when | Notes |
+|---|---|---|
+| `storyteller_start_session` | user explicitly asks for a story, memo, executive brief, pitch, or recommendation | clears prior storyteller state; standard SessionState is untouched |
+| `storyteller_status` | checking current phase and gate status mid-workflow | read-only snapshot |
+| `storyteller_end_session` | abandoning a session | clears artifacts |
+| `storyteller_record_context_brief` | after collecting audience, action, mechanism, tone | **Gate 1.** Rejects vague audiences and un-articulable actions at the Pydantic layer |
+| `storyteller_record_big_idea` | after writing one declarative sentence with stakes | **Gate 2.** Rejects labels and single-word "ideas" |
+| `storyteller_record_storyboard` | after mapping scenes to setup → tension → resolution | **Gate 3.** Rejects storyboards with no tension or no resolution |
+| `storyteller_record_visual_spec` | one call per storyboard scene | **Gate 4.** Rejects pie/donut/3D/dual-axis; rejects descriptive titles; rejects scene indexes not in the storyboard |
+| `storyteller_record_final_story` | after assembling markdown with `{{chart:CHART_ID}}` placeholders | **Gate 5.** Requires every scene to have a visual spec |
+| `storyteller_run_clarity_checks` | after running title-only readthrough, reverse storyboard, fresh-eye, and audits | **Gate 6.** `ready_for_handoff=True` only if all checks pass; failures loop back to earliest failing phase |
+| `storyteller_record_accessibility_pass` | after colorblind, contrast, language, and tone checks | **Gate 7.** Hard failures block handoff |
+| `storyteller_generate_story_report` | after every gate has passed | renders through the existing `create_report_artifact`; standard session state is preserved |
+
+The seven persona briefs are loaded via `get_agent_persona(role)` with roles `storyteller_orchestrator`, `storyteller_context`, `storyteller_narrative`, `storyteller_visual_designer`, `storyteller_writer`, `storyteller_critic`, `storyteller_accessibility`. Each persona has a narrow contract and is adopted only for its phase.
+
 ---
 
 ## Prompts, Personas, And Resources
@@ -638,10 +802,19 @@ Prompts available today:
 
 Personas are guidance, not automation:
 
-- `analytics_reporter`: analysis and EDA discipline
+- `analytics_reporter`: analysis and EDA discipline (monolithic — state-accumulation pipeline)
 - `gnosis_research_analyst`: semantic-first research workflow and evidence discipline
 - `ui_designer`: chart selection and report composition
 - `reality_checker`: QA and adversarial review rules
+- `storyteller_orchestrator`: storyteller mode selection and gate enforcement
+- `storyteller_context`: audience, required action, mechanism, tone
+- `storyteller_narrative`: big idea and storyboard construction
+- `storyteller_visual_designer`: relationship-first chart choice, focal-point design, declutter rules
+- `storyteller_writer`: action titles, annotations, medium adaptation
+- `storyteller_critic`: adversarial clarity review (title-only readthrough, reverse storyboard, fresh-eye)
+- `storyteller_accessibility`: colorblind palette, contrast, language, tone match
+
+The seven storyteller personas are split by design — each is adopted for exactly one phase of an artifact-handoff pipeline. See the Storyteller Workflow section for why.
 
 Resources expose stable reference material:
 
@@ -1157,6 +1330,23 @@ Use the research workflow:
 5. peer review
 6. publication
 
+### "Write me an executive brief / decision memo / stakeholder pitch"
+
+Use the storyteller workflow when the user explicitly asks for a story, narrative, memo, brief, pitch, or recommendation artifact. Do **not** auto-upgrade a standard report request. If the scope is ambiguous ("give me a report on X"), ask which mode the user wants.
+
+1. `storyteller_start_session`
+2. Adopt `get_agent_persona("storyteller_orchestrator")` and `("storyteller_context")`
+3. Collect audience, required action, mechanism, tone from the user
+4. `storyteller_record_context_brief(...)` — rejects vague audiences
+5. Run normal Cerebro discovery and EDA to gather evidence
+6. `storyteller_record_big_idea(sentence, stakes)` — one declarative sentence
+7. `storyteller_record_storyboard(scenes, narrative_order)` — setup → tension → resolution
+8. For each scene: `storyteller_record_visual_spec(...)` then `generate_charts` then attach `chart_id`
+9. `storyteller_record_final_story(title, content_markdown)`
+10. `storyteller_run_clarity_checks(checks=[...])` — loops back on failure
+11. `storyteller_record_accessibility_pass(passed, notes)`
+12. `storyteller_generate_story_report()`
+
 ---
 
 ## Project Structure
@@ -1186,6 +1376,8 @@ cerebro-mcp/
 │   ├── research_models.py
 │   ├── research_store.py
 │   ├── research_workflow.py
+│   ├── storyteller_models.py
+│   ├── storyteller_state.py
 │   ├── tools/
 │   │   ├── query.py
 │   │   ├── query_async.py
@@ -1201,6 +1393,7 @@ cerebro-mcp/
 │   │   ├── dashboard_builder.py
 │   │   ├── custom_queries.py
 │   │   ├── cross_check.py
+│   │   ├── storyteller.py
 │   │   └── semantic.py
 │   ├── prompts/
 │   ├── resources/
