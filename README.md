@@ -23,6 +23,9 @@ Cerebro MCP is a FastMCP server with:
 - interactive chart and report generation
 - reasoning/tracing utilities
 - durable research project storage
+- parameterized custom query tools loaded from YAML config
+- AI dashboard tab scaffolding for metrics-dashboard
+- number verification tool that checks arithmetic and cross-references before reporting
 - MCP prompts and resources that guide clients, but do not run automatically on their own
 
 Important distinction:
@@ -74,6 +77,9 @@ Artifacts created by the server:
 | Quick exploration | answering a direct question, checking a metric, testing a hypothesis quickly | `discover_models`, `describe_table`, `execute_query`, `explain_query`, `get_sample_data` | markdown summary plus structured query payload |
 | Report workflow | visual analysis, KPI packs, weekly or monthly summaries, chart-heavy deliverables | `discover_models`, `describe_table`, `execute_query`, `generate_charts`, `generate_report` | interactive report artifact plus saved HTML |
 | Research workflow | multi-step investigations that need memory, evidence, review, and publication | `start_research_project`, phase tools, evidence tools, verification, peer review, `publish_research_report` | durable research project plus report artifact |
+| Custom query tools | common domain questions with known parameters | `get_validator_balance_history`, `get_token_transfers_for_address`, etc. | parameterized query result |
+| Dashboard scaffolding | creating new dashboard tabs from semantic metrics | `discover_dashboard_metrics`, `scaffold_dashboard_tab` | JS query files + YAML config |
+| Number verification | any computed numbers before reporting to user | `verify_numbers` | PASS/MISMATCH verdict |
 
 Use quick exploration when you do not need charts or durable state. Use reports when the deliverable is a visual artifact. Use research when the work spans multiple phases or needs explicit evidence and review.
 
@@ -165,6 +171,63 @@ Important behavior:
 - when semantic is enabled but artifacts are stale or unavailable, semantic tools stay registered but execution returns graceful unavailable guidance
 - `query_metrics` performs one deterministic server-side repair retry for known-safe ClickHouse errors
 - raw `execute_query` remains agent-guided rather than auto-healed by the server
+
+### 1c. Custom Parameterized Queries
+
+Use this when the user asks common domain questions with known parameters:
+
+- "What is validator 12345's balance history?"
+- "Show me GNO transfers for 0x..."
+- "What are the bridge flows for USDC?"
+
+These are pre-built, peer-reviewed SQL templates. The LLM passes typed parameters; ClickHouse handles binding natively. Zero SQL hallucination risk.
+
+Recommended sequence:
+
+1. Check available tools
+   - Call `list_custom_tools` to see available parameterized tools
+2. Call the matching tool directly
+   - e.g. `get_validator_balance_history(validator_index=12345, start_date="2025-01-01")`
+
+Example tools:
+
+```text
+get_validator_balance_history(validator_index=12345, start_date="2025-01-01")
+get_token_transfers_for_address(address="0x...", token_symbol="GNO")
+get_bridge_flows_by_token(token="USDC", start_date="2025-06-01")
+get_gpay_wallet_activity(wallet_address="0x...")
+```
+
+Custom tools use ClickHouse native parameter binding (`{param:Type}`) and are immune to SQL injection. When no custom tool exists, fall back to the raw SQL workflow.
+
+### 1d. Number Verification
+
+The `verify_numbers` tool catches computation errors before numbers reach the user. The agent must show its work — the formula it used and the component values — so the tool can independently verify the math.
+
+When to call: before reporting any computed number (sums, nets, percentages, totals).
+
+How it works:
+
+1. Agent computes numbers from query results
+2. Agent calls `verify_numbers` with structured claims:
+   - `label`: what the number represents
+   - `value`: the computed number
+   - `formula`: the arithmetic used (e.g., "received - sent")
+   - `components`: the named values (e.g., {"received": 9352.5, "sent": 9002.9})
+   - `check_query`: optional SQL against an independent model for cross-reference
+3. Tool verifies: does received - sent actually equal the claimed value?
+4. Tool runs check_query if provided and compares
+5. Returns PASS or MISMATCH with specific error details
+
+Example catching a real bug:
+
+The agent computed transfers and claimed net inflow = 1360 GNO:
+
+```text
+verify_numbers('[{"label": "net GNO inflow", "value": 1360.5, "formula": "received - sent", "components": {"received": 9352.5, "sent": 9002.9}}]')
+```
+
+Result: ARITHMETIC FAIL — 9352.5 - 9002.9 = 349.6, NOT 1360.5 (diff: 289.2%). The agent must correct to 349.6 before presenting to the user.
 
 ### 2. Report Workflow
 
@@ -435,6 +498,25 @@ Use it after:
 - peer review is recorded
 - peer review decision is not `rejected`
 
+### 4. Dashboard Tab Factory
+
+Use this when you need to create new dashboard tabs in the metrics-dashboard Vite application.
+
+Recommended sequence:
+
+1. Discover available metrics
+   - Call `discover_dashboard_metrics(module="bridges")` to browse api_* models
+2. Build a blueprint
+   - Construct a DashboardBlueprint JSON with tab config and query specs
+3. Preview changes
+   - Call `scaffold_dashboard_tab(blueprint_json)` with `dry_run: true`
+4. Apply changes
+   - Call again with `dry_run: false` to write JS query files and merge YAML config
+
+The scaffold tool generates JS query files in `metrics-dashboard/src/queries/` and merges tab config into the appropriate YAML dashboard file. It is idempotent: re-running updates existing files rather than creating duplicates.
+
+Important: The LLM never writes React/JSX directly. Only the scaffold tool generates UI code from structured JSON blueprints validated by Pydantic.
+
 ---
 
 ## Tool Guide
@@ -508,6 +590,32 @@ Use it after:
 | `explain_metric_query` | you want the plan without execution | returns planner mode, selected/rejected paths, warnings, and compiled SQL |
 | `query_metrics` | execute governed metrics with semantic provenance | uses the semantic planner, ClickHouse compiler, and one safe retry loop |
 | `get_clickhouse_query_rules` | raw SQL fallback help | only registered when a valid vendored ClickHouse bundle is present |
+
+### Custom Query Tools
+
+| Tool | Use when | Notes |
+|---|---|---|
+| `list_custom_tools` | discovering available parameterized tools | shows all tools from custom_tools.yaml |
+| *(dynamically registered)* | common domain questions with specific parameters | parameterized SQL, no raw query needed |
+
+Custom tools are defined in `custom_tools.yaml` and registered at startup when `CUSTOM_TOOLS_ENABLED=True`. Each tool maps to a pre-built SQL template with typed parameters.
+
+### Dashboard Builder Tools
+
+| Tool | Use when | Notes |
+|---|---|---|
+| `discover_dashboard_metrics` | browsing api_* models for dashboard building | returns chart type suggestions and column info |
+| `scaffold_dashboard_tab` | generating JS + YAML for a new dashboard tab | idempotent, supports dry_run mode |
+
+Dashboard tools are registered when `DASHBOARD_BUILDER_ENABLED=True` and `METRICS_DASHBOARD_PATH` is set.
+
+### Verification Tools
+
+| Tool | Use when | Notes |
+|---|---|---|
+| `verify_numbers` | before reporting any computed numbers to the user | checks arithmetic and optionally cross-references via check_query |
+
+The agent provides its computation logic (formula + component values) and the tool independently verifies the math. If a `check_query` is provided, it also cross-references against an independent data source.
 
 ---
 
@@ -880,6 +988,15 @@ All settings are environment variables or `.env` values.
 | `SEMANTIC_REFRESH_INTERVAL_SECONDS` | `300` | semantic snapshot refresh cadence |
 | `CLICKHOUSE_AGENT_SKILLS_PATH` | `src/cerebro_mcp/static/clickhouse_agent_skills` | vendored ClickHouse rules bundle root |
 
+### Dashboard builder and custom tools
+
+| Variable | Default | Description |
+|---|---|---|
+| `DASHBOARD_BUILDER_ENABLED` | `False` | enable dashboard scaffolding tools |
+| `METRICS_DASHBOARD_PATH` | empty | absolute path to metrics-dashboard repo root |
+| `CUSTOM_TOOLS_ENABLED` | `False` | enable YAML-defined parameterized query tools |
+| `CUSTOM_TOOLS_PATH` | empty | path to custom_tools.yaml config file |
+
 ### ClickHouse and SQL limits
 
 | Variable | Default | Description |
@@ -967,6 +1084,10 @@ The server enforces the following at the execution layer:
 - forced result capping even when a query already contains `LIMIT`
 - JSON-safe normalization for ClickHouse values
 - best-effort OS trust-store injection for TLS
+- custom tools use ClickHouse native parameter binding — immune to SQL injection
+- custom tool SQL templates are peer-reviewed and static; the LLM only provides parameter values
+- dashboard scaffold tool validates blueprints via Pydantic before any file writes
+- `verify_numbers` tool enforces arithmetic verification before numerical claims reach the user
 
 Recommended operational hardening:
 
@@ -1060,6 +1181,8 @@ cerebro-mcp/
 │   ├── semantic_graph.py
 │   ├── semantic_planner.py
 │   ├── semantic_sql_compiler.py
+│   ├── dashboard_models.py
+│   ├── custom_tool_models.py
 │   ├── research_models.py
 │   ├── research_store.py
 │   ├── research_workflow.py
@@ -1075,10 +1198,14 @@ cerebro-mcp/
 │   │   ├── session_state.py
 │   │   ├── reasoning.py
 │   │   ├── agents.py
+│   │   ├── dashboard_builder.py
+│   │   ├── custom_queries.py
+│   │   ├── cross_check.py
 │   │   └── semantic.py
 │   ├── prompts/
 │   ├── resources/
 │   └── static/
+├── custom_tools.yaml
 ├── scripts/
 ├── ui/
 ├── tests/
@@ -1183,6 +1310,7 @@ Semantic resources now prefer the generated semantic page bodies referenced by `
 | `python-dotenv` | `.env` loading |
 | `requests` | manifest/docs HTTP fetching |
 | `truststore` | OS trust-store TLS integration |
+| `PyYAML` | YAML parsing for dashboard configs and custom tool definitions |
 
 Frontend stack:
 

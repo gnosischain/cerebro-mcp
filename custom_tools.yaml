@@ -1,0 +1,236 @@
+tools:
+  # --- Consensus: Validator-specific ---
+
+  - name: get_validator_balance_history
+    description: >
+      Get daily balance history for a specific Gnosis Chain validator.
+      Returns balance in GNO (converted from Gwei), effective balance, and status.
+      Use this instead of raw SQL against stg_consensus__validators.
+    parameters:
+      validator_index:
+        type: UInt64
+        description: "Validator index number"
+      start_date:
+        type: String
+        description: "Start date (YYYY-MM-DD)"
+        default: "2024-01-01"
+    database: consensus
+    sql: |
+      SELECT
+        toDate(slot_timestamp) AS date,
+        validator_index,
+        argMax(balance, slot_timestamp) / 1e9 AS balance_gno,
+        argMax(effective_balance, slot_timestamp) / 1e9 AS effective_balance_gno,
+        argMax(status, slot_timestamp) AS status
+      FROM stg_consensus__validators
+      WHERE validator_index = {validator_index:UInt64}
+        AND slot_timestamp >= toDate({start_date:String})
+      GROUP BY date, validator_index
+      ORDER BY date DESC
+
+  - name: get_validator_withdrawals
+    description: >
+      Get withdrawal history for a specific validator on Gnosis Chain.
+      Returns amounts converted from wei to GNO. Useful for tracking
+      staking rewards and partial/full withdrawals.
+    parameters:
+      validator_index:
+        type: UInt64
+        description: "Validator index number"
+      start_date:
+        type: String
+        description: "Start date (YYYY-MM-DD)"
+        default: "2024-01-01"
+    database: consensus
+    sql: |
+      SELECT
+        toDate(slot_timestamp) AS date,
+        validator_index,
+        address AS withdrawal_address,
+        amount / 1e18 AS amount_gno,
+        withdrawal_index
+      FROM stg_consensus__withdrawals
+      WHERE validator_index = {validator_index:UInt64}
+        AND slot_timestamp >= toDate({start_date:String})
+      ORDER BY slot_timestamp DESC
+
+  # --- Execution: Address-specific ---
+
+  - name: get_token_transfers_for_address
+    description: >
+      Get daily ERC-20 token transfer summary for a specific address
+      (sent and received). Optionally filter by token. Returns volume
+      in token units and transfer counts.
+    parameters:
+      address:
+        type: String
+        description: "Wallet address (0x..., will be lowercased)"
+      start_date:
+        type: String
+        description: "Start date (YYYY-MM-DD)"
+        default: "2024-01-01"
+      token_symbol:
+        type: String
+        description: "Optional token symbol filter (e.g., GNO, USDC)"
+        default: ""
+    database: dbt
+    sql: |
+      WITH transfers AS (
+        SELECT
+          date,
+          symbol,
+          `from`,
+          `to`,
+          toFloat64(amount_raw) / 1e18 AS amount,
+          transfer_count,
+          CASE
+            WHEN `from` = lower({address:String}) THEN 'sent'
+            ELSE 'received'
+          END AS direction
+        FROM int_execution_transfers_whitelisted_daily
+        WHERE (`from` = lower({address:String})
+            OR `to` = lower({address:String}))
+          AND date >= toDate({start_date:String})
+          AND ({token_symbol:String} = '' OR symbol = {token_symbol:String})
+      ),
+      summary AS (
+        SELECT
+          symbol,
+          SUM(CASE WHEN direction = 'received' THEN amount ELSE 0 END) AS total_received,
+          SUM(CASE WHEN direction = 'sent' THEN amount ELSE 0 END) AS total_sent,
+          SUM(CASE WHEN direction = 'received' THEN amount ELSE 0 END)
+            - SUM(CASE WHEN direction = 'sent' THEN amount ELSE 0 END) AS net_inflow,
+          SUM(CASE WHEN direction = 'received' THEN transfer_count ELSE 0 END) AS received_count,
+          SUM(CASE WHEN direction = 'sent' THEN transfer_count ELSE 0 END) AS sent_count
+        FROM transfers
+        GROUP BY symbol
+      )
+      SELECT '--- SUMMARY ---' AS date, symbol,
+        '' AS `from`, '' AS `to`,
+        net_inflow AS amount, received_count + sent_count AS transfer_count,
+        concat('net_inflow=', toString(round(net_inflow, 4)),
+               ' | received=', toString(round(total_received, 4)),
+               ' | sent=', toString(round(total_sent, 4))) AS direction
+      FROM summary
+      UNION ALL
+      SELECT toString(date), symbol, `from`, `to`,
+        amount, transfer_count, direction
+      FROM transfers
+      ORDER BY date DESC
+      LIMIT 500
+
+  - name: get_gpay_wallet_activity
+    description: >
+      Get Gnosis Pay transaction history for a specific wallet address.
+      Returns classified transactions (Payment, Cashback, Fiat Top Up,
+      Crypto Deposit, etc.) with amounts in both native token and USD.
+    parameters:
+      wallet_address:
+        type: String
+        description: "Gnosis Pay wallet address (0x...)"
+      start_date:
+        type: String
+        description: "Start date (YYYY-MM-DD)"
+        default: "2024-01-01"
+    database: dbt
+    sql: |
+      SELECT
+        block_timestamp,
+        date,
+        action,
+        direction,
+        symbol,
+        counterparty,
+        amount,
+        amount_usd,
+        transaction_hash
+      FROM int_execution_gpay_activity
+      WHERE wallet_address = lower({wallet_address:String})
+        AND date >= toDate({start_date:String})
+      ORDER BY block_timestamp DESC
+      LIMIT 500
+
+  - name: get_liquidity_providers_by_token
+    description: >
+      Get unique liquidity provider counts for a token across time windows
+      (7D, 30D, 90D, All). Includes percent change vs prior period.
+      Uses bitmap deduplication internally.
+    parameters:
+      token:
+        type: String
+        description: "Token symbol (e.g., GNO, WXDAI, USDC)"
+    database: dbt
+    sql: |
+      SELECT
+        window,
+        token,
+        value AS unique_lp_count,
+        change_pct
+      FROM fct_execution_pools_lps_latest
+      WHERE token = {token:String}
+      ORDER BY
+        CASE window WHEN '7D' THEN 1 WHEN '30D' THEN 2 WHEN '90D' THEN 3 ELSE 4 END
+
+  # --- Bridges: Token-specific ---
+
+  - name: get_bridge_flows_by_token
+    description: >
+      Get daily bridge flow volume for a specific token across all bridges
+      on Gnosis Chain. Shows inbound/outbound by bridge with USD values.
+    parameters:
+      token:
+        type: String
+        description: "Token symbol (e.g., GNO, WXDAI, USDC)"
+      start_date:
+        type: String
+        description: "Start date (YYYY-MM-DD)"
+        default: "2024-01-01"
+      bridge:
+        type: String
+        description: "Optional bridge name filter (e.g., Arbitrary, xDAI)"
+        default: ""
+    database: dbt
+    sql: |
+      SELECT
+        date,
+        bridge,
+        source_chain,
+        dest_chain,
+        direction,
+        volume_token,
+        volume_usd,
+        txs
+      FROM int_bridges_flows_daily
+      WHERE token = {token:String}
+        AND date >= toDate({start_date:String})
+        AND ({bridge:String} = '' OR bridge = {bridge:String})
+      ORDER BY date DESC
+
+  # --- Staking: Deposit events ---
+
+  - name: get_deposit_events
+    description: >
+      Get GBC (Gnosis Beacon Chain) deposit events, optionally filtered
+      by withdrawal credentials. Useful for tracking staking deposits
+      by a specific entity.
+    parameters:
+      start_date:
+        type: String
+        description: "Start date (YYYY-MM-DD)"
+      withdrawal_credentials:
+        type: String
+        description: "Optional withdrawal credentials filter (0x...)"
+        default: ""
+    database: dbt
+    sql: |
+      SELECT
+        date,
+        withdrawal_credentials,
+        SUM(amount) AS total_amount,
+        COUNT(*) AS deposit_count
+      FROM int_GBCDeposit_deposists_daily
+      WHERE date >= toDate({start_date:String})
+        AND ({withdrawal_credentials:String} = ''
+             OR withdrawal_credentials = {withdrawal_credentials:String})
+      GROUP BY date, withdrawal_credentials
+      ORDER BY date DESC

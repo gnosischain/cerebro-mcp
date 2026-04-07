@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     )
     SEMANTIC_DOCS_INDEX_PATH: str = ""
     SEMANTIC_REFRESH_INTERVAL_SECONDS: int = 300
+
+    # Dashboard builder
+    DASHBOARD_BUILDER_ENABLED: bool = False
+    METRICS_DASHBOARD_PATH: str = ""
+
+    # Custom tools (MCP Toolbox pattern)
+    CUSTOM_TOOLS_ENABLED: bool = False
+    CUSTOM_TOOLS_PATH: str = ""
     CLICKHOUSE_AGENT_SKILLS_PATH: str = "src/cerebro_mcp/static/clickhouse_agent_skills"
 
     # Safety limits

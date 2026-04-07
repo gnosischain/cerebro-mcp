@@ -43,6 +43,9 @@ from cerebro_mcp.tools.reasoning import (
     register_reasoning_tools,
 )
 from cerebro_mcp.tools.agents import register_agent_tools
+from cerebro_mcp.tools.dashboard_builder import register_dashboard_tools
+from cerebro_mcp.tools.custom_queries import register_custom_query_tools
+from cerebro_mcp.tools.cross_check import register_cross_check_tools
 
 
 runtime_state.ssl_trust_injected = init_ssl_trust()
@@ -80,6 +83,34 @@ mcp = FastMCP(
         "heatmap/sankey type (dimensional breakdown), (e) at least 1 scatter/heatmap chart "
         "OR correlation query (relational analysis).\n"
         "- For quick ad-hoc plots, use `quick_chart` instead — no gates required.\n\n"
+
+        "CUSTOM TOOL ROUTING:\n"
+        "- Before writing raw SQL via `execute_query`, check if a custom parameterized tool "
+        "exists for the user's request (e.g., `get_validator_balance_history`, "
+        "`get_token_transfers_for_address`, `get_bridge_flows_by_token`). "
+        "Always prefer custom tools over raw SQL for common domain queries.\n"
+        "- Use `list_custom_tools` to see available parameterized tools.\n"
+        "- Raw `execute_query` is reserved for exploratory analysis, complex joins, and "
+        "novel research questions where no custom tool exists.\n\n"
+
+        "QUERY EFFICIENCY:\n"
+        "- Prefer pre-aggregated dbt models (int_*, fct_*, api_*) over raw source tables. "
+        "Raw tables (execution.logs, execution.transactions, consensus.attestations) have "
+        "billions of rows — only query them as a last resort and always with tight filters "
+        "(date range, specific address, LIMIT).\n"
+        "- For simple factual lookups (address transfers, balances, validator info), "
+        "skip the full discover/search/describe ceremony. Go directly to the custom tool "
+        "or a single execute_query against the known dbt model.\n\n"
+
+        "NUMBER VERIFICATION (MANDATORY):\n"
+        "- Before reporting computed numbers (sums, nets, percentages, totals), "
+        "call `verify_numbers` with your claims, formulas, and component values.\n"
+        "- Provide the formula you used (e.g., 'received - sent') and the component "
+        "values so the tool can independently verify your arithmetic.\n"
+        "- Include a check_query when possible to cross-reference against an "
+        "independent dbt model (e.g., balance model to verify net transfers).\n"
+        "- If any claim fails: DO NOT report it. Fix the computation first.\n"
+        "- When reporting verified numbers, note: 'verified via verify_numbers'.\n\n"
 
         "OUTPUT FORMAT RULES:\n"
         "You have two output modes. ALWAYS use the correct mode:\n\n"
@@ -221,6 +252,9 @@ register_research_tools(mcp, ch, research_store)
 register_semantic_tools(mcp, ch, research_store)
 register_reasoning_tools(mcp)
 register_agent_tools(mcp)
+register_dashboard_tools(mcp)
+register_custom_query_tools(mcp, ch)
+register_cross_check_tools(mcp, ch)
 install_auto_tool_tracing(mcp)
 
 

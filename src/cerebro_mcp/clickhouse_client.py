@@ -119,15 +119,16 @@ class ClickHouseManager:
         table = client.query_arrow(sql)
         return self._rows_from_arrow(table)
 
-    def _fetch_rows_native(self, client, sql: str) -> tuple[list[str], list[list[Any]]]:
-        result = client.query(sql)
+    def _fetch_rows_native(self, client, sql: str, parameters: dict | None = None) -> tuple[list[str], list[list[Any]]]:
+        result = client.query(sql, parameters=parameters)
         return list(result.column_names), [list(row) for row in result.result_rows]
 
     def _fetch_rows(
-        self, client, sql: str, fetch_mode: Literal["auto", "rows", "arrow"]
+        self, client, sql: str, fetch_mode: Literal["auto", "rows", "arrow"],
+        parameters: dict | None = None,
     ) -> tuple[list[str], list[list[Any]], Literal["rows", "arrow"], list[str]]:
         warnings: list[str] = []
-        if fetch_mode in {"auto", "arrow"}:
+        if fetch_mode in {"auto", "arrow"} and parameters is None:
             try:
                 columns, rows = self._fetch_rows_arrow(client, sql)
                 return columns, rows, "arrow", warnings
@@ -135,7 +136,7 @@ class ClickHouseManager:
                 if fetch_mode == "arrow":
                     raise
                 warnings.append("arrow_fallback_to_row_fetch")
-        columns, rows = self._fetch_rows_native(client, sql)
+        columns, rows = self._fetch_rows_native(client, sql, parameters=parameters)
         return columns, rows, "rows", warnings
 
     def run_query(
@@ -145,6 +146,7 @@ class ClickHouseManager:
         requested_max_rows: int = 100,
         audience: Literal["tool", "internal"] = "tool",
         fetch_mode: Literal["auto", "rows", "arrow"] = "auto",
+        parameters: dict | None = None,
     ) -> ExecutedQuery:
         """Execute a validated read-only query through one shared pipeline."""
         self._validate_database(database)
@@ -178,7 +180,7 @@ class ClickHouseManager:
         start = time.time()
         try:
             columns, rows, actual_fetch_mode, fetch_warnings = self._fetch_rows(
-                client, executed_sql, fetch_mode
+                client, executed_sql, fetch_mode, parameters=parameters
             )
         except Exception:
             elapsed = time.time() - start
