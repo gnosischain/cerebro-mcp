@@ -12,9 +12,8 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 REQUEST_DURATION_BUCKETS = (
@@ -352,13 +351,13 @@ def log_event(
     logger.log(level, str(event), extra={"event": str(event), **safe_fields})
 
 
-def normalize_http_path(request: Request) -> str:
-    route = request.scope.get("route")
+def normalize_http_path(scope: Scope) -> str:
+    route = scope.get("route")
     route_path = getattr(route, "path", None)
     if route_path:
         return str(route_path)
 
-    path = request.url.path
+    path = scope.get("path", "") or ""
     if path.startswith("/messages/"):
         return "/messages/*"
     if path.startswith("/reports/"):
@@ -622,20 +621,43 @@ def metrics_response() -> Response:
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-class PrometheusMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = normalize_http_path(request)
-        method = request.method
+class PrometheusMiddleware:
+    """Pure ASGI middleware — compatible with SSE / streaming responses.
+
+    Do NOT subclass ``starlette.middleware.base.BaseHTTPMiddleware`` here:
+    its ``body_stream`` buffers the downstream response into an async
+    queue and asserts a strict ``http.response.start`` → ``http.response.body``
+    sequence, which breaks FastMCP's SSE transport (server-sent events
+    and the POST-to-``/messages/`` session channel).
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "GET")
+        path = normalize_http_path(scope)
         started = time.perf_counter()
         status = "500"
         cerebro_http_requests_in_progress.labels(
             method=method,
             path=path,
         ).inc()
+
+        async def _send(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = str(message["status"])
+            await send(message)
+
         try:
-            response = await call_next(request)
-            status = str(response.status_code)
-            return response
+            await self.app(scope, receive, _send)
         finally:
             elapsed_seconds = time.perf_counter() - started
             cerebro_http_requests_in_progress.labels(

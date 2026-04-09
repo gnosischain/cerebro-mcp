@@ -3,9 +3,9 @@ import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from cerebro_mcp import runtime_state
 from cerebro_mcp.bootstrap import (
@@ -373,22 +373,50 @@ def main():
         mcp.run(transport="stdio")
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, auth_token: str):
-        super().__init__(app)
-        self._auth_token = auth_token
+class BearerAuthMiddleware:
+    """Pure ASGI middleware — compatible with SSE / streaming responses.
 
-    async def dispatch(self, request, call_next):
+    Do NOT subclass ``starlette.middleware.base.BaseHTTPMiddleware`` here:
+    its ``body_stream`` buffers the downstream response into an async
+    queue and asserts a strict ``http.response.start`` → ``http.response.body``
+    sequence, which breaks FastMCP's SSE transport (the long-poll GET
+    ``/sse`` stream and the POST-to-``/messages/`` channel).
+    """
+
+    def __init__(self, app: ASGIApp, auth_token: str) -> None:
+        self.app = app
+        self._expected = f"Bearer {auth_token}".encode("latin-1")
+
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "") or ""
         if (
-            request.url.path == "/health"
-            or request.url.path == "/metrics"
-            or request.url.path.startswith("/reports/")
+            path == "/health"
+            or path == "/metrics"
+            or path.startswith("/reports/")
         ):
-            return await call_next(request)
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header != f"Bearer {self._auth_token}":
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
+            await self.app(scope, receive, send)
+            return
+
+        header_value = b""
+        for name, value in scope.get("headers", []):
+            if name == b"authorization":
+                header_value = value
+                break
+
+        if header_value != self._expected:
+            unauthorized = JSONResponse(
+                {"error": "unauthorized"}, status_code=401
+            )
+            await unauthorized(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 def build_sse_app(auth_token: str | None = None):
