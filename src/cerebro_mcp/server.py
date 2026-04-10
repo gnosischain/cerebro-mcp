@@ -22,6 +22,7 @@ from cerebro_mcp.observability import (
     PrometheusMiddleware,
     log_event,
     metrics_response,
+    observe_report_token_auth,
     setup_logging,
 )
 from cerebro_mcp.research_store import ResearchStore
@@ -340,15 +341,35 @@ async def download_report(request: Request) -> JSONResponse | HTMLResponse:
     """Serve a report HTML file by ID (full UUID or 8-char prefix)."""
     from cerebro_mcp.tools.visualization import _resolve_report
 
+    report_id = request.path_params["report_id"]
+
     # Auth: accept Bearer header or ?token= query param
     auth_token = os.environ.get("MCP_AUTH_TOKEN")
     if auth_token:
         auth_header = request.headers.get("Authorization", "")
         query_token = request.query_params.get("token", "")
-        if auth_header != f"Bearer {auth_token}" and query_token != auth_token:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    report_id = request.path_params["report_id"]
+        if auth_header == f"Bearer {auth_token}":
+            auth_method = "bearer"
+            auth_success = True
+        elif query_token == auth_token:
+            auth_method = "query_token"
+            auth_success = True
+        else:
+            auth_method = "none"
+            auth_success = False
+
+        log_event(
+            logger,
+            "report_token_auth",
+            report_id=report_id,
+            auth_method=auth_method,
+            success=auth_success,
+        )
+        observe_report_token_auth(status="success" if auth_success else "denied")
+
+        if not auth_success:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
         html, resolved_id, _ = _resolve_report(report_id)

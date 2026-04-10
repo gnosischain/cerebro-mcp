@@ -11,6 +11,8 @@ from collections.abc import Callable
 
 import requests
 
+from cerebro_mcp.observability import log_event
+
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,16 @@ class ArtifactLoader:
             self._last_load_time = time.time()
             self._last_refresh_error = None
             self._loaded = True
+            log_event(
+                logger,
+                "artifact_reload",
+                label=self._label,
+                source="local" if not payload.source.startswith("http") else "remote",
+                content_hash=payload.content_hash,
+                etag=payload.etag or "",
+                last_modified=payload.last_modified or "",
+                changed=True,
+            )
         return payload
 
     def reload_if_changed(self) -> tuple[bool, str | None]:
@@ -95,6 +107,16 @@ class ArtifactLoader:
         self._last_load_time = time.time()
         self._last_refresh_error = None
         self._loaded = True
+        log_event(
+            logger,
+            "artifact_reload",
+            label=self._label,
+            source="local" if not payload.source.startswith("http") else "remote",
+            content_hash=payload.content_hash,
+            etag=payload.etag or "",
+            last_modified=payload.last_modified or "",
+            changed=True,
+        )
         return True, None
 
     def _candidate_paths(self) -> list[str]:

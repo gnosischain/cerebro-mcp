@@ -272,6 +272,35 @@ semantic_semantic_enabled = Gauge(
     ("state",),
 )
 
+# ---------------------------------------------------------------------------
+# Security audit counters
+# ---------------------------------------------------------------------------
+
+cerebro_security_high_risk_tool_calls_total = Counter(
+    "cerebro_security_high_risk_tool_calls_total",
+    "Tool calls classified above read_only risk",
+    ("tool_name", "risk_class", "transport"),
+)
+
+cerebro_security_suspicious_calls_total = Counter(
+    "cerebro_security_suspicious_calls_total",
+    "Tool calls flagged as suspicious",
+    ("tool_name", "flag_type"),
+)
+
+cerebro_security_app_only_calls_total = Counter(
+    "cerebro_security_app_only_calls_total",
+    "Calls to app-only tools (hidden from model)",
+    ("tool_name", "transport"),
+)
+
+cerebro_report_token_auth_total = Counter(
+    "cerebro_report_token_auth_total",
+    "Report endpoint authentications by method",
+    ("status",),
+)
+
+
 SEMANTIC_ENABLED_STATES = (
     "disabled",
     "unavailable",
@@ -615,6 +644,39 @@ def set_semantic_enabled(state: str) -> None:
     for known_state in SEMANTIC_ENABLED_STATES:
         semantic_semantic_enabled.labels(state=known_state).set(0)
     semantic_semantic_enabled.labels(state=state).set(1)
+
+
+# ---------------------------------------------------------------------------
+# Security audit observe helpers
+# ---------------------------------------------------------------------------
+
+
+def observe_security_high_risk_call(
+    *, tool_name: str, risk_class: str, transport: str,
+) -> None:
+    cerebro_security_high_risk_tool_calls_total.labels(
+        tool_name=tool_name, risk_class=risk_class, transport=transport,
+    ).inc()
+
+
+def observe_security_suspicious_call(
+    *, tool_name: str, flag_type: str,
+) -> None:
+    cerebro_security_suspicious_calls_total.labels(
+        tool_name=tool_name, flag_type=flag_type,
+    ).inc()
+
+
+def observe_security_app_only_call(
+    *, tool_name: str, transport: str,
+) -> None:
+    cerebro_security_app_only_calls_total.labels(
+        tool_name=tool_name, transport=transport,
+    ).inc()
+
+
+def observe_report_token_auth(*, status: str) -> None:
+    cerebro_report_token_auth_total.labels(status=status).inc()
 
 
 def metrics_response() -> Response:

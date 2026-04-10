@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     RESEARCH_PAGE_SIZE_MAX: int = 100
     ALLOW_INSECURE_REMOTE_TRANSPORT: bool = False
 
+    # Security / audit
+    MCP_SECURITY_POLICY_MODE: str = "log_only"  # future: "warn", "enforce"
+    MCP_SECURITY_LOG_DIR: str = ".cerebro/security_audit"
+    MCP_EXPECTED_MANIFEST_SHA256: str = ""  # optional pin, empty = disabled
+
     # Manifest refresh
     MANIFEST_REFRESH_INTERVAL_SECONDS: int = 300
 

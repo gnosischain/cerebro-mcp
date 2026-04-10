@@ -27,6 +27,8 @@ Cerebro MCP is a FastMCP server with:
 - AI dashboard tab scaffolding for metrics-dashboard
 - number verification tool that checks arithmetic and cross-references before reporting
 - MCP prompts and resources that guide clients, but do not run automatically on their own
+- security audit layer with tool risk classification, suspicious-call detection, and append-only JSONL logging
+- mini-app infrastructure for interactive in-chat views (Metric Lab, Token Explorer)
 
 Important distinction:
 
@@ -58,6 +60,11 @@ Core runtime components:
 - `tools/dbt.py`: model search and lineage/context lookup
 - `tools/visualization.py`: chart registry, report rendering, report persistence
 - `tools/research.py`: durable research projects, evidence, verification, peer review, publication
+- `tools/mini_apps.py`: mini-app view infrastructure, app-only tool visibility filter
+- `tools/metric_lab.py`: interactive Metric Lab views
+- `tools/token_explorer.py`: interactive Token Explorer views
+- `security.py`: tool risk classification, suspicious-call flagging, append-only JSONL security audit log
+- `observability.py`: Prometheus metrics, structured JSON logging, security counters
 
 Artifacts created by the server:
 
@@ -66,6 +73,7 @@ Artifacts created by the server:
 - async query result pages
 - research projects and evidence snapshots
 - reasoning traces
+- security audit logs (JSONL, daily rotation)
 
 ---
 
@@ -1227,6 +1235,14 @@ All settings are environment variables or `.env` values.
 | `FASTMCP_HOST` | `0.0.0.0` | SSE bind host |
 | `FASTMCP_PORT` | `8000` | SSE bind port |
 
+### Security and audit
+
+| Variable | Default | Description |
+|---|---|---|
+| `MCP_SECURITY_POLICY_MODE` | `log_only` | security policy mode; future: `warn`, `enforce` |
+| `MCP_SECURITY_LOG_DIR` | `.cerebro/security_audit` | directory for daily JSONL security audit logs |
+| `MCP_EXPECTED_MANIFEST_SHA256` | empty | optional manifest pin; empty disables hash verification |
+
 ### Chart and report gates
 
 | Variable | Default | Description |
@@ -1241,7 +1257,33 @@ All settings are environment variables or `.env` values.
 
 Use `system_status()` to inspect the live resolved configuration, cache sizes, transport mode, and ClickHouse connectivity.
 
-Semantic observability is also exposed through Prometheus counters, histograms, and structured reasoning traces. Low-cardinality metrics track tool calls, planner failures, retries, fallbacks, docs reads, snapshot reloads, and research semantic evidence by agent role and planner mode. High-cardinality details such as resolved metrics, chosen paths, SQL hash, fallback reason, and ClickHouse error text remain in logs and reasoning traces rather than metric labels.
+### Observability
+
+Cerebro MCP exposes comprehensive Prometheus metrics and structured JSON logs. A ready-to-import Grafana dashboard is provided at `grafana/cerebro-mcp-observability.json`.
+
+The dashboard covers 9 sections:
+
+1. **Overview** — replicas, pods, restarts, images
+2. **HTTP / SSE** — request rate, p95 latency, 4xx/5xx errors
+3. **MCP Internals** — MCP request/tool call rates, latency, top failing tools
+4. **Security Audit** — suspicious calls, high-risk tool calls, app-only calls, report auth denials
+5. **Tool Usage Details** — top tools by volume, call distribution, error rates, p99 latency
+6. **Semantic Layer** — semantic state, registry stats, query attempts, route decisions, planner failures
+7. **ClickHouse** — query rate, latency, errors, rows returned
+8. **Pod Resources** — CPU, memory, network, throttling, restarts
+9. **Logs** — structured logs, tool calls, security audit events, artifact reloads
+
+Prometheus metrics include:
+
+- `cerebro_http_*`, `cerebro_mcp_*` — HTTP and MCP protocol metrics
+- `cerebro_clickhouse_*` — ClickHouse query metrics
+- `cerebro_security_*` — security audit counters (high-risk calls, suspicious flags, app-only calls)
+- `cerebro_report_token_auth_total` — report endpoint auth events
+- `semantic_*` — semantic layer metrics (query attempts, planner failures, repairs, fallbacks, snapshot age)
+
+Low-cardinality metrics track tool calls, planner failures, retries, fallbacks, and security events by tool name, risk class, and transport. High-cardinality details (resolved metrics, SQL hash, ClickHouse error text) remain in structured logs and reasoning traces.
+
+See [docs/observability.md](docs/observability.md) for the full metric catalog, Grafana setup, and structured log event reference.
 
 ---
 
@@ -1261,12 +1303,19 @@ The server enforces the following at the execution layer:
 - custom tool SQL templates are peer-reviewed and static; the LLM only provides parameter values
 - dashboard scaffold tool validates blueprints via Pydantic before any file writes
 - `verify_numbers` tool enforces arithmetic verification before numerical claims reach the user
+- tool risk classification: every tool is assigned a risk class (`read_only`, `server_state_write`, `workspace_write`, `subprocess`, `app_only`)
+- suspicious-call detection: flags app-only tool invocations, workspace writes over SSE, and unknown tools
+- append-only security audit log: JSONL file per day with redacted arguments, SHA-256 hashes, risk class, and suspicious flags
+- security layer is observation-only (`log_only` mode) — never blocks tool execution
+
+See [docs/security.md](docs/security.md) for the full security architecture, risk registry, and audit event schema.
 
 Recommended operational hardening:
 
 - use a least-privilege ClickHouse user
 - keep `CLICKHOUSE_VERIFY=True`
 - require `MCP_AUTH_TOKEN` on remote SSE
+- monitor `cerebro_security_suspicious_calls_total` in Grafana for anomalous tool invocations
 
 Saved-query reminder:
 
@@ -1394,11 +1443,22 @@ cerebro-mcp/
 │   │   ├── custom_queries.py
 │   │   ├── cross_check.py
 │   │   ├── storyteller.py
-│   │   └── semantic.py
+│   │   ├── semantic.py
+│   │   ├── mini_apps.py
+│   │   ├── metric_lab.py
+│   │   └── token_explorer.py
+│   ├── security.py
+│   ├── mini_app_cache.py
+│   ├── mini_app_models.py
 │   ├── prompts/
 │   ├── resources/
 │   └── static/
 ├── custom_tools.yaml
+├── docs/
+│   ├── security.md
+│   └── observability.md
+├── grafana/
+│   └── cerebro-mcp-observability.json
 ├── scripts/
 ├── ui/
 ├── tests/

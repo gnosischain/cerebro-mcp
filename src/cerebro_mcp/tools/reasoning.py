@@ -635,6 +635,19 @@ def _install_tool_manager_tracing(mcp) -> None:
                 duration_ms=elapsed_ms,
                 success=False,
             )
+            # Security audit (fire-and-forget, never blocks tool execution)
+            try:
+                from cerebro_mcp.security import assess_tool_call as _assess
+                _assess(
+                    tool_name=name,
+                    arguments=arguments,
+                    result=None,
+                    success=False,
+                    duration_ms=elapsed_ms,
+                    error=str(exc),
+                )
+            except Exception:
+                logger.debug("Security assessment failed for %s", name, exc_info=True)
             raise
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -659,6 +672,19 @@ def _install_tool_manager_tracing(mcp) -> None:
             duration_ms=elapsed_ms,
             success=extracted_error is None,
         )
+        # Security audit (fire-and-forget, never blocks tool execution)
+        try:
+            from cerebro_mcp.security import assess_tool_call as _assess
+            _assess(
+                tool_name=name,
+                arguments=arguments,
+                result=result,
+                success=extracted_error is None,
+                duration_ms=elapsed_ms,
+                error=extracted_error,
+            )
+        except Exception:
+            logger.debug("Security assessment failed for %s", name, exc_info=True)
         return result
 
     setattr(
