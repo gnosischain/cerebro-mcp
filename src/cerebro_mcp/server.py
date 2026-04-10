@@ -47,6 +47,9 @@ from cerebro_mcp.tools.dashboard_builder import register_dashboard_tools
 from cerebro_mcp.tools.custom_queries import register_custom_query_tools
 from cerebro_mcp.tools.cross_check import register_cross_check_tools
 from cerebro_mcp.tools.storyteller import register_storyteller_tools
+from cerebro_mcp.tools.mini_apps import register_mini_app_infra
+from cerebro_mcp.tools.token_explorer import register_token_explorer_tools
+from cerebro_mcp.tools.metric_lab import register_metric_lab_tools
 
 
 runtime_state.ssl_trust_injected = init_ssl_trust()
@@ -292,6 +295,13 @@ register_dashboard_tools(mcp)
 register_custom_query_tools(mcp, ch)
 register_cross_check_tools(mcp, ch)
 register_storyteller_tools(mcp, ch)
+
+# Mini-app platform: install the visibility filter first so subsequent
+# app registrations can mark hydration tools as app-only.
+register_mini_app_infra(mcp, ch)
+register_token_explorer_tools(mcp, ch)
+register_metric_lab_tools(mcp, ch)
+
 install_auto_tool_tracing(mcp)
 
 

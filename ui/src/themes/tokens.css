@@ -20,6 +20,9 @@
   --accent-softer: rgba(99, 102, 241, 0.1);
   --table-header: #151c24;
   --table-stripe: rgba(255, 255, 255, 0.02);
+  --surface-1: #151c24;
+  --surface-2: #1a2230;
+  --surface-3: #212b3a;
   --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.12);
   --shadow-base: 0 2px 6px -1px rgba(0, 0, 0, 0.15);
   --radius-sm: 4px;
@@ -48,6 +51,9 @@
   --accent-softer: rgba(79, 70, 229, 0.06);
   --table-header: #f5f4f0;
   --table-stripe: rgba(0, 0, 0, 0.02);
+  --surface-1: #fbfaf7;
+  --surface-2: #f0ede6;
+  --surface-3: #e5e2db;
   --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.04);
   --shadow-base: 0 2px 6px -1px rgba(15, 23, 42, 0.06);
 }
