@@ -123,3 +123,30 @@ def enforce_result_limit(sql: str, max_rows: int) -> str:
 def ensure_limit(sql: str, max_rows: int) -> str:
     """Backward-compatible alias for result-cap enforcement."""
     return enforce_result_limit(sql, max_rows)
+
+
+_TABLE_REF_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+(?:(\w+)\.)?(\w+)",
+    re.IGNORECASE,
+)
+
+
+def extract_table_names(sql: str) -> list[str]:
+    """Best-effort extraction of table names from a read-only SQL query.
+
+    Returns deduplicated names in encounter order.
+    Covers FROM and JOIN clauses, which is sufficient for the read-only
+    SELECT queries allowed through ``validate_query()``.
+    """
+    cleaned = _strip_comments_and_strings(sql)
+    seen: set[str] = set()
+    tables: list[str] = []
+    for match in _TABLE_REF_RE.finditer(cleaned):
+        db_part, table = match.group(1), match.group(2)
+        if table.startswith("_cerebro"):
+            continue
+        qualified = f"{db_part}.{table}" if db_part else table
+        if qualified not in seen:
+            seen.add(qualified)
+            tables.append(qualified)
+    return tables

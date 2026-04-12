@@ -725,26 +725,67 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 ### dbt Models
 | Tool | Description |
 |------|-------------|
+| `discover_models` | Search + expand top model details in one call (preferred first step) |
 | `search_models` | Search ~400 dbt models by name, description, tags, or module |
 | `get_model_details` | Full model info: SQL, columns, lineage, dependencies |
+| `search_models_by_address` | Find dbt models related to a contract address |
+
+### Semantic Analytics
+| Tool | Description |
+|------|-------------|
+| `preflight_analytics_request` | Route an analytics question to the best workflow |
+| `discover_metrics` | Search governed metrics by name, synonym, or module |
+| `get_metric_details` | Metric lineage, allowed dimensions, grains, docs |
+| `explain_metric_query` | Show the planner's plan and compiled SQL without executing |
+| `query_metrics` | Execute governed metrics with semantic provenance and auto-repair |
+| `quick_metric_chart` | One-off semantic chart without writing SQL |
+| `generate_metric_charts` | Batch semantic charts for reports |
+| `get_clickhouse_query_rules` | ClickHouse best-practice rules for raw SQL fallback |
 
 ### Visualization & Reports
 | Tool | Description |
 |------|-------------|
-| `generate_chart` | Create ECharts visualization (line, area, bar, pie, numberDisplay) |
-| `generate_report` | Assemble interactive report with charts |
+| `quick_chart` | One-off chart, bypasses workflow gates |
+| `generate_chart` | Single gated chart |
+| `generate_charts` | Batch chart creation for reports (preferred) |
+| `generate_report` | Assemble interactive report with chart placeholders |
 | `list_charts` | Show registered charts in current session |
 | `open_report` | Reopen a saved report by ID |
 | `list_reports` | List all saved reports on disk |
+| `export_report` | Get file path or download URL for a report |
+
+### Mini-App Interactive Views
+| Tool | Description |
+|------|-------------|
+| `open_metric_lab` | Open interactive metric explorer with catalog picker |
+| `open_metric_lab_from_sql` | Load a custom SQL dataset into Metric Lab |
+| `open_metric_lab_from_metrics` | Load a semantic metric into Metric Lab |
+| `load_metric_lab_metric` | Swap metrics in an open Metric Lab view |
+| `update_metric_lab_chart` | Change chart type, axes, or aggregation |
+| `open_token_explorer` | Open interactive token explorer with bridge flows and prices |
+| `load_token_explorer_token` | Swap tokens in an open Token Explorer view |
+| `update_token_explorer_focus` | Filter by metric, bridge, or direction |
+
+### Custom Query Tools
+| Tool | Description |
+|------|-------------|
+| `list_custom_tools` | Show available parameterized query tools |
+| `get_bridge_flows_by_token` | Bridge inflow/outflow by token and date range |
+| `get_deposit_events` | Beacon chain deposit events |
+| `get_gpay_wallet_activity` | Gnosis Pay wallet transaction history |
+| `get_liquidity_providers_by_token` | LP positions for a token |
+| `get_token_transfers_for_address` | ERC-20 transfers for an address |
+| `get_validator_balance_history` | Validator balance over time |
+| `get_validator_withdrawals` | Validator withdrawal events |
 
 ### Metadata & Reference
 | Tool | Description |
 |------|-------------|
 | `list_databases` | All ClickHouse databases with descriptions |
-| `system_status` | Server health: ClickHouse, manifest, config |
+| `system_status` | Server health: ClickHouse, manifest, semantic, config |
+| `get_help` | This capabilities overview |
 | `resolve_address` | Look up address labels (5.3M entries from Dune) |
 | `get_token_metadata` | Token info: address, decimals, price data |
-| `search_models_by_address` | Find dbt models related to a contract |
 | `search_docs` | Search platform documentation and references |
 | `get_doc_chunk` | Read full text of a documentation page |
 | `get_platform_constants` | Chain params, event signatures, contracts, partition keys |
@@ -756,12 +797,17 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 | `list_saved_queries` | Show all saved queries |
 | `run_saved_query` | Execute a saved query by name |
 
+### Verification
+| Tool | Description |
+|------|-------------|
+| `verify_numbers` | Check arithmetic and cross-reference computed numbers before reporting |
+
 ### Research Workflow
 | Tool | Description |
 |------|-------------|
 | `start_research_project` | Create a durable phase-driven research project |
 | `get_research_project` | Compact project summary with counts and current phase |
-| `plan_research_phase` / `execute_research_phase` | Move through mapping, hypothesis, and execution |
+| `plan_research_phase` / `execute_research_phase` | Move through mapping, hypothesis, execution, verification, publication |
 | `attach_research_evidence` | Link query/chart/report/schema artifacts to a project |
 | `capture_schema_snapshot` | Persist and attach a schema snapshot for mapping |
 | `record_research_memory` | Store reusable domain caveats and facts |
@@ -771,6 +817,27 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 | `prepare_peer_review` / `record_peer_review` | Client-orchestrated adversarial review workflow |
 | `publish_research_report` | Publish the final reviewed research report |
 
+### Storyteller Workflow
+| Tool | Description |
+|------|-------------|
+| `storyteller_start_session` | Start a gated narrative pipeline for decision-oriented artifacts |
+| `storyteller_status` | Check current phase and gate status |
+| `storyteller_record_context_brief` | Record audience, required action, mechanism, tone (Gate 1) |
+| `storyteller_record_big_idea` | One declarative sentence with stakes (Gate 2) |
+| `storyteller_record_storyboard` | Scene sequence: setup, tension, evidence, resolution (Gate 3) |
+| `storyteller_record_visual_spec` | Chart design rationale per scene (Gate 4) |
+| `storyteller_record_final_story` | Assembled markdown with chart placeholders (Gate 5) |
+| `storyteller_run_clarity_checks` | Adversarial review — loops back on failure (Gate 6) |
+| `storyteller_record_accessibility_pass` | Colorblind, contrast, language check (Gate 7) |
+| `storyteller_generate_story_report` | Render final story through the report pipeline |
+| `storyteller_end_session` | Abandon and clear session |
+
+### Dashboard Builder
+| Tool | Description |
+|------|-------------|
+| `discover_dashboard_metrics` | Browse api_* models for dashboard building |
+| `scaffold_dashboard_tab` | Generate JS query files + YAML config for a new dashboard tab |
+
 ### Reasoning & Tracing
 | Tool | Description |
 |------|-------------|
@@ -779,10 +846,25 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 | `get_reasoning_log` | Retrieve trace for a session |
 | `get_performance_stats` | Aggregate metrics across sessions |
 
-### Agents
+### Agent Personas
 | Tool | Description |
 |------|-------------|
-| `get_agent_persona` | Load operational rules for a persona: analytics_reporter (Data Science Lead), ui_designer, reality_checker |
+| `get_agent_persona` | Load operational rules for a persona |
+
+Available personas:
+
+| Persona | Role |
+|---------|------|
+| `analytics_reporter` | Data Science Lead — analysis and EDA discipline |
+| `ui_designer` | Chart selection and report composition |
+| `reality_checker` | QA and adversarial review |
+| `storyteller_orchestrator` | Storyteller mode selection and gate enforcement |
+| `storyteller_context` | Audience, required action, mechanism, tone |
+| `storyteller_narrative` | Big idea and storyboard construction |
+| `storyteller_visual_designer` | Relationship-first chart choice, focal-point design |
+| `storyteller_writer` | Action titles, annotations, medium adaptation |
+| `storyteller_critic` | Adversarial clarity review |
+| `storyteller_accessibility` | Colorblind palette, contrast, language, tone match |
 
 ## Prompts
 
@@ -795,8 +877,11 @@ Guided workflows you can select in Claude Desktop / VS Code:
 | `explore_protocol(protocol)` | Explore a DeFi protocol's on-chain data |
 | `write_query(question)` | Step-by-step SQL query writing |
 | `report(period, topics, focus)` | Generate interactive reports with charts |
-| `adopt_persona_*` | Load agent personas for multi-phase workflows |
-| `conduct_research_peer_review(packet_json)` | Peer-review prompt with strict JSON schema injection |
+| `adopt_persona_analytics_reporter` | Load analytics reporter persona |
+| `adopt_persona_gnosis_research_analyst` | Load semantic-first research persona |
+| `adopt_persona_ui_designer` | Load UI/chart design persona |
+| `adopt_persona_reality_checker` | Load QA review persona |
+| `conduct_research_peer_review(packet_json)` | Peer-review prompt with strict JSON schema |
 
 ## Resources
 
@@ -810,15 +895,24 @@ Reference materials available via MCP resource protocol:
 | `gnosis://address-directory` | Token addresses, DeFi protocols |
 | `gnosis://metric-definitions` | Standard metric formulas (DAU, gas, TVL) |
 | `gnosis://query-cookbook` | 12 optimized SQL templates with examples |
+| `gnosis://semantic-model/{name}` | Semantic model details and lineage |
+| `gnosis://semantic-metric/{name}` | Semantic metric definition and dimensions |
+| `gnosis://semantic-relationship/{name}` | Semantic relationship between models |
+| `gnosis://semantic-module/{module}` | All models and metrics in a module |
+| `gnosis://semantic-graph-overview` | Full semantic graph summary |
 
 ## Quick Start Examples
 
 Try asking:
-- "What data is available?" — uses `list_databases` and `search_models`
+- "What data is available?" — uses `list_databases` and `discover_models`
 - "Show me transaction trends this week" — queries data and generates charts
+- "What are the bridge flows for USDC?" — uses `get_bridge_flows_by_token`
+- "Show transaction count by sector" — uses `discover_metrics` and `query_metrics`
 - "Explore the Circles protocol" — finds decoded contract events
 - "Look up address 0x9c58ba..." — uses `resolve_address` for label lookup
 - "Give me a weekly report" — full report workflow with interactive charts
+- "Write me an executive brief on validator performance" — storyteller workflow
+- "What is validator 12345's balance history?" — uses `get_validator_balance_history`
 """
 
     @mcp.tool()

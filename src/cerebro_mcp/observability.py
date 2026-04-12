@@ -123,6 +123,12 @@ cerebro_clickhouse_rows_returned = Histogram(
     buckets=ROWS_RETURNED_BUCKETS,
 )
 
+cerebro_clickhouse_table_access_total = Counter(
+    "cerebro_clickhouse_table_access_total",
+    "Table-level access counts from ClickHouse queries",
+    ("database", "table_name"),
+)
+
 semantic_tool_calls_total = Counter(
     "semantic_tool_calls_total",
     "Total semantic tool invocations",
@@ -463,6 +469,12 @@ def observe_clickhouse_query(
             database=database,
             audience=audience,
         ).observe(row_count)
+
+
+def observe_clickhouse_table_access(*, database: str, table_name: str) -> None:
+    cerebro_clickhouse_table_access_total.labels(
+        database=database, table_name=table_name,
+    ).inc()
 
 
 def observe_semantic_tool_call(

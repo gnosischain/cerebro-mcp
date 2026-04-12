@@ -11,9 +11,11 @@ from cerebro_mcp.config import settings
 from cerebro_mcp.observability import (
     log_event,
     observe_clickhouse_query,
+    observe_clickhouse_table_access,
 )
 from cerebro_mcp.safety import (
     enforce_result_limit,
+    extract_table_names,
     validate_identifier,
     validate_query,
 )
@@ -155,6 +157,8 @@ class ClickHouseManager:
         if not is_valid:
             raise ValueError(f"Query rejected: {error}")
 
+        tables_accessed = extract_table_names(sql)
+
         if requested_max_rows < 1:
             raise ValueError("max_rows must be at least 1")
 
@@ -199,6 +203,7 @@ class ClickHouseManager:
                 fetch_mode=fetch_mode,
                 elapsed_seconds=round(elapsed, 3),
                 success=False,
+                tables=",".join(tables_accessed) if tables_accessed else "",
             )
             raise
 
@@ -213,6 +218,8 @@ class ClickHouseManager:
             elapsed_seconds=elapsed,
             row_count=len(rows),
         )
+        for tbl in tables_accessed:
+            observe_clickhouse_table_access(database=database, table_name=tbl)
         log_event(
             logger,
             "clickhouse_query",
@@ -222,6 +229,7 @@ class ClickHouseManager:
             elapsed_seconds=round(elapsed, 3),
             row_count=len(rows),
             success=True,
+            tables=",".join(tables_accessed) if tables_accessed else "",
         )
 
         return ExecutedQuery(

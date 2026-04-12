@@ -1,5 +1,5 @@
 import pytest
-from cerebro_mcp.safety import validate_query, validate_identifier, ensure_limit
+from cerebro_mcp.safety import validate_query, validate_identifier, ensure_limit, extract_table_names
 
 
 class TestValidateQuery:
@@ -170,3 +170,42 @@ class TestEnsureLimit:
         result = ensure_limit("SELECT * FROM t limit 50", 100)
         assert result.startswith("SELECT * FROM (SELECT * FROM t limit 50)")
         assert result.endswith("LIMIT 100")
+
+
+class TestExtractTableNames:
+    def test_simple_from(self):
+        assert extract_table_names("SELECT * FROM users") == ["users"]
+
+    def test_qualified_table(self):
+        assert extract_table_names("SELECT * FROM dbt.api_tx_daily") == ["dbt.api_tx_daily"]
+
+    def test_join(self):
+        result = extract_table_names(
+            "SELECT a.x FROM table_a a JOIN table_b b ON a.id = b.id"
+        )
+        assert result == ["table_a", "table_b"]
+
+    def test_cerebro_alias_excluded(self):
+        result = extract_table_names(
+            "SELECT * FROM (SELECT * FROM real_table) AS _cerebro_limit LIMIT 100"
+        )
+        assert result == ["real_table"]
+
+    def test_cte(self):
+        assert "source" in extract_table_names(
+            "WITH cte AS (SELECT * FROM source) SELECT * FROM cte"
+        )
+
+    def test_no_from(self):
+        assert extract_table_names("SELECT 1") == []
+
+    def test_string_literal_ignored(self):
+        result = extract_table_names("SELECT * FROM users WHERE x = 'FROM fake'")
+        assert result == ["users"]
+
+    def test_dedup(self):
+        assert extract_table_names("SELECT * FROM t JOIN t ON t.a = t.b") == ["t"]
+
+    def test_multi_join(self):
+        sql = "SELECT * FROM a LEFT JOIN b ON 1=1 RIGHT JOIN c ON 1=1"
+        assert extract_table_names(sql) == ["a", "b", "c"]
