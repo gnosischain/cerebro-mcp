@@ -15,6 +15,16 @@ _VALID_ROLES = {
     "storyteller_writer",
     "storyteller_critic",
     "storyteller_accessibility",
+    # Specialist consultants (called by analytics_reporter for domain expertise)
+    "forecasting_analyst",
+    "growth_analyst",
+    "tokenomics_analyst",
+    "defi_analyst",
+    "network_health_analyst",
+    "bridge_security_analyst",
+    "marketing_analyst",
+    "esg_analyst",
+    "statistical_reviewer",
 }
 
 
@@ -30,11 +40,16 @@ def register_agent_tools(mcp):
 
         Args:
             role: One of the standard roles ('analytics_reporter',
-                'ui_designer', 'reality_checker') or a storyteller role
+                'ui_designer', 'reality_checker'), a storyteller role
                 ('storyteller_orchestrator', 'storyteller_context',
                 'storyteller_narrative', 'storyteller_visual_designer',
                 'storyteller_writer', 'storyteller_critic',
-                'storyteller_accessibility').
+                'storyteller_accessibility'), or a specialist consultant
+                ('forecasting_analyst', 'growth_analyst',
+                'tokenomics_analyst', 'defi_analyst',
+                'network_health_analyst', 'bridge_security_analyst',
+                'marketing_analyst', 'esg_analyst',
+                'statistical_reviewer').
         """
         if role not in _VALID_ROLES:
             return (

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import shutil
 import time
@@ -37,6 +38,7 @@ class QueryJob:
     sql: str
     database: str
     max_rows: int
+    dedup_key: str = ""
     status: str = "pending"  # pending, running, completed, failed
     stored_result: StoredAsyncResult | None = None
     error: str | None = None
@@ -47,6 +49,12 @@ class QueryJob:
 _pending_queries: dict[str, QueryJob] = {}
 _executor = ThreadPoolExecutor(max_workers=3)
 _CLEANUP_AFTER_SECONDS = 600
+
+
+def _query_dedup_key(sql: str, database: str, max_rows: int) -> str:
+    """Deterministic hash key for deduplicating identical async queries."""
+    raw = f"{database}\n{max_rows}\n{sql.strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _result_root_dir() -> Path:
@@ -319,6 +327,21 @@ def register_async_query_tools(mcp, ch: ClickHouseManager):
 
             capped_max = min(max_rows, settings.MAX_ROWS)
 
+            # Dedup: reuse an existing in-flight or recently completed identical job
+            dedup_key = _query_dedup_key(sql, database, capped_max)
+            for existing_job in _pending_queries.values():
+                if (
+                    existing_job.dedup_key == dedup_key
+                    and existing_job.status in ("pending", "running", "completed")
+                ):
+                    label = (
+                        "running" if existing_job.status != "completed" else "completed"
+                    )
+                    return (
+                        f"Query already {label} as query_id=`{existing_job.id}`.\n\n"
+                        f"Use `get_query_results('{existing_job.id}')` to retrieve results."
+                    )
+
             from cerebro_mcp.tools.session_state import state
 
             state.record_execute_query(sql)
@@ -329,6 +352,7 @@ def register_async_query_tools(mcp, ch: ClickHouseManager):
                 sql=sql,
                 database=database,
                 max_rows=capped_max,
+                dedup_key=dedup_key,
             )
             _pending_queries[query_id] = job
 

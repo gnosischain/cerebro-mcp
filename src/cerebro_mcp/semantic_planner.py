@@ -87,7 +87,34 @@ def _resolve_dimension_binding(snapshot, root_model: str, dimension_name: str) -
         )
 
     if not candidates:
-        raise PlanningError(f"Dimension {dimension_name} is not reachable from {root_model}")
+        local_dims = sorted(d["name"] for d in root.get("dimensions", []))
+        hints: list[str] = [f"Dimension '{dimension_name}' is not reachable from '{root_model}'."]
+
+        if rejected:
+            reasons = "; ".join(
+                f"{r['provider_model']}: {r['reason']}" for r in rejected[:3]
+            )
+            hints.append(f"Rejected paths: {reasons}.")
+
+        all_providers = snapshot.dimension_index.get(dimension_name, [])
+        unapproved = [
+            p["provider_model"]
+            for p in all_providers
+            if p.get("semantic_status") != "approved"
+        ]
+        if unapproved and not rejected:
+            hints.append(
+                f"Providers exist but are not approved: {', '.join(unapproved[:3])}."
+            )
+
+        if local_dims:
+            hints.append(
+                f"Available dimensions on '{root_model}': {', '.join(local_dims[:10])}."
+            )
+        else:
+            hints.append(f"'{root_model}' has no local dimensions.")
+
+        raise PlanningError(" ".join(hints))
 
     candidates.sort(key=lambda candidate: (candidate["cost"], candidate["hop_count"], candidate["provider_model"]))
     best = candidates[0]
@@ -95,7 +122,9 @@ def _resolve_dimension_binding(snapshot, root_model: str, dimension_name: str) -
         peer = candidates[1]
         if peer["cost"] == best["cost"] and peer["path"] != best["path"]:
             raise PlanningError(
-                f"Ambiguous semantic provider for dimension {dimension_name} from {root_model}"
+                f"Ambiguous semantic provider for dimension '{dimension_name}' from '{root_model}': "
+                f"'{best['provider_model']}' and '{peer['provider_model']}' have equal cost. "
+                f"Approve a preferred path or remove one provider."
             )
 
     return best, rejected[0] if rejected else None

@@ -865,6 +865,15 @@ Available personas:
 | `storyteller_writer` | Action titles, annotations, medium adaptation |
 | `storyteller_critic` | Adversarial clarity review |
 | `storyteller_accessibility` | Colorblind palette, contrast, language, tone match |
+| `forecasting_analyst` | Time-series forecasting, trend decomposition, prediction |
+| `growth_analyst` | Retention cohorts, funnels, DAU/WAU/MAU, user segmentation |
+| `tokenomics_analyst` | Staking economics, token velocity, supply concentration |
+| `defi_analyst` | TVL, utilization, liquidation risk, impermanent loss |
+| `network_health_analyst` | Client diversity, peer distribution, network partition risk |
+| `bridge_security_analyst` | Bridge flow anomalies, efficiency comparison, arbitrage signals |
+| `marketing_analyst` | Ecosystem growth framing, competitive benchmarking, external comms |
+| `esg_analyst` | Carbon footprint, energy efficiency, sustainability reporting |
+| `statistical_reviewer` | Confidence intervals, effect sizes, methodology validation |
 
 ## Prompts
 
