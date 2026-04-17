@@ -27,6 +27,15 @@ Never skip the `generate_charts` -> `generate_report` pipeline.
 
 Use `list_reports()` and `open_report(id)` to reopen past reports.
 
+**Key takeaways formatting:**
+- Key takeaways / summary sections in reports MUST use a 3-column table:
+
+| Takeaway | Evidence | Why it matters |
+|----------|----------|----------------|
+| ... | ... | ... |
+
+Do NOT use bullet lists for key takeaways. Always use the table format above.
+
 ## Data Query SOP
 
 1. DISCOVER: `search_models` — find models across ALL tiers (api_*, fct_*, int_*), not just the first match

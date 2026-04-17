@@ -14,7 +14,7 @@ export const ECHARTS_DARK = {
     backgroundColor: "rgba(21,28,36,0.97)",
     borderColor: "rgba(226,232,240,0.08)",
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: 6,
     extraCssText: "box-shadow:0 4px 12px -4px rgba(0,0,0,0.3);",
     textStyle: { color: "#E2E8F0", fontFamily: FONT },
   },

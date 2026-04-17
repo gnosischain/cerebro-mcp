@@ -140,6 +140,23 @@ ORDER BY date DESC
 LIMIT 1500
 """
 
+# Supply data is currently only available for GNO via
+# api_execution_gno_supply_daily.  A generic per-token supply model does not
+# exist yet, so the loader sets a ``supply_unavailable`` flag for all other
+# tokens and falls back to a stub.
+_SUPPLY_AVAILABLE_TOKENS: set[str] = {"gno"}
+
+_SUPPLY_HISTORY_SQL = """
+SELECT
+  dt AS date,
+  total_supply,
+  circulating_supply
+FROM api_execution_gno_supply_daily
+WHERE dt >= toDate({start_date:String})
+ORDER BY dt DESC
+LIMIT 1500
+"""
+
 
 def _resolve_token(symbol_or_address: str) -> dict[str, Any] | None:
     query = symbol_or_address.strip().lower()
@@ -342,6 +359,124 @@ def _build_summary_cards(
     return cards
 
 
+def _extract_token_metrics(
+    token_info: dict[str, Any],
+    bridge_ds: "mini_apps.CachedDataset",
+    lp_ds: "mini_apps.CachedDataset",
+    price_ds: "mini_apps.CachedDataset | None",
+) -> dict[str, float]:
+    """Extract raw numeric metrics from datasets for comparison purposes."""
+    metrics: dict[str, float] = {}
+
+    # Bridge volume total
+    if bridge_ds.rows and "volume_usd" in bridge_ds.columns:
+        vol_idx = bridge_ds.columns.index("volume_usd")
+        total = 0.0
+        for row in bridge_ds.rows:
+            try:
+                total += float(row[vol_idx] or 0)
+            except (TypeError, ValueError):
+                continue
+        metrics["bridge_volume"] = total
+
+    # Bridge tx count
+    if bridge_ds.rows and "txs" in bridge_ds.columns:
+        tx_idx = bridge_ds.columns.index("txs")
+        total_tx = 0
+        for row in bridge_ds.rows:
+            try:
+                total_tx += int(row[tx_idx] or 0)
+            except (TypeError, ValueError):
+                continue
+        metrics["bridge_txs"] = float(total_tx)
+
+    # LP count (7D preferred)
+    if lp_ds.rows and "unique_lp_count" in lp_ds.columns:
+        win_idx = lp_ds.columns.index("window") if "window" in lp_ds.columns else None
+        lp_idx = lp_ds.columns.index("unique_lp_count")
+        chosen = lp_ds.rows[0]
+        if win_idx is not None:
+            for row in lp_ds.rows:
+                if str(row[win_idx]).upper() == "7D":
+                    chosen = row
+                    break
+        try:
+            metrics["lp_count"] = float(int(chosen[lp_idx] or 0))
+        except (TypeError, ValueError):
+            pass
+
+    # Latest price
+    if price_ds and price_ds.rows and "price_usd" in price_ds.columns:
+        price_idx = price_ds.columns.index("price_usd")
+        try:
+            metrics["price"] = float(price_ds.rows[0][price_idx] or 0)
+        except (TypeError, ValueError):
+            pass
+
+    return metrics
+
+
+def _build_comparison_summary_cards(
+    primary_info: dict[str, Any],
+    primary_metrics: dict[str, float],
+    secondary_info: dict[str, Any],
+    secondary_metrics: dict[str, float],
+) -> list[SummaryCard]:
+    """Build paired summary cards for comparison mode.
+
+    For each metric, produce two cards side-by-side.  The token with the
+    higher value gets ``tone="positive"``, the lower one ``tone="neutral"``.
+    """
+    cards: list[SummaryCard] = []
+    p_sym = primary_info["symbol"]
+    s_sym = secondary_info["symbol"]
+
+    metric_defs: list[tuple[str, str, str]] = [
+        ("bridge_volume", "Bridge Vol (USD)", "$"),
+        ("bridge_txs", "Bridge Txs", ""),
+        ("lp_count", "Unique LPs (7D)", ""),
+        ("price", "Price (USD)", "$"),
+    ]
+
+    for key, label, prefix in metric_defs:
+        p_val = primary_metrics.get(key)
+        s_val = secondary_metrics.get(key)
+
+        if p_val is None and s_val is None:
+            continue
+
+        p_num = p_val if p_val is not None else 0.0
+        s_num = s_val if s_val is not None else 0.0
+
+        p_tone: str = "positive" if p_num >= s_num else "neutral"
+        s_tone: str = "positive" if s_num > p_num else "neutral"
+
+        def _fmt(val: float | None, pfx: str, is_price: bool = False) -> str:
+            if val is None:
+                return "—"
+            if is_price:
+                return f"{pfx}{val:,.4f}"
+            return f"{pfx}{val:,.0f}"
+
+        is_price = key == "price"
+        cards.append(
+            SummaryCard(
+                label=f"{p_sym} {label}",
+                value=_fmt(p_val, prefix, is_price),
+                tone=p_tone,
+            )
+        )
+        cards.append(
+            SummaryCard(
+                label=f"{s_sym} {label}",
+                value=_fmt(s_val, prefix, is_price),
+                tone=s_tone,
+            )
+        )
+
+    return cards
+
+
 def _build_empty_payload(
     *,
     view_id: str,
@@ -372,11 +507,16 @@ def _build_empty_payload(
             "mode": "empty",
             "token_catalog": catalog,
             "selected_token": "",
+            "selected_tokens": [],
+            "comparison_mode": False,
             "start_date": "2024-01-01",
             "include_price": True,
             "selected_metric": "bridge_volume",
+            "growth_source": "bridge_volume",
+            "growth_window": "wow",
             "bridge": "",
             "direction": "both",
+            "supply_unavailable": True,
         },
         provenance={"source": "catalog", "catalog_size": len(catalog)},
         warnings=[],
@@ -395,10 +535,25 @@ def _build_initial_payload(
     pool_tvl_ds: "mini_apps.CachedDataset | None" = None,
     pool_vol_ds: "mini_apps.CachedDataset | None" = None,
     price_ds: "mini_apps.CachedDataset | None" = None,
+    supply_ds: "mini_apps.CachedDataset | None" = None,
+    supply_unavailable: bool = True,
     catalog: list[dict[str, Any]] | None = None,
     start_date: str = "2024-01-01",
     include_price: bool = True,
+    # --- comparison mode fields ---
+    secondary_info: dict[str, Any] | None = None,
+    secondary_bridge_ds: "mini_apps.CachedDataset | None" = None,
+    secondary_lp_ds: "mini_apps.CachedDataset | None" = None,
+    secondary_price_ds: "mini_apps.CachedDataset | None" = None,
+    secondary_holders_ds: "mini_apps.CachedDataset | None" = None,
+    secondary_pool_tvl_ds: "mini_apps.CachedDataset | None" = None,
+    secondary_pool_vol_ds: "mini_apps.CachedDataset | None" = None,
+    secondary_supply_ds: "mini_apps.CachedDataset | None" = None,
+    secondary_supply_unavailable: bool = True,
+    secondary_metadata_ds: "mini_apps.CachedDataset | None" = None,
 ) -> MiniAppPayload:
+    comparison_mode = secondary_info is not None
+
     descriptors = {
         "metadata": mini_apps.build_dataset_descriptor(
             key="metadata", dataset=metadata_ds, title="Token metadata"
@@ -426,6 +581,97 @@ def _build_initial_payload(
         descriptors["price_history"] = mini_apps.build_dataset_descriptor(
             key="price_history", dataset=price_ds, title="Price history"
         )
+    if supply_ds is not None and supply_ds.rows:
+        descriptors["supply_history"] = mini_apps.build_dataset_descriptor(
+            key="supply_history", dataset=supply_ds, title="Supply history"
+        )
+
+    # --- secondary (comparison) datasets ---
+    all_warning_datasets: list["mini_apps.CachedDataset | None"] = [
+        metadata_ds, bridge_ds, lp_ds, holders_ds, pool_tvl_ds, pool_vol_ds,
+        price_ds, supply_ds,
+    ]
+
+    if comparison_mode:
+        assert secondary_info is not None  # for type narrowing
+        if secondary_metadata_ds is not None:
+            descriptors["secondary_metadata"] = mini_apps.build_dataset_descriptor(
+                key="secondary_metadata",
+                dataset=secondary_metadata_ds,
+                title=f"{secondary_info['symbol']} metadata",
+            )
+        if secondary_bridge_ds is not None:
+            descriptors["secondary_bridge_flows"] = mini_apps.build_dataset_descriptor(
+                key="secondary_bridge_flows",
+                dataset=secondary_bridge_ds,
+                title=f"{secondary_info['symbol']} bridge flows (daily)",
+            )
+            all_warning_datasets.append(secondary_bridge_ds)
+        if secondary_lp_ds is not None:
+            descriptors["secondary_lp_counts"] = mini_apps.build_dataset_descriptor(
+                key="secondary_lp_counts",
+                dataset=secondary_lp_ds,
+                title=f"{secondary_info['symbol']} liquidity providers",
+            )
+            all_warning_datasets.append(secondary_lp_ds)
+        if secondary_price_ds is not None:
+            descriptors["secondary_price_history"] = mini_apps.build_dataset_descriptor(
+                key="secondary_price_history",
+                dataset=secondary_price_ds,
+                title=f"{secondary_info['symbol']} price history",
+            )
+            all_warning_datasets.append(secondary_price_ds)
+        if secondary_holders_ds is not None and secondary_holders_ds.rows:
+            descriptors["secondary_holders"] = mini_apps.build_dataset_descriptor(
+                key="secondary_holders",
+                dataset=secondary_holders_ds,
+                title=f"{secondary_info['symbol']} holder count (daily)",
+            )
+            all_warning_datasets.append(secondary_holders_ds)
+        if secondary_pool_tvl_ds is not None and secondary_pool_tvl_ds.rows:
+            descriptors["secondary_pool_tvl"] = mini_apps.build_dataset_descriptor(
+                key="secondary_pool_tvl",
+                dataset=secondary_pool_tvl_ds,
+                title=f"{secondary_info['symbol']} Pool TVL (USD, daily)",
+            )
+            all_warning_datasets.append(secondary_pool_tvl_ds)
+        if secondary_pool_vol_ds is not None and secondary_pool_vol_ds.rows:
+            descriptors["secondary_pool_volume"] = mini_apps.build_dataset_descriptor(
+                key="secondary_pool_volume",
+                dataset=secondary_pool_vol_ds,
+                title=f"{secondary_info['symbol']} Pool volume (USD, daily)",
+            )
+            all_warning_datasets.append(secondary_pool_vol_ds)
+        if secondary_supply_ds is not None and secondary_supply_ds.rows:
+            descriptors["secondary_supply_history"] = mini_apps.build_dataset_descriptor(
+                key="secondary_supply_history",
+                dataset=secondary_supply_ds,
+                title=f"{secondary_info['symbol']} supply history",
+            )
+            all_warning_datasets.append(secondary_supply_ds)
+
+    # --- summary cards: paired in comparison mode, standard otherwise ---
+    if comparison_mode:
+        assert secondary_info is not None
+        primary_metrics = _extract_token_metrics(
+            token_info, bridge_ds, lp_ds, price_ds
+        )
+        secondary_metrics = _extract_token_metrics(
+            secondary_info,
+            secondary_bridge_ds or bridge_ds,  # fallback to avoid None
+            secondary_lp_ds or lp_ds,
+            secondary_price_ds,
+        )
+        summary_cards = _build_comparison_summary_cards(
+            token_info, primary_metrics, secondary_info, secondary_metrics
+        )
+    else:
+        summary_cards = _build_summary_cards(token_info, bridge_ds, lp_ds, price_ds)
+
+    selected_tokens = [token_info["symbol"]]
+    if comparison_mode:
+        assert secondary_info is not None
+        selected_tokens.append(secondary_info["symbol"])
 
     return MiniAppPayload(
         type="INITIAL_LOAD",
@@ -433,17 +679,23 @@ def _build_initial_payload(
         app_id=TOKEN_EXPLORER_APP_ID,
         title=title,
         status="ready",
-        summary_cards=_build_summary_cards(token_info, bridge_ds, lp_ds, price_ds),
+        summary_cards=summary_cards,
         datasets=descriptors,
         view_state={
-            "mode": "loaded",
+            "mode": "comparison" if comparison_mode else "loaded",
             "token_catalog": catalog or [],
             "selected_token": token_info["symbol"],
+            "selected_tokens": selected_tokens,
+            "comparison_mode": comparison_mode,
             "start_date": start_date,
             "include_price": include_price and price_ds is not None,
             "selected_metric": "bridge_volume",
+            "growth_source": "bridge_volume",
+            "growth_window": "wow",
             "bridge": "",
             "direction": "both",
+            "supply_unavailable": supply_unavailable,
+            "secondary_supply_unavailable": secondary_supply_unavailable if comparison_mode else True,
         },
         provenance={
             "source_tools": [
@@ -451,10 +703,9 @@ def _build_initial_payload(
                 "get_liquidity_providers_by_token",
             ],
             "token": token_info["symbol"],
+            **({"compare_with": secondary_info["symbol"]} if comparison_mode else {}),
         },
-        warnings=mini_apps.collect_dataset_warnings(
-            metadata_ds, bridge_ds, lp_ds, holders_ds, pool_tvl_ds, pool_vol_ds, price_ds
-        ),
+        warnings=mini_apps.collect_dataset_warnings(*all_warning_datasets),
     )
 
 
@@ -475,6 +726,85 @@ def register_token_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         """Serve the bundled Vite/React single-file app for the Token Explorer URI."""
         return get_token_explorer_html()
 
+    def _load_datasets_for_token(
+        token_info: dict[str, Any],
+        start_date: str,
+        include_price: bool,
+        prefix: str = "",
+    ) -> dict[str, Any]:
+        """Load all per-panel datasets for a single token.
+
+        Returns a dict of datasets keyed by their logical name (optionally
+        prefixed for secondary tokens in comparison mode).
+        """
+        pfx = f"{prefix}_" if prefix else ""
+        sym = token_info["symbol"]
+
+        metadata_ds = _metadata_dataset(ch, token_info)
+        bridge_ds = _safe_load(
+            ch,
+            _BRIDGE_FLOWS_SQL,
+            {"token": sym, "start_date": start_date},
+            f"{pfx}bridge_flows",
+        )
+        lp_ds = _safe_load(
+            ch,
+            _LP_COUNTS_SQL,
+            {"token": sym},
+            f"{pfx}lp_counts",
+        )
+        price_ds: "mini_apps.CachedDataset | None" = None
+        if include_price and token_info["address"] != "native":
+            price_ds = _safe_load(
+                ch,
+                _PRICE_HISTORY_SQL,
+                {"token": sym, "start_date": start_date},
+                f"{pfx}price_history",
+            )
+
+        holders_ds = _safe_load(
+            ch,
+            _HOLDERS_SQL,
+            {"token": sym, "start_date": start_date},
+            f"{pfx}holders",
+        )
+        pool_tvl_ds = _safe_load(
+            ch,
+            _POOL_TVL_SQL,
+            {"token": sym, "start_date": start_date},
+            f"{pfx}pool_tvl",
+        )
+        pool_vol_ds = _safe_load(
+            ch,
+            _POOL_VOLUME_SQL,
+            {"token": sym, "start_date": start_date},
+            f"{pfx}pool_volume",
+        )
+
+        # Supply: only available for tokens in _SUPPLY_AVAILABLE_TOKENS
+        supply_ds: "mini_apps.CachedDataset | None" = None
+        supply_unavailable = True
+        if sym.lower() in _SUPPLY_AVAILABLE_TOKENS:
+            supply_ds = _safe_load(
+                ch,
+                _SUPPLY_HISTORY_SQL,
+                {"start_date": start_date},
+                f"{pfx}supply_history",
+            )
+            supply_unavailable = not (supply_ds and supply_ds.rows)
+
+        return {
+            "metadata_ds": metadata_ds,
+            "bridge_ds": bridge_ds,
+            "lp_ds": lp_ds,
+            "price_ds": price_ds,
+            "holders_ds": holders_ds,
+            "pool_tvl_ds": pool_tvl_ds,
+            "pool_vol_ds": pool_vol_ds,
+            "supply_ds": supply_ds,
+            "supply_unavailable": supply_unavailable,
+        }
+
     def _load_token_into_view(
         *,
         view_id: str,
@@ -482,73 +812,75 @@ def register_token_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         token_info: dict[str, Any],
         start_date: str,
         include_price: bool,
+        compare_with_info: dict[str, Any] | None = None,
     ) -> MiniAppPayload:
-        """Run the four per-panel queries and attach datasets to a view."""
-        metadata_ds = _metadata_dataset(ch, token_info)
-        bridge_ds = _safe_load(
-            ch,
-            _BRIDGE_FLOWS_SQL,
-            {"token": token_info["symbol"], "start_date": start_date},
-            "bridge_flows",
+        """Run per-panel queries and attach datasets to a view.
+
+        When ``compare_with_info`` is provided, datasets for both the
+        primary and secondary token are loaded.  Secondary datasets are
+        stored under ``secondary_*`` keys.
+        """
+        # --- primary token ---
+        primary = _load_datasets_for_token(
+            token_info, start_date, include_price
         )
-        lp_ds = _safe_load(
-            ch,
-            _LP_COUNTS_SQL,
-            {"token": token_info["symbol"]},
-            "lp_counts",
-        )
-        price_ds: "mini_apps.CachedDataset | None" = None
-        if include_price and token_info["address"] != "native":
-            price_ds = _safe_load(
-                ch,
-                _PRICE_HISTORY_SQL,
-                {"token": token_info["symbol"], "start_date": start_date},
-                "price_history",
+
+        mini_apps.attach_dataset(view_id, "metadata", primary["metadata_ds"])
+        mini_apps.attach_dataset(view_id, "bridge_flows", primary["bridge_ds"])
+        mini_apps.attach_dataset(view_id, "lp_counts", primary["lp_ds"])
+        mini_apps.attach_dataset(view_id, "holders", primary["holders_ds"])
+        mini_apps.attach_dataset(view_id, "pool_tvl", primary["pool_tvl_ds"])
+        mini_apps.attach_dataset(view_id, "pool_volume", primary["pool_vol_ds"])
+        if primary["price_ds"] is not None:
+            mini_apps.attach_dataset(view_id, "price_history", primary["price_ds"])
+        if primary["supply_ds"] is not None:
+            mini_apps.attach_dataset(view_id, "supply_history", primary["supply_ds"])
+
+        # --- secondary token (comparison mode) ---
+        secondary: dict[str, Any] | None = None
+        if compare_with_info is not None:
+            secondary = _load_datasets_for_token(
+                compare_with_info, start_date, include_price, prefix="secondary"
             )
-
-        holders_ds = _safe_load(
-            ch,
-            _HOLDERS_SQL,
-            {"token": token_info["symbol"], "start_date": start_date},
-            "holders",
-        )
-        pool_tvl_ds = _safe_load(
-            ch,
-            _POOL_TVL_SQL,
-            {"token": token_info["symbol"], "start_date": start_date},
-            "pool_tvl",
-        )
-        pool_vol_ds = _safe_load(
-            ch,
-            _POOL_VOLUME_SQL,
-            {"token": token_info["symbol"], "start_date": start_date},
-            "pool_volume",
-        )
-
-        mini_apps.attach_dataset(view_id, "metadata", metadata_ds)
-        mini_apps.attach_dataset(view_id, "bridge_flows", bridge_ds)
-        mini_apps.attach_dataset(view_id, "lp_counts", lp_ds)
-        mini_apps.attach_dataset(view_id, "holders", holders_ds)
-        mini_apps.attach_dataset(view_id, "pool_tvl", pool_tvl_ds)
-        mini_apps.attach_dataset(view_id, "pool_volume", pool_vol_ds)
-        if price_ds is not None:
-            mini_apps.attach_dataset(view_id, "price_history", price_ds)
+            mini_apps.attach_dataset(view_id, "secondary_metadata", secondary["metadata_ds"])
+            mini_apps.attach_dataset(view_id, "secondary_bridge_flows", secondary["bridge_ds"])
+            mini_apps.attach_dataset(view_id, "secondary_lp_counts", secondary["lp_ds"])
+            mini_apps.attach_dataset(view_id, "secondary_holders", secondary["holders_ds"])
+            mini_apps.attach_dataset(view_id, "secondary_pool_tvl", secondary["pool_tvl_ds"])
+            mini_apps.attach_dataset(view_id, "secondary_pool_volume", secondary["pool_vol_ds"])
+            if secondary["price_ds"] is not None:
+                mini_apps.attach_dataset(view_id, "secondary_price_history", secondary["price_ds"])
+            if secondary["supply_ds"] is not None:
+                mini_apps.attach_dataset(view_id, "secondary_supply_history", secondary["supply_ds"])
 
         catalog = get_token_catalog()
         payload = _build_initial_payload(
             view_id=view_id,
             title=title,
             token_info=token_info,
-            metadata_ds=metadata_ds,
-            bridge_ds=bridge_ds,
-            lp_ds=lp_ds,
-            holders_ds=holders_ds,
-            pool_tvl_ds=pool_tvl_ds,
-            pool_vol_ds=pool_vol_ds,
-            price_ds=price_ds,
+            metadata_ds=primary["metadata_ds"],
+            bridge_ds=primary["bridge_ds"],
+            lp_ds=primary["lp_ds"],
+            holders_ds=primary["holders_ds"],
+            pool_tvl_ds=primary["pool_tvl_ds"],
+            pool_vol_ds=primary["pool_vol_ds"],
+            price_ds=primary["price_ds"],
+            supply_ds=primary["supply_ds"],
+            supply_unavailable=primary["supply_unavailable"],
             catalog=catalog,
             start_date=start_date,
             include_price=include_price,
+            # comparison fields
+            secondary_info=compare_with_info,
+            secondary_metadata_ds=secondary["metadata_ds"] if secondary else None,
+            secondary_bridge_ds=secondary["bridge_ds"] if secondary else None,
+            secondary_lp_ds=secondary["lp_ds"] if secondary else None,
+            secondary_price_ds=secondary["price_ds"] if secondary else None,
+            secondary_holders_ds=secondary["holders_ds"] if secondary else None,
+            secondary_pool_tvl_ds=secondary["pool_tvl_ds"] if secondary else None,
+            secondary_pool_vol_ds=secondary["pool_vol_ds"] if secondary else None,
+            secondary_supply_ds=secondary["supply_ds"] if secondary else None,
+            secondary_supply_unavailable=secondary["supply_unavailable"] if secondary else True,
         )
         mini_apps.patch_view_state(view_id, payload.view_state)
         return payload
@@ -642,6 +974,7 @@ def register_token_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         symbol_or_address: str,
         start_date: str = "2024-01-01",
         include_price: bool = True,
+        compare_with: str = "",
     ) -> CallToolResult:
         """Load data for a specific token into an existing Token Explorer view.
 
@@ -649,6 +982,11 @@ def register_token_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         opening a fresh view. Re-emits ``INITIAL_LOAD`` for the same
         ``view_id`` so the frontend replaces the datasets in place while
         the catalog stays visible.
+
+        When ``compare_with`` is provided, data for both tokens is loaded.
+        The primary token populates the standard dataset keys; the
+        comparison token populates ``secondary_*`` keys.  Summary cards
+        show paired metrics with tone-based styling.
         """
         record = mini_apps.get_view(view_id)
         if record is None:
@@ -662,19 +1000,53 @@ def register_token_explorer_tools(mcp, ch: ClickHouseManager) -> None:
                 f"Token '{symbol_or_address}' not found in registry."
             )
 
+        # Resolve the comparison token (if requested)
+        compare_with_info: dict[str, Any] | None = None
+        if compare_with.strip():
+            compare_with_info = _resolve_token(compare_with)
+            if compare_with_info is None:
+                return mini_apps.error_call_tool_result(
+                    f"Comparison token '{compare_with}' not found in registry."
+                )
+            if compare_with_info["symbol"] == token_info["symbol"]:
+                return mini_apps.error_call_tool_result(
+                    "Primary and comparison tokens must be different."
+                )
+
+        comparison_mode = compare_with_info is not None
+        if comparison_mode:
+            assert compare_with_info is not None
+            view_title = (
+                record.title
+                or f"Token Explorer — {token_info['symbol']} vs {compare_with_info['symbol']}"
+            )
+        else:
+            view_title = record.title or f"Token Explorer — {token_info['symbol']}"
+
         payload = _load_token_into_view(
             view_id=view_id,
-            title=record.title or f"Token Explorer — {token_info['symbol']}",
+            title=view_title,
             token_info=token_info,
             start_date=start_date,
             include_price=include_price,
+            compare_with_info=compare_with_info,
         )
-        return mini_apps.payload_to_call_tool_result(
-            payload,
-            summary_text=(
+
+        if comparison_mode:
+            assert compare_with_info is not None
+            summary = (
+                f"Token Explorer loaded {token_info['symbol']} vs "
+                f"{compare_with_info['symbol']} into view {view_id[:8]}"
+            )
+        else:
+            summary = (
                 f"Token Explorer loaded {token_info['symbol']} into view "
                 f"{view_id[:8]}"
-            ),
+            )
+
+        return mini_apps.payload_to_call_tool_result(
+            payload,
+            summary_text=summary,
         )
 
     @mcp.tool(
@@ -694,11 +1066,11 @@ def register_token_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         Args:
             view_id: The view ID returned by ``open_token_explorer``.
             metric: One of ``bridge_volume``, ``bridge_txs``, ``lp_count``,
-                ``price``.
+                ``price``, ``growth``.
             bridge: Optional bridge name filter (empty string = all).
             direction: Optional flow direction (``inbound``/``outbound``/``""``).
         """
-        allowed_metrics = {"bridge_volume", "bridge_txs", "lp_count", "price"}
+        allowed_metrics = {"bridge_volume", "bridge_txs", "lp_count", "price", "growth"}
         if metric not in allowed_metrics:
             return mini_apps.error_call_tool_result(
                 f"metric must be one of {sorted(allowed_metrics)}"
@@ -710,7 +1082,7 @@ def register_token_explorer_tools(mcp, ch: ClickHouseManager) -> None:
                 f"Unknown or expired view_id: {view_id}"
             )
 
-        patch = {
+        patch: dict[str, Any] = {
             "selected_metric": metric,
             "bridge": bridge,
             "direction": direction,

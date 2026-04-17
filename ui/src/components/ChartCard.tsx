@@ -90,41 +90,27 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
         style={{
           background: "var(--surface)",
           border: "1px solid var(--border)",
-          borderRadius: "var(--radius-lg)",
+          borderRadius: "var(--radius-card)",
           boxShadow: "var(--shadow-sm)",
           overflow: "hidden",
           margin: "0.75rem 0",
         }}
       >
-        {(title || sql) && (
+        {sql && (
           <div
             style={{
-              padding: "0.75rem 1rem 0",
+              padding: "0.5rem 1rem 0",
               display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
+              justifyContent: "flex-end",
             }}
           >
-            {title && (
-              <span
-                style={{
-                  fontSize: "0.875rem",
-                  fontWeight: 600,
-                  color: "var(--text-primary)",
-                }}
-              >
-                {title}
-              </span>
-            )}
-            {sql && (
-              <button
-                className="chart-sql-toggle"
-                onClick={() => setShowSql(!showSql)}
-                title="View SQL query"
-              >
-                {"</>"}
-              </button>
-            )}
+            <button
+              className="chart-sql-toggle"
+              onClick={() => setShowSql(!showSql)}
+              title="View SQL query"
+            >
+              {"</>"}
+            </button>
           </div>
         )}
         {showSql && sql && (
@@ -180,11 +166,10 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
       style={{
         background: "var(--surface)",
         border: "1px solid var(--border)",
-        borderRadius: "var(--radius-lg)",
+        borderRadius: "var(--radius-card)",
         boxShadow: "var(--shadow-sm)",
         overflow: "hidden",
         margin: "0.75rem 0",
-        transition: "border-color 0.2s, box-shadow 0.2s",
       }}
     >
       {(title || sql) && (

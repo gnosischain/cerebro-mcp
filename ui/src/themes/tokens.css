@@ -27,8 +27,10 @@
   --shadow-base: 0 2px 6px -1px rgba(0, 0, 0, 0.15);
   --radius-sm: 4px;
   --radius-base: 8px;
-  --radius-lg: 14px;
-  --radius-xl: 16px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-card: 6px;
+  --section-divider: rgba(226, 232, 240, 0.06);
   --sidebar-width: 224px;
   --sidebar-collapsed: 56px;
   --header-height: 56px;
@@ -56,4 +58,5 @@
   --surface-3: #e5e2db;
   --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.04);
   --shadow-base: 0 2px 6px -1px rgba(15, 23, 42, 0.06);
+  --section-divider: rgba(15, 23, 42, 0.06);
 }

@@ -2,11 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
-import { AssistantBar } from "../shared/AssistantBar";
 import type {
   DatasetDescriptor,
   MiniAppPayload,
 } from "../shared/miniAppTypes";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface TokenCatalogEntry {
   key: string;
@@ -17,18 +20,31 @@ interface TokenCatalogEntry {
   has_price: boolean;
 }
 
-type TokenMetric = "bridge_volume" | "bridge_txs" | "lp_count" | "price" | "holders" | "pool_tvl" | "pool_volume";
+type TokenMetric =
+  | "bridge_volume"
+  | "bridge_txs"
+  | "lp_count"
+  | "price"
+  | "holders"
+  | "pool_tvl"
+  | "pool_volume"
+  | "growth";
 type TokenDirection = "inbound" | "outbound" | "both" | "";
 
 interface TokenExplorerState {
-  mode: "empty" | "loaded";
+  mode: "empty" | "loaded" | "comparison";
   token_catalog: TokenCatalogEntry[];
   selected_token: string;
+  selected_tokens?: string[];
+  comparison_mode?: boolean;
   start_date: string;
   include_price: boolean;
   selected_metric: TokenMetric;
   bridge: string;
   direction: TokenDirection;
+  growth_source?: string;
+  growth_window?: string;
+  supply_unavailable?: boolean;
 }
 
 const APP_ID = "token_explorer";
@@ -51,7 +67,6 @@ const MOCK_PAYLOAD: MiniAppPayload<TokenExplorerState> = {
   status: "ready",
   summary_cards: [
     { label: "Tokens available", value: String(MOCK_CATALOG.length), tone: "neutral" },
-    { label: "Status", value: "Pick a token", tone: "neutral" },
   ],
   datasets: {},
   view_state: {
@@ -68,60 +83,69 @@ const MOCK_PAYLOAD: MiniAppPayload<TokenExplorerState> = {
 };
 
 // ---------------------------------------------------------------------------
-// Chart option builder (loaded mode)
+// Chart helpers
 // ---------------------------------------------------------------------------
 
 function metricColumn(metric: TokenMetric): string {
   switch (metric) {
-    case "bridge_volume":
-      return "volume_usd";
-    case "bridge_txs":
-      return "txs";
-    case "lp_count":
-      return "unique_lp_count";
-    case "price":
-      return "price_usd";
-    case "holders":
-      return "holder_count";
-    case "pool_tvl":
-      return "tvl_usd";
-    case "pool_volume":
-      return "volume_usd";
+    case "bridge_volume": return "volume_usd";
+    case "bridge_txs": return "txs";
+    case "lp_count": return "unique_lp_count";
+    case "price": return "price_usd";
+    case "holders": return "holder_count";
+    case "pool_tvl": return "tvl_usd";
+    case "pool_volume": return "volume_usd";
+    case "growth": return "volume_usd";
   }
 }
 
 function datasetForMetric(
   metric: TokenMetric,
   datasets: Record<string, DatasetDescriptor> | undefined,
+  prefix = "",
 ): DatasetDescriptor | undefined {
   if (!datasets) return undefined;
+  const p = prefix;
   switch (metric) {
     case "bridge_volume":
     case "bridge_txs":
-      return datasets.bridge_flows;
+      return datasets[`${p}bridge_flows`];
     case "lp_count":
-      return datasets.lp_counts;
+      return datasets[`${p}lp_counts`];
     case "price":
-      return datasets.price_history;
+      return datasets[`${p}price_history`];
     case "holders":
-      return datasets.holders;
+      return datasets[`${p}holders`];
     case "pool_tvl":
-      return datasets.pool_tvl;
+      return datasets[`${p}pool_tvl`];
     case "pool_volume":
-      return datasets.pool_volume;
+      return datasets[`${p}pool_volume`];
+    case "growth":
+      return datasets[`${p}bridge_flows`];
   }
 }
 
-/** All metric tabs — only shown if the corresponding dataset exists. */
+/** All metric tabs — always shown, greyed out if no data */
 const ALL_METRICS: { key: TokenMetric; label: string; dsKey: string }[] = [
   { key: "bridge_volume", label: "Bridge vol.", dsKey: "bridge_flows" },
   { key: "bridge_txs", label: "Bridge txs", dsKey: "bridge_flows" },
   { key: "holders", label: "Holders", dsKey: "holders" },
   { key: "pool_tvl", label: "Pool TVL", dsKey: "pool_tvl" },
-  { key: "pool_volume", label: "Pool volume", dsKey: "pool_volume" },
+  { key: "pool_volume", label: "Pool vol.", dsKey: "pool_volume" },
   { key: "price", label: "Price", dsKey: "price_history" },
   { key: "lp_count", label: "LPs", dsKey: "lp_counts" },
+  { key: "growth", label: "Growth", dsKey: "bridge_flows" },
 ];
+
+function sortByDate(xs: string[], ys: number[]): void {
+  if (xs.length === 0 || !/^\d{4}-\d{2}/.test(xs[0])) return;
+  const paired = xs.map((x, i) => ({ x, y: ys[i] }));
+  paired.sort((a, b) => a.x.localeCompare(b.x));
+  for (let i = 0; i < paired.length; i++) {
+    xs[i] = paired[i].x;
+    ys[i] = paired[i].y;
+  }
+}
 
 function buildEChartsOption(
   dataset: DatasetDescriptor | undefined,
@@ -129,42 +153,89 @@ function buildEChartsOption(
   bridgeFilter: string,
   direction: TokenDirection,
   isDark: boolean,
+  secondaryDataset?: DatasetDescriptor,
+  secondaryLabel?: string,
+  primaryLabel?: string,
 ): Record<string, unknown> {
   if (!dataset || dataset.preview_rows.length === 0) {
     return { title: { text: "No data", left: "center", top: "center" } };
   }
-  const dateIdx = dataset.columns.findIndex(
-    (c) => c.name === "date" || c.name === "window",
-  );
+  const dateIdx = dataset.columns.findIndex((c) => c.name === "date" || c.name === "window");
   const valueIdx = dataset.columns.findIndex((c) => c.name === metricColumnName);
   const bridgeIdx = dataset.columns.findIndex((c) => c.name === "bridge");
   const dirIdx = dataset.columns.findIndex((c) => c.name === "direction");
   if (valueIdx < 0) {
-    return {
-      title: {
-        text: `Column '${metricColumnName}' not in dataset`,
-        left: "center",
-        top: "center",
-      },
-    };
+    return { title: { text: `Column '${metricColumnName}' not in dataset`, left: "center", top: "center" } };
   }
-  let filteredRows = dataset.preview_rows;
-  if (bridgeFilter && bridgeIdx >= 0) {
-    filteredRows = filteredRows.filter((row) => row[bridgeIdx] === bridgeFilter);
-  }
-  if (direction && direction !== "both" && dirIdx >= 0) {
-    filteredRows = filteredRows.filter((row) => row[dirIdx] === direction);
-  }
-  const xs = filteredRows.map((row) => String(row[dateIdx >= 0 ? dateIdx : 0] ?? ""));
-  const ys = filteredRows.map((row) => Number(row[valueIdx] ?? 0));
 
-  // Sort ascending by date for proper left-to-right chronological order
-  if (xs.length > 0 && /^\d{4}-\d{2}/.test(xs[0])) {
-    const paired = xs.map((x, i) => ({ x, y: ys[i] }));
-    paired.sort((a, b) => a.x.localeCompare(b.x));
-    for (let i = 0; i < paired.length; i++) {
-      xs[i] = paired[i].x;
-      ys[i] = paired[i].y;
+  let filteredRows = dataset.preview_rows;
+  if (bridgeFilter && bridgeIdx >= 0) filteredRows = filteredRows.filter((r) => r[bridgeIdx] === bridgeFilter);
+  if (direction && direction !== "both" && dirIdx >= 0) filteredRows = filteredRows.filter((r) => r[dirIdx] === direction);
+
+  const xs = filteredRows.map((r) => String(r[dateIdx >= 0 ? dateIdx : 0] ?? ""));
+  const ys = filteredRows.map((r) => Number(r[valueIdx] ?? 0));
+  sortByDate(xs, ys);
+
+  const series: unknown[] = [
+    {
+      name: primaryLabel || metricColumnName,
+      type: "line",
+      smooth: true,
+      showSymbol: false,
+      data: ys,
+      lineStyle: { width: 2 },
+      areaStyle: { opacity: isDark ? 0.18 : 0.12 },
+    },
+  ];
+
+  const yAxes: unknown[] = [{ type: "value" }];
+
+  // Comparison overlay
+  if (secondaryDataset && secondaryDataset.preview_rows.length > 0) {
+    const sDateIdx = secondaryDataset.columns.findIndex((c) => c.name === "date" || c.name === "window");
+    const sValIdx = secondaryDataset.columns.findIndex((c) => c.name === metricColumnName);
+    if (sValIdx >= 0) {
+      let sRows = secondaryDataset.preview_rows;
+      const sBridgeIdx = secondaryDataset.columns.findIndex((c) => c.name === "bridge");
+      const sDirIdx = secondaryDataset.columns.findIndex((c) => c.name === "direction");
+      if (bridgeFilter && sBridgeIdx >= 0) sRows = sRows.filter((r) => r[sBridgeIdx] === bridgeFilter);
+      if (direction && direction !== "both" && sDirIdx >= 0) sRows = sRows.filter((r) => r[sDirIdx] === direction);
+
+      const sxs = sRows.map((r) => String(r[sDateIdx >= 0 ? sDateIdx : 0] ?? ""));
+      const sys = sRows.map((r) => Number(r[sValIdx] ?? 0));
+      sortByDate(sxs, sys);
+
+      // Merge dates: use the union of both date sets
+      const allDates = Array.from(new Set([...xs, ...sxs])).sort();
+      const primaryMap = new Map(xs.map((x, i) => [x, ys[i]]));
+      const secondaryMap = new Map(sxs.map((x, i) => [x, sys[i]]));
+
+      series[0] = {
+        ...(series[0] as Record<string, unknown>),
+        data: allDates.map((d) => primaryMap.get(d) ?? null),
+      };
+
+      yAxes.push({ type: "value", position: "right" });
+      series.push({
+        name: secondaryLabel || "comparison",
+        type: "line",
+        smooth: true,
+        showSymbol: false,
+        yAxisIndex: 1,
+        data: allDates.map((d) => secondaryMap.get(d) ?? null),
+        lineStyle: { width: 2 },
+        areaStyle: { opacity: isDark ? 0.1 : 0.06 },
+      });
+
+      return {
+        backgroundColor: "transparent",
+        tooltip: { trigger: "axis" },
+        legend: { data: [primaryLabel || metricColumnName, secondaryLabel || "comparison"] },
+        grid: { left: 60, right: 60, top: 48, bottom: 48 },
+        xAxis: { type: "category", data: allDates },
+        yAxis: yAxes,
+        series,
+      };
     }
   }
 
@@ -174,20 +245,51 @@ function buildEChartsOption(
     grid: { left: 60, right: 24, top: 36, bottom: 48 },
     xAxis: { type: "category", data: xs },
     yAxis: { type: "value" },
-    series: [
-      {
-        type: "line",
-        smooth: true,
-        showSymbol: false,
-        data: ys,
-        lineStyle: { width: 2 },
-        areaStyle: { opacity: isDark ? 0.18 : 0.12 },
-      },
-    ],
+    series,
   };
 }
 
-// --- Basic analysis helpers (shared with MetricLab pattern) ---
+// ---------------------------------------------------------------------------
+// Growth calculation (frontend-derived)
+// ---------------------------------------------------------------------------
+
+type GrowthWindow = "wow" | "mom";
+
+function computeGrowth(
+  dataset: DatasetDescriptor | undefined,
+  valueCol: string,
+  window: GrowthWindow,
+): { dates: string[]; values: number[] } {
+  if (!dataset || dataset.preview_rows.length === 0) return { dates: [], values: [] };
+  const dateIdx = dataset.columns.findIndex((c) => c.name === "date" || c.name === "window");
+  const valIdx = dataset.columns.findIndex((c) => c.name === valueCol);
+  if (valIdx < 0) return { dates: [], values: [] };
+
+  // Aggregate by period
+  const buckets = new Map<string, number>();
+  for (const row of dataset.preview_rows) {
+    const d = String(row[dateIdx >= 0 ? dateIdx : 0] ?? "");
+    const v = Number(row[valIdx] ?? 0);
+    const key = window === "mom" ? d.slice(0, 7) : d; // month or day
+    buckets.set(key, (buckets.get(key) ?? 0) + v);
+  }
+
+  const sorted = Array.from(buckets.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  const dates: string[] = [];
+  const values: number[] = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1][1];
+    const curr = sorted[i][1];
+    if (prev === 0) continue;
+    dates.push(sorted[i][0]);
+    values.push(((curr - prev) / prev) * 100);
+  }
+  return { dates, values };
+}
+
+// ---------------------------------------------------------------------------
+// Analysis helpers
+// ---------------------------------------------------------------------------
 
 function isNumericColumn(rows: unknown[][], idx: number): boolean {
   let seen = 0;
@@ -202,10 +304,7 @@ function isNumericColumn(rows: unknown[][], idx: number): boolean {
   return seen > 0;
 }
 
-function computeStats(
-  rows: unknown[][],
-  columns: string[],
-): { name: string; count: number; min: number; max: number; mean: number; median: number }[] {
+function computeStats(rows: unknown[][], columns: string[]) {
   const out: { name: string; count: number; min: number; max: number; mean: number; median: number }[] = [];
   for (let idx = 0; idx < columns.length; idx++) {
     if (!isNumericColumn(rows, idx)) continue;
@@ -250,25 +349,13 @@ function TokenAnalysisPanel({ rows, columns }: { rows: unknown[][]; columns: str
       </div>
       <div className="mini-app-table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>Column</th>
-              <th>Count</th>
-              <th>Min</th>
-              <th>Mean</th>
-              <th>Median</th>
-              <th>Max</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Column</th><th>Count</th><th>Min</th><th>Mean</th><th>Median</th><th>Max</th></tr></thead>
           <tbody>
             {stats.map((s) => (
               <tr key={s.name}>
-                <td>{s.name}</td>
-                <td>{s.count.toLocaleString()}</td>
-                <td>{fmtNum(s.min)}</td>
-                <td>{fmtNum(s.mean)}</td>
-                <td>{fmtNum(s.median)}</td>
-                <td>{fmtNum(s.max)}</td>
+                <td>{s.name}</td><td>{s.count.toLocaleString()}</td>
+                <td>{fmtNum(s.min)}</td><td>{fmtNum(s.mean)}</td>
+                <td>{fmtNum(s.median)}</td><td>{fmtNum(s.max)}</td>
               </tr>
             ))}
           </tbody>
@@ -279,7 +366,32 @@ function TokenAnalysisPanel({ rows, columns }: { rows: unknown[][]; columns: str
 }
 
 // ---------------------------------------------------------------------------
-// Compact token picker (combobox + chip)
+// Chart info panel
+// ---------------------------------------------------------------------------
+
+function ChartInfoPanel({ metric, token, compareToken, rows, datasetMode }: {
+  metric: string; token: string; compareToken?: string; rows: number; datasetMode?: string;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  return (
+    <div className="mini-app-chart-info">
+      <button className="mini-app-chart-info__toggle" onClick={() => setExpanded(!expanded)} title="Toggle info">
+        {expanded ? "▾ ℹ" : "▸ ℹ"}
+      </button>
+      {expanded && (
+        <>
+          <span className="mini-app-chart-info__item"><strong>Token:</strong> {token}{compareToken ? ` vs ${compareToken}` : ""}</span>
+          <span className="mini-app-chart-info__item"><strong>Metric:</strong> {metric}</span>
+          <span className="mini-app-chart-info__item"><strong>Rows:</strong> {rows.toLocaleString()}</span>
+          {datasetMode && <span className="mini-app-chart-info__item"><strong>Mode:</strong> {datasetMode}</span>}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Token picker (always visible, supports 1 or 2 tokens)
 // ---------------------------------------------------------------------------
 
 interface TokenPickerProps {
@@ -288,35 +400,29 @@ interface TokenPickerProps {
   initialIncludePrice: boolean;
   loading: boolean;
   errorMessage: string | null;
+  compact?: boolean;
   onLoad: (config: {
     symbol: string;
+    compareWith?: string;
     startDate: string;
     includePrice: boolean;
   }) => void;
 }
 
 function TokenPicker({
-  catalog,
-  initialStartDate,
-  initialIncludePrice,
-  loading,
-  errorMessage,
-  onLoad,
+  catalog, initialStartDate, initialIncludePrice, loading, errorMessage, compact, onLoad,
 }: TokenPickerProps) {
   const [search, setSearch] = useState("");
-  const [selected, setSelected] = useState<TokenCatalogEntry | null>(null);
+  const [primary, setPrimary] = useState<TokenCatalogEntry | null>(null);
+  const [compare, setCompare] = useState<TokenCatalogEntry | null>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [startDate, setStartDate] = useState(initialStartDate);
   const [includePrice, setIncludePrice] = useState(initialIncludePrice);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
-  // Close dropdown on outside click.
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (!wrapRef.current) return;
-      if (!wrapRef.current.contains(e.target as Node)) {
-        setDropdownOpen(false);
-      }
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setDropdownOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -325,57 +431,53 @@ function TokenPicker({
   const matches = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return catalog.slice(0, 12);
-    return catalog
-      .filter((t) => {
-        const hay = `${t.symbol} ${t.name} ${t.address}`.toLowerCase();
-        return hay.includes(q);
-      })
-      .slice(0, 12);
+    return catalog.filter((t) => `${t.symbol} ${t.name} ${t.address}`.toLowerCase().includes(q)).slice(0, 12);
   }, [catalog, search]);
 
-  useEffect(() => {
-    if (selected && !selected.has_price) setIncludePrice(false);
-  }, [selected]);
-
   const pick = (t: TokenCatalogEntry) => {
-    setSelected(t);
+    if (!primary) {
+      setPrimary(t);
+    } else if (!compare && t.key !== primary.key) {
+      setCompare(t);
+    }
     setSearch("");
     setDropdownOpen(false);
   };
 
   const handleLoad = () => {
-    if (!selected) return;
-    onLoad({ symbol: selected.symbol, startDate, includePrice });
+    if (!primary) return;
+    onLoad({
+      symbol: primary.symbol,
+      compareWith: compare?.symbol,
+      startDate,
+      includePrice,
+    });
   };
 
   return (
-    <div className="mini-app-picker mini-app-picker--compact">
-      <h2 className="mini-app-picker__title">Pick a token</h2>
-      <p className="mini-app-picker__subtitle">
-        {catalog.length.toLocaleString()} tokens in the registry. Type to
-        search; pick one to load metadata, bridge flows, LPs, and price history.
-      </p>
+    <div className={`mini-app-picker mini-app-picker--compact${compact ? " mini-app-picker--shrink" : ""}`}>
+      <div className="mini-app-picker__head">
+        <h2 className="mini-app-picker__title">Pick a token{compare ? " (comparison)" : ""}</h2>
+        <span className="mini-app-picker__hint">{catalog.length} tokens</span>
+      </div>
 
-      {errorMessage && (
-        <div className="mini-app-picker__error">{errorMessage}</div>
-      )}
+      {errorMessage && <div className="mini-app-picker__error">{errorMessage}</div>}
 
       <div className="mini-app-picker__compact-row">
         <div className="mini-app-picker__combo" ref={wrapRef}>
           <input
             type="search"
             className="mini-app-picker__combo-input"
-            placeholder="Search token symbol, name, or address…"
+            placeholder={
+              !primary ? "Search token symbol, name, or address..." :
+              !compare ? "Add a second token to compare (optional)..." : "Two tokens selected"
+            }
             value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setDropdownOpen(true);
-            }}
+            onChange={(e) => { setSearch(e.target.value); setDropdownOpen(true); }}
             onFocus={() => setDropdownOpen(true)}
+            disabled={!!primary && !!compare}
           />
-          <span className="mini-app-picker__count-pill">
-            {catalog.length.toLocaleString()}
-          </span>
+          <span className="mini-app-picker__count-pill">{catalog.length}</span>
           {dropdownOpen && matches.length > 0 && (
             <div className="mini-app-picker__dropdown">
               {matches.map((t) => (
@@ -383,76 +485,63 @@ function TokenPicker({
                   key={t.key}
                   type="button"
                   className="mini-app-picker__dropdown-item"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    pick(t);
-                  }}
+                  disabled={(primary?.key === t.key) || (compare?.key === t.key)}
+                  onMouseDown={(e) => { e.preventDefault(); pick(t); }}
                 >
                   <strong>{t.symbol}</strong> — {t.name}
                 </button>
               ))}
-              {catalog.length > matches.length && (
-                <div className="mini-app-picker__dropdown-more">
-                  Keep typing to narrow down…
-                </div>
-              )}
             </div>
           )}
         </div>
       </div>
 
       <div className="mini-app-picker__basket">
-        {selected ? (
-          <div className="mini-app-picker__chip">
-            <strong>{selected.symbol}</strong>
-            <span>{selected.name}</span>
-            <button
-              type="button"
-              className="mini-app-picker__chip-remove"
-              onClick={() => setSelected(null)}
-              aria-label="Remove"
-            >
-              ×
-            </button>
-          </div>
+        {primary ? (
+          <>
+            <div className="mini-app-picker__chip">
+              <span className="mini-app-picker__kind-pill">1</span>
+              <strong>{primary.symbol}</strong> {primary.name}
+              <button type="button" className="mini-app-picker__chip-remove" onClick={() => { setPrimary(compare); setCompare(null); }}>×</button>
+            </div>
+            {compare && (
+              <div className="mini-app-picker__chip">
+                <span className="mini-app-picker__kind-pill">2</span>
+                <strong>{compare.symbol}</strong> {compare.name}
+                <button type="button" className="mini-app-picker__chip-remove" onClick={() => setCompare(null)}>×</button>
+              </div>
+            )}
+          </>
         ) : (
-          <div className="mini-app-picker__basket-empty">
-            No token selected — pick one above.
-          </div>
+          <div className="mini-app-picker__basket-empty">No token selected — pick one above.</div>
         )}
       </div>
 
-      <details className="mini-app-picker__config">
-        <summary>Options</summary>
-        <fieldset className="mini-app-picker__fieldset--row">
-          <label>
-            Start date
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-            />
-          </label>
-          <label className="mini-app-picker__checkbox">
-            <input
-              type="checkbox"
-              checked={includePrice}
-              onChange={(e) => setIncludePrice(e.target.checked)}
-              disabled={!!selected && !selected.has_price}
-            />
-            Include 365-day price history
-          </label>
-        </fieldset>
-      </details>
+      {/* Inline options */}
+      <div className="mini-app-picker__fieldset--row">
+        <label>
+          Start date
+          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+        </label>
+        <label className="mini-app-picker__checkbox">
+          <input
+            type="checkbox"
+            checked={includePrice}
+            onChange={(e) => setIncludePrice(e.target.checked)}
+            disabled={!!primary && !primary.has_price}
+          />
+          Price history
+        </label>
+      </div>
 
       <div className="mini-app-picker__actions">
         <button
           type="button"
           className="mini-app-picker__load-btn"
           onClick={handleLoad}
-          disabled={loading || !selected}
+          disabled={loading || !primary}
         >
-          {loading ? "Loading…" : "Load token"}
+          {loading ? "Loading..." : compare ? `Compare ${primary?.symbol} vs ${compare.symbol}` : "Load token"}
         </button>
       </div>
     </div>
@@ -466,49 +555,56 @@ function TokenPicker({
 interface LoadedViewProps {
   view: MiniAppPayload<TokenExplorerState>;
   isDark: boolean;
-  sendMessage: (text: string) => Promise<boolean>;
-  onSwitchToken: () => void;
-  onUpdateFocus: (
-    metric: TokenMetric,
-    bridge: string,
-    direction: TokenDirection,
-  ) => void;
+  onUpdateFocus: (metric: TokenMetric, bridge: string, direction: TokenDirection) => void;
 }
 
-function LoadedView({
-  view,
-  isDark,
-  sendMessage,
-  onSwitchToken,
-  onUpdateFocus,
-}: LoadedViewProps) {
-  const selectedMetric = view.view_state?.selected_metric ?? "bridge_volume";
-  const bridgeFilter = view.view_state?.bridge ?? "";
-  const direction = view.view_state?.direction ?? "both";
+function LoadedView({ view, isDark, onUpdateFocus }: LoadedViewProps) {
+  const state = view.view_state!;
+  const selectedMetric = state.selected_metric ?? "bridge_volume";
+  const bridgeFilter = state.bridge ?? "";
+  const direction = state.direction ?? "both";
+  const isComparison = state.comparison_mode === true;
+  const tokens = state.selected_tokens ?? [state.selected_token];
+  const [growthSource, setGrowthSource] = useState<string>(state.growth_source ?? "bridge_volume");
+  const [growthWindow, setGrowthWindow] = useState<GrowthWindow>((state.growth_window ?? "wow") as GrowthWindow);
 
-  // Only show metric tabs whose dataset actually has data.
-  const availableTabs = useMemo(
-    () => ALL_METRICS.filter((m) => {
-      const ds = view.datasets?.[m.dsKey];
-      return ds && ds.preview_rows.length > 0;
-    }),
-    [view.datasets],
-  );
+  // Tab data availability
+  const tabAvailability = useMemo(() => {
+    const map = new Map<string, boolean>();
+    for (const m of ALL_METRICS) {
+      if (m.key === "growth") {
+        // Growth is available if any time-series dataset exists
+        map.set(m.key, !!(view.datasets?.bridge_flows?.preview_rows?.length || view.datasets?.price_history?.preview_rows?.length));
+      } else {
+        const ds = view.datasets?.[m.dsKey];
+        map.set(m.key, !!(ds && ds.preview_rows?.length > 0));
+      }
+    }
+    return map;
+  }, [view.datasets]);
+
+  // Fall back to first available tab if current is unavailable.
+  // Uses ref for onUpdateFocus to avoid dependency cycle.
+  const onUpdateFocusRef = useRef(onUpdateFocus);
+  onUpdateFocusRef.current = onUpdateFocus;
+  useEffect(() => {
+    // Only run fallback when there's actual data loaded
+    const hasAnyData = Array.from(tabAvailability.values()).some(Boolean);
+    if (!hasAnyData) return;
+    if (!tabAvailability.get(selectedMetric)) {
+      const first = ALL_METRICS.find((m) => tabAvailability.get(m.key));
+      if (first) onUpdateFocusRef.current(first.key, bridgeFilter, direction);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabAvailability, selectedMetric]);
 
   const activeDS = datasetForMetric(selectedMetric, view.datasets);
+  const secondaryDS = isComparison ? datasetForMetric(selectedMetric, view.datasets, "secondary_") : undefined;
 
-  const chartOption = useMemo(
-    () =>
-      buildEChartsOption(
-        activeDS,
-        metricColumn(selectedMetric),
-        bridgeFilter,
-        direction,
-        isDark,
-      ),
-    [activeDS, selectedMetric, bridgeFilter, direction, isDark],
-  );
+  const isBridgeMetric = selectedMetric === "bridge_volume" || selectedMetric === "bridge_txs";
+  const isGrowthTab = selectedMetric === "growth";
 
+  // Bridge filter options
   const bridgeOptions = useMemo(() => {
     const ds = view.datasets?.bridge_flows;
     if (!ds) return [] as string[];
@@ -522,16 +618,55 @@ function LoadedView({
     return Array.from(set).sort();
   }, [view.datasets]);
 
-  const isBridgeMetric = selectedMetric === "bridge_volume" || selectedMetric === "bridge_txs";
+  // Growth chart data
+  const growthData = useMemo(() => {
+    if (!isGrowthTab) return null;
+    const srcMetric = growthSource as TokenMetric;
+    const ds = datasetForMetric(srcMetric, view.datasets);
+    const col = metricColumn(srcMetric);
+    return computeGrowth(ds, col, growthWindow);
+  }, [isGrowthTab, growthSource, growthWindow, view.datasets]);
+
+  const growthOption = useMemo(() => {
+    if (!growthData || growthData.dates.length === 0) return { title: { text: "No growth data", left: "center", top: "center" } };
+    return {
+      backgroundColor: "transparent",
+      tooltip: { trigger: "axis", valueFormatter: (v: number) => `${v.toFixed(1)}%` },
+      grid: { left: 60, right: 24, top: 36, bottom: 48 },
+      xAxis: { type: "category", data: growthData.dates },
+      yAxis: { type: "value", axisLabel: { formatter: "{value}%" } },
+      series: [{
+        type: "bar",
+        data: growthData.values,
+        itemStyle: {
+          color: (p: { value: number }) => p.value >= 0 ? (isDark ? "#34d399" : "#10b981") : (isDark ? "#f87171" : "#ef4444"),
+        },
+      }],
+    };
+  }, [growthData, isDark]);
+
+  // Main chart
+  const chartOption = useMemo(() => {
+    if (isGrowthTab) return growthOption;
+    return buildEChartsOption(
+      activeDS, metricColumn(selectedMetric), bridgeFilter, direction, isDark,
+      secondaryDS, isComparison ? tokens[1] : undefined, isComparison ? tokens[0] : undefined,
+    );
+  }, [activeDS, secondaryDS, selectedMetric, bridgeFilter, direction, isDark, isGrowthTab, growthOption, isComparison, tokens]);
+
+  // Available growth sources
+  const growthSources = useMemo(() => {
+    return ALL_METRICS
+      .filter((m) => m.key !== "growth" && m.key !== "lp_count" && tabAvailability.get(m.key))
+      .map((m) => ({ key: m.key, label: m.label }));
+  }, [tabAvailability]);
 
   return (
     <>
+      {/* Summary cards */}
       <section className="mini-app-summary-grid">
         {(view.summary_cards ?? []).map((card, i) => (
-          <div
-            key={i}
-            className={`mini-app-summary-card tone-${card.tone ?? "neutral"}`}
-          >
+          <div key={i} className={`mini-app-summary-card tone-${card.tone ?? "neutral"}`}>
             <div className="mini-app-summary-label">{card.label}</div>
             <div className="mini-app-summary-value">{card.value}</div>
             {card.delta && <div className="mini-app-summary-delta">{card.delta}</div>}
@@ -539,60 +674,54 @@ function LoadedView({
         ))}
       </section>
 
-      <section className="mini-app-controls">
-        <button
-          type="button"
-          className="mini-app-picker__load-btn"
-          onClick={onSwitchToken}
-        >
-          ← Pick a different token
-        </button>
-      </section>
-
-      {/* Metric tabs — shown as a tab bar */}
+      {/* Tab bar — all tabs visible, greyed out if no data */}
       <div className="mini-app-analysis__tabs">
-        {availableTabs.map((m) => (
-          <button
-            key={m.key}
-            type="button"
-            className={`mini-app-analysis__tab ${selectedMetric === m.key ? "is-active" : ""}`}
-            onClick={() => onUpdateFocus(m.key, bridgeFilter, direction)}
-          >
-            {m.label}
-          </button>
-        ))}
+        {ALL_METRICS.map((m) => {
+          const hasData = tabAvailability.get(m.key) ?? false;
+          return (
+            <button
+              key={m.key}
+              type="button"
+              className={`mini-app-analysis__tab ${selectedMetric === m.key ? "is-active" : ""}`}
+              disabled={!hasData}
+              onClick={() => hasData && onUpdateFocus(m.key, bridgeFilter, direction)}
+            >
+              {m.label}
+            </button>
+          );
+        })}
       </div>
 
-      {/* Bridge-specific filters (only when a bridge metric is active) */}
+      {/* Growth tab controls */}
+      {isGrowthTab && (
+        <div className="mini-app-growth-controls">
+          <span>Source:</span>
+          <select value={growthSource} onChange={(e) => setGrowthSource(e.target.value)}>
+            {growthSources.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+          </select>
+          <span>Window:</span>
+          <select value={growthWindow} onChange={(e) => setGrowthWindow(e.target.value as GrowthWindow)}>
+            <option value="wow">Week-over-week</option>
+            <option value="mom">Month-over-month</option>
+          </select>
+        </div>
+      )}
+
+      {/* Bridge-specific filters */}
       {isBridgeMetric && (
         <section className="mini-app-controls">
           <fieldset>
             <legend>Bridge</legend>
-            <select
-              value={bridgeFilter}
-              onChange={(e) =>
-                onUpdateFocus(selectedMetric, e.target.value, direction)
-              }
-            >
+            <select value={bridgeFilter} onChange={(e) => onUpdateFocus(selectedMetric, e.target.value, direction)}>
               <option value="">All bridges</option>
-              {bridgeOptions.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
+              {bridgeOptions.map((b) => <option key={b} value={b}>{b}</option>)}
             </select>
           </fieldset>
           <fieldset>
             <legend>Direction</legend>
             {(["both", "inbound", "outbound"] as const).map((d) => (
               <label key={d}>
-                <input
-                  type="radio"
-                  name="te-direction"
-                  value={d}
-                  checked={direction === d}
-                  onChange={() => onUpdateFocus(selectedMetric, bridgeFilter, d)}
-                />
+                <input type="radio" name="te-direction" value={d} checked={direction === d} onChange={() => onUpdateFocus(selectedMetric, bridgeFilter, d)} />
                 {d}
               </label>
             ))}
@@ -600,6 +729,16 @@ function LoadedView({
         </section>
       )}
 
+      {/* Chart info panel */}
+      <ChartInfoPanel
+        metric={selectedMetric}
+        token={tokens[0]}
+        compareToken={isComparison ? tokens[1] : undefined}
+        rows={activeDS?.preview_rows.length ?? 0}
+        datasetMode={activeDS?.stats?.mode}
+      />
+
+      {/* Main chart */}
       <section className="mini-app-chart">
         <ReactECharts
           option={chartOption}
@@ -609,24 +748,62 @@ function LoadedView({
         />
       </section>
 
-      {activeDS && activeDS.preview_rows.length > 0 && (
-        <TokenAnalysisPanel
-          rows={activeDS.preview_rows}
-          columns={activeDS.columns.map((c) => c.name)}
-        />
+      {/* Comparison scatter (for time-series metrics, not lp_count or growth) */}
+      {isComparison && !isGrowthTab && selectedMetric !== "lp_count" && activeDS && secondaryDS && (
+        <section className="mini-app-chart">
+          <div style={{ fontSize: "0.82rem", color: "var(--text-muted)", padding: "0 0 8px" }}>
+            Correlation: {tokens[0]} vs {tokens[1]} ({selectedMetric})
+          </div>
+          <ReactECharts
+            option={buildCorrelationScatter(activeDS, secondaryDS, metricColumn(selectedMetric), tokens[0], tokens[1], isDark)}
+            notMerge={true}
+            style={{ height: 300, width: "100%" }}
+            theme={isDark ? "dark" : undefined}
+          />
+        </section>
       )}
 
-      <AssistantBar
-        contextHint={view.view_state?.selected_token || "this token"}
-        onSend={async (text) => {
-          const s = view.view_state;
-          const ctx = `[Token Explorer view_id=${view.view_id}, token=${s?.selected_token || "?"}, ` +
-            `metric=${s?.selected_metric}, bridge=${s?.bridge || "all"}] ${text}`;
-          return sendMessage(ctx);
-        }}
-      />
+      {isComparison && selectedMetric === "lp_count" && (
+        <div className="mini-app-unavailable">
+          Correlation scatter not available for LP count — use Bridge vol. or Price for correlation analysis.
+        </div>
+      )}
+
+      {/* Analysis panel */}
+      {activeDS && activeDS.preview_rows.length > 0 && !isGrowthTab && (
+        <TokenAnalysisPanel rows={activeDS.preview_rows} columns={activeDS.columns.map((c) => c.name)} />
+      )}
     </>
   );
+}
+
+// Scatter plot for correlation between two tokens
+function buildCorrelationScatter(
+  ds1: DatasetDescriptor, ds2: DatasetDescriptor, col: string,
+  label1: string, label2: string, isDark: boolean,
+): Record<string, unknown> {
+  const dateIdx1 = ds1.columns.findIndex((c) => c.name === "date" || c.name === "window");
+  const valIdx1 = ds1.columns.findIndex((c) => c.name === col);
+  const dateIdx2 = ds2.columns.findIndex((c) => c.name === "date" || c.name === "window");
+  const valIdx2 = ds2.columns.findIndex((c) => c.name === col);
+  if (valIdx1 < 0 || valIdx2 < 0) return { title: { text: "Cannot build scatter", left: "center", top: "center" } };
+
+  const map1 = new Map<string, number>();
+  for (const r of ds1.preview_rows) map1.set(String(r[dateIdx1] ?? ""), Number(r[valIdx1] ?? 0));
+  const data: [number, number][] = [];
+  for (const r of ds2.preview_rows) {
+    const d = String(r[dateIdx2] ?? "");
+    if (map1.has(d)) data.push([map1.get(d)!, Number(r[valIdx2] ?? 0)]);
+  }
+
+  return {
+    backgroundColor: "transparent",
+    tooltip: { trigger: "item" },
+    grid: { left: 60, right: 24, top: 24, bottom: 48 },
+    xAxis: { type: "value", name: label1 },
+    yAxis: { type: "value", name: label2 },
+    series: [{ type: "scatter", data, symbolSize: 6, itemStyle: { opacity: 0.7, color: isDark ? "#818cf8" : "#4f46e5" } }],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -634,56 +811,44 @@ function LoadedView({
 // ---------------------------------------------------------------------------
 
 export default function TokenExplorerApp() {
-  const { view, callTool, updateModelContext, sendMessage } =
+  const { view, callTool, updateModelContext } =
     useMiniApp<TokenExplorerState>({
       appId: APP_ID,
       mockPayload: MOCK_PAYLOAD,
     });
 
-  const [isDark, setIsDark] = useState(
-    () => document.documentElement.dataset.theme !== "light",
-  );
+  const [isDark, setIsDark] = useState(() => document.documentElement.dataset.theme !== "light");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [forceEmpty, setForceEmpty] = useState(false);
 
   useEffect(() => {
-    const obs = new MutationObserver(() => {
-      setIsDark(document.documentElement.dataset.theme !== "light");
-    });
-    obs.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
+    const obs = new MutationObserver(() => setIsDark(document.documentElement.dataset.theme !== "light"));
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     return () => obs.disconnect();
   }, []);
 
   useEffect(() => {
     setLoading(false);
     setErrorMessage(null);
-    if (view?.view_state?.mode === "loaded") {
-      setForceEmpty(false);
-    }
   }, [view?.view_id, view?.view_state?.selected_token]);
 
   useEffect(() => {
     if (!view) return;
-    const state = view.view_state;
-    const bridgeStats = view.datasets?.bridge_flows?.stats;
+    const s = view.view_state;
     updateModelContext({
       view_id: view.view_id,
-      mode: state?.mode ?? "empty",
-      token: state?.selected_token || "n/a",
-      selected_metric: state?.selected_metric ?? "n/a",
-      bridge: state?.bridge ?? "",
-      direction: state?.direction ?? "",
-      dataset_mode: bridgeStats?.mode ?? "n/a",
-      sample_source_rows: bridgeStats?.sample_source_rows ?? "n/a",
+      mode: s?.mode ?? "empty",
+      token: s?.selected_token || "n/a",
+      comparison: s?.comparison_mode ? s?.selected_tokens?.join(",") : "none",
+      selected_metric: s?.selected_metric ?? "n/a",
+      bridge: s?.bridge ?? "",
+      direction: s?.direction ?? "",
     });
   }, [view, updateModelContext]);
 
   const handleLoadToken = async (config: {
     symbol: string;
+    compareWith?: string;
     startDate: string;
     includePrice: boolean;
   }) => {
@@ -691,13 +856,14 @@ export default function TokenExplorerApp() {
     setLoading(true);
     setErrorMessage(null);
     try {
-      await callTool("load_token_explorer_token", {
+      const args: Record<string, unknown> = {
         view_id: view.view_id,
         symbol_or_address: config.symbol,
         start_date: config.startDate,
         include_price: config.includePrice,
-      });
-      setForceEmpty(false);
+      };
+      if (config.compareWith) args.compare_with = config.compareWith;
+      await callTool("load_token_explorer_token", args);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
     } finally {
@@ -705,58 +871,43 @@ export default function TokenExplorerApp() {
     }
   };
 
-  const handleUpdateFocus = async (
-    metric: TokenMetric,
-    bridge: string,
-    direction: TokenDirection,
-  ) => {
+  const handleUpdateFocus = async (metric: TokenMetric, bridge: string, direction: TokenDirection) => {
     if (!view) return;
     try {
-      await callTool("update_token_explorer_focus", {
-        view_id: view.view_id,
-        metric,
-        bridge,
-        direction,
-      });
+      await callTool("update_token_explorer_focus", { view_id: view.view_id, metric, bridge, direction });
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
     }
   };
 
-  if (!view) {
-    return <div className="mini-app-loading">Loading Token Explorer…</div>;
-  }
+  if (!view) return <div className="mini-app-loading">Loading Token Explorer...</div>;
 
   const state = view.view_state;
-  const isEmptyMode =
-    forceEmpty || !state || state.mode === "empty" || !view.datasets?.bridge_flows;
+  const hasData = !!((state?.mode === "loaded" || state?.mode === "comparison") && view.datasets && Object.keys(view.datasets).length > 0);
 
   return (
     <div className="mini-app-root mini-app-token-explorer">
       <header className="mini-app-header">
         <h1>{view.title}</h1>
-        <span className="mini-app-subtitle">
-          view_id: {view.view_id.slice(0, 8)}
-        </span>
+        <span className="mini-app-subtitle">view_id: {view.view_id.slice(0, 8)}</span>
       </header>
 
       <WarningBanner warnings={view.warnings ?? []} />
 
-      {isEmptyMode ? (
-        <TokenPicker
-          catalog={state?.token_catalog ?? []}
-          initialStartDate={state?.start_date ?? "2024-01-01"}
-          initialIncludePrice={state?.include_price ?? true}
-          loading={loading}
-          errorMessage={errorMessage}
-          onLoad={handleLoadToken}
-        />
-      ) : (
+      <TokenPicker
+        catalog={state?.token_catalog ?? []}
+        initialStartDate={state?.start_date ?? "2024-01-01"}
+        initialIncludePrice={state?.include_price ?? true}
+        loading={loading}
+        errorMessage={errorMessage}
+        compact={hasData}
+        onLoad={handleLoadToken}
+      />
+
+      {hasData && (
         <LoadedView
           view={view}
           isDark={isDark}
-          sendMessage={sendMessage}
-          onSwitchToken={() => setForceEmpty(true)}
           onUpdateFocus={handleUpdateFocus}
         />
       )}

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
-import { AssistantBar } from "../shared/AssistantBar";
+// AssistantBar removed — replaced by ChartInfoPanel
 import type { DatasetMode, MiniAppPayload } from "../shared/miniAppTypes";
 
 type ChartType =
@@ -506,7 +506,7 @@ function computeCorrelationMatrix(
 }
 
 function fmtNum(n: number): string {
-  if (!Number.isFinite(n)) return "—";
+  if (!Number.isFinite(n)) return "\u2014";
   if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + "B";
   if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + "M";
   if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(2) + "k";
@@ -562,9 +562,9 @@ function AnalysisPanel({ rows, columns }: AnalysisPanelProps) {
           className={`mini-app-analysis__tab ${tab === "corr" ? "is-active" : ""}`}
           onClick={() => setTab("corr")}
           disabled={corr.cols.length < 2}
-          title={corr.cols.length < 2 ? "Need ≥2 numeric columns" : ""}
+          title={corr.cols.length < 2 ? "Need >=2 numeric columns" : ""}
         >
-          Correlations ({corr.cols.length}×{corr.cols.length})
+          Correlations ({corr.cols.length}x{corr.cols.length})
         </button>
       </div>
 
@@ -609,7 +609,7 @@ function AnalysisPanel({ rows, columns }: AnalysisPanelProps) {
                 <th></th>
                 {corr.cols.map((c) => (
                   <th key={c} title={c}>
-                    {c.length > 14 ? c.slice(0, 12) + "…" : c}
+                    {c.length > 14 ? c.slice(0, 12) + "\u2026" : c}
                   </th>
                 ))}
               </tr>
@@ -623,7 +623,7 @@ function AnalysisPanel({ rows, columns }: AnalysisPanelProps) {
                       key={j}
                       className="mini-app-corr-cell"
                       style={{ background: corrColor(r) }}
-                      title={`${rowCol} × ${corr.cols[j]}: r = ${r.toFixed(4)}`}
+                      title={`${rowCol} x ${corr.cols[j]}: r = ${r.toFixed(4)}`}
                     >
                       {r.toFixed(2)}
                     </td>
@@ -639,26 +639,31 @@ function AnalysisPanel({ rows, columns }: AnalysisPanelProps) {
 }
 
 // ---------------------------------------------------------------------------
-// Metric picker (shown when mode === "empty")
+// Metric picker (always visible at the top)
 // ---------------------------------------------------------------------------
+
+interface PickerConfig {
+  metrics: string[];
+  dimensions: string[];
+  limit: number;
+  orderBy: string[];
+}
 
 interface MetricPickerProps {
   catalog: MetricCatalogEntry[];
-  onLoad: (config: {
-    metrics: string[];
-    dimensions: string[];
-    limit: number;
-    orderBy: string[];
-  }) => void;
+  onLoad: (config: PickerConfig) => void;
+  onConfigChange: (config: PickerConfig) => void;
   loading: boolean;
   errorMessage: string | null;
+  compact: boolean;
 }
 
 /**
  * Compact picker: single searchable combobox (no wall of list items)
- * + chip basket for multi-select + collapsed config panel.
+ * + chip basket for multi-select + inline config panel.
+ * Always visible; shrinks when compact=true (data showing below).
  */
-function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerProps) {
+function MetricPicker({ catalog, onLoad, onConfigChange, loading, errorMessage, compact }: MetricPickerProps) {
   const [search, setSearch] = useState("");
   const [sector, setSector] = useState<string>("");
   const [subsector, setSubsector] = useState<string>("");
@@ -668,7 +673,10 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
   const [orderByField, setOrderByField] = useState<string>("");
   const [orderDir, setOrderDir] = useState<"asc" | "desc">("desc");
   const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [showConfig, setShowConfig] = useState(false);
+
+  // Track whether the initial anchor setup has fired so we do not
+  // fire onConfigChange during the very first dimension reset.
+  const initializedRef = useRef(false);
 
   const sectors = useMemo(() => {
     const set = new Set<string>();
@@ -720,11 +728,44 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
     if (!anchor) {
       setDimensions([]);
       setOrderByField("");
+      initializedRef.current = false;
       return;
     }
     setDimensions(anchor.default_dimensions.slice());
     setOrderByField("");
+    initializedRef.current = true;
   }, [anchor?.name]);
+
+  // Fire onConfigChange whenever basket, dimensions, limit, or orderBy change.
+  // Uses a 350ms debounce. Skips firing if basket is empty.
+  // IMPORTANT: onConfigChange is stored in a ref to avoid re-triggering the
+  // effect when the callback identity changes (which happens after every
+  // successful load because `view` updates → callback is recreated).
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onConfigChangeRef = useRef(onConfigChange);
+  onConfigChangeRef.current = onConfigChange;
+  const orderByStr = orderByField ? `${orderByField} ${orderDir}` : "";
+
+  useEffect(() => {
+    if (basket.length === 0) return;
+    if (!initializedRef.current) return;
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      const config: PickerConfig = {
+        metrics: basket,
+        dimensions,
+        limit,
+        orderBy: orderByStr ? [orderByStr] : [],
+      };
+      onConfigChangeRef.current(config);
+    }, 350);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [basket, dimensions, limit, orderByStr]);
 
   const addToBasket = (name: string) => {
     const entry = catalog.find((m) => m.name === name);
@@ -739,11 +780,11 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
           return [...prev, name];
         });
       } else {
-        // switching from metrics to a table — replace
+        // switching from metrics to a table -- replace
         setBasket([name]);
       }
     } else if (hasModel) {
-      // switching from a table to metrics — replace
+      // switching from a table to metrics -- replace
       setBasket([name]);
     } else {
       setBasket((prev) => (prev.includes(name) ? prev : [...prev, name]));
@@ -762,19 +803,12 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
     );
   };
 
-  const handleLoad = () => {
-    if (basket.length === 0) return;
-    const orderBy = orderByField ? [`${orderByField} ${orderDir}`] : [];
-    onLoad({
-      metrics: basket,
-      dimensions,
-      limit,
-      orderBy,
-    });
-  };
+  // onLoad is available for programmatic triggers but auto-load via
+  // onConfigChange handles the normal interactive flow.
+  void onLoad;
 
   return (
-    <div className="mini-app-picker mini-app-picker--compact">
+    <div className={`mini-app-picker mini-app-picker--compact${compact ? " mini-app-picker--shrink" : ""}`}>
       <div className="mini-app-picker__head">
         <h2 className="mini-app-picker__title">Build a query</h2>
         <span className="mini-app-picker__hint">
@@ -830,10 +864,10 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
             onBlur={() => setTimeout(() => setDropdownOpen(false), 160)}
             placeholder={
               basket.length === 0
-                ? "Search to add a metric or table…"
+                ? "Search to add a metric or table\u2026"
                 : hasModel
-                  ? "Replace table…"
-                  : "Add another metric…"
+                  ? "Replace table\u2026"
+                  : "Add another metric\u2026"
             }
             className="mini-app-picker__combo-input"
           />
@@ -858,22 +892,26 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
                     {m.label}
                   </span>
                   <span className="mini-app-picker__dropdown-path">
-                    {[m.sector, m.subsector].filter(Boolean).join(" › ")}
+                    {[m.sector, m.subsector].filter(Boolean).join(" > ")}
                   </span>
                 </button>
               ))}
               {filtered.length > suggestions.length && (
                 <div className="mini-app-picker__dropdown-more">
-                  + {filtered.length - suggestions.length} more — keep typing
+                  + {filtered.length - suggestions.length} more -- keep typing
                   to narrow
                 </div>
               )}
             </div>
           )}
         </div>
+
+        {loading && (
+          <span className="mini-app-picker__loading-pill">Loading...</span>
+        )}
       </div>
 
-      {/* Basket — selected metric chips */}
+      {/* Basket -- selected metric chips */}
       <div className="mini-app-picker__basket">
         {basket.length === 0 ? (
           <span className="mini-app-picker__basket-empty">
@@ -881,7 +919,7 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
           </span>
         ) : (
           basketEntries.map((m, i) => (
-            <span key={m.name} className="mini-app-picker__chip">
+            <span key={m.name} className="mini-app-picker__chip" title={m.label}>
               <span className="mini-app-picker__kind-pill">
                 {m.kind === "model" ? "tbl" : "mtr"}
               </span>
@@ -889,7 +927,7 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
               {i === 0 && basketEntries.length > 1 && (
                 <span
                   className="mini-app-picker__hint"
-                  title="Anchor metric — its dimensions drive the query"
+                  title="Anchor metric -- its dimensions drive the query"
                 >
                   anchor
                 </span>
@@ -900,14 +938,14 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
                 onClick={() => removeFromBasket(m.name)}
                 title="Remove"
               >
-                ×
+                x
               </button>
             </span>
           ))
         )}
         {canMultiSelect && basket.length >= 1 && (
           <span className="mini-app-picker__hint">
-            Semantic metrics compose into one query — add more for side-by-side
+            Semantic metrics compose into one query -- add more for side-by-side
             comparison & correlations.
           </span>
         )}
@@ -918,106 +956,136 @@ function MetricPicker({ catalog, onLoad, loading, errorMessage }: MetricPickerPr
         )}
         {hasModel && basket.length >= 2 && (
           <span className="mini-app-picker__hint">
-            Two tables selected — they will be plotted on separate y-axes.
+            Two tables selected -- they will be plotted on separate y-axes.
           </span>
         )}
       </div>
 
-      {/* Collapsed config panel */}
-      <details
-        className="mini-app-picker__config"
-        open={showConfig}
-        onToggle={(e) => setShowConfig((e.target as HTMLDetailsElement).open)}
-      >
-        <summary>
-          Options
-          {anchor && (
-            <>
-              {" · "}
-              {dimensions.length} dim{dimensions.length !== 1 && "s"}
-              {" · "}
-              limit {limit}
-              {orderByField && ` · order ${orderByField} ${orderDir}`}
-            </>
+      {/* Inline config panel (visible when an anchor metric is selected) */}
+      {anchor && (
+        <div className="mini-app-picker__config-inline">
+          {anchor.kind !== "model" && anchor.allowed_dimensions.length > 0 && (
+            <fieldset className="mini-app-picker__fieldset">
+              <legend>Dimensions (for {anchor.label})</legend>
+              <div className="mini-app-picker__dim-row">
+                {anchor.allowed_dimensions.map((dim) => (
+                  <label key={dim} className="mini-app-picker__checkbox">
+                    <input
+                      type="checkbox"
+                      checked={dimensions.includes(dim)}
+                      onChange={() => toggleDimension(dim)}
+                    />
+                    {dim}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
           )}
-        </summary>
 
-        {anchor && anchor.kind !== "model" && anchor.allowed_dimensions.length > 0 && (
-          <fieldset className="mini-app-picker__fieldset">
-            <legend>Dimensions (for {anchor.label})</legend>
-            <div className="mini-app-picker__dim-row">
-              {anchor.allowed_dimensions.map((dim) => (
-                <label key={dim} className="mini-app-picker__checkbox">
-                  <input
-                    type="checkbox"
-                    checked={dimensions.includes(dim)}
-                    onChange={() => toggleDimension(dim)}
-                  />
-                  {dim}
-                </label>
-              ))}
-            </div>
+          <fieldset className="mini-app-picker__fieldset mini-app-picker__fieldset--row">
+            <label>
+              <span>Order by</span>
+              <select
+                value={orderByField}
+                onChange={(e) => setOrderByField(e.target.value)}
+              >
+                <option value="">-- none --</option>
+                {(anchor?.allowed_dimensions ?? []).map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Direction</span>
+              <select
+                value={orderDir}
+                onChange={(e) => setOrderDir(e.target.value as "asc" | "desc")}
+                disabled={!orderByField}
+              >
+                <option value="desc">desc</option>
+                <option value="asc">asc</option>
+              </select>
+            </label>
+            <label>
+              <span>Row limit</span>
+              <input
+                type="number"
+                min={10}
+                max={20000}
+                step={100}
+                value={limit}
+                onChange={(e) => setLimit(Number(e.target.value) || 2000)}
+              />
+            </label>
           </fieldset>
-        )}
 
-        <fieldset className="mini-app-picker__fieldset mini-app-picker__fieldset--row">
-          <label>
-            <span>Order by</span>
-            <select
-              value={orderByField}
-              onChange={(e) => setOrderByField(e.target.value)}
-            >
-              <option value="">— none —</option>
-              {(anchor?.allowed_dimensions ?? []).map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>Direction</span>
-            <select
-              value={orderDir}
-              onChange={(e) => setOrderDir(e.target.value as "asc" | "desc")}
-              disabled={!orderByField}
-            >
-              <option value="desc">desc</option>
-              <option value="asc">asc</option>
-            </select>
-          </label>
-          <label>
-            <span>Row limit</span>
-            <input
-              type="number"
-              min={10}
-              max={20000}
-              step={100}
-              value={limit}
-              onChange={(e) => setLimit(Number(e.target.value) || 2000)}
-            />
-          </label>
-        </fieldset>
+          {anchor?.description && (
+            <p className="mini-app-picker__description">{anchor.description}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
-        {anchor?.description && (
-          <p className="mini-app-picker__description">{anchor.description}</p>
-        )}
-      </details>
+// ---------------------------------------------------------------------------
+// Chart info panel (between summary cards and chart config)
+// ---------------------------------------------------------------------------
 
-      <div className="mini-app-picker__actions">
-        <button
-          type="button"
-          className="mini-app-picker__load-btn"
-          onClick={handleLoad}
-          disabled={loading || basket.length === 0}
-        >
-          {loading
-            ? "Loading…"
-            : basket.length > 1
-              ? `Load ${basket.length} metrics`
-              : "Load"}
-        </button>
-      </div>
+interface ChartInfoPanelProps {
+  selectedMetrics: string[];
+  dimensions: string[];
+  datasetMode: DatasetMode | null;
+  rowCount: number;
+  xField: string;
+  yField: string;
+}
+
+function ChartInfoPanel({
+  selectedMetrics,
+  dimensions,
+  datasetMode,
+  rowCount,
+  xField,
+  yField,
+}: ChartInfoPanelProps) {
+  const [expanded, setExpanded] = useState(true);
+
+  return (
+    <div className={`mini-app-chart-info${expanded ? "" : " mini-app-chart-info--collapsed"}`}>
+      <button
+        type="button"
+        className="mini-app-chart-info__toggle"
+        onClick={() => setExpanded((v) => !v)}
+        title={expanded ? "Collapse info" : "Expand info"}
+      >
+        {expanded ? "\u2139\ufe0f" : "\u2139\ufe0f"}
+      </button>
+      {expanded && (
+        <div className="mini-app-chart-info__content">
+          <span className="mini-app-chart-info__item">
+            <strong>Metric{selectedMetrics.length > 1 ? "s" : ""}:</strong>{" "}
+            {selectedMetrics.join(", ") || "none"}
+          </span>
+          {dimensions.length > 0 && (
+            <span className="mini-app-chart-info__item">
+              <strong>Dimensions:</strong> {dimensions.join(", ")}
+            </span>
+          )}
+          <span className="mini-app-chart-info__item">
+            <strong>Dataset:</strong>{" "}
+            {datasetMode ?? "n/a"}
+          </span>
+          <span className="mini-app-chart-info__item">
+            <strong>Rows:</strong> {rowCount.toLocaleString()}
+          </span>
+          <span className="mini-app-chart-info__item">
+            <strong>Axes:</strong> x={xField || "n/a"}, y={yField || "n/a"}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -1036,8 +1104,6 @@ interface LoadedViewProps {
   estimates: boolean;
   isDark: boolean;
   callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
-  sendMessage: (text: string) => Promise<boolean>;
-  onSwitchMetric: () => void;
 }
 
 function LoadedView({
@@ -1050,8 +1116,6 @@ function LoadedView({
   estimates,
   isDark,
   callTool,
-  sendMessage,
-  onSwitchMetric,
 }: LoadedViewProps) {
   // Local chart state for instant responsiveness; syncs from server on prop change.
   const [localChart, setLocalChart] = useState<ChartConfig>(chartConfig);
@@ -1097,7 +1161,7 @@ function LoadedView({
     const sValIdx = sCols.findIndex((_c, i) => i !== sDateIdx);
     const pLabel = selectedMetrics[0]?.replace("api_", "").replace(/_/g, " ") ?? "primary";
     const sLabel = selectedMetrics[1]?.replace("api_", "").replace(/_/g, " ") ?? "secondary";
-    // Build a date→values map.
+    // Build a date->values map.
     const map = new Map<string, [unknown, unknown]>();
     for (const row of p.preview_rows) {
       const d = String(row[pDateIdx] ?? "");
@@ -1127,6 +1191,8 @@ function LoadedView({
     return buildChartOption(rows, columns, localChart, isDark, sortAsc);
   }, [rows, columns, mergedRows, mergedColumns, mergedMetricCols, localChart, isMultiMetric, hasDualDatasets, isDark, sortAsc]);
 
+  const state = view.view_state;
+
   return (
     <>
       <section className="mini-app-summary-grid">
@@ -1142,14 +1208,16 @@ function LoadedView({
         ))}
       </section>
 
+      <ChartInfoPanel
+        selectedMetrics={selectedMetrics}
+        dimensions={state?.selected_dimensions ?? []}
+        datasetMode={state?.dataset_mode ?? null}
+        rowCount={rows.length}
+        xField={localChart.xField}
+        yField={localChart.yField}
+      />
+
       <section className="mini-app-chart-config">
-        <button
-          type="button"
-          className="mini-app-picker__load-btn"
-          onClick={onSwitchMetric}
-        >
-          ← Pick a different metric
-        </button>
         <label>
           chart
           <select
@@ -1206,22 +1274,22 @@ function LoadedView({
         </label>
         <button
           type="button"
-          className="mini-app-picker__load-btn"
+          className="mini-app-toolbar-btn"
           onClick={() => updateChart({ xField: localChart.yField, yField: localChart.xField })}
           title="Swap X and Y axes"
         >
-          x↔y
+          {"x\u2194y"}
         </button>
         <button
           type="button"
-          className="mini-app-picker__load-btn"
+          className="mini-app-toolbar-btn"
           onClick={() => setSortAsc((v) => !v)}
           title="Toggle sort direction"
         >
-          {sortAsc ? "asc ↑" : "desc ↓"}
+          {sortAsc ? "asc" : "desc"}
         </button>
         {estimates && (
-          <span className="mini-app-pill mini-app-pill--estimate">≈ estimate</span>
+          <span className="mini-app-pill mini-app-pill--estimate">~ estimate</span>
         )}
         {previewOnly && (
           <span className="mini-app-pill mini-app-pill--warning">
@@ -1270,16 +1338,6 @@ function LoadedView({
       </section>
 
       <AnalysisPanel rows={rows} columns={columns} />
-
-      <AssistantBar
-        contextHint={selectedMetrics.join(", ") || "this dataset"}
-        onSend={async (text) => {
-          const ctx = `[Metric Lab view_id=${view.view_id}, metrics=${selectedMetrics.join(",")}, ` +
-            `chart=${localChart.chartType}, x=${localChart.xField}, y=${localChart.yField}, ` +
-            `rows=${rows.length}] ${text}`;
-          return sendMessage(ctx);
-        }}
-      />
     </>
   );
 }
@@ -1289,7 +1347,7 @@ function LoadedView({
 // ---------------------------------------------------------------------------
 
 export default function MetricLabApp() {
-  const { view, fetchRows, callTool, updateModelContext, sendMessage } =
+  const { view, fetchRows, callTool, updateModelContext } =
     useMiniApp<MetricLabState>({
       appId: APP_ID,
       mockPayload: MOCK_PAYLOAD,
@@ -1301,7 +1359,6 @@ export default function MetricLabApp() {
   const [isDark, setIsDark] = useState(
     () => document.documentElement.dataset.theme !== "light",
   );
-  const [forceEmpty, setForceEmpty] = useState(false);
 
   useEffect(() => {
     const obs = new MutationObserver(() => {
@@ -1319,9 +1376,6 @@ export default function MetricLabApp() {
     setHydratedRows(null);
     setLoading(false);
     setErrorMessage(null);
-    if (view?.view_state?.mode === "loaded") {
-      setForceEmpty(false);
-    }
   }, [view?.view_id, view?.view_state?.selected_metric]);
 
   // Hydrate the rest of the dataset (up to 5,000 rows buffered).
@@ -1371,12 +1425,7 @@ export default function MetricLabApp() {
     });
   }, [view, updateModelContext]);
 
-  const handleLoadMetric = async (config: {
-    metrics: string[];
-    dimensions: string[];
-    limit: number;
-    orderBy: string[];
-  }) => {
+  const handleLoadMetric = useCallback(async (config: PickerConfig) => {
     if (!view) return;
     setLoading(true);
     setErrorMessage(null);
@@ -1390,23 +1439,25 @@ export default function MetricLabApp() {
         order_by: config.orderBy,
         limit: config.limit,
       });
-      // Successful load — clear the "forced empty" override so the
-      // loaded view can render the new dataset.
-      setForceEmpty(false);
       setHydratedRows(null);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  };
+  }, [view, callTool]);
+
+  // Auto-load: triggered by onConfigChange from the picker (debounced inside picker).
+  const handleConfigChange = useCallback((config: PickerConfig) => {
+    void handleLoadMetric(config);
+  }, [handleLoadMetric]);
 
   if (!view) {
-    return <div className="mini-app-loading">Loading Metric Lab…</div>;
+    return <div className="mini-app-loading">Loading Metric Lab...</div>;
   }
 
   const state = view.view_state;
-  const isEmptyMode = forceEmpty || !state || state.mode === "empty" || !view.datasets?.primary;
+  const hasData = !!(view.datasets?.primary && state?.mode === "loaded");
 
   return (
     <div className="mini-app-root mini-app-metric-lab">
@@ -1419,14 +1470,16 @@ export default function MetricLabApp() {
 
       <WarningBanner warnings={view.warnings ?? []} />
 
-      {isEmptyMode ? (
-        <MetricPicker
-          catalog={state?.metric_catalog ?? []}
-          onLoad={handleLoadMetric}
-          loading={loading}
-          errorMessage={errorMessage}
-        />
-      ) : (
+      <MetricPicker
+        catalog={state?.metric_catalog ?? []}
+        onLoad={handleLoadMetric}
+        onConfigChange={handleConfigChange}
+        loading={loading}
+        errorMessage={errorMessage}
+        compact={hasData}
+      />
+
+      {hasData && (
         <LoadedView
           view={view}
           rows={hydratedRows ?? view.datasets?.primary?.preview_rows ?? []}
@@ -1437,8 +1490,6 @@ export default function MetricLabApp() {
           estimates={state!.estimates === true}
           isDark={isDark}
           callTool={callTool}
-          sendMessage={sendMessage}
-          onSwitchMetric={() => setForceEmpty(true)}
         />
       )}
     </div>
