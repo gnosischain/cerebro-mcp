@@ -28,6 +28,7 @@ Cerebro MCP is a FastMCP server with:
 - number verification tool that checks arithmetic and cross-references before reporting
 - MCP prompts and resources that guide clients, but do not run automatically on their own
 - security audit layer with tool risk classification, suspicious-call detection, and append-only JSONL logging
+- six React + ECharts **mini-apps** (Report, Token Explorer, Metric Lab, Portfolio, Yield Opportunities, Graph Explorer) served as single-file HTML via `ui://cerebro/<app>` resources — see [`docs/MINI_APPS.md`](docs/MINI_APPS.md) for the full tour
 - mini-app infrastructure for interactive in-chat views (Metric Lab, Token Explorer)
 
 Important distinction:
@@ -1455,6 +1456,7 @@ cerebro-mcp/
 │   └── static/
 ├── custom_tools.yaml
 ├── docs/
+│   ├── MINI_APPS.md
 │   ├── security.md
 │   └── observability.md
 ├── grafana/

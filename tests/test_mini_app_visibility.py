@@ -13,7 +13,10 @@ from cerebro_mcp.tools.mini_apps import (
     get_app_only_tool_names,
     register_mini_app_infra,
 )
+from cerebro_mcp.tools.graph_explorer import register_graph_explorer_tools
+from cerebro_mcp.tools.portfolio import register_portfolio_tools
 from cerebro_mcp.tools.token_explorer import register_token_explorer_tools
+from cerebro_mcp.tools.yield_opportunities import register_yield_opportunities_tools
 
 
 class StubCH:
@@ -27,6 +30,9 @@ def mcp_server():
     register_mini_app_infra(server, ch)
     register_token_explorer_tools(server, ch)
     register_metric_lab_tools(server, ch)
+    register_yield_opportunities_tools(server, ch)
+    register_portfolio_tools(server, ch)
+    register_graph_explorer_tools(server, ch)
     return server
 
 
@@ -48,6 +54,19 @@ def test_launcher_and_delta_tools_are_visible_to_model(mcp_server):
         "open_metric_lab_from_metrics",
         "update_token_explorer_focus",
         "update_metric_lab_chart",
+        "open_yield_opportunities",
+        "load_yield_opportunity",
+        "update_yield_opportunities_focus",
+        "run_yield_simulation",
+        "open_portfolio",
+        "load_portfolio_address",
+        "navigate_portfolio_relation",
+        "load_portfolio_section",
+        "update_portfolio_focus",
+        "open_graph_explorer",
+        "load_graph_explorer_seed",
+        "expand_graph_explorer_node",
+        "update_graph_explorer_focus",
     }
     missing = expected_visible - names
     assert not missing, f"missing model-visible tools: {missing}"

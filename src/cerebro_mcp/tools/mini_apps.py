@@ -190,6 +190,18 @@ def attach_dataset(view_id: str, key: str, dataset: CachedDataset) -> None:
         _touch_view_locked(record)
 
 
+def replace_view_datasets(
+    view_id: str, datasets: dict[str, CachedDataset]
+) -> None:
+    """Atomically replace all datasets attached to a view."""
+    with _views_lock:
+        record = _views.get(view_id)
+        if record is None:
+            raise KeyError(f"Unknown view_id: {view_id}")
+        record.datasets = dict(datasets)
+        _touch_view_locked(record)
+
+
 def reset_views_for_tests() -> None:
     with _views_lock:
         _views.clear()
@@ -752,6 +764,7 @@ __all__ = [
     "get_view_title",
     "patch_view_state",
     "attach_dataset",
+    "replace_view_datasets",
     "run_structured_query",
     "load_bounded_dataset",
     "get_view_dataset_page",

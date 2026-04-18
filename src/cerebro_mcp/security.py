@@ -115,6 +115,10 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "open_token_explorer": _RO,
     "load_token_explorer_token": _RO,
     "update_token_explorer_focus": _RO,
+    "open_graph_explorer": _RO,
+    "load_graph_explorer_seed": _RO,
+    "expand_graph_explorer_node": _RO,
+    "update_graph_explorer_focus": _RO,
     # custom query tools (parameterized, read-only SQL)
     # — dynamically registered; defaults to _RO via get_risk_classes()
     # research read

@@ -13,11 +13,16 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 //   report          (default — original report renderer)
 //   tokenExplorer
 //   metricLab
+//   yieldOpportunities
+//   portfolio
 
 const ENTRY_MAP: Record<string, { html: string; out: string }> = {
   report:        { html: "index.html",          out: "index.html" },
   tokenExplorer: { html: "token-explorer.html", out: "token-explorer.html" },
   metricLab:     { html: "metric-lab.html",     out: "metric-lab.html" },
+  yieldOpportunities: { html: "yield-opportunities.html", out: "yield-opportunities.html" },
+  portfolio:     { html: "portfolio.html",      out: "portfolio.html" },
+  graphExplorer: { html: "graph-explorer.html", out: "graph-explorer.html" },
 };
 
 const entryName = process.env.CEREBRO_UI_ENTRY ?? "report";

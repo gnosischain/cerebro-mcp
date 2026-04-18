@@ -765,6 +765,10 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 | `open_token_explorer` | Open interactive token explorer with bridge flows and prices |
 | `load_token_explorer_token` | Swap tokens in an open Token Explorer view |
 | `update_token_explorer_focus` | Filter by metric, bridge, or direction |
+| `open_graph_explorer` | Open the cross-sector semantic Graph Explorer (Circles trust, Safe/GPay ownership, transfers, LP, validators, bridges, labels) |
+| `load_graph_explorer_seed` | Seed a 1-hop subgraph around an address; auto-detects profiles via address_roles_current |
+| `expand_graph_explorer_node` | Expand a node by one hop (max 2 hops per session) |
+| `update_graph_explorer_focus` | Change selection, relation filters, layout, or time window |
 
 ### Custom Query Tools
 | Tool | Description |
