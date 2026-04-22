@@ -25,6 +25,10 @@ _VALID_ROLES = {
     "marketing_analyst",
     "esg_analyst",
     "statistical_reviewer",
+    # Marketing Mix Modeling agents (sector contribution / ROI analysis)
+    "mmm_analyst",
+    "mmm_causal_reviewer",
+    "mmm_simulator",
 }
 
 
@@ -49,7 +53,8 @@ def register_agent_tools(mcp):
                 'tokenomics_analyst', 'defi_analyst',
                 'network_health_analyst', 'bridge_security_analyst',
                 'marketing_analyst', 'esg_analyst',
-                'statistical_reviewer').
+                'statistical_reviewer'), or an MMM agent
+                ('mmm_analyst', 'mmm_causal_reviewer', 'mmm_simulator').
         """
         if role not in _VALID_ROLES:
             return (
