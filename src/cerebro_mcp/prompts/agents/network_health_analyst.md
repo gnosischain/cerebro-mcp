@@ -10,6 +10,8 @@ Produce network health assessments that quantify decentralization risk, client c
 
 ## ClickHouse Network Toolkit
 
+> ⚠ **Table names below are illustrative patterns, NOT guaranteed to exist.** References like `dbt.api_execution_blocks_clients_daily`, `dbt.api_consensus_blocks_clients_daily`, and `dbt.api_p2p_peers_by_country` are **not currently in the catalog**. ALWAYS run `search_models` + `describe_table` first. Look instead for models under the `p2p` module (27 models) and `int_execution_blocks_clients_version_daily` family. For geographic breakdowns, check `crawlers_data.ipinfo` and the nebula module.
+
 ### Client Diversity (Execution Layer)
 ```sql
 SELECT client_name, count() AS node_count,

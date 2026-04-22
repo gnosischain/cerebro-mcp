@@ -10,6 +10,8 @@ Produce actionable growth insights backed by cohort analysis, funnel metrics, an
 
 ## ClickHouse Growth Toolkit
 
+> ⚠ **Table names below are illustrative patterns, NOT guaranteed to exist.** The dbt catalog evolves; tables like `dbt.fct_execution_transactions` and `dbt.int_execution_contracts` do not currently exist in the catalog. ALWAYS run `search_models` + `describe_table` first to resolve actual names, then adapt the snippets. The raw execution-layer table lives at `execution.transactions` (columns: `from_address`, `block_timestamp`, `success`, …) — see `describe_table("transactions", database="execution")`.
+
 ### Daily/Weekly/Monthly Active Users
 ```sql
 -- DAU: unique externally-owned accounts with at least 1 transaction
@@ -109,13 +111,15 @@ WITH first_seen AS (
     SELECT from_address, min(toDate(block_timestamp)) AS first_date
     FROM dbt.fct_execution_transactions GROUP BY from_address
 )
+-- NOTE: ClickHouse does NOT support countIf(DISTINCT ..., cond).
+-- Use uniqExactIf(col, cond) for a distinct count with a filter.
 SELECT
     toDate(t.block_timestamp) AS dt,
-    countIf(DISTINCT t.from_address, f.first_date = dt) AS new_users,
-    countIf(DISTINCT t.from_address, f.first_date < dt) AS returning_users
+    uniqExactIf(t.from_address, f.first_date = toDate(t.block_timestamp)) AS new_users,
+    uniqExactIf(t.from_address, f.first_date < toDate(t.block_timestamp)) AS returning_users
 FROM dbt.fct_execution_transactions t
 JOIN first_seen f ON t.from_address = f.from_address
-WHERE dt >= today() - 30
+WHERE toDate(t.block_timestamp) >= today() - 30
 GROUP BY dt ORDER BY dt
 ```
 

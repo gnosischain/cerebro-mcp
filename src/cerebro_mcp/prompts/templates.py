@@ -72,6 +72,22 @@ def register_prompts(mcp):
         return [prompt_base.Message(role="user", content=content)]
 
     @mcp.prompt()
+    def adopt_persona_cerebro_dispatcher() -> list[prompt_base.Message]:
+        """Adopt the Cerebro Dispatcher — top-level intent triage and gated routing.
+
+        Call this at the start of any non-trivial session. The dispatcher
+        classifies the user request, runs preflight, picks the specialist
+        chain, enforces gates (e.g. MMM causal-reviewer PASS before
+        generate_report), and emits a dispatch manifest.
+        """
+        content = (
+            importlib.resources.files("cerebro_mcp.prompts.agents")
+            .joinpath("cerebro_dispatcher.md")
+            .read_text("utf-8")
+        )
+        return [prompt_base.Message(role="user", content=content)]
+
+    @mcp.prompt()
     def conduct_research_peer_review(packet_json: str) -> list[prompt_base.Message]:
         """Review a research packet and return the result via `record_peer_review`."""
         schema = json.dumps(

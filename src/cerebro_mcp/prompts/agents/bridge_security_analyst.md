@@ -10,6 +10,8 @@ Produce bridge security assessments that identify flow anomalies, concentration 
 
 ## ClickHouse Bridge Toolkit
 
+> ⚠ **Verify table names before copying SQL.** `dbt.int_bridges_flows_daily` does exist (confirmed 2026-04). `dbt.api_bridges_cum_netflow_daily` does NOT exist — the real model is `dbt.api_bridges_cum_netflow_weekly_by_bridge` (weekly, broken down by bridge). Always `search_models` / `describe_table` to confirm the granularity and columns before running. For token-specific analysis, prefer the `get_bridge_flows_by_token` custom tool which handles parameter binding.
+
 ### Flow Anomaly Detection
 ```sql
 -- Z-score based anomaly detection on daily bridge flows

@@ -5,7 +5,7 @@ tools:
     description: >
       Get daily balance history for a specific Gnosis Chain validator.
       Returns balance in GNO (converted from Gwei), effective balance, and status.
-      Use this instead of raw SQL against stg_consensus__validators.
+      Use this instead of raw SQL against dbt.stg_consensus__validators.
     parameters:
       validator_index:
         type: UInt64
@@ -14,7 +14,7 @@ tools:
         type: String
         description: "Start date (YYYY-MM-DD)"
         default: "2024-01-01"
-    database: consensus
+    database: dbt
     sql: |
       SELECT
         toDate(slot_timestamp) AS date,
@@ -41,13 +41,13 @@ tools:
         type: String
         description: "Start date (YYYY-MM-DD)"
         default: "2024-01-01"
-    database: consensus
+    database: dbt
     sql: |
       SELECT
         toDate(slot_timestamp) AS date,
         validator_index,
         address AS withdrawal_address,
-        amount / 1e18 AS amount_gno,
+        amount / 1e9 AS amount_gno,  -- consensus withdrawal.amount is in Gwei, not wei
         withdrawal_index
       FROM stg_consensus__withdrawals
       WHERE validator_index = {validator_index:UInt64}

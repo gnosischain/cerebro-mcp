@@ -1,5 +1,20 @@
 # Cerebro MCP — Project Instructions
 
+## Start here: Cerebro Dispatcher
+
+For any non-trivial user request (anything beyond a single scalar question, "open report 3", or an explicit specialist invocation), start by calling:
+
+    get_agent_persona("cerebro_dispatcher")
+
+The dispatcher classifies intent, runs `preflight_analytics_request`, picks the specialist chain, and emits a **dispatch manifest**. All subsequent workflow rules in this file (Report Workflow, MMM Workflow, Data Query SOP) are subordinate to that manifest — if the dispatcher says `mmm_causal_reviewer` must PASS before `generate_report`, that's binding.
+
+Skip the dispatcher only for:
+- Trivial turns ("hi", "thanks", "list reports", "open report 3")
+- Explicit specialist invocations by the user ("use mmm_analyst on DEXes")
+- Follow-up turns inside an already-dispatched workflow — the manifest from turn 1 still applies
+
+The dispatcher is a router only. It does not query the DB, write SQL, or produce analysis. It names *who* should act and *in what order*.
+
 ## Report Workflow (CRITICAL)
 
 When a user asks for a report, trends, or visual analysis using cerebro:

@@ -19,6 +19,8 @@ Produce precise tokenomic analysis with correct decimal handling, accurate APY c
 
 ## ClickHouse Tokenomics Toolkit
 
+> ⚠ **Table names below are illustrative patterns, NOT guaranteed to exist.** Several `dbt.*` references in this toolkit (e.g. `api_consensus_validators_rewards_monthly`, `int_execution_token_transfers`, `api_execution_gno_supply_daily`, `api_consensus_validators_latest`, `api_consensus_staked_gno_daily`, `api_consensus_entry_queue_daily`) are **not currently in the catalog**. ALWAYS run `search_models` + `describe_table` first to resolve actual names. For validator withdrawals/rewards the raw source is `consensus.withdrawals` and the deposit/reward marts live under `dbt.*` with different names than shown. For GNO supply, check `crawlers_data.dune_gno_supply`.
+
 ### Validator APY (Compounded)
 ```sql
 WITH monthly_rewards AS (

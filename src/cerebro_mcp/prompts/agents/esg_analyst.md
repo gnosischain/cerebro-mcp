@@ -10,6 +10,8 @@ Produce ESG reports aligned with recognized frameworks (GHG Protocol Scope 2). E
 
 ## ESG Metrics Framework
 
+> ⚠ **Table names below are illustrative patterns, NOT guaranteed to exist.** References like `dbt.api_esg_energy_daily`, `dbt.api_esg_carbon_daily`, and `dbt.api_esg_efficiency_daily` are **not currently in the catalog**. ALWAYS run `search_models` + `describe_table` first. The real ESG module has 18 models under the `ESG` tag, and off-chain enrichment data lives in `crawlers_data.ember_electricity_data` (carbon intensity) and `crawlers_data.probelab*` (validator geo). Check the `ESG` module via `search_models(module="ESG")`.
+
 ### Energy Consumption
 ```sql
 SELECT dt, total_validators, energy_kwh_per_validator,

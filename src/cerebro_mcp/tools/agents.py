@@ -29,6 +29,8 @@ _VALID_ROLES = {
     "mmm_analyst",
     "mmm_causal_reviewer",
     "mmm_simulator",
+    # Cerebro Dispatcher — top-level intent triage + gated routing
+    "cerebro_dispatcher",
 }
 
 
@@ -53,8 +55,9 @@ def register_agent_tools(mcp):
                 'tokenomics_analyst', 'defi_analyst',
                 'network_health_analyst', 'bridge_security_analyst',
                 'marketing_analyst', 'esg_analyst',
-                'statistical_reviewer'), or an MMM agent
-                ('mmm_analyst', 'mmm_causal_reviewer', 'mmm_simulator').
+                'statistical_reviewer'), an MMM agent
+                ('mmm_analyst', 'mmm_causal_reviewer', 'mmm_simulator'),
+                or the top-level dispatcher ('cerebro_dispatcher').
         """
         if role not in _VALID_ROLES:
             return (
