@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
-// AssistantBar removed — replaced by ChartInfoPanel
+import { CollapsibleSection } from "../shared/CollapsibleSection";
+import { useDebouncedValue } from "../shared/useDebouncedValue";
 import type { DatasetMode, MiniAppPayload } from "../shared/miniAppTypes";
 
 type ChartType =
@@ -118,35 +119,72 @@ const MOCK_CATALOG: MetricCatalogEntry[] = [
   },
 ];
 
+const MOCK_LOADED =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("demo") === "loaded";
+
+const MOCK_LOADED_DATASET = {
+  key: "primary",
+  title: "execution_tx_count",
+  sql: "SELECT day, tx_count FROM dbt.api_execution_transactions_daily",
+  database: "dbt",
+  columns: [
+    { name: "day", type: "Date" },
+    { name: "tx_count", type: "number" },
+  ],
+  stats: {
+    row_count: 7,
+    rows_returned: 7,
+    mode: "exact_bounded" as const,
+    warnings: [],
+  },
+  preview_rows: [
+    ["2026-03-03", 125432],
+    ["2026-03-04", 131205],
+    ["2026-03-05", 128903],
+    ["2026-03-06", 135678],
+    ["2026-03-07", 142310],
+    ["2026-03-08", 119876],
+    ["2026-03-09", 127500],
+  ] as unknown[][],
+};
+
 const MOCK_PAYLOAD: MiniAppPayload<MetricLabState> = {
   type: "INITIAL_LOAD",
   view_id: "dev-view",
   app_id: APP_ID,
   title: "Metric Lab",
   status: "ready",
-  summary_cards: [
-    { label: "Metrics available", value: String(MOCK_CATALOG.length), tone: "neutral" },
-    { label: "Status", value: "Pick a metric", tone: "neutral" },
-  ],
-  datasets: {},
+  summary_cards: MOCK_LOADED
+    ? [
+        { label: "Metric", value: "execution_tx_count", tone: "neutral" },
+        { label: "Rows", value: "7", tone: "neutral" },
+        { label: "Dataset", value: "exact_bounded", tone: "positive" },
+      ]
+    : [
+        { label: "Metrics available", value: String(MOCK_CATALOG.length), tone: "neutral" },
+        { label: "Status", value: "Pick a metric", tone: "neutral" },
+      ],
+  datasets: MOCK_LOADED ? { primary: MOCK_LOADED_DATASET } : {},
   view_state: {
-    mode: "empty",
+    mode: MOCK_LOADED ? "loaded" : "empty",
     metric_catalog: MOCK_CATALOG,
     catalog_query: "",
-    selected_metric: "",
-    selected_dimensions: [],
+    selected_metric: MOCK_LOADED ? "execution_tx_count" : "",
+    selected_metrics: MOCK_LOADED ? ["execution_tx_count"] : [],
+    selected_dimensions: MOCK_LOADED ? ["day"] : [],
     selected_limit: 2000,
     selected_order_by: [],
     chart: {
-      xField: "",
-      yField: "",
-      chartType: "table",
+      xField: MOCK_LOADED ? "day" : "",
+      yField: MOCK_LOADED ? "tx_count" : "",
+      chartType: MOCK_LOADED ? "line" : "table",
       aggregation: "sum",
       groupBy: "",
     },
-    analytics_disabled: true,
+    analytics_disabled: !MOCK_LOADED,
     estimates: false,
-    dataset_mode: null,
+    dataset_mode: MOCK_LOADED ? "exact_bounded" : null,
     sample_source_rows: null,
   },
   warnings: [],
@@ -1051,42 +1089,29 @@ function ChartInfoPanel({
   xField,
   yField,
 }: ChartInfoPanelProps) {
-  const [expanded, setExpanded] = useState(true);
-
   return (
-    <div className={`mini-app-chart-info${expanded ? "" : " mini-app-chart-info--collapsed"}`}>
-      <button
-        type="button"
-        className="mini-app-chart-info__toggle"
-        onClick={() => setExpanded((v) => !v)}
-        title={expanded ? "Collapse info" : "Expand info"}
-      >
-        {expanded ? "\u2139\ufe0f" : "\u2139\ufe0f"}
-      </button>
-      {expanded && (
-        <div className="mini-app-chart-info__content">
+    <CollapsibleSection title="Chart context" defaultOpen tone="subtle">
+      <div className="mini-app-chart-info__content">
+        <span className="mini-app-chart-info__item">
+          <strong>Metric{selectedMetrics.length > 1 ? "s" : ""}:</strong>{" "}
+          {selectedMetrics.join(", ") || "none"}
+        </span>
+        {dimensions.length > 0 && (
           <span className="mini-app-chart-info__item">
-            <strong>Metric{selectedMetrics.length > 1 ? "s" : ""}:</strong>{" "}
-            {selectedMetrics.join(", ") || "none"}
+            <strong>Dimensions:</strong> {dimensions.join(", ")}
           </span>
-          {dimensions.length > 0 && (
-            <span className="mini-app-chart-info__item">
-              <strong>Dimensions:</strong> {dimensions.join(", ")}
-            </span>
-          )}
-          <span className="mini-app-chart-info__item">
-            <strong>Dataset:</strong>{" "}
-            {datasetMode ?? "n/a"}
-          </span>
-          <span className="mini-app-chart-info__item">
-            <strong>Rows:</strong> {rowCount.toLocaleString()}
-          </span>
-          <span className="mini-app-chart-info__item">
-            <strong>Axes:</strong> x={xField || "n/a"}, y={yField || "n/a"}
-          </span>
-        </div>
-      )}
-    </div>
+        )}
+        <span className="mini-app-chart-info__item">
+          <strong>Dataset:</strong> {datasetMode ?? "n/a"}
+        </span>
+        <span className="mini-app-chart-info__item">
+          <strong>Rows:</strong> {rowCount.toLocaleString()}
+        </span>
+        <span className="mini-app-chart-info__item">
+          <strong>Axes:</strong> x={xField || "n/a"}, y={yField || "n/a"}
+        </span>
+      </div>
+    </CollapsibleSection>
   );
 }
 
@@ -1122,17 +1147,25 @@ function LoadedView({
   const [sortAsc, setSortAsc] = useState(true);
   useEffect(() => setLocalChart(chartConfig), [chartConfig]);
 
-  const updateChart = (patch: Partial<ChartConfig>) => {
-    const next = { ...localChart, ...patch };
-    setLocalChart(next);
-    // Fire-and-forget server sync so LLM model context stays current.
+  // Stage-1 retrofit: debounce the server sync so rapid select changes
+  // don't spawn competing in-flight requests (race condition per audit).
+  const debouncedChart = useDebouncedValue(localChart, 300);
+  const lastSyncedRef = useRef<string>("");
+  useEffect(() => {
+    const key = JSON.stringify(debouncedChart);
+    if (key === lastSyncedRef.current) return;
+    lastSyncedRef.current = key;
     callTool("update_metric_lab_chart", {
       view_id: view.view_id,
-      x_field: next.xField,
-      y_field: next.yField,
-      chart_type: next.chartType,
-      aggregation: next.aggregation,
+      x_field: debouncedChart.xField,
+      y_field: debouncedChart.yField,
+      chart_type: debouncedChart.chartType,
+      aggregation: debouncedChart.aggregation,
     }).catch(() => {});
+  }, [debouncedChart, view.view_id, callTool]);
+
+  const updateChart = (patch: Partial<ChartConfig>) => {
+    setLocalChart((cur) => ({ ...cur, ...patch }));
   };
 
   const isMultiMetric = selectedMetrics.length > 1;
@@ -1425,8 +1458,13 @@ export default function MetricLabApp() {
     });
   }, [view, updateModelContext]);
 
+  // Stage-1 retrofit: request-id fence so rapid metric switches don't
+  // race — only the newest in-flight request can clear `loading` or set
+  // error state (prior behaviour could leave stale error toasts on screen).
+  const loadReqRef = useRef(0);
   const handleLoadMetric = useCallback(async (config: PickerConfig) => {
     if (!view) return;
+    const reqId = ++loadReqRef.current;
     setLoading(true);
     setErrorMessage(null);
     try {
@@ -1439,11 +1477,13 @@ export default function MetricLabApp() {
         order_by: config.orderBy,
         limit: config.limit,
       });
-      setHydratedRows(null);
+      if (reqId === loadReqRef.current) setHydratedRows(null);
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : String(err));
+      if (reqId === loadReqRef.current) {
+        setErrorMessage(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setLoading(false);
+      if (reqId === loadReqRef.current) setLoading(false);
     }
   }, [view, callTool]);
 

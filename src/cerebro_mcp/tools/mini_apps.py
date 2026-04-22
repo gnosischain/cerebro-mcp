@@ -282,9 +282,9 @@ def run_structured_query(
 # ---------------------------------------------------------------------------
 
 
-SAMPLE_TARGET = 2000
-PREVIEW_ROW_CAP = 200
-HARD_TOTAL_LIMIT = 100_000_000
+SAMPLE_TARGET = 10_000
+PREVIEW_ROW_CAP = 1_000
+HARD_TOTAL_LIMIT = 1_000_000_000
 
 
 class MiniAppQueryError(RuntimeError):

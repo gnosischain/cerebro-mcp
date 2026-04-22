@@ -259,14 +259,14 @@ export default function GraphExplorerApp() {
     }).catch((err) => console.error("[graph_explorer] refetch failed", err));
   };
 
-  const onExpand = (nodeId: string) => {
+  const onExpand = (nodeId: string, hops: number = 1) => {
     if (!view?.view_id || !nodeId) return;
     void callTool("expand_graph_explorer_node", {
       view_id: view.view_id,
       node_id: nodeId,
       relation_types: state.relation_types,
       direction: "both",
-      hops: 1,
+      hops,
     }).catch((err) => console.error("[graph_explorer] expand failed", err));
   };
 
@@ -294,7 +294,12 @@ export default function GraphExplorerApp() {
     if (patch.semantic_status_filter)
       viewOnly.semantic_status_filter = patch.semantic_status_filter;
     if (Object.keys(viewOnly).length > 1) {
-      void callTool("update_graph_explorer_focus", viewOnly).catch(() => {});
+      void callTool("update_graph_explorer_focus", viewOnly).catch((err) => {
+        // Stage-1 polish: surface optimistic-sync failures to the console
+        // instead of swallowing silently (audit flagged stale optimistic
+        // state lingering after a rejected server update).
+        console.warn("[graph-explorer] focus sync failed", err);
+      });
     }
 
     // 3. Data-affecting changes: refetch the subgraph.
@@ -310,7 +315,12 @@ export default function GraphExplorerApp() {
         void callTool("update_graph_explorer_focus", {
           view_id: view.view_id,
           relation_types: patch.relation_types,
-        }).catch(() => {});
+        }).catch((err) => {
+        // Stage-1 polish: surface optimistic-sync failures to the console
+        // instead of swallowing silently (audit flagged stale optimistic
+        // state lingering after a rejected server update).
+        console.warn("[graph-explorer] focus sync failed", err);
+      });
       }
     }
     if (patch.transfer_window_days !== undefined) {
@@ -323,16 +333,40 @@ export default function GraphExplorerApp() {
 
   const toggleProfile = (profileId: string) => {
     const current = new Set(state.relation_types);
-    if (current.has(profileId)) current.delete(profileId);
+    const wasActive = current.has(profileId);
+    if (wasActive) current.delete(profileId);
     else current.add(profileId);
     onFocus({ relation_types: Array.from(current) });
+
+    // UX bug 7 fix — when activating a profile, warn the user if the profile's
+    // source_kind is incompatible with the current seed (e.g. selecting a
+    // pool-sourced profile on an address seed). Without this hint the user
+    // sees the chip light up but the graph doesn't grow and it looks broken.
+    if (!wasActive && state.seed_node?.id && state.seed_node.kind) {
+      const catalog = state.catalog || [];
+      const prof = catalog.find((p) => p.profile === profileId);
+      if (prof && prof.source_kind !== state.seed_node.kind && prof.target_kind !== state.seed_node.kind) {
+        const msg = `Heads up: "${profileId}" connects ${prof.source_kind} → ${prof.target_kind}, ` +
+          `but your seed is ${state.seed_node.kind}. This profile likely returns no new edges from this seed.`;
+        // Attach as a warning so the WarningBanner picks it up.
+        setOptimistic((cur) => ({
+          ...cur,
+          warnings: [...(state.warnings || []), msg],
+        }));
+      }
+    }
   };
 
-  /** Expand the seed node — gives the user a one-click "more hops" action. */
-  const onExpandAll = () => {
+  /** Expand the seed node by BFS with `hops` frontier rounds. */
+  const onExpandAll = (hops: number = 1) => {
     if (!state.seed_node?.id) return;
-    onExpand(state.seed_node.id);
+    onExpand(state.seed_node.id, Math.max(1, hops));
   };
+
+  // How many BFS hops each click of the "+" expand button performs.
+  // Persisted in local UI state so it survives view patches but doesn't
+  // round-trip to the server on every change.
+  const [bfsHops, setBfsHops] = useState(3);
 
   const onAskAssistant = () => {
     updateModelContext({
@@ -367,6 +401,21 @@ export default function GraphExplorerApp() {
   const activeSet = new Set(state.relation_types);
   const statusFilter = state.semantic_status_filter;
 
+  // UX bug 6 fix — when status filter is "approved" or "candidate", pass only
+  // the profiles that pass the status filter to the graph renderer. Previously
+  // the chip row filtered but the canvas kept showing candidate edges, which
+  // was misleading. Computed as a *view layer* so persisted state isn't
+  // mutated — user flipping filter back to "all" restores the full picture.
+  const catalogByProfile = new Map((state.catalog || []).map((p) => [p.profile, p]));
+  const effectiveRelationTypes =
+    statusFilter === "all"
+      ? state.relation_types
+      : state.relation_types.filter((id) => {
+          const p = catalogByProfile.get(id);
+          return !p || p.semantic_status === statusFilter;
+        });
+  const trimmedCount = state.relation_types.length - effectiveRelationTypes.length;
+
   return (
     <div className="ge-shell">
       <WarningBanner warnings={view.warnings ?? []} />
@@ -381,9 +430,28 @@ export default function GraphExplorerApp() {
             onReset={onReset}
             detailsOpen={detailsOpen}
             onToggleDetails={() => setDetailsOpen((v) => !v)}
-            onExpand={onExpandAll}
+            onExpand={(hops) => onExpandAll(hops)}
             isSampleMode={isSampleMode}
+            bfsHops={bfsHops}
+            onBfsHopsChange={setBfsHops}
           />
+          {trimmedCount > 0 && (
+            <div
+              className="ge-status-filter-note"
+              title="Status filter hides some active profiles. Click 'All' to see them again."
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted, #94a3b8)",
+                padding: "2px 12px",
+                background: "rgba(251, 191, 36, 0.08)",
+                borderTop: "1px solid rgba(251, 191, 36, 0.2)",
+              }}
+            >
+              Status filter ({statusFilter}) hides {trimmedCount} active
+              profile{trimmedCount === 1 ? "" : "s"} from the canvas. Switch to
+              "All" to restore.
+            </div>
+          )}
           <nav className="ge-chip-strip">
             {sectors.map(([sector, profiles]) => {
               const visible = profiles.filter((p) =>
@@ -433,7 +501,7 @@ export default function GraphExplorerApp() {
                 edges={view.datasets?.edges}
                 selectedNodeId={state.selected_node_id}
                 selectedEdgeId={state.selected_edge_id}
-                activeProfiles={state.relation_types}
+                activeProfiles={effectiveRelationTypes}
                 layout={state.layout}
                 onSelectNode={(id) => onFocus({ selected_node_id: id })}
                 onSelectEdge={(id) => onFocus({ selected_edge_id: id })}

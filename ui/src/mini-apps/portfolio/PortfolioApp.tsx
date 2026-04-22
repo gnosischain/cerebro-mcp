@@ -3,6 +3,8 @@ import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { SummaryCards } from "../shared/SummaryCards";
 import { DatasetTable } from "../shared/DatasetTable";
+import { TabBar, type TabDef } from "../shared/TabBar";
+import { AsyncButton } from "../shared/AsyncButton";
 import type { DatasetDescriptor, MiniAppPayload } from "../shared/miniAppTypes";
 
 type PortfolioSection = "overview" | "relationships" | "yields" | "gpay" | "circles";
@@ -51,19 +53,30 @@ interface PortfolioState {
 const APP_ID = "portfolio";
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
+const MOCK_LOADED =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("demo") === "loaded";
+const MOCK_ADDR = "0x1234567890abcdef1234567890abcdef12345678";
+
 const MOCK_PAYLOAD: MiniAppPayload<PortfolioState> = {
   type: "INITIAL_LOAD",
   view_id: "dev-view",
   app_id: APP_ID,
   title: "Portfolio",
   status: "ready",
-  summary_cards: [{ label: "Address", value: "Pick an address", tone: "neutral" }],
+  summary_cards: MOCK_LOADED
+    ? [
+        { label: "Address", value: `${MOCK_ADDR.slice(0, 6)}…${MOCK_ADDR.slice(-4)}`, tone: "neutral" },
+        { label: "Yields TVL", value: "$12,430", tone: "positive" },
+        { label: "Activity", value: "active", tone: "neutral" },
+      ]
+    : [{ label: "Address", value: "Pick an address", tone: "neutral" }],
   datasets: {},
   view_state: {
-    current_address: "",
+    current_address: MOCK_LOADED ? MOCK_ADDR : "",
     active_section: "overview",
     loaded_sections: {
-      overview: false,
+      overview: MOCK_LOADED,
       relationships: false,
       yields: false,
       gpay: false,
@@ -72,7 +85,16 @@ const MOCK_PAYLOAD: MiniAppPayload<PortfolioState> = {
     breadcrumbs: [],
     circles_avatar_override: "",
     effective_circles_avatar: "",
-    presence: { address: "" },
+    presence: MOCK_LOADED
+      ? {
+          address: MOCK_ADDR,
+          has_yields: true,
+          has_gpay: false,
+          is_circles_avatar: false,
+          first_activity_date: "2024-01-10",
+          last_activity_date: "2026-04-15",
+        }
+      : { address: "" },
     overview: {},
     section_filters: {
       overview: { start_date: "", token: "", action: "" },
@@ -262,9 +284,9 @@ function SectionFilters({
         <span>Action</span>
         <input value={draft.action} onChange={(event) => setDraft((current) => ({ ...current, action: event.target.value }))} placeholder="Optional action" />
       </label>
-      <button type="button" className="mini-app-toolbar-btn" onClick={() => void onPatch(section, draft)}>
+      <AsyncButton variant="secondary" onClick={() => onPatch(section, draft)} loadingLabel="Applying">
         Apply
-      </button>
+      </AsyncButton>
     </div>
   );
 }
@@ -280,7 +302,12 @@ export default function PortfolioApp() {
   const [yieldsTab, setYieldsTab] = useState<YieldsTab>("positions");
   const [gpayTab, setGPayTab] = useState<GPayTab>("balances");
   const [circlesTab, setCirclesTab] = useState<CirclesTab>("identity");
-  const [pending, setPending] = useState(false);
+  // Stage-1 retrofit: split a single `pending` flag into (a) address-scoped
+  // and (b) section-scoped so switching sections doesn't freeze the whole
+  // page and unrelated panels stay interactive.
+  const [loadingAddress, setLoadingAddress] = useState(false);
+  const [loadingSection, setLoadingSection] = useState<PortfolioSection | null>(null);
+  const pending = loadingAddress || loadingSection !== null;
 
   const state = view?.view_state;
   const datasets = view?.datasets ?? {};
@@ -296,7 +323,7 @@ export default function PortfolioApp() {
   }
 
   const loadAddress = async (address: string, override = "") => {
-    setPending(true);
+    setLoadingAddress(true);
     try {
       await callTool("load_portfolio_address", {
         view_id: view.view_id,
@@ -304,13 +331,13 @@ export default function PortfolioApp() {
         circles_avatar_override: override,
       });
     } finally {
-      setPending(false);
+      setLoadingAddress(false);
     }
   };
 
   const openSection = async (section: PortfolioSection) => {
     setActiveSection(section);
-    setPending(true);
+    setLoadingSection(section);
     try {
       if (!state.loaded_sections?.[section] && section !== "overview" && section !== "relationships") {
         await callTool("load_portfolio_section", {
@@ -327,7 +354,7 @@ export default function PortfolioApp() {
         });
       }
     } finally {
-      setPending(false);
+      setLoadingSection((cur) => (cur === section ? null : cur));
     }
   };
 
@@ -335,7 +362,7 @@ export default function PortfolioApp() {
     section: PortfolioSection,
     next: { start_date: string; token: string; action: string },
   ) => {
-    setPending(true);
+    setLoadingSection(section);
     try {
       await callTool("update_portfolio_focus", {
         view_id: view.view_id,
@@ -345,7 +372,7 @@ export default function PortfolioApp() {
         action: next.action,
       });
     } finally {
-      setPending(false);
+      setLoadingSection((cur) => (cur === section ? null : cur));
     }
   };
 
@@ -410,18 +437,16 @@ export default function PortfolioApp() {
             </div>
           ) : null}
 
-          <div className="mini-app-analysis__tabs">
-            {(["overview", "relationships", "yields", "gpay", "circles"] as PortfolioSection[]).map((section) => (
-              <button
-                key={section}
-                type="button"
-                className={`mini-app-analysis__tab ${activeSection === section ? "is-active" : ""}`}
-                onClick={() => void openSection(section)}
-              >
-                {section === "gpay" ? "Gnosis Pay" : section.charAt(0).toUpperCase() + section.slice(1)}
-              </button>
-            ))}
-          </div>
+          <TabBar<PortfolioSection>
+            ariaLabel="Portfolio section"
+            active={activeSection}
+            onChange={(section) => void openSection(section)}
+            tabs={(["overview", "relationships", "yields", "gpay", "circles"] as PortfolioSection[]).map((id) => ({
+              id,
+              label: id === "gpay" ? "Gnosis Pay" : id.charAt(0).toUpperCase() + id.slice(1),
+              badge: loadingSection === id ? "…" : undefined,
+            }) satisfies TabDef<PortfolioSection>)}
+          />
 
           {activeSection !== "overview" && activeSection !== "relationships" ? (
             <SectionFilters section={activeSection} filters={sectionFilters} onPatch={patchSectionFilters} />
@@ -433,14 +458,14 @@ export default function PortfolioApp() {
             <RelationshipsPanel
               dataset={datasets.relationships}
               onNavigate={async (address) => {
-                setPending(true);
+                setLoadingAddress(true);
                 try {
                   await callTool("navigate_portfolio_relation", {
                     view_id: view.view_id,
                     related_address: address,
                   });
                 } finally {
-                  setPending(false);
+                  setLoadingAddress(false);
                 }
               }}
             />
@@ -537,22 +562,37 @@ export default function PortfolioApp() {
 
           {activeSection === "circles" ? (
             <div className="mini-app-detail-stack">
-              {!state.presence?.is_circles_avatar ? (
-                <div className="mini-app-inline-toolbar">
-                  <label className="mini-app-inline-field mini-app-inline-field--wide">
-                    <span>Circles avatar override</span>
-                    <input value={circlesOverride} onChange={(event) => setCirclesOverride(event.target.value)} placeholder="Optional avatar address" />
-                  </label>
-                  <button
-                    type="button"
-                    className="mini-app-toolbar-btn"
-                    disabled={!circlesOverride || !isAddress(circlesOverride)}
-                    onClick={() => void loadAddress(state.current_address, circlesOverride)}
-                  >
-                    Load avatar
-                  </button>
-                </div>
-              ) : null}
+              {/* Stage-1 retrofit: always render the override input; disable
+                  (rather than unmount) when the address is already a Circles
+                  avatar so users see *why* it's unavailable. */}
+              <div className="mini-app-inline-toolbar">
+                <label className="mini-app-inline-field mini-app-inline-field--wide">
+                  <span>Circles avatar override</span>
+                  <input
+                    value={circlesOverride}
+                    onChange={(event) => setCirclesOverride(event.target.value)}
+                    placeholder="Optional avatar address"
+                    disabled={state.presence?.is_circles_avatar}
+                    title={
+                      state.presence?.is_circles_avatar
+                        ? "This address is already a Circles avatar"
+                        : undefined
+                    }
+                  />
+                </label>
+                <AsyncButton
+                  variant="secondary"
+                  disabled={
+                    state.presence?.is_circles_avatar ||
+                    !circlesOverride ||
+                    !isAddress(circlesOverride)
+                  }
+                  loadingLabel="Loading"
+                  onClick={() => loadAddress(state.current_address, circlesOverride)}
+                >
+                  Load avatar
+                </AsyncButton>
+              </div>
 
               <div className="mini-app-analysis__tabs">
                 {(["identity", "balances", "trust", "mint"] as CirclesTab[]).map((tab) => (

@@ -148,12 +148,16 @@ _SUPPLY_AVAILABLE_TOKENS: set[str] = {"gno"}
 
 _SUPPLY_HISTORY_SQL = """
 SELECT
-  dt AS date,
-  total_supply,
-  circulating_supply
-FROM api_execution_gno_supply_daily
-WHERE dt >= toDate({start_date:String})
-ORDER BY dt DESC
+  date,
+  sumIf(supply, label = 'Gnosis Circ. Supply')
+    + sumIf(supply, label = 'Ethereum Circ. Supply')
+    + sumIf(supply, label = 'Non-Circ. Supply') AS total_supply,
+  sumIf(supply, label = 'Gnosis Circ. Supply')
+    + sumIf(supply, label = 'Ethereum Circ. Supply') AS circulating_supply
+FROM api_crawlers_data_gno_supply_daily
+WHERE date >= toDate({start_date:String})
+GROUP BY date
+ORDER BY date DESC
 LIMIT 1500
 """
 

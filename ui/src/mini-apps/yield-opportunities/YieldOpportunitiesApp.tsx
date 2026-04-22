@@ -4,6 +4,8 @@ import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { SummaryCards } from "../shared/SummaryCards";
 import { DatasetTable } from "../shared/DatasetTable";
+import { SegmentedControl } from "../shared/SegmentedControl";
+import { AsyncButton } from "../shared/AsyncButton";
 import type { DatasetDescriptor, MiniAppPayload } from "../shared/miniAppTypes";
 
 type OpportunityType = "LP" | "Lending";
@@ -331,7 +333,12 @@ export default function YieldOpportunitiesApp() {
   const [simulationStart, setSimulationStart] = useState("");
   const [simulationEnd, setSimulationEnd] = useState("");
   const [compound, setCompound] = useState(true);
-  const [pending, setPending] = useState(false);
+  // Stage-1 retrofit: split pending so filter refreshes don't freeze the
+  // opportunity detail, and a running simulation doesn't block filters.
+  const [loadingFilters, setLoadingFilters] = useState(false);
+  const [loadingOpportunity, setLoadingOpportunity] = useState(false);
+  const [loadingSimulation, setLoadingSimulation] = useState(false);
+  const pending = loadingFilters || loadingOpportunity || loadingSimulation;
   const [activeTab, setActiveTab] = useState<YieldTab>("Overview");
   const isDark = document.documentElement.dataset.theme !== "light";
 
@@ -386,7 +393,7 @@ export default function YieldOpportunitiesApp() {
   const protocolOptions = Array.from(new Set(opportunities.map((row) => row.protocol))).sort();
 
   const patchFilters = async (patch: Partial<YieldFilters> & { sort?: SortKey }) => {
-    setPending(true);
+    setLoadingFilters(true);
     try {
       await callTool("update_yield_opportunities_focus", {
         view_id: view.view_id,
@@ -396,12 +403,12 @@ export default function YieldOpportunitiesApp() {
         protocol: patch.protocol ?? state.filters.protocol,
       });
     } finally {
-      setPending(false);
+      setLoadingFilters(false);
     }
   };
 
   const loadOpportunity = async (opportunityKey: string, compareWith = state.compare_with) => {
-    setPending(true);
+    setLoadingOpportunity(true);
     try {
       setActiveTab(compareWith ? "Compare" : "Overview");
       await callTool("load_yield_opportunity", {
@@ -410,13 +417,13 @@ export default function YieldOpportunitiesApp() {
         compare_with: compareWith,
       });
     } finally {
-      setPending(false);
+      setLoadingOpportunity(false);
     }
   };
 
   const runSimulation = async () => {
     if (!selected) return;
-    setPending(true);
+    setLoadingSimulation(true);
     try {
       setActiveTab("Simulation");
       await callTool("run_yield_simulation", {
@@ -429,7 +436,7 @@ export default function YieldOpportunitiesApp() {
         compound,
       });
     } finally {
-      setPending(false);
+      setLoadingSimulation(false);
     }
   };
 
@@ -471,11 +478,17 @@ export default function YieldOpportunitiesApp() {
         </label>
         <label className="mini-app-inline-field">
           <span>Type</span>
-          <select value={state.filters.type} onChange={(event) => void patchFilters({ type: event.target.value })}>
-            <option value="">All types</option>
-            <option value="lp">LP</option>
-            <option value="lending">Lending</option>
-          </select>
+          <SegmentedControl<string>
+            ariaLabel="Filter by opportunity type"
+            size="sm"
+            value={state.filters.type || "all"}
+            onChange={(v) => void patchFilters({ type: v === "all" ? "" : v })}
+            options={[
+              { value: "all", label: "All" },
+              { value: "lp", label: "LP" },
+              { value: "lending", label: "Lending" },
+            ]}
+          />
         </label>
         <label className="mini-app-inline-field">
           <span>Protocol</span>
@@ -685,9 +698,9 @@ export default function YieldOpportunitiesApp() {
                         <input type="checkbox" checked={compound} onChange={(event) => setCompound(event.target.checked)} />
                         <span>Compound returns</span>
                       </label>
-                      <button type="button" className="mini-app-picker__load-btn mini-app-picker__load-btn--sm" onClick={() => void runSimulation()}>
+                      <AsyncButton variant="primary" loadingLabel="Simulating" onClick={runSimulation}>
                         Run simulation
-                      </button>
+                      </AsyncButton>
                     </div>
                     <div className="mini-app-card-grid">
                       <div className="mini-app-data-card">

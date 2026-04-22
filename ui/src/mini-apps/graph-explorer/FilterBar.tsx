@@ -7,8 +7,12 @@ interface Props {
   onReset: () => void;
   detailsOpen: boolean;
   onToggleDetails: () => void;
-  onExpand: () => void;
+  /** BFS expansion from the seed. `hops` = how many frontier rounds. */
+  onExpand: (hops: number) => void;
   isSampleMode: boolean;
+  /** Depth applied when the user clicks the "+" expand button. */
+  bfsHops: number;
+  onBfsHopsChange: (next: number) => void;
 }
 
 /**
@@ -21,6 +25,7 @@ interface Props {
  */
 export function FilterBar({
   view, onFocus, onAskAssistant, onReset, detailsOpen, onToggleDetails, onExpand, isSampleMode,
+  bfsHops, onBfsHopsChange,
 }: Props) {
   return (
     <header className="ge-topbar">
@@ -91,6 +96,7 @@ export function FilterBar({
           </button>
           <button
             type="button"
+            aria-label="Show approved profiles only"
             className={
               "appr " + (view.semantic_status_filter === "approved" ? "active" : "")
             }
@@ -98,9 +104,11 @@ export function FilterBar({
             title="Approved only"
           >
             <span className="ge-dot ge-dot-approved" aria-hidden />
+            <span className="sr-only">Approved</span>
           </button>
           <button
             type="button"
+            aria-label="Show candidate profiles only"
             className={
               "cand " + (view.semantic_status_filter === "candidate" ? "active" : "")
             }
@@ -108,16 +116,29 @@ export function FilterBar({
             title="Candidate only"
           >
             <span className="ge-dot ge-dot-candidate" aria-hidden />
+            <span className="sr-only">Candidate</span>
           </button>
         </div>
       </div>
 
       <div className="ge-topbar-right">
+        <label className="ge-pill" title="Hops per Expand click — multi-round BFS over the whole frontier">
+          <span className="ge-pill-icon" aria-hidden>⇢</span>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            value={bfsHops}
+            onChange={(e) => onBfsHopsChange(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+            style={{ width: 28 }}
+          />
+          <span className="ge-pill-unit">hop</span>
+        </label>
         <button
           type="button"
           className="ge-icon-btn"
-          onClick={onExpand}
-          title="Expand seed +1 hop"
+          onClick={() => onExpand(bfsHops)}
+          title={`Expand seed by BFS, ${bfsHops} hop${bfsHops === 1 ? "" : "s"} of frontier rounds`}
           disabled={!view.seed_node?.id}
         >
           +

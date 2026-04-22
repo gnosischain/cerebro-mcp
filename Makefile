@@ -1,11 +1,11 @@
-.PHONY: build-ui build-ui-report build-ui-token-explorer build-ui-metric-lab build-ui-yield-opportunities build-ui-portfolio build-ui-graph-explorer install dev test
+.PHONY: build-ui build-ui-report build-ui-token-explorer build-ui-metric-lab build-ui-yield-opportunities build-ui-portfolio build-ui-graph-explorer build-ui-quarterly-review install dev test
 
 # Each per-app target builds AND copies into src/cerebro_mcp/static/ so that
 # `make build-ui-<app>` is self-contained — running it and restarting the MCP
 # server is enough for the app's new bundle to take effect. The top-level
 # build-ui target simply fans out to all per-app targets.
 
-build-ui: build-ui-report build-ui-token-explorer build-ui-metric-lab build-ui-yield-opportunities build-ui-portfolio build-ui-graph-explorer
+build-ui: build-ui-report build-ui-token-explorer build-ui-metric-lab build-ui-yield-opportunities build-ui-portfolio build-ui-graph-explorer build-ui-quarterly-review
 
 build-ui-report:
 	cd ui && npm ci && CEREBRO_UI_ENTRY=report npm run build
@@ -30,6 +30,10 @@ build-ui-portfolio:
 build-ui-graph-explorer:
 	cd ui && CEREBRO_UI_ENTRY=graphExplorer npm run build
 	cp ui/dist/graph-explorer.html src/cerebro_mcp/static/graph_explorer.html
+
+build-ui-quarterly-review:
+	cd ui && CEREBRO_UI_ENTRY=quarterlyReview npm run build
+	cp ui/dist/quarterly-review.html src/cerebro_mcp/static/quarterly_review.html
 
 install: build-ui
 	pip install -e .

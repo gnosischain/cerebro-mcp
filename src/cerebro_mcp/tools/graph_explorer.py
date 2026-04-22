@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 GRAPH_EXPLORER_APP_ID = "graph_explorer"
 GRAPH_EXPLORER_URI = "ui://cerebro/graph_explorer"
 DEFAULT_TITLE = "Graph Explorer"
-MAX_HOPS = 5
-DEFAULT_WINDOW_DAYS = 90
-DEFAULT_MAX_NEIGHBORS = 25
+MAX_HOPS = 20
+DEFAULT_WINDOW_DAYS = 365
+DEFAULT_MAX_NEIGHBORS = 100
 
 _BUNDLED_HTML: str | None = None
 
@@ -724,32 +724,119 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
                         expand_kind = str(row[1]) if len(row) > 1 else ""
                         break
 
-        new_nodes: list[dict[str, Any]] = []
-        new_edges: list[dict[str, Any]] = []
-        warnings: list[str] = []
-        for profile in profiles:
-            effective_direction = (
-                direction if direction != "both" else _pick_direction(profile, expand_kind)
-            )
-            nodes, edges, warn = _fetch_edges(
-                ch,
-                profile,
-                seed_ids=[node_id],
-                direction=effective_direction,
-                window_days=window_days,
-                limit=limit,
-            )
-            warnings.extend(warn)
-            new_nodes.extend(nodes)
-            new_edges.extend(edges)
-
+        # Multi-hop BFS: expand the frontier `hops` times so callers actually
+        # see *paths* grow, not just a single node's 1-hop neighbours. Bounded
+        # by a global node cap so a dense seed doesn't blow up the renderer.
         nodes_ds = record.datasets.get("nodes")
         edges_ds = record.datasets.get("edges")
         existing_nodes = list(nodes_ds.rows) if nodes_ds else []
         existing_edges = list(edges_ds.rows) if edges_ds else []
-        merged_nodes, merged_edges = _merge_graph(
-            existing_nodes, existing_edges, new_nodes, new_edges
-        )
+        merged_nodes = list(existing_nodes)
+        merged_edges = list(existing_edges)
+        already_expanded: set[str] = set()
+        frontier: list[tuple[str, str]] = [(node_id, expand_kind or "address")]
+        warnings: list[str] = []
+        BFS_NODE_CAP = 2000  # hard ceiling so runaway BFS can't wedge the UI
+        hops_to_run = max(1, int(hops or 1))
+        all_catalog = list(discover_profiles())
+
+        for hop_round in range(hops_to_run):
+            if not frontier:
+                break
+            if len(merged_nodes) >= BFS_NODE_CAP:
+                warnings.append(
+                    f"BFS stopped at {len(merged_nodes)} nodes "
+                    f"(cap {BFS_NODE_CAP}) after hop {hop_round}."
+                )
+                break
+            next_frontier: list[tuple[str, str]] = []
+            for cur_id, cur_kind in frontier:
+                if cur_id in already_expanded:
+                    continue
+                already_expanded.add(cur_id)
+                # Pick profiles compatible with this node's kind. Fall back to
+                # whole chosen_ids set if kind is unknown.
+                if cur_kind:
+                    step_profiles = [
+                        p
+                        for p in all_catalog
+                        if p.profile in chosen_ids
+                        and (p.source_kind == cur_kind or p.target_kind == cur_kind)
+                    ]
+                else:
+                    step_profiles = profiles
+                for profile in step_profiles:
+                    eff_dir = (
+                        direction
+                        if direction != "both"
+                        else _pick_direction(profile, cur_kind or "")
+                    )
+                    new_n, new_e, warn = _fetch_edges(
+                        ch,
+                        profile,
+                        seed_ids=[cur_id],
+                        direction=eff_dir,
+                        window_days=window_days,
+                        limit=limit,
+                    )
+                    warnings.extend(warn)
+                    # Learn each new neighbour's kind from its node row so the
+                    # next BFS round can pick the right profile for it.
+                    for n in new_n:
+                        nid = str(n[0]) if isinstance(n, list) else str(n.get("id", ""))
+                        nkind = str(n[1]) if isinstance(n, list) else str(n.get("kind", ""))
+                        if nid and nid not in already_expanded:
+                            next_frontier.append((nid, nkind))
+                    merged_nodes, merged_edges = _merge_graph(
+                        merged_nodes, merged_edges, new_n, new_e
+                    )
+                    if len(merged_nodes) >= BFS_NODE_CAP:
+                        break
+                if len(merged_nodes) >= BFS_NODE_CAP:
+                    break
+            frontier = next_frontier
+
+        # UX fallback: if the caller's chosen profiles couldn't emit any edges
+        # from this node (e.g. expanding a token node with only
+        # lending_user_to_reserve — source_kind=address), retry with ALL
+        # profiles whose source_kind matches the node's kind. Prevents the
+        # "click expand, nothing happens" failure mode.
+        gained_edges = len(merged_edges) - len(existing_edges)
+        widened = False
+        if gained_edges == 0 and expand_kind:
+            widen_profiles = [
+                p
+                for p in discover_profiles()
+                if p.profile not in chosen_ids
+                and p.source_kind == expand_kind
+            ]
+            for profile in widen_profiles:
+                effective_direction = (
+                    direction
+                    if direction != "both"
+                    else _pick_direction(profile, expand_kind)
+                )
+                nodes, edges, warn = _fetch_edges(
+                    ch,
+                    profile,
+                    seed_ids=[node_id],
+                    direction=effective_direction,
+                    window_days=window_days,
+                    limit=limit,
+                )
+                if edges:
+                    widened = True
+                    warnings.extend(warn)
+                    merged_nodes, merged_edges = _merge_graph(
+                        merged_nodes, merged_edges, nodes, edges
+                    )
+                    chosen_ids.add(profile.profile)
+            if widened:
+                warnings.append(
+                    "No edges found under selected profiles — widened to "
+                    f"{', '.join(sorted(chosen_ids))}."
+                )
+
         mini_apps.replace_view_datasets(
             view_id,
             {
@@ -758,11 +845,29 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
                 "edges": _dataset_from_rows(EDGES_COLUMNS, merged_edges, "edges"),
             },
         )
+        # Refresh graph_metrics and selected_profiles so the UI status bar
+        # and chip group stay consistent with the real graph after expand.
+        profile_ids_in_graph = sorted(set(str(e[3]) for e in merged_edges if len(e) > 3))
+        metrics_rows = [
+            ["node_count", float(len(merged_nodes))],
+            ["edge_count", float(len(merged_edges))],
+            ["profile_count", float(len(profile_ids_in_graph))],
+            ["window_days", float(window_days)],
+        ]
+        mini_apps.attach_dataset(
+            view_id,
+            "graph_metrics",
+            _dataset_from_rows(METRICS_COLUMNS, metrics_rows, "graph_metrics"),
+        )
+        prev_selected = set(state.get("selected_profiles") or [])
+        merged_profiles = sorted(prev_selected | chosen_ids)
         mini_apps.patch_view_state(
             view_id,
             {
                 "hops": min(current_hops + max(1, int(hops or 1)), MAX_HOPS),
                 "warnings": warnings,
+                "selected_profiles": merged_profiles,
+                "relation_types": merged_profiles,
             },
         )
         updated = mini_apps.get_view(view_id)

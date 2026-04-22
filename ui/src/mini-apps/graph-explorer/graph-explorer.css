@@ -305,6 +305,8 @@ body { overflow: hidden; }
   flex: 1 1 auto;
   min-height: 0; /* allow grid children to shrink-and-scroll instead of overflowing */
   position: relative;
+  /* Stage-1 polish: smooth details-panel open/close instead of snap. */
+  transition: grid-template-columns var(--motion-med, 250ms) var(--ease-standard, ease);
 }
 .ge-body.details-closed {
   grid-template-columns: 1fr 0;

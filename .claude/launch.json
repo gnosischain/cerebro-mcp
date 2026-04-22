@@ -1,0 +1,65 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "graph-explorer",
+      "cwd": "ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5179"],
+      "port": 5179,
+      "env": {
+        "CEREBRO_UI_ENTRY": "graphExplorer"
+      }
+    },
+    {
+      "name": "metric-lab",
+      "cwd": "ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5180"],
+      "port": 5180,
+      "env": {
+        "CEREBRO_UI_ENTRY": "metricLab"
+      }
+    },
+    {
+      "name": "portfolio",
+      "cwd": "ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5181"],
+      "port": 5181,
+      "env": {
+        "CEREBRO_UI_ENTRY": "portfolio"
+      }
+    },
+    {
+      "name": "yield-opportunities",
+      "cwd": "ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5182"],
+      "port": 5182,
+      "env": {
+        "CEREBRO_UI_ENTRY": "yieldOpportunities"
+      }
+    },
+    {
+      "name": "token-explorer",
+      "cwd": "ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5183"],
+      "port": 5183,
+      "env": {
+        "CEREBRO_UI_ENTRY": "tokenExplorer"
+      }
+    },
+    {
+      "name": "quarterly-review",
+      "cwd": "ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5184"],
+      "port": 5184,
+      "env": {
+        "CEREBRO_UI_ENTRY": "quarterlyReview"
+      }
+    }
+  ]
+}

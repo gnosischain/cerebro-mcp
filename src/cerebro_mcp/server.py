@@ -54,6 +54,7 @@ from cerebro_mcp.tools.metric_lab import register_metric_lab_tools
 from cerebro_mcp.tools.yield_opportunities import register_yield_opportunities_tools
 from cerebro_mcp.tools.portfolio import register_portfolio_tools
 from cerebro_mcp.tools.graph_explorer import register_graph_explorer_tools
+from cerebro_mcp.tools.quarterly_review import register_quarterly_review_tools
 
 
 runtime_state.ssl_trust_injected = init_ssl_trust()
@@ -308,6 +309,7 @@ register_metric_lab_tools(mcp, ch)
 register_yield_opportunities_tools(mcp, ch)
 register_portfolio_tools(mcp, ch)
 register_graph_explorer_tools(mcp, ch)
+register_quarterly_review_tools(mcp, ch, research_store)
 
 install_auto_tool_tracing(mcp)
 

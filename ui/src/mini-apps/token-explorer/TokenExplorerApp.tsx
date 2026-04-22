@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
+import { CollapsibleSection } from "../shared/CollapsibleSection";
 import type {
   DatasetDescriptor,
   MiniAppPayload,
@@ -59,20 +60,50 @@ const MOCK_CATALOG: TokenCatalogEntry[] = [
   { key: "usdc", symbol: "USDC", name: "USD Coin", address: "0xddaf...", decimals: 6, has_price: true },
 ];
 
+const MOCK_LOADED =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("demo") === "loaded";
+
+const MOCK_DATASET: DatasetDescriptor = {
+  key: "primary",
+  title: "gno bridge volume",
+  sql: "SELECT * FROM dbt.api_bridges_volume_daily WHERE symbol='GNO'",
+  database: "dbt",
+  columns: [
+    { name: "day", type: "Date" },
+    { name: "volume_usd", type: "number" },
+    { name: "txs", type: "number" },
+  ],
+  stats: { row_count: 5, rows_returned: 5, mode: "exact_bounded", warnings: [] },
+  preview_rows: [
+    ["2026-03-05", 1_420_000, 312],
+    ["2026-03-06", 1_610_000, 341],
+    ["2026-03-07", 1_280_000, 299],
+    ["2026-03-08", 1_880_000, 402],
+    ["2026-03-09", 1_520_000, 355],
+  ],
+};
+
 const MOCK_PAYLOAD: MiniAppPayload<TokenExplorerState> = {
   type: "INITIAL_LOAD",
   view_id: "dev-view",
   app_id: APP_ID,
   title: "Token Explorer",
   status: "ready",
-  summary_cards: [
-    { label: "Tokens available", value: String(MOCK_CATALOG.length), tone: "neutral" },
-  ],
-  datasets: {},
+  summary_cards: MOCK_LOADED
+    ? [
+        { label: "Token", value: "GNO", tone: "neutral" },
+        { label: "Metric", value: "bridge_volume", tone: "neutral" },
+        { label: "Rows", value: "5", tone: "positive" },
+      ]
+    : [
+        { label: "Tokens available", value: String(MOCK_CATALOG.length), tone: "neutral" },
+      ],
+  datasets: MOCK_LOADED ? { primary: MOCK_DATASET } : {},
   view_state: {
-    mode: "empty",
+    mode: MOCK_LOADED ? "loaded" : "empty",
     token_catalog: MOCK_CATALOG,
-    selected_token: "",
+    selected_token: MOCK_LOADED ? "GNO" : "",
     start_date: "2024-01-01",
     include_price: true,
     selected_metric: "bridge_volume",
@@ -372,21 +403,22 @@ function TokenAnalysisPanel({ rows, columns }: { rows: unknown[][]; columns: str
 function ChartInfoPanel({ metric, token, compareToken, rows, datasetMode }: {
   metric: string; token: string; compareToken?: string; rows: number; datasetMode?: string;
 }) {
-  const [expanded, setExpanded] = useState(true);
   return (
-    <div className="mini-app-chart-info">
-      <button className="mini-app-chart-info__toggle" onClick={() => setExpanded(!expanded)} title="Toggle info">
-        {expanded ? "▾ ℹ" : "▸ ℹ"}
-      </button>
-      {expanded && (
-        <>
-          <span className="mini-app-chart-info__item"><strong>Token:</strong> {token}{compareToken ? ` vs ${compareToken}` : ""}</span>
-          <span className="mini-app-chart-info__item"><strong>Metric:</strong> {metric}</span>
-          <span className="mini-app-chart-info__item"><strong>Rows:</strong> {rows.toLocaleString()}</span>
-          {datasetMode && <span className="mini-app-chart-info__item"><strong>Mode:</strong> {datasetMode}</span>}
-        </>
-      )}
-    </div>
+    <CollapsibleSection title="Chart context" defaultOpen tone="subtle">
+      <div className="mini-app-chart-info__content">
+        <span className="mini-app-chart-info__item">
+          <strong>Token:</strong> {token}
+          {compareToken ? ` vs ${compareToken}` : ""}
+        </span>
+        <span className="mini-app-chart-info__item"><strong>Metric:</strong> {metric}</span>
+        <span className="mini-app-chart-info__item"><strong>Rows:</strong> {rows.toLocaleString()}</span>
+        {datasetMode && (
+          <span className="mini-app-chart-info__item">
+            <strong>Mode:</strong> {datasetMode}
+          </span>
+        )}
+      </div>
+    </CollapsibleSection>
   );
 }
 
@@ -905,11 +937,21 @@ export default function TokenExplorerApp() {
       />
 
       {hasData && (
-        <LoadedView
-          view={view}
-          isDark={isDark}
-          onUpdateFocus={handleUpdateFocus}
-        />
+        // Stage-1 retrofit: cross-fade on token switch instead of unmount.
+        // Keeps the previous chart visible at 55% opacity while the next
+        // dataset arrives, eliminating the skeleton-flash the audit flagged.
+        <div
+          style={{
+            opacity: loading ? 0.55 : 1,
+            transition: "opacity 200ms var(--ease-standard, ease)",
+          }}
+        >
+          <LoadedView
+            view={view}
+            isDark={isDark}
+            onUpdateFocus={handleUpdateFocus}
+          />
+        </div>
       )}
     </div>
   );
