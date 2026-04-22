@@ -42,6 +42,48 @@ If a client wants to use personas or peer review, it must explicitly call the pr
 
 ---
 
+## Agent Fleet
+
+Cerebro ships with **23 agent personas** loadable via `get_agent_persona(role)`. They are prompt-layer guidance — the LLM adopts a persona's rules for the duration of a task, then can switch. Personas organize into three tiers:
+
+### Tier 1 — Top-level orchestrator
+
+| Role | Purpose |
+|---|---|
+| `cerebro_dispatcher` | Intent-triage and gated routing. Start here for any non-trivial request — classifies the ask, runs `preflight_analytics_request`, picks the specialist chain, and emits a mandatory **dispatch manifest**. Full rules: [docs/cerebro-docs — MCP / Dispatcher](https://docs.analytics.gnosis.io/mcp/dispatcher/). |
+
+### Tier 2 — Workflow leads
+
+| Role | Purpose |
+|---|---|
+| `analytics_reporter` | Data Science Lead — standard analysis + report SOP (preflight → discovery → EDA → charts → report). |
+| `reality_checker` | QA gate — SQL safety audit, data validation, chart-type fit, narrative consistency before delivery. |
+| `ui_designer` | Chart selection, ECharts styling, report markdown layout. |
+| `gnosis_research_analyst` | Semantic-first multi-phase research — wraps `start_research_project` through `publish_research_report`. |
+| `storyteller_orchestrator` | Coordinates the 7-persona Storytelling-with-Data pipeline (see the Storyteller Workflow section). |
+| `mmm_analyst` | Marketing Mix Modeling SOP — spine-fill → multicollinearity → baseline → adstock/Hill → contribution decomposition. |
+| `mmm_causal_reviewer` | DAG gate before any MMM `generate_report`: chronological, non-inclusion, identifiability checks per Hakuhodo Guidebook Ch.3. |
+| `mmm_simulator` | Budget reallocation and marginal-ROI — bounded at ±30%/period. |
+
+### Tier 3 — Domain specialists (consulted as needed)
+
+| Role | Topic keywords |
+|---|---|
+| `growth_analyst` | DAU / WAU / MAU, retention cohorts, funnel analysis, new-vs-returning |
+| `forecasting_analyst` | time-series decomposition (`seriesDecomposeSTL`), seasonality, forecasts with confidence bands |
+| `defi_analyst` | TVL, utilization, lending protocols (Aave/Agave/Spark), DEXs (UniV3/Balancer/CoW/Swapr), LP/IL |
+| `tokenomics_analyst` | staking APY, GNO supply, validator concentration (HHI / Gini / Nakamoto) |
+| `network_health_analyst` | client diversity, p2p, geographic distribution, decentralization thresholds |
+| `bridge_security_analyst` | bridge flow anomaly detection, directional imbalance, bridge-efficiency comparison |
+| `marketing_analyst` | external-audience framing, investor updates, grant narratives |
+| `esg_analyst` | validator energy, carbon intensity, GHG Scope 2, efficiency trends |
+| `statistical_reviewer` | methodology challenge, sample-size review, p-hacking / multiple-testing correction, CI construction |
+| `storyteller_context`, `storyteller_narrative`, `storyteller_visual_designer`, `storyteller_writer`, `storyteller_critic`, `storyteller_accessibility` | Sub-phases of the storyteller pipeline — invoked by `storyteller_orchestrator` |
+
+**Gating:** when the dispatcher emits a manifest listing required specialists, the session treats it as a binding execution contract. The MMM flow hard-blocks `generate_report` until `mmm_causal_reviewer` returns `VERDICT: PASS`. The storyteller flow hard-blocks final handoff until every clarity check passes. See [docs/cerebro-docs — MCP / Agents](https://docs.analytics.gnosis.io/mcp/agents/) for the full agent catalog, gate semantics, and routing table.
+
+---
+
 ## How The MCP Works
 
 At runtime the system looks like this:
@@ -87,6 +129,7 @@ Artifacts created by the server:
 | Report workflow | visual analysis, KPI packs, weekly or monthly summaries, chart-heavy deliverables | `discover_models`, `describe_table`, `execute_query`, `generate_charts`, `generate_report` | interactive report artifact plus saved HTML |
 | Research workflow | multi-step investigations that need memory, evidence, review, and publication | `start_research_project`, phase tools, evidence tools, verification, peer review, `publish_research_report` | durable research project plus report artifact |
 | Storyteller workflow | decision-oriented narratives, executive briefs, stakeholder memos, recommendation artifacts where an audience must be moved to action | `storyteller_start_session`, `storyteller_record_*`, `storyteller_run_clarity_checks`, `storyteller_generate_story_report` | gated, narrative-first report artifact with action titles, focal-point design, and adversarial clarity review |
+| MMM workflow | sector contribution attribution, ROI across incentive programs, "which emissions drove TVL", budget reallocation | `get_agent_persona("mmm_analyst")` → `get_agent_persona("mmm_causal_reviewer")` (gate) → `get_agent_persona("mmm_simulator")` (optional) → `generate_charts` → `generate_report` | contribution stacked-area, spend-vs-effectiveness share, response-curve scatter, adstock decay, causal-review table |
 | Custom query tools | common domain questions with known parameters | `get_validator_balance_history`, `get_token_transfers_for_address`, etc. | parameterized query result |
 | Dashboard scaffolding | creating new dashboard tabs from semantic metrics | `discover_dashboard_metrics`, `scaffold_dashboard_tab` | JS query files + YAML config |
 | Number verification | any computed numbers before reporting to user | `verify_numbers` | PASS/MISMATCH verdict |
@@ -670,6 +713,56 @@ The standard session state (`search_models_count`, `explored_models`, chart regi
 
 Do not auto-upgrade. If the user asks "give me a report on bridge activity", ask whether they want a standard report or a decision-oriented story.
 
+### 6. MMM Workflow
+
+Use this when the user asks about **contribution attribution, ROI across incentive programs, budget optimisation, or "which emissions / rewards actually drove TVL / volume / users"**. MMM (Marketing Mix Modeling) adapts the Hakuhodo / Google framework to on-chain incentives: media = token emissions / LM rewards / validator APR, KPI = TVL / DEX volume / DAU / tx count.
+
+MMM is a **gated** workflow. `generate_report` is blocked until the `mmm_causal_reviewer` returns `VERDICT: PASS`. The gate catches the most common MMM failure mode — undetected confounding (e.g. user-growth driving both incentives and KPI simultaneously) that would otherwise under-attribute the real drivers by an order of magnitude.
+
+#### Workflow
+
+```text
+1. get_agent_persona("mmm_analyst")
+   - Runs the full SOP: spine-fill → multicollinearity → baseline → adstock → concave + Hill fit → decompose
+   - SQL toolkit is in the persona (geometric adstock, Hill grid search, bootstrap CIs, etc.)
+   - Requires ≥60 weekly rows or downgrades output to "directional only" with a banner
+2. Synthesize mmm_analyst's output into a markdown DAG table (nodes, edges, confounder flags)
+3. get_agent_persona("mmm_causal_reviewer")
+   - Pass the DAG table verbatim as the next user message
+   - Reviewer runs three checks: chronological, non-inclusion, identifiability
+   - On BLOCK: apply the prescribed fix (intervention / segmentation / front-door variable), re-submit
+4. On PASS verdict:
+   - generate_charts (batch): contribution stacked-area, spend-vs-effectiveness share,
+     response-curve scatter per media, adstock decay, plus the causal-review markdown table
+   - generate_report
+5. Optional prescription step (if user asks "what should we do next?"):
+   - get_agent_persona("mmm_simulator")
+   - Pass fitted (β, r, λ, current_spend, baseline_kpi) per media
+   - Simulator caps any shift at ±30%/period and returns marginal-ROI + reallocation charts
+```
+
+#### What the `mmm_causal_reviewer` catches
+
+The review is mandatory because a single open backdoor can flip a coefficient's sign (Hakuhodo Guidebook p.35–38) or under-attribute a driver by ~9.8× (Guidebook p.116 TV-under-attribution simulation). Common on-chain failures the reviewer flags:
+
+- **Inverse causation**: using pay-for-performance spend as a cause of conversions — the arrow runs the other way
+- **Computed-from-outcome loops**: using validator APR as a cause of deposits when APR is derived from deposit volume
+- **Co-launched confounding**: two incentive programs that started the same week have correlated series — the model cannot separate them without intervention, segmentation, or a front-door intermediate (e.g. unique-wallet count)
+
+Prescribed fixes, in priority order: (1) stagger / dark-period intervention, (2) audience or protocol segmentation, (3) front-door variable, (4) future dark-period request.
+
+#### Required charts in the MMM report
+
+On top of the standard `generate_report` gates, an MMM report must include:
+
+- Contribution stacked-area over time (series_field = media)
+- Spend vs. effectiveness share (grouped bar)
+- Response curve per media (scatter + fitted line)
+- Adstock decay per media showing λ
+- Causal-review table (markdown, from `mmm_causal_reviewer`)
+
+See [docs/cerebro-docs — MCP / MMM](https://docs.analytics.gnosis.io/mcp/mmm/) for the full SQL toolkit, worked example on real Gnosis App data, and the 4 SQL bugs surfaced by the live smoke test (with patched snippets).
+
 ---
 
 ## Tool Guide
@@ -803,27 +896,17 @@ Prompts available today:
 - `explore_protocol(protocol)`
 - `write_query(question, database="dbt")`
 - `report(period, topics, focus)`
+- `adopt_persona_cerebro_dispatcher` — **start here for non-trivial requests**
 - `adopt_persona_analytics_reporter`
 - `adopt_persona_gnosis_research_analyst`
 - `adopt_persona_ui_designer`
 - `adopt_persona_reality_checker`
 - `conduct_research_peer_review(packet_json)`
+- `orchestrator(user_request)`, `data_engineer(task)`, `data_scientist(task)`, `frontend_agent(task)` — per-task decomposition scaffolds
 
-Personas are guidance, not automation:
+See the **Agent Fleet** section above for the full 23-persona catalog loadable via `get_agent_persona(role)`. Personas are guidance, not automation; each is adopted for a specific phase of work and produces specific artifacts.
 
-- `analytics_reporter`: analysis and EDA discipline (monolithic — state-accumulation pipeline)
-- `gnosis_research_analyst`: semantic-first research workflow and evidence discipline
-- `ui_designer`: chart selection and report composition
-- `reality_checker`: QA and adversarial review rules
-- `storyteller_orchestrator`: storyteller mode selection and gate enforcement
-- `storyteller_context`: audience, required action, mechanism, tone
-- `storyteller_narrative`: big idea and storyboard construction
-- `storyteller_visual_designer`: relationship-first chart choice, focal-point design, declutter rules
-- `storyteller_writer`: action titles, annotations, medium adaptation
-- `storyteller_critic`: adversarial clarity review (title-only readthrough, reverse storyboard, fresh-eye)
-- `storyteller_accessibility`: colorblind palette, contrast, language, tone match
-
-The seven storyteller personas are split by design — each is adopted for exactly one phase of an artifact-handoff pipeline. See the Storyteller Workflow section for why.
+The seven storyteller personas are split by design — each is adopted for exactly one phase of an artifact-handoff pipeline. The three MMM personas split orchestration, DAG review, and simulation along the same lines. See the Storyteller Workflow and MMM Workflow sections for the gate semantics.
 
 Resources expose stable reference material:
 
@@ -1328,6 +1411,14 @@ Saved-query reminder:
 
 ## Typical User Requests And What To Do
 
+### For any non-trivial request: start with the dispatcher
+
+```text
+get_agent_persona("cerebro_dispatcher")
+```
+
+The dispatcher classifies intent, runs `preflight_analytics_request`, picks the specialist chain, and emits a mandatory **dispatch manifest**. The patterns below are subordinate to that manifest. Skip the dispatcher only for trivial turns ("hi", "list reports", "open report 3"), explicit specialist invocations ("use `forecasting_analyst` on validator count"), or follow-up turns inside an already-dispatched workflow.
+
 ### "What data is available for X?"
 
 Use:
@@ -1379,6 +1470,17 @@ Use the research workflow:
 4. verification
 5. peer review
 6. publication
+
+### "Which incentives / emissions drove TVL (or volume, DAU, …)?"
+
+Use the MMM workflow. This is a gated flow — `generate_report` is blocked until `mmm_causal_reviewer` returns `VERDICT: PASS`.
+
+1. `get_agent_persona("mmm_analyst")`
+2. Follow the SOP: spine-fill → multicollinearity → baseline → adstock → fit → decompose
+3. Synthesize the DAG as a markdown table
+4. `get_agent_persona("mmm_causal_reviewer")` — pass the DAG; iterate until PASS
+5. `generate_charts` (5 required charts) → `generate_report`
+6. Optional: `get_agent_persona("mmm_simulator")` for ±30%-bounded budget reallocation
 
 ### "Write me an executive brief / decision memo / stakeholder pitch"
 
