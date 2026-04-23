@@ -823,7 +823,7 @@ See [docs/cerebro-docs — MCP / MMM](https://docs.analytics.gnosis.io/mcp/mmm/)
 | `resolve_address` | map names to addresses or labels | backed by `dune_labels` |
 | `get_token_metadata` | verify token decimals and metadata | useful before interpreting amounts |
 | `search_models_by_address` | find dbt models around a contract | contract-centric analysis |
-| `search_docs` / `get_doc_chunk` | query platform docs | supplementary context |
+| `search_docs` / `get_doc_chunk` / `get_docs_overview` / `get_docs_context` / `get_gnosis_chain_docs_context` / `get_gnosis_chain_doc_chunk` | query platform docs | supplementary context, curated overview, platform corpus, and Gnosis Chain corpus |
 | `get_platform_constants` | chain constants and fixed references | useful before querying raw execution data |
 | `save_query` / `run_saved_query` / `list_saved_queries` | reusable SQL snippets | not evidence storage |
 
@@ -1242,9 +1242,11 @@ All settings are environment variables or `.env` values.
 | `DBT_MANIFEST_PATH` | empty | local manifest fallback |
 | `DBT_CATALOG_URL` | published `dbt-cerebro` catalog URL | remote catalog source; takes precedence over local path |
 | `DBT_CATALOG_PATH` | empty | local catalog fallback |
+| `DOCS_BASE_URL` | `https://docs.analytics.gnosis.io/` | canonical docs host used to derive `llms.txt`, `llms-ctx*.txt`, and page mirror URLs |
 | `DOCS_SEARCH_INDEX_URL` | published docs search URL | external platform docs index |
 | `DOCS_SEARCH_INDEX_PATH` | empty | local docs index fallback |
 | `DOCS_REFRESH_INTERVAL_SECONDS` | `3600` | docs index refresh cadence |
+| `GNOSIS_CHAIN_DOCS_LLM_URL` | `https://docs.gnosischain.com/llms.txt` | Gnosis Chain docs context artifact used for search and broad chain context |
 | `SEMANTIC_ENABLED` | `False` | deployment-level semantic switch; the only semantic on/off control |
 | `SEMANTIC_REGISTRY_URL` | published `dbt-cerebro` registry URL | remote semantic registry source |
 | `SEMANTIC_REGISTRY_PATH` | empty | local semantic registry fallback |

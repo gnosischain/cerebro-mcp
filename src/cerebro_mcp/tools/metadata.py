@@ -286,8 +286,14 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
         lines.append("\n## Docs Index\n")
         lines.append(f"- **Loaded:** {docs_index.is_loaded}")
         lines.append(f"- **Entry count:** {docs_index.entry_count}")
+        lines.append(f"- **LLMS entries:** {docs_index.llms_entry_count}")
+        lines.append(f"- **Gnosis Chain docs entries:** {docs_index.gnosis_chain_entry_count}")
+        lines.append(f"- **Base URL:** {settings.DOCS_BASE_URL or 'none'}")
         lines.append(
             f"- **Source:** {settings.DOCS_SEARCH_INDEX_URL or settings.DOCS_SEARCH_INDEX_PATH or 'none'}"
+        )
+        lines.append(
+            f"- **Gnosis Chain docs source:** {settings.GNOSIS_CHAIN_DOCS_LLM_URL or 'none'}"
         )
         if docs_index.last_load_time:
             ts = datetime.fromtimestamp(docs_index.last_load_time, tz=timezone.utc)
@@ -634,17 +640,29 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                             (hits, f"**[Static: {source_name}]**\n{trimmed}")
                         )
 
-            # 2. Search external MkDocs index and merge
-            if docs_index.is_loaded:
+            # 2. Search external docs corpora and merge
+            if docs_index.is_loaded or docs_index.gnosis_chain_entry_count:
                 doc_results = docs_index.search(topic, limit=10)
-                base_docs_url = "https://docs.analytics.gnosis.io/"
 
                 for r in doc_results:
-                    full_url = f"{base_docs_url}{r['location']}"
-                    text_block = (
-                        f"**[Docs: {r['title']}]({full_url})**\n"
-                        f"{r['snippet']}\n"
+                    full_url = r.get("page_url") or docs_index.docs_base_url
+                    detail_lines = []
+                    if r.get("section"):
+                        detail_lines.append(f"*Section:* {r['section']}")
+                    if r.get("description"):
+                        detail_lines.append(r["description"])
+                    detail_lines.append(r["snippet"])
+                    source_label = "Docs" if r.get("source") == "platform" else "Gnosis Chain Docs"
+                    follow_up = (
                         f"*To read full text, call tool: `get_doc_chunk(\"{r['location']}\")`*"
+                        if r.get("source") == "platform"
+                        else f"*To read full text, call tool: `get_gnosis_chain_doc_chunk(\"{r['file_path']}\")`*"
+                    )
+                    text_block = (
+                        f"**[{source_label}: {r['title']}]({full_url})**\n"
+                        + "\n".join(detail_lines)
+                        + "\n"
+                        + follow_up
                     )
                     scored_results.append((r["score"], text_block))
 
@@ -670,7 +688,7 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                 )
 
             header = f"# Documentation Search: '{topic}'\n\nFound {len(unique_results)} matching section(s).\n"
-            if not docs_index.is_loaded:
+            if not docs_index.is_loaded and not docs_index.gnosis_chain_entry_count:
                 header += "*(Note: External docs index is currently unavailable; showing static results only)*\n"
             header += "\n"
 
@@ -684,7 +702,9 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
         """Retrieve full text of a documentation page by its location path.
 
         Use this tool after search_docs returns a promising match to read the
-        complete content of that page.
+        complete content of that page. This fetches the published Markdown
+        mirror first and falls back to the search index excerpt if the mirror
+        is unavailable.
 
         Args:
             location: Doc location path (e.g., 'data-pipeline/ingestion/cryo-indexer/').
@@ -697,6 +717,68 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
             return docs_index.get_chunk(location, max_chars)
         except Exception as e:
             return f"Error retrieving document: {e}"
+
+    @mcp.tool()
+    def get_docs_overview(max_chars: int = 6000) -> str:
+        """Retrieve the curated docs overview published at llms.txt.
+
+        Args:
+            max_chars: Max characters to return (default 6000).
+
+        Returns:
+            The generated docs overview file used to curate public docs for LLMs.
+        """
+        try:
+            return docs_index.get_overview(max_chars)
+        except Exception as e:
+            return f"Error retrieving docs overview: {e}"
+
+    @mcp.tool()
+    def get_docs_context(full: bool = False, max_chars: int = 12000) -> str:
+        """Retrieve the generated broad docs context artifact.
+
+        Args:
+            full: When true, fetch the full public corpus (`llms-ctx-full.txt`).
+            max_chars: Max characters to return (default 12000).
+
+        Returns:
+            The generated docs context file for broad LLM grounding.
+        """
+        try:
+            return docs_index.get_context(full=full, max_chars=max_chars)
+        except Exception as e:
+            return f"Error retrieving docs context: {e}"
+
+    @mcp.tool()
+    def get_gnosis_chain_docs_context(max_chars: int = 12000) -> str:
+        """Retrieve the Gnosis Chain docs llms context artifact.
+
+        Args:
+            max_chars: Max characters to return (default 12000).
+
+        Returns:
+            The `https://docs.gnosischain.com/llms.txt` context artifact.
+        """
+        try:
+            return docs_index.get_gnosis_chain_context(max_chars=max_chars)
+        except Exception as e:
+            return f"Error retrieving Gnosis Chain docs context: {e}"
+
+    @mcp.tool()
+    def get_gnosis_chain_doc_chunk(file_path: str, max_chars: int = 6000) -> str:
+        """Retrieve a single Gnosis Chain docs section from the llms artifact.
+
+        Args:
+            file_path: The `// File:` path from `docs.gnosischain.com/llms.txt`, or its page path/URL.
+            max_chars: Max characters to return (default 6000).
+
+        Returns:
+            The matching Gnosis Chain docs chunk.
+        """
+        try:
+            return docs_index.get_gnosis_chain_chunk(file_path, max_chars=max_chars)
+        except Exception as e:
+            return f"Error retrieving Gnosis Chain docs chunk: {e}"
 
     @mcp.tool()
     def get_help() -> str:
@@ -792,6 +874,10 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 | `get_token_metadata` | Token info: address, decimals, price data |
 | `search_docs` | Search platform documentation and references |
 | `get_doc_chunk` | Read full text of a documentation page |
+| `get_docs_overview` | Read the curated `llms.txt` docs index |
+| `get_docs_context` | Read the generated broad docs context corpus |
+| `get_gnosis_chain_docs_context` | Read the Gnosis Chain docs `llms.txt` context |
+| `get_gnosis_chain_doc_chunk` | Read a single chunk from Gnosis Chain docs `llms.txt` |
 | `get_platform_constants` | Chain params, event signatures, contracts, partition keys |
 
 ### Saved Queries

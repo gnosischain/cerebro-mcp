@@ -179,6 +179,10 @@ For durable, phase-driven investigations:
 - Call `get_help()` for a full reference of all tools, prompts, and resources
 - Call `get_platform_constants()` for chain parameters, event signatures, and contract addresses
 - Call `search_docs('topic')` to search platform documentation
+- Call `get_doc_chunk('location')` to read a single docs page
+- Call `get_docs_context(full=True)` when you need broader documentation context
+- Call `get_gnosis_chain_docs_context()` for the broader Gnosis Chain public docs corpus
+- Call `get_gnosis_chain_doc_chunk('path')` to read a specific Gnosis Chain docs chunk
 """
 
     # --- Data Analysis Prompts ---
@@ -489,6 +493,8 @@ and structured output (HTML reports or markdown).{data_section}
 - `generate_report` — Produce interactive UI resource with charts and Gnosis branding
 - `list_charts` — View all registered chart IDs
 - `search_docs` — Search platform documentation for context
+- `get_doc_chunk` / `get_docs_context` — Pull focused or broad docs context
+- `get_gnosis_chain_docs_context` / `get_gnosis_chain_doc_chunk` — Pull broad or focused Gnosis Chain docs context
 
 ## Output Mode Selection
 
