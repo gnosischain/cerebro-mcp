@@ -1453,6 +1453,177 @@ class TestHybridRouting:
         state.reset()
         assert state.analysis_path == "undecided"
 
+class TestResearchReport:
+    """Research-report style layout: markdown directives + artifact builder."""
+
+    def _setup_chart(self, chart_id="chart_1"):
+        viz._chart_registry[chart_id] = {
+            "option": {"xAxis": {"data": ["a"]}, "series": [{"data": [1]}]},
+            "title": "Test Chart",
+            "chart_type": "line",
+            "data_points": 1,
+            "created_at": datetime.now(),
+        }
+
+    def test_markdown_heading_gets_anchor_in_research_mode(self):
+        html = viz._markdown_to_html("## Methodology\n", research_mode=True)
+        assert 'id="methodology"' in html
+        assert "rr-section-heading" in html
+
+    def test_markdown_heading_no_anchor_in_default_mode(self):
+        html = viz._markdown_to_html("## Methodology\n", research_mode=False)
+        assert "<h2>Methodology</h2>" in html
+        assert "rr-section-heading" not in html
+
+    def test_pullquote_directive(self):
+        md = "{{pullquote}}\nThe default is uncertainty.\n{{/pullquote}}\n"
+        html = viz._markdown_to_html(md, research_mode=True)
+        assert 'class="rr-pullquote"' in html
+        assert "uncertainty" in html
+
+    def test_callout_directive_captures_kind(self):
+        md = "{{callout kind=key_takeaway}}\nBig result.\n{{/callout}}\n"
+        html = viz._markdown_to_html(md, research_mode=True)
+        assert "rr-callout--key_takeaway" in html
+        assert "Big result" in html
+
+    def test_sidebar_directive_with_title(self):
+        md = '{{sidebar title="Methods"}}\nDetails here.\n{{/sidebar}}\n'
+        html = viz._markdown_to_html(md, research_mode=True)
+        assert 'class="rr-sidebar"' in html
+        assert "Methods" in html
+        assert "Details here" in html
+
+    def test_figure_directive_renders_chart_with_caption(self):
+        self._setup_chart("chart_7")
+        md = '{{figure:chart_7 caption="TVL trend" source="Dune"}}\n'
+        html = viz._markdown_to_html(md, research_mode=True)
+        assert 'class="rr-figure"' in html
+        assert 'id="chart-chart_7"' in html
+        assert "TVL trend" in html
+        assert "Source:" in html
+        assert "Dune" in html
+
+    def test_figure_directive_missing_chart_emits_placeholder(self):
+        md = "{{figure:missing_chart caption=\"x\"}}\n"
+        html = viz._markdown_to_html(md, research_mode=True)
+        assert "rr-figure--missing" in html
+        assert "missing_chart" in html
+
+    def test_footnotes_ref_and_definition(self):
+        md = (
+            "Some claim[^1] and another[^two].\n\n"
+            "[^1]: First note.\n"
+            "[^two]: Second note.\n"
+        )
+        html = viz._markdown_to_html(md, research_mode=True)
+        assert 'id="fnref-1"' in html
+        assert 'id="fnref-two"' in html
+        assert 'id="fn-1"' in html
+        assert 'id="fn-two"' in html
+        assert "First note" in html
+        assert "Second note" in html
+        assert "rr-footnotes" in html
+
+    def test_footnotes_ignored_when_not_research_mode(self):
+        md = "Claim[^1].\n\n[^1]: note.\n"
+        html = viz._markdown_to_html(md, research_mode=False)
+        assert "rr-footnotes" not in html
+        assert "[^1]" in html  # passes through unchanged
+
+    def test_chart_placeholder_still_works_in_research_mode(self):
+        self._setup_chart("chart_9")
+        html = viz._markdown_to_html(
+            "{{chart:chart_9}}\n", research_mode=True
+        )
+        assert 'id="chart-chart_9"' in html
+
+    def test_report_filename_research_prefix(self):
+        name = viz._report_filename("abc-123", "Q2 2026 TVL Review", kind="research")
+        assert name.startswith("cerebro_research_")
+        assert name.endswith("_abc-123.html")
+
+    def test_report_filename_default_prefix_unchanged(self):
+        name = viz._report_filename("abc-123", "My Report")
+        assert name.startswith("cerebro_report_")
+
+    def test_find_report_on_disk_matches_research(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        fn = tmp_path / "cerebro_research_20260101T000000Z_q2-review_abc12345-def6-7890-1234-567890abcdef.html"
+        fn.write_text("<html></html>")
+        found = viz._find_report_on_disk("abc12345")
+        assert found == fn
+        assert viz._report_kind_from_path(fn) == "research"
+
+    def test_create_research_report_artifact_happy_path(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        self._setup_chart("chart_1")
+        out = viz.create_research_report_artifact(
+            title="Stablecoin Yield Landscape",
+            deck="A tour of on-chain yield across the five largest stablecoin pools.",
+            content_markdown=(
+                "## Overview\n\n"
+                "Intro paragraph[^1].\n\n"
+                "{{callout kind=key_takeaway}}\nThings happened.\n{{/callout}}\n\n"
+                "{{figure:chart_1 caption=\"TVL\" source=\"Dune\"}}\n\n"
+                "## Methods\n\nMethods body.\n\n"
+                "[^1]: Data through 2026-04-21.\n"
+            ),
+            authors=["Jane D.", "John S."],
+            category="DeFi Research",
+            key_takeaways=[
+                "Yields compressed ~30% YoY",
+                "Curve remains dominant venue",
+                "Ethena inflows accelerating",
+            ],
+            footnotes=[{"id": "note2", "text": "Excludes CEX data."}],
+            enforce_quality_gate=False,
+            reset_session_state=False,
+        )
+        assert out["report_path"].name.startswith("cerebro_research_")
+        structured = out["structured"]
+        assert structured["presentation_mode"] == "research"
+        meta = structured["research_metadata"]
+        assert meta["deck"].startswith("A tour")
+        assert meta["category"] == "DeFi Research"
+        assert meta["reading_minutes"] >= 1
+        assert len(meta["key_takeaways"]) == 3
+        # Normalized footnote list contains the extra meta footnote
+        assert any(f["id"] == "note2" for f in meta["footnotes"])
+        # Rendered sections HTML contains the research structures and anchors
+        sections = structured["sections_html"]
+        assert "rr-callout" in sections
+        assert "rr-figure" in sections
+        assert 'id="overview"' in sections
+        assert 'id="methods"' in sections
+
+    def test_create_research_report_requires_deck(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        self._setup_chart("chart_1")
+        with pytest.raises(ValueError, match="deck"):
+            viz.create_research_report_artifact(
+                title="X",
+                deck="",
+                content_markdown="{{chart:chart_1}}\n",
+                key_takeaways=["a", "b", "c"],
+                enforce_quality_gate=False,
+                reset_session_state=False,
+            )
+
+    def test_create_research_report_requires_3_to_6_takeaways(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        self._setup_chart("chart_1")
+        with pytest.raises(ValueError, match="key_takeaways"):
+            viz.create_research_report_artifact(
+                title="X",
+                deck="A deck.",
+                content_markdown="{{chart:chart_1}}\n",
+                key_takeaways=["only one"],
+                enforce_quality_gate=False,
+                reset_session_state=False,
+            )
+
+
     def test_raw_chart_blocked_in_pure_semantic_before_execution(self, monkeypatch):
         monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
         monkeypatch.setattr(session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", True)

@@ -1,5 +1,173 @@
 import type { ReportData } from "./types";
 
+function renderMarkdownForDev(md: string): string {
+  // Very small subset of the Python _markdown_to_html output in research mode.
+  // Only used in `npm run dev` — production bundles receive server-rendered HTML.
+  const lines = md.split("\n");
+  const out: string[] = [];
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length) {
+      out.push(`<p>${para.join(" ")}</p>`);
+      para = [];
+    }
+  };
+  const slug = (t: string) =>
+    t
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, "")
+      .trim()
+      .replace(/\s+/g, "-");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const s = line.trim();
+    if (!s) {
+      flushPara();
+      i++;
+      continue;
+    }
+    if (s.startsWith("## ")) {
+      flushPara();
+      const t = s.slice(3);
+      out.push(
+        `<h2 id="${slug(t)}" class="rr-section-heading">${t}</h2>`
+      );
+      i++;
+      continue;
+    }
+    if (s.startsWith("### ")) {
+      flushPara();
+      out.push(`<h3>${s.slice(4)}</h3>`);
+      i++;
+      continue;
+    }
+    const fig = s.match(/^\{\{figure:(\w+)(?:\s+(.*))?\}\}$/);
+    if (fig) {
+      flushPara();
+      const attrs: Record<string, string> = {};
+      (fig[2] || "").replace(/(\w+)\s*=\s*"([^"]*)"/g, (_m, k, v) => {
+        attrs[k] = v;
+        return "";
+      });
+      const cap = attrs.caption
+        ? `<figcaption class="rr-figure-caption">${attrs.caption}${attrs.source ? ` <span class="rr-figure-source">Source: ${attrs.source}</span>` : ""}</figcaption>`
+        : "";
+      out.push(
+        `<figure class="rr-figure"><div class="chart-card rr-figure-chart"><div id="chart-${fig[1]}" class="chart-container"></div></div>${cap}</figure>`
+      );
+      i++;
+      continue;
+    }
+    if (s === "{{pullquote}}") {
+      flushPara();
+      const buf: string[] = [];
+      i++;
+      while (i < lines.length && lines[i].trim() !== "{{/pullquote}}") {
+        buf.push(lines[i]);
+        i++;
+      }
+      i++;
+      out.push(
+        `<blockquote class="rr-pullquote"><p>${buf.join(" ")}</p></blockquote>`
+      );
+      continue;
+    }
+    const calloutOpen = s.match(/^\{\{callout\s+kind=([A-Za-z0-9_-]+)\}\}$/);
+    if (calloutOpen) {
+      flushPara();
+      const kind = calloutOpen[1];
+      const buf: string[] = [];
+      i++;
+      while (i < lines.length && lines[i].trim() !== "{{/callout}}") {
+        buf.push(lines[i]);
+        i++;
+      }
+      i++;
+      out.push(
+        `<aside class="rr-callout rr-callout--${kind}"><p>${buf.join(" ")}</p></aside>`
+      );
+      continue;
+    }
+    para.push(s);
+    i++;
+  }
+  flushPara();
+  return out.join("\n");
+}
+
+const RESEARCH_MARKDOWN = `## Why on-chain yield is consolidating
+
+For most of 2024 and 2025, stablecoin yields across DeFi looked like a long tail — dozens of pools, hundreds of strategies, and enough variance that spreadsheets and Dune dashboards were the way you navigated them. That tail is now shortening.
+
+## What the data shows
+
+{{figure:chart_1 caption="Weekly TVL across the five largest stablecoin yield venues." source="dbt-cerebro / Dune"}}
+
+Three venues — Curve, Ethena, and Sky — now account for **68%** of stablecoin TVL earning yield above the risk-free rate, up from 41% a year ago. The rest of the table didn't shrink in absolute terms; it just grew more slowly.
+
+{{callout kind=key_takeaway}}
+Concentration is not a byproduct of outflows. Smaller venues kept their deposits; large venues simply grew faster. This is compounding, not competition.
+{{/callout}}
+
+{{pullquote}}
+The headline isn't that yields fell — it's that the *variance* of yields fell.
+{{/pullquote}}
+
+## Methods
+
+We pulled daily deposits, redemptions, and realised yield per pool from the \`fct_stablecoin_yield__pool_daily\` model for the twelve months ending 2026-04-15. Venues were ranked by TVL-weighted median yield across the period.
+
+Assumptions worth flagging[^1]: CEX yield products are excluded, and "Ethena" here aggregates sUSDe and USDtb.
+
+## Implications
+
+If the trend holds, the next leg of growth is unlikely to come from discovering a new venue — it's more likely to come from re-pricing risk inside the three that already dominate. That shifts the useful research question from "which pool?" to "at what point does concentration itself start to matter?"
+
+[^1]: Data through 2026-04-15. Cross-chain bridges are counted at origin.
+`;
+
+export const DEV_RESEARCH_REPORT_DATA: ReportData = {
+  title: "The quiet consolidation of on-chain yield",
+  timestamp: "2026-04-21T14:30:00Z",
+  presentation_mode: "research",
+  research_metadata: {
+    deck: "How three venues quietly absorbed the bulk of stablecoin yield TVL in under a year — and why that changes the next research question.",
+    authors: ["Cerebro Research"],
+    published_date: "2026-04-21",
+    category: "DeFi Research",
+    reading_minutes: 7,
+    key_takeaways: [
+      "Three venues now hold 68% of above-risk-free stablecoin TVL, up from 41% a year ago.",
+      "Smaller pools didn't shrink; the top of the distribution simply grew faster.",
+      "The useful forward-looking question shifts from discovery to concentration risk.",
+    ],
+    footnotes: [
+      { id: "2", text: "Data excludes CEX-side yield products." },
+    ],
+  },
+  charts: {
+    chart_1: {
+      tooltip: { trigger: "axis" },
+      legend: { data: ["Curve", "Ethena", "Sky"], top: 0 },
+      grid: { left: "3%", right: "4%", bottom: "10%", top: "40", containLabel: true },
+      xAxis: {
+        type: "category",
+        data: ["W-48", "W-44", "W-40", "W-36", "W-32", "W-28", "W-24", "W-20", "W-16", "W-12", "W-8", "W-4", "Now"],
+        boundaryGap: false,
+      },
+      yAxis: { type: "value", name: "TVL ($B)" },
+      series: [
+        { name: "Curve", type: "line", smooth: true, data: [4.1, 4.3, 4.5, 4.8, 5.0, 5.2, 5.5, 5.7, 5.9, 6.2, 6.5, 6.8, 7.1] },
+        { name: "Ethena", type: "line", smooth: true, data: [0.8, 1.1, 1.5, 1.9, 2.4, 3.1, 3.8, 4.5, 5.0, 5.4, 5.8, 6.1, 6.4] },
+        { name: "Sky", type: "line", smooth: true, data: [2.0, 2.1, 2.2, 2.3, 2.5, 2.7, 3.0, 3.3, 3.5, 3.7, 3.9, 4.0, 4.2] },
+      ],
+    },
+  },
+  sections_html: renderMarkdownForDev(RESEARCH_MARKDOWN),
+};
+
+
 /**
  * Mock report data for local HMR development.
  * Run `npm run dev` to see the report at localhost:5173 without the MCP server.

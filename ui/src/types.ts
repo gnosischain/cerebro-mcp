@@ -24,6 +24,21 @@ export interface QueryInfo {
   source?: "semantic" | "raw";
 }
 
+export interface ResearchFootnote {
+  id: string;
+  text: string;
+}
+
+export interface ResearchMetadata {
+  deck: string;
+  authors?: string[];
+  published_date?: string;
+  category?: string | null;
+  key_takeaways?: string[];
+  footnotes?: ResearchFootnote[];
+  reading_minutes?: number;
+}
+
 export interface ReportData {
   title: string;
   timestamp: string;
@@ -32,6 +47,8 @@ export interface ReportData {
   queries?: Record<string, QueryInfo>;
   file_uri?: string;
   analysis_path?: string;
+  presentation_mode?: "report" | "visual_answer" | "research";
+  research_metadata?: ResearchMetadata;
 }
 
 export interface HtmlSection {

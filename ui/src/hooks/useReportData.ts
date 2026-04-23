@@ -25,7 +25,13 @@ export function useReportData(): ReportData | null {
     // In dev mode, load mock data
     if (import.meta.env.DEV && !data) {
       import("../dev-data").then((mod) => {
-        setData(mod.DEV_REPORT_DATA);
+        const wantResearch =
+          typeof window !== "undefined" &&
+          new URLSearchParams(window.location.search).get("mode") ===
+            "research";
+        setData(
+          wantResearch ? mod.DEV_RESEARCH_REPORT_DATA : mod.DEV_REPORT_DATA
+        );
       });
       return;
     }

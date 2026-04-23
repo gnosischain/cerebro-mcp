@@ -40,7 +40,31 @@ Never skip the `generate_charts` -> `generate_report` pipeline.
 - Summarize key insights and ask about format conversion
 - SQL queries are embedded in the report UI (click `</>` on each chart card)
 
-Use `list_reports()` and `open_report(id)` to reopen past reports.
+Use `list_reports()` and `open_report(id)` to reopen past reports. The list
+includes both dashboard reports and research-essay reports (`kind` column).
+
+### When to use `generate_research_report` instead of `generate_report`
+
+Both tools share the chart pipeline and enforcement gates. Pick based on the
+artifact the user is asking for:
+
+- **`generate_report`** — analytical dashboard. Dense charts, grids, KPIs,
+  short commentary between chart groups. Default choice.
+- **`generate_research_report`** — long-form research essay in the
+  Anthropic-style layout. Use when the user asks for a whitepaper, research
+  report, research essay, narrative analysis, thesis piece, or "long-form"
+  article with an argument. Requires `deck` (sub-headline, ≤240 chars) and
+  `key_takeaways` (3–6 items). Supports extra markdown directives:
+  `{{figure:CHART_ID caption="..." source="..."}}`, `{{pullquote}}`,
+  `{{callout kind=...}}`, `{{sidebar title="..."}}`, and `[^fnid]` footnotes.
+  Standard `{{chart:ID}}` and `{{grid:N}}` still work inline.
+- **`storyteller_generate_story_report`** — final step of the storyteller
+  pipeline (memos, decision briefs, investor updates, narrative-first
+  deliverables). Defaults to the **research-essay layout**, automatically
+  populating `deck` from the recorded big idea, `key_takeaways` from
+  storyboard scene intents, and `category` from the context-brief mechanism.
+  Pass `style="dashboard"` to opt back into the original dashboard layout
+  for back-compat.
 
 **Key takeaways formatting:**
 - Key takeaways / summary sections in reports MUST use a 3-column table:

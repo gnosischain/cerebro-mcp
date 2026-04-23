@@ -492,6 +492,133 @@ def test_tool_generate_story_report_blocks_without_gates():
     assert "Gate" in result.content[0].text
 
 
+def _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard):
+    """Run the storyteller pipeline to ready_for_handoff and return the
+    fully-baked singleton state."""
+    storyteller_state.start_session()
+    storyteller_state.record_context_brief(valid_brief)
+    storyteller_state.record_big_idea(valid_big_idea)
+    storyteller_state.record_storyboard(valid_storyboard)
+    for idx in range(len(valid_storyboard.scenes)):
+        storyteller_state.record_visual_spec(_valid_visual_spec(scene_index=idx))
+    storyteller_state.record_final_story(
+        title="Fund the pilot",
+        content_markdown=(
+            "## Setup\n\nIntro paragraph.\n\n"
+            "## Tension\n\nThe gap is real.\n\n"
+            "## Resolution\n\nFund it.\n"
+        ),
+    )
+    storyteller_state.record_review(
+        ReviewReport(
+            checks=[
+                ClarityCheck(test="title_only_readthrough", passed=True),
+                ClarityCheck(test="per_scene_reinforcement", passed=True),
+                ClarityCheck(test="reverse_storyboard", passed=True),
+                ClarityCheck(test="fresh_eye_simulation", passed=True),
+                ClarityCheck(test="emphasis_alignment", passed=True),
+                ClarityCheck(test="chart_type_audit", passed=True),
+                ClarityCheck(test="action_title_audit", passed=True),
+                ClarityCheck(test="assumption_surfacing", passed=True),
+            ],
+            ready_for_handoff=True,
+        )
+    )
+    storyteller_state.record_accessibility_pass(True)
+
+
+def test_research_metadata_from_snapshot_maps_fields(
+    valid_brief, valid_big_idea, valid_storyboard
+):
+    from cerebro_mcp.tools.storyteller import _research_metadata_from_snapshot
+
+    _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard)
+    snap = storyteller_state.snapshot()
+    meta = _research_metadata_from_snapshot(snap)
+
+    # Deck = big idea sentence, capped at 240 chars.
+    assert meta["deck"].startswith("The summer learning pilot improved")
+    assert len(meta["deck"]) <= 240
+    # Takeaways = storyboard scene intents (4 scenes here).
+    assert meta["key_takeaways"][0] == "Set up the pilot's goal"
+    assert 3 <= len(meta["key_takeaways"]) <= 6
+    # Category derived from mechanism (memo).
+    assert meta["category"] == "Storyteller · Memo"
+
+
+def test_research_metadata_takeaways_capped_at_six(
+    valid_brief, valid_big_idea
+):
+    """A storyboard with >6 scene intents is capped at 6 takeaways."""
+    from cerebro_mcp.tools.storyteller import _research_metadata_from_snapshot
+
+    big_storyboard = Storyboard(
+        scenes=[
+            StoryboardScene(index=0, intent=f"Scene {i}", role="setup")
+            if i == 0
+            else StoryboardScene(index=i, intent=f"Scene {i}", role="tension")
+            if i < 6
+            else StoryboardScene(index=i, intent=f"Scene {i}", role="resolution")
+            for i in range(8)
+        ],
+        narrative_order="chronological",
+    )
+    storyteller_state.start_session()
+    storyteller_state.record_context_brief(valid_brief)
+    storyteller_state.record_big_idea(valid_big_idea)
+    storyteller_state.record_storyboard(big_storyboard)
+    snap = storyteller_state.snapshot()
+
+    meta = _research_metadata_from_snapshot(snap)
+    assert len(meta["key_takeaways"]) == 6
+    # Order preserved.
+    assert meta["key_takeaways"][0] == "Scene 0"
+    assert meta["key_takeaways"][5] == "Scene 5"
+
+
+def test_storyteller_generate_story_report_research_default(
+    valid_brief, valid_big_idea, valid_storyboard, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+    mcp = FastMCP("test-storyteller-research")
+    register_storyteller_tools(mcp)
+
+    _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard)
+    generate = mcp._tool_manager._tools["storyteller_generate_story_report"].fn
+
+    result = generate()  # default style = "research"
+    assert not result.isError, result.content[0].text
+    structured = result.structuredContent
+    assert structured["presentation_mode"] == "research"
+    meta = structured["research_metadata"]
+    assert meta["deck"].startswith("The summer learning pilot")
+    assert len(meta["key_takeaways"]) >= 3
+
+    # File written under research filename prefix.
+    files = list(tmp_path.glob("cerebro_research_*.html"))
+    assert len(files) == 1
+
+
+def test_storyteller_generate_story_report_dashboard_opt_out(
+    valid_brief, valid_big_idea, valid_storyboard, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+    mcp = FastMCP("test-storyteller-dashboard")
+    register_storyteller_tools(mcp)
+
+    _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard)
+    generate = mcp._tool_manager._tools["storyteller_generate_story_report"].fn
+
+    result = generate(style="dashboard")
+    assert not result.isError, result.content[0].text
+    # Dashboard mode falls back to default (no research metadata).
+    structured = result.structuredContent
+    assert structured.get("presentation_mode") in (None, "report", "visual_answer")
+    assert "research_metadata" not in structured
+    files = list(tmp_path.glob("cerebro_report_*.html"))
+    assert len(files) == 1
+
+
 def test_standard_mode_untouched_by_storyteller():
     """Starting a storyteller session must not touch the standard SessionState."""
     from cerebro_mcp.tools.session_state import state

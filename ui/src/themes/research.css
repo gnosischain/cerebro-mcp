@@ -1,0 +1,551 @@
+/* Long-form research-essay layout (Anthropic 81k-economics style).
+   Loaded only by ResearchReportLayout.tsx. Reuses tokens.css variables. */
+
+:root {
+  --rr-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia,
+    ui-serif, serif;
+  --rr-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --rr-column-width: 720px;
+  --rr-toc-width: 220px;
+  --rr-right-gutter: 160px;
+  --rr-display-size: clamp(2.25rem, 4.5vw, 3.5rem);
+  --rr-deck-size: clamp(1.125rem, 1.75vw, 1.375rem);
+  --rr-body-size: 1.0625rem;
+  --rr-body-line: 1.75;
+}
+
+.rr-shell {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text-primary);
+}
+
+/* --- Top bar --- */
+.rr-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: saturate(140%) blur(8px);
+}
+.rr-topbar-inner {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0.6rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.rr-topbar-brand {
+  font-family: var(--rr-sans);
+  font-size: 0.8125rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.rr-topbar-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+.rr-icon-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-base);
+  padding: 0.4rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+.rr-icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+
+/* --- Main --- */
+.rr-main {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 6rem;
+}
+
+/* --- Hero (title block) --- */
+.rr-hero {
+  max-width: 880px;
+  margin: 0 auto 3rem;
+  text-align: left;
+}
+.rr-category {
+  font-family: var(--rr-sans);
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--primary);
+  margin-bottom: 1.25rem;
+  font-weight: 600;
+}
+.rr-title {
+  font-family: var(--rr-serif);
+  font-size: var(--rr-display-size);
+  font-weight: 600;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  margin: 0 0 1.25rem;
+}
+.rr-deck {
+  font-family: var(--rr-serif);
+  font-size: var(--rr-deck-size);
+  font-style: italic;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  margin: 0 0 1.75rem;
+  max-width: 640px;
+}
+.rr-byline {
+  font-family: var(--rr-sans);
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.rr-authors {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* --- Key takeaways --- */
+.rr-takeaways {
+  max-width: 880px;
+  margin: 0 auto 4rem;
+  padding: 1.75rem 2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+.rr-takeaways-heading {
+  font-family: var(--rr-sans);
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 1rem;
+  font-weight: 600;
+}
+.rr-takeaways-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 1rem;
+}
+.rr-takeaway {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1rem;
+  align-items: baseline;
+}
+.rr-takeaway-num {
+  font-family: var(--rr-serif);
+  font-size: 1.25rem;
+  color: var(--primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.rr-takeaway-text {
+  font-family: var(--rr-serif);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+/* --- Grid: TOC | body | right gutter --- */
+.rr-grid {
+  display: grid;
+  grid-template-columns:
+    var(--rr-toc-width)
+    minmax(0, var(--rr-column-width))
+    var(--rr-right-gutter);
+  gap: 3rem;
+  justify-content: center;
+  align-items: start;
+}
+
+/* --- TOC --- */
+.rr-toc {
+  position: sticky;
+  top: 5rem;
+  align-self: start;
+  font-family: var(--rr-sans);
+}
+.rr-toc--empty {
+  visibility: hidden;
+}
+.rr-toc-inner {
+  border-left: 1px solid var(--border);
+  padding-left: 1rem;
+}
+.rr-toc-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+.rr-toc-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.rr-toc-item a {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  line-height: 1.4;
+  transition: color 0.15s;
+  display: block;
+}
+.rr-toc-item a:hover {
+  color: var(--text-primary);
+}
+.rr-toc-item--active a {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+/* --- Body prose --- */
+.rr-body {
+  min-width: 0;
+}
+.rr-prose {
+  font-family: var(--rr-serif);
+  font-size: var(--rr-body-size);
+  line-height: var(--rr-body-line);
+  color: var(--text-primary);
+}
+.rr-prose p {
+  margin: 0 0 1.25rem;
+}
+.rr-prose h2.rr-section-heading {
+  font-family: var(--rr-serif);
+  font-size: 1.875rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin: 3rem 0 1.25rem;
+  scroll-margin-top: 5rem;
+}
+.rr-prose h3 {
+  font-family: var(--rr-serif);
+  font-size: 1.375rem;
+  font-weight: 600;
+  margin: 2rem 0 0.75rem;
+  color: var(--text-primary);
+}
+.rr-prose a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+.rr-prose a:hover {
+  color: var(--primary-hover);
+}
+.rr-prose ul,
+.rr-prose ol {
+  margin: 0 0 1.25rem 1.5rem;
+  padding: 0;
+}
+.rr-prose li {
+  margin: 0 0 0.5rem;
+}
+.rr-prose code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.9em;
+  background: var(--surface-2);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+.rr-prose pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-base);
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+  margin: 0 0 1.5rem;
+}
+.rr-prose pre code {
+  background: transparent;
+  padding: 0;
+}
+.rr-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 1.75rem;
+  font-family: var(--rr-sans);
+  font-size: 0.9375rem;
+}
+.rr-prose thead th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0.75rem 0.5rem;
+  border-bottom: 2px solid var(--border);
+}
+.rr-prose tbody td {
+  padding: 0.75rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.rr-prose blockquote {
+  margin: 1.5rem 0 1.75rem;
+  padding-left: 1.25rem;
+  border-left: 3px solid var(--primary);
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.rr-prose hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 2.5rem auto;
+  width: 6rem;
+}
+
+/* --- Pullquote --- */
+.rr-prose .rr-pullquote {
+  margin: 2.5rem -3rem;
+  padding: 0;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 1.75rem 0;
+  font-family: var(--rr-serif);
+  font-style: italic;
+  font-size: 1.5rem;
+  line-height: 1.4;
+  color: var(--text-primary);
+  text-align: center;
+}
+.rr-prose .rr-pullquote p {
+  margin: 0;
+}
+
+/* --- Callouts --- */
+.rr-prose .rr-callout {
+  margin: 1.75rem 0;
+  padding: 1.25rem 1.5rem;
+  border-left: 4px solid var(--primary);
+  background: var(--accent-softer);
+  border-radius: 0 var(--radius-base) var(--radius-base) 0;
+  font-family: var(--rr-sans);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+.rr-prose .rr-callout p {
+  margin: 0 0 0.5rem;
+}
+.rr-prose .rr-callout p:last-child {
+  margin-bottom: 0;
+}
+.rr-prose .rr-callout--key_takeaway {
+  border-left-color: var(--success);
+}
+.rr-prose .rr-callout--warning {
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+/* --- Sidebar (in-body aside) --- */
+.rr-prose .rr-sidebar {
+  float: right;
+  width: 260px;
+  margin: 0.5rem -14rem 1rem 1.5rem;
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-base);
+  background: var(--surface-1);
+  font-family: var(--rr-sans);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.rr-prose .rr-sidebar-title {
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+/* --- Figures --- */
+.rr-prose .rr-figure {
+  margin: 2.5rem -3rem;
+  padding: 0;
+}
+.rr-prose .rr-figure-chart {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  padding: 1.25rem;
+}
+.rr-prose .rr-figure-caption {
+  margin-top: 0.75rem;
+  font-family: var(--rr-sans);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  text-align: left;
+}
+.rr-prose .rr-figure-source {
+  display: inline-block;
+  margin-left: 0.75rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.rr-prose .rr-figure--missing {
+  padding: 2rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-base);
+  color: var(--text-muted);
+  text-align: center;
+  font-family: var(--rr-sans);
+}
+
+/* --- Footnotes (inline, from [^id] pairs) --- */
+.rr-prose .rr-footnote-ref a {
+  color: var(--primary);
+  font-size: 0.75em;
+  padding: 0 0.15em;
+  text-decoration: none;
+}
+.rr-prose .rr-footnotes {
+  margin: 3rem 0 0;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  font-family: var(--rr-sans);
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+.rr-prose .rr-footnotes-heading,
+.rr-meta-footnotes .rr-footnotes-heading {
+  font-family: var(--rr-sans);
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 0.75rem;
+  font-weight: 600;
+}
+.rr-prose .rr-footnote-list,
+.rr-meta-footnotes .rr-footnote-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.rr-prose .rr-footnote-item {
+  display: flex;
+  gap: 0.5rem;
+  line-height: 1.55;
+}
+.rr-prose .rr-footnote-num,
+.rr-meta-footnotes .rr-footnote-num {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 1.5rem;
+}
+.rr-prose .rr-footnote-back {
+  color: var(--primary);
+  text-decoration: none;
+  margin-left: 0.25rem;
+}
+
+/* --- Meta footnotes (supplied via tool kwarg) --- */
+.rr-meta-footnotes {
+  max-width: 880px;
+  margin: 3rem auto 0;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+/* --- Right gutter (reserved space for sidebars in wide layout) --- */
+.rr-right-gutter {
+  min-height: 1px;
+}
+
+/* --- Citation --- */
+.rr-citation {
+  max-width: 880px;
+  margin: 4rem auto 0;
+  padding: 1.5rem 0 0;
+  border-top: 1px solid var(--border);
+  font-family: var(--rr-sans);
+}
+.rr-citation-heading {
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 0.5rem;
+  font-weight: 600;
+}
+.rr-citation-body {
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* --- Responsive --- */
+@media (max-width: 1100px) {
+  .rr-grid {
+    grid-template-columns: minmax(0, var(--rr-column-width));
+    justify-content: center;
+  }
+  .rr-toc,
+  .rr-right-gutter {
+    display: none;
+  }
+  .rr-prose .rr-sidebar {
+    float: none;
+    width: auto;
+    margin: 1.5rem 0;
+  }
+  .rr-prose .rr-pullquote,
+  .rr-prose .rr-figure {
+    margin-left: 0;
+    margin-right: 0;
+  }
+}
+@media (max-width: 640px) {
+  .rr-main {
+    padding: 2rem 1rem 4rem;
+  }
+  .rr-takeaways {
+    padding: 1.25rem;
+  }
+  .rr-takeaways-list {
+    gap: 0.75rem;
+  }
+  .rr-takeaway {
+    grid-template-columns: auto 1fr;
+    gap: 0.75rem;
+  }
+}

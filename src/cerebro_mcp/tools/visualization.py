@@ -150,13 +150,29 @@ def _get_report_dir() -> Path:
     return d
 
 
-def _report_filename(report_id: str, title: str) -> str:
-    """Build a durable report filename: cerebro_report_<UTC>_<slug>_<full-id>.html"""
+_REPORT_FILENAME_GLOBS = ("cerebro_report_*.html", "cerebro_research_*.html")
+
+
+def _report_filename(report_id: str, title: str, kind: str = "report") -> str:
+    """Build a durable report filename.
+
+    kind="report"   -> cerebro_report_<UTC>_<slug>_<full-id>.html
+    kind="research" -> cerebro_research_<UTC>_<slug>_<full-id>.html
+    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     # Slug: first 3 words of title, lowercased, non-alpha stripped, joined by hyphen
     words = re.sub(r"[^a-zA-Z0-9 ]", "", title).split()[:3]
-    slug = "-".join(w.lower() for w in words) if words else "report"
-    return f"cerebro_report_{ts}_{slug}_{report_id}.html"
+    slug = "-".join(w.lower() for w in words) if words else kind
+    prefix = "cerebro_research" if kind == "research" else "cerebro_report"
+    return f"{prefix}_{ts}_{slug}_{report_id}.html"
+
+
+def _iter_report_files(report_dir: Path):
+    """Yield every saved report file (dashboard + research) in report_dir."""
+    if not report_dir.exists():
+        return
+    for pattern in _REPORT_FILENAME_GLOBS:
+        yield from report_dir.glob(pattern)
 
 
 def _get_report_link(path: Path) -> str:
@@ -173,14 +189,15 @@ def _find_report_on_disk(report_ref: str) -> Path | None:
     report_dir = _get_report_dir()
     if not report_dir.exists():
         return None
-    # Try exact match first (full UUID in filename)
-    for f in report_dir.glob(f"cerebro_report_*_{report_ref}.html"):
-        return f
+    # Try exact match first (full UUID in filename) across both patterns
+    for pattern in (
+        f"cerebro_report_*_{report_ref}.html",
+        f"cerebro_research_*_{report_ref}.html",
+    ):
+        for f in report_dir.glob(pattern):
+            return f
     # Try 8-char prefix match
-    matches = [
-        f for f in report_dir.glob("cerebro_report_*.html")
-        if report_ref in f.name
-    ]
+    matches = [f for f in _iter_report_files(report_dir) if report_ref in f.name]
     if len(matches) == 1:
         return matches[0]
     return None
@@ -189,12 +206,18 @@ def _find_report_on_disk(report_ref: str) -> Path | None:
 def _extract_report_id_from_path(path: Path) -> str:
     """Extract the full report UUID from a filename."""
     # Format: cerebro_report_<ts>_<slug>_<uuid>.html
+    #     or: cerebro_research_<ts>_<slug>_<uuid>.html
     name = path.stem  # drop .html
     parts = name.split("_")
     # UUID is the last part (may contain hyphens)
     if len(parts) >= 5:
         return parts[-1]
     return name
+
+
+def _report_kind_from_path(path: Path) -> str:
+    """Return 'research' for research reports, else 'report'."""
+    return "research" if path.name.startswith("cerebro_research_") else "report"
 
 
 def _resolve_report(
@@ -255,7 +278,7 @@ def _resolve_report(
     report_dir = _get_report_dir()
     if report_dir.exists():
         files = sorted(
-            report_dir.glob("cerebro_report_*.html"),
+            _iter_report_files(report_dir),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -291,13 +314,17 @@ def create_report_artifact(
     *,
     enforce_quality_gate: bool = True,
     reset_session_state: bool = True,
+    presentation_mode: str | None = None,
+    research_metadata: dict | None = None,
 ) -> dict:
     from cerebro_mcp.tools.session_state import state
 
-    semantic_mode = state.semantic_summary().get("semantic_mode_last", "")
-    presentation_mode = (
-        "visual_answer" if semantic_mode in {"answer", "chart"} else "report"
-    )
+    if presentation_mode is None:
+        semantic_mode = state.semantic_summary().get("semantic_mode_last", "")
+        presentation_mode = (
+            "visual_answer" if semantic_mode in {"answer", "chart"} else "report"
+        )
+    research_mode = presentation_mode == "research"
 
     if enforce_quality_gate:
         passed, reason, _warnings = state.check_report_preconditions(
@@ -310,6 +337,17 @@ def create_report_artifact(
         r"\{\{chart:(\w+)\}\}",
         content_markdown,
     )
+    if research_mode:
+        # Research layout also uses {{figure:chart_id ...}}
+        figure_ids = re.findall(
+            r"\{\{figure:(\w+)(?:\s+[^}]*)?\}\}",
+            content_markdown,
+        )
+        seen = set(chart_ids_in_content)
+        for fid in figure_ids:
+            if fid not in seen:
+                chart_ids_in_content.append(fid)
+                seen.add(fid)
 
     has_grid = "{{grid:" in content_markdown
     kpi_count = sum(
@@ -343,7 +381,7 @@ def create_report_artifact(
             f"Available: {', '.join(_chart_registry.keys()) or 'none'}."
         )
 
-    rendered_html = _markdown_to_html(content_markdown)
+    rendered_html = _markdown_to_html(content_markdown, research_mode=research_mode)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     structured = {
@@ -355,6 +393,8 @@ def create_report_artifact(
         "queries": chart_queries,
         "analysis_path": state.analysis_path,
     }
+    if research_metadata:
+        structured["research_metadata"] = research_metadata
 
     html = _build_standalone_html(
         title,
@@ -362,11 +402,14 @@ def create_report_artifact(
         chart_specs,
         rendered_html,
         chart_queries,
+        presentation_mode=presentation_mode,
+        research_metadata=research_metadata,
     )
 
     report_id = str(uuid.uuid4())
     report_dir = _get_report_dir()
-    report_path = report_dir / _report_filename(report_id, title)
+    kind = "research" if research_mode else "report"
+    report_path = report_dir / _report_filename(report_id, title, kind=kind)
     report_path.write_text(html, encoding="utf-8")
 
     file_uri = _get_report_link(report_path)
@@ -392,6 +435,15 @@ def create_report_artifact(
             f"Charts: {len(chart_specs)}\n\n"
             f"To reopen: `open_report(\"{report_id[:8]}\")`"
         )
+    elif presentation_mode == "research":
+        reply_text = (
+            f"**Research report:** {title}\n\n"
+            f"Report ID: `{report_id[:8]}` | "
+            f"Charts: {len(chart_specs)}\n\n"
+            f"To reopen: `open_report(\"{report_id[:8]}\")`\n"
+            f"To export HTML: `export_report(\"{report_id[:8]}\")`\n\n"
+            f"_Summarize the headline finding in 2–3 sentences, then offer docx/pdf conversion._"
+        )
     else:
         reply_text = (
             f"**Report:** {title}\n\n"
@@ -410,6 +462,81 @@ def create_report_artifact(
         "reply_text": reply_text,
         "chart_count": len(chart_specs),
     }
+
+
+def _estimate_reading_minutes(text: str) -> int:
+    """Rough reading-time estimate at ~220 words/min, minimum 1 minute."""
+    word_count = len(re.findall(r"\b\w+\b", text))
+    return max(1, round(word_count / 220))
+
+
+def create_research_report_artifact(
+    title: str,
+    deck: str,
+    content_markdown: str,
+    *,
+    authors: list[str] | None = None,
+    published_date: str | None = None,
+    category: str | None = None,
+    key_takeaways: list[str] | None = None,
+    footnotes: list[dict] | None = None,
+    enforce_quality_gate: bool = True,
+    reset_session_state: bool = True,
+) -> dict:
+    """Build a long-form research-essay report (Anthropic-style layout).
+
+    Reuses create_report_artifact's chart registry and gate logic, but emits
+    presentation_mode="research" and carries essay metadata so the React layer
+    can render the editorial layout (header deck, TOC, figures, footnotes).
+    """
+    deck = (deck or "").strip()
+    if not deck:
+        raise ValueError("Research reports require a non-empty `deck` (sub-headline).")
+    if len(deck) > 240:
+        raise ValueError(
+            f"Deck is too long ({len(deck)} chars). Keep it under 240 characters."
+        )
+
+    takeaways = [t.strip() for t in (key_takeaways or []) if t and t.strip()]
+    if not 3 <= len(takeaways) <= 6:
+        raise ValueError(
+            "Research reports require 3–6 `key_takeaways` items "
+            f"(got {len(takeaways)})."
+        )
+
+    authors = [a.strip() for a in (authors or []) if a and a.strip()]
+    published = published_date or date.today().isoformat()
+    reading_minutes = _estimate_reading_minutes(content_markdown)
+
+    # Normalize footnotes to [{id, text}] with stable ids
+    normalized_footnotes: list[dict] = []
+    for idx, fn in enumerate(footnotes or [], start=1):
+        if isinstance(fn, str):
+            normalized_footnotes.append({"id": str(idx), "text": fn})
+        elif isinstance(fn, dict):
+            fid = str(fn.get("id") or idx)
+            text_val = str(fn.get("text") or "").strip()
+            if text_val:
+                normalized_footnotes.append({"id": fid, "text": text_val})
+
+    research_metadata = {
+        "deck": deck,
+        "authors": authors,
+        "published_date": published,
+        "category": (category or "").strip() or None,
+        "key_takeaways": takeaways,
+        "footnotes": normalized_footnotes,
+        "reading_minutes": reading_minutes,
+    }
+
+    return create_report_artifact(
+        title,
+        content_markdown,
+        enforce_quality_gate=enforce_quality_gate,
+        reset_session_state=reset_session_state,
+        presentation_mode="research",
+        research_metadata=research_metadata,
+    )
 
 
 def _extract_structured_from_html(html: str) -> dict | None:
@@ -1306,8 +1433,32 @@ CHART_BUILDERS = {
 
 # --- Markdown to HTML Converter ---
 
-def _markdown_to_html(text: str) -> str:
-    """Convert markdown to HTML. Handles headers, bold, tables, lists, code, and chart placeholders."""
+_FOOTNOTE_DEF_RE = re.compile(r"^\[\^([A-Za-z0-9_-]+)\]:\s*(.+)$")
+_FOOTNOTE_REF_RE = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
+_RESEARCH_FIGURE_RE = re.compile(
+    r"^\{\{figure:(\w+)(?:\s+([^}]*))?\}\}\s*$"
+)
+_RESEARCH_ATTR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
+
+
+def _slugify_heading(text: str) -> str:
+    """Turn heading text into a URL-safe anchor id."""
+    plain = re.sub(r"<[^>]+>", "", text)  # strip any HTML
+    plain = re.sub(r"[^a-zA-Z0-9\s-]", "", plain).strip().lower()
+    return re.sub(r"\s+", "-", plain) or "section"
+
+
+def _markdown_to_html(text: str, *, research_mode: bool = False) -> str:
+    """Convert markdown to HTML. Handles headers, bold, tables, lists, code, and chart placeholders.
+
+    When research_mode=True, additionally parses research-layout directives:
+      {{figure:chart_id caption="..." source="..."}}
+      {{pullquote}} ... {{/pullquote}}
+      {{callout kind=...}} ... {{/callout}}
+      {{sidebar title="..."}} ... {{/sidebar}}
+      [^id] inline + [^id]: text at end-of-doc footnotes
+    All h2 headings get slug anchors for the floating TOC.
+    """
     lines = text.split("\n")
     html_lines: list[str] = []
     in_list = False
@@ -1318,6 +1469,10 @@ def _markdown_to_html(text: str) -> str:
     in_grid = False
     grid_cols = 0
     grid_chart_ids: list[str] = []
+    # Research-only block state
+    research_block: str | None = None  # "pullquote" | "callout" | "sidebar"
+    research_block_buffer: list[str] = []
+    research_block_attrs: dict[str, str] = {}
 
     def _close_content_card():
         nonlocal in_content_card
@@ -1325,7 +1480,132 @@ def _markdown_to_html(text: str) -> str:
             html_lines.append("</div>")  # close .content-card
             in_content_card = False
 
+    def _flush_research_block() -> None:
+        nonlocal research_block, research_block_buffer, research_block_attrs
+        if research_block is None:
+            return
+        inner_html = _markdown_to_html(
+            "\n".join(research_block_buffer), research_mode=research_mode
+        )
+        if research_block == "pullquote":
+            html_lines.append(f'<blockquote class="rr-pullquote">{inner_html}</blockquote>')
+        elif research_block == "callout":
+            kind = research_block_attrs.get("kind", "note")
+            safe_kind = re.sub(r"[^a-zA-Z0-9_-]", "", kind) or "note"
+            html_lines.append(
+                f'<aside class="rr-callout rr-callout--{safe_kind}">{inner_html}</aside>'
+            )
+        elif research_block == "sidebar":
+            title_attr = research_block_attrs.get("title", "")
+            title_html = (
+                f'<div class="rr-sidebar-title">{_escape_html(title_attr)}</div>'
+                if title_attr
+                else ""
+            )
+            html_lines.append(
+                f'<aside class="rr-sidebar">{title_html}{inner_html}</aside>'
+            )
+        research_block = None
+        research_block_buffer = []
+        research_block_attrs = {}
+
+    footnote_defs: list[tuple[str, str]] = []
+
     for line in lines:
+        # While inside a research block, buffer until matching close tag
+        if research_block is not None and research_mode:
+            stripped_line = line.strip()
+            close_tag = "{{/" + research_block + "}}"
+            if stripped_line == close_tag:
+                _flush_research_block()
+                continue
+            research_block_buffer.append(line)
+            continue
+
+        # Research-only block openers
+        if research_mode:
+            stripped_line = line.strip()
+            # {{pullquote}}
+            if stripped_line == "{{pullquote}}":
+                _close_content_card()
+                research_block = "pullquote"
+                research_block_attrs = {}
+                research_block_buffer = []
+                continue
+            # {{callout kind=...}}
+            callout_open = re.match(
+                r"^\{\{callout\b([^}]*)\}\}$", stripped_line
+            )
+            if callout_open:
+                _close_content_card()
+                research_block = "callout"
+                research_block_attrs = {
+                    k: v for k, v in _RESEARCH_ATTR_RE.findall(callout_open.group(1))
+                }
+                # Also accept bare kind=... without quotes
+                kind_bare = re.search(r"kind\s*=\s*([A-Za-z0-9_-]+)", callout_open.group(1))
+                if kind_bare and "kind" not in research_block_attrs:
+                    research_block_attrs["kind"] = kind_bare.group(1)
+                research_block_buffer = []
+                continue
+            # {{sidebar title="..."}}
+            sidebar_open = re.match(
+                r"^\{\{sidebar\b([^}]*)\}\}$", stripped_line
+            )
+            if sidebar_open:
+                _close_content_card()
+                research_block = "sidebar"
+                research_block_attrs = {
+                    k: v for k, v in _RESEARCH_ATTR_RE.findall(sidebar_open.group(1))
+                }
+                research_block_buffer = []
+                continue
+            # {{figure:chart_id caption="..." source="..."}}
+            figure_match = _RESEARCH_FIGURE_RE.match(stripped_line)
+            if figure_match:
+                _close_content_card()
+                cid = figure_match.group(1)
+                attrs = {
+                    k: v
+                    for k, v in _RESEARCH_ATTR_RE.findall(figure_match.group(2) or "")
+                }
+                caption = attrs.get("caption", "")
+                source = attrs.get("source", "")
+                if cid not in _chart_registry:
+                    html_lines.append(
+                        f'<figure class="rr-figure rr-figure--missing">'
+                        f'<div class="rr-figure-missing">Missing chart: {_escape_html(cid)}</div>'
+                        f'</figure>'
+                    )
+                    continue
+                caption_html = (
+                    f'<figcaption class="rr-figure-caption">'
+                    f'{_inline_format(caption)}'
+                    + (
+                        f'<span class="rr-figure-source">Source: '
+                        f'{_inline_format(source)}</span>'
+                        if source
+                        else ""
+                    )
+                    + "</figcaption>"
+                    if caption or source
+                    else ""
+                )
+                html_lines.append(
+                    f'<figure class="rr-figure">'
+                    f'<div class="chart-card rr-figure-chart">'
+                    f'<div id="chart-{cid}" class="chart-container"></div>'
+                    f'</div>'
+                    f'{caption_html}'
+                    f'</figure>'
+                )
+                continue
+            # Footnote definition: [^id]: text  (collect, render at end)
+            fn_def = _FOOTNOTE_DEF_RE.match(stripped_line)
+            if fn_def:
+                footnote_defs.append((fn_def.group(1), fn_def.group(2)))
+                continue
+
         # Code blocks
         if line.strip().startswith("```"):
             if in_code_block:
@@ -1408,7 +1688,15 @@ def _markdown_to_html(text: str) -> str:
             continue
         if stripped.startswith("## "):
             _close_content_card()
-            html_lines.append(f"<h2>{_inline_format(stripped[3:])}</h2>")
+            heading_text = stripped[3:]
+            if research_mode:
+                anchor = _slugify_heading(heading_text)
+                html_lines.append(
+                    f'<h2 id="{anchor}" class="rr-section-heading">'
+                    f'{_inline_format(heading_text)}</h2>'
+                )
+            else:
+                html_lines.append(f"<h2>{_inline_format(heading_text)}</h2>")
             continue
         if stripped.startswith("# "):
             _close_content_card()
@@ -1520,8 +1808,51 @@ def _markdown_to_html(text: str) -> str:
     if in_code_block:
         html_lines.append("</code></pre>")
     _close_content_card()
+    if research_mode and research_block is not None:
+        _flush_research_block()
 
-    return "\n".join(html_lines)
+    output = "\n".join(html_lines)
+
+    if research_mode:
+        # Assign numeric order based on first appearance in prose
+        ref_order: dict[str, int] = {}
+
+        def _ref_sub(m: "re.Match[str]") -> str:
+            fid = m.group(1)
+            if fid not in ref_order:
+                ref_order[fid] = len(ref_order) + 1
+            num = ref_order[fid]
+            return (
+                f'<sup class="rr-footnote-ref">'
+                f'<a id="fnref-{fid}" href="#fn-{fid}">{num}</a></sup>'
+            )
+
+        output = _FOOTNOTE_REF_RE.sub(_ref_sub, output)
+
+        if footnote_defs:
+            footnote_items: list[str] = []
+            # Order footnotes by order of reference, fall back to def order
+            def _sort_key(item: tuple[str, str]) -> int:
+                fid = item[0]
+                return ref_order.get(fid, 10_000 + footnote_defs.index(item))
+
+            for fid, body in sorted(footnote_defs, key=_sort_key):
+                num = ref_order.get(fid, list(dict.fromkeys(f for f, _ in footnote_defs)).index(fid) + 1)
+                footnote_items.append(
+                    f'<li id="fn-{fid}" class="rr-footnote-item">'
+                    f'<span class="rr-footnote-num">{num}.</span> '
+                    f'{_inline_format(body)} '
+                    f'<a class="rr-footnote-back" href="#fnref-{fid}" aria-label="Back to text">↩</a>'
+                    f'</li>'
+                )
+            output += (
+                '\n<section class="rr-footnotes" aria-label="Footnotes">'
+                '<h2 class="rr-footnotes-heading">Footnotes</h2>'
+                f'<ol class="rr-footnote-list">{"".join(footnote_items)}</ol>'
+                '</section>'
+            )
+
+    return output
 
 
 def _inline_format(text: str) -> str:
@@ -1566,6 +1897,9 @@ def _build_standalone_html(
     charts: dict,
     sections_html: str,
     queries: dict | None = None,
+    *,
+    presentation_mode: str | None = None,
+    research_metadata: dict | None = None,
 ) -> str:
     """Build self-contained HTML with embedded data for disk saves / direct file access.
 
@@ -1580,6 +1914,10 @@ def _build_standalone_html(
     }
     if queries:
         data_dict["queries"] = queries
+    if presentation_mode:
+        data_dict["presentation_mode"] = presentation_mode
+    if research_metadata:
+        data_dict["research_metadata"] = research_metadata
     data = json.dumps(data_dict, default=str)
 
     html = _get_report_html()
@@ -2548,6 +2886,97 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 isError=True,
             )
 
+    @mcp.tool(meta={
+        "ui": {"resourceUri": REPORT_URI},
+        "ui/resourceUri": REPORT_URI,
+    })
+    def generate_research_report(
+        title: str,
+        deck: str,
+        content_markdown: str,
+        authors: list[str] | None = None,
+        published_date: str | None = None,
+        category: str | None = None,
+        key_takeaways: list[str] | None = None,
+        footnotes: list[dict] | None = None,
+    ) -> CallToolResult:
+        """Create a long-form research report in the Anthropic-essay style.
+
+        Use this (instead of `generate_report`) when the user asks for a
+        whitepaper, research essay, narrative analysis, or long-form article
+        rather than an analytical dashboard. Reuses the same chart registry
+        and enforcement gates — call `generate_charts` (batch) first.
+
+        The layout adds: display title + deck (sub-headline), authors, date,
+        reading time, key-takeaways callout, floating TOC from `##` headings,
+        full-bleed figures with captions, pull-quotes, sidebars, and footnotes.
+
+        Extra markdown directives (only parsed in this tool):
+            {{figure:chart_id caption="..." source="..."}}
+            {{pullquote}} ... {{/pullquote}}
+            {{callout kind=key_takeaway}} ... {{/callout}}
+            {{sidebar title="..."}} ... {{/sidebar}}
+            [^fnid] inline reference, then at end of doc:
+            [^fnid]: footnote text
+
+        Standard `{{chart:CHART_ID}}` and `{{grid:N}}` still work for inline
+        dashboard-style chart groupings inside the essay.
+
+        Args:
+            title: Report title (display serif).
+            deck: Sub-headline / abstract (1 sentence, ≤240 chars).
+            content_markdown: Essay body. Use `##` for section headings.
+            authors: Author names (optional).
+            published_date: ISO date (YYYY-MM-DD). Defaults to today.
+            category: Category chip (e.g. "DeFi Research").
+            key_takeaways: 3–6 bullet-style takeaways rendered at the top.
+            footnotes: [{id, text}] list, or plain [text, text, ...].
+
+        Returns:
+            Interactive UI resource rendered as a long-form research essay.
+        """
+        try:
+            report = create_research_report_artifact(
+                title=title,
+                deck=deck,
+                content_markdown=content_markdown,
+                authors=authors,
+                published_date=published_date,
+                category=category,
+                key_takeaways=key_takeaways,
+                footnotes=footnotes,
+                enforce_quality_gate=True,
+                reset_session_state=True,
+            )
+
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=report["reply_text"],
+                        annotations=Annotations(
+                            audience=["assistant"],
+                            priority=1.0,
+                        ),
+                    ),
+                    TextContent(
+                        type="text",
+                        text=(
+                            f"Research report generated: {title} "
+                            f"({report['chart_count']} charts). "
+                            f"Report ID: `{report['report_id'][:8]}`"
+                        ),
+                    ),
+                ],
+                structuredContent=report["structured"],
+            )
+
+        except Exception as e:
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"Error: {e}")],
+                isError=True,
+            )
+
     # --- Report Reopen & List ---
 
     @mcp.tool(meta={
@@ -2669,17 +3098,17 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             return "No report directory found. Generate a report first with `generate_report`."
 
         html_files = sorted(
-            report_dir.glob("cerebro_report_*.html"),
+            _iter_report_files(report_dir),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
 
         if not html_files:
-            return "No saved reports found. Generate a report first with `generate_report`."
+            return "No saved reports found. Generate a report first with `generate_report` or `generate_research_report`."
 
         lines = ["# Saved Reports\n"]
-        lines.append("| # | Report ID | Title | Created (UTC) | Size | Link |")
-        lines.append("|---|-----------|-------|---------------|------|------|")
+        lines.append("| # | Report ID | Kind | Title | Created (UTC) | Size | Link |")
+        lines.append("|---|-----------|------|-------|---------------|------|------|")
 
         for i, f in enumerate(html_files[:limit], 1):
             stat = f.stat()
@@ -2688,15 +3117,15 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             ).strftime("%Y-%m-%d %H:%M")
             size_kb = stat.st_size / 1024
             file_uri = _get_report_link(f)
-            # Parse filename for ID and slug
             full_id = _extract_report_id_from_path(f)
             short_id = full_id[:8]
-            # Extract slug from filename for title hint
+            kind = _report_kind_from_path(f)
+            # Slug is the 4th segment in both filename schemes (0-indexed)
             parts = f.stem.split("_")
-            slug = parts[4] if len(parts) >= 5 else ""
+            slug = parts[3] if len(parts) >= 5 else ""
             title_hint = slug.replace("-", " ").title() if slug else "—"
             lines.append(
-                f"| {i} | `{short_id}` | {title_hint} | {modified} "
+                f"| {i} | `{short_id}` | {kind} | {title_hint} | {modified} "
                 f"| {size_kb:.0f} KB | {file_uri} |"
             )
 

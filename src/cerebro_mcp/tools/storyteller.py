@@ -32,6 +32,67 @@ from cerebro_mcp.storyteller_models import (
 from cerebro_mcp.storyteller_state import storyteller_state
 
 
+def _research_metadata_from_snapshot(snap: StorytellerSnapshot) -> dict[str, Any]:
+    """Map a fully-baked storyteller snapshot to research-layout metadata.
+
+    Field mapping:
+      - deck            ← big_idea.sentence (the one declarative POV sentence)
+      - key_takeaways   ← storyboard scene intents (3–6 items, padded with
+                          big_idea sentence + stakes if fewer than 3 scenes)
+      - category        ← context_brief.mechanism (e.g. 'memo', 'deck')
+      - footnotes       ← context_brief.weakens_case (kept visible per the
+                          storyteller "honesty" rule)
+    Authors and published_date are left to defaults (none / today).
+    """
+    big_idea = snap.big_idea
+    storyboard = snap.storyboard
+    brief = snap.context_brief
+
+    # Deck: prefer the big idea sentence; truncate to research-layout's 240 cap.
+    deck_raw = (big_idea.sentence if big_idea else "").strip()
+    if len(deck_raw) > 240:
+        deck_raw = deck_raw[:237].rstrip() + "…"
+
+    # Takeaways: storyboard scene intents, padded if needed.
+    takeaways: list[str] = []
+    if storyboard is not None:
+        for scene in storyboard.scenes:
+            intent = (scene.intent or "").strip()
+            if intent:
+                takeaways.append(intent)
+    # Pad with big_idea sentence + stakes if we don't have ≥3.
+    if big_idea is not None:
+        if len(takeaways) < 3 and big_idea.sentence:
+            sentence = big_idea.sentence.strip()
+            if sentence and sentence not in takeaways:
+                takeaways.append(sentence)
+        if len(takeaways) < 3 and big_idea.stakes:
+            stakes = big_idea.stakes.strip()
+            if stakes and stakes not in takeaways:
+                takeaways.append(stakes)
+    # Cap at 6 to satisfy the research gate.
+    takeaways = takeaways[:6]
+
+    category = None
+    if brief is not None:
+        mechanism = getattr(brief, "mechanism", None)
+        if mechanism:
+            category = f"Storyteller · {str(mechanism).title()}"
+
+    footnotes: list[dict[str, str]] = []
+    if brief is not None and getattr(brief, "weakens_case", "").strip():
+        footnotes.append(
+            {"id": "weakens", "text": f"Counter-evidence: {brief.weakens_case.strip()}"}
+        )
+
+    return {
+        "deck": deck_raw,
+        "key_takeaways": takeaways,
+        "category": category,
+        "footnotes": footnotes,
+    }
+
+
 def _ok(snapshot: StorytellerSnapshot, heading: str) -> CallToolResult:
     """Serialize a snapshot into a structured tool result with a human hint."""
     next_step = snapshot.next_step or ""
@@ -419,7 +480,9 @@ def register_storyteller_tools(mcp, ch=None) -> None:
     # ── Handoff ─────────────────────────────────────────────────────
 
     @mcp.tool()
-    def storyteller_generate_story_report() -> CallToolResult:
+    def storyteller_generate_story_report(
+        style: str = "research",
+    ) -> CallToolResult:
         """Render the final story as an interactive report.
 
         Only runs after every upstream gate has passed: context brief, big
@@ -431,6 +494,15 @@ def register_storyteller_tools(mcp, ch=None) -> None:
         since the storyteller has its own gates upstream. The standard
         session state is NOT reset, so users can continue exploring after
         the story is rendered.
+
+        Args:
+            style: Layout style. "research" (default) emits the long-form
+                Anthropic-style essay layout — display title, deck (from the
+                big idea), key-takeaways block (from storyboard scene
+                intents), floating TOC, and editorial typography. This is
+                the natural fit for narrative-first storyteller output.
+                "dashboard" emits the standard `generate_report` layout
+                (kept for back-compat).
         """
         # Import inside the function to avoid a circular import at module load.
         from cerebro_mcp.tools.visualization import create_report_artifact
@@ -439,11 +511,26 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             storyteller_state.require_ready_for_handoff()
             snap = storyteller_state.snapshot()
             assert snap.context_brief is not None  # checked by require_ready_for_handoff
+
+            normalized_style = (style or "research").strip().lower()
+            if normalized_style not in {"research", "dashboard"}:
+                raise ValueError(
+                    f"Unknown style '{style}'. Use 'research' or 'dashboard'."
+                )
+
+            extra_kwargs: dict[str, Any] = {}
+            if normalized_style == "research":
+                extra_kwargs["presentation_mode"] = "research"
+                extra_kwargs["research_metadata"] = (
+                    _research_metadata_from_snapshot(snap)
+                )
+
             report = create_report_artifact(
                 title=storyteller_state.final_story_title,
                 content_markdown=storyteller_state.final_story_markdown,
                 enforce_quality_gate=False,  # storyteller has its own gates
                 reset_session_state=False,   # keep standard state for the user
+                **extra_kwargs,
             )
             # End the session after a successful handoff.
             storyteller_state.end_session()
