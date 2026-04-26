@@ -943,6 +943,11 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         if normalized_mode not in {"answer", "chart", "report"}:
             normalized_mode = "answer"
         try:
+            # Each preflight marks the start of a new analysis cycle. Reset
+            # per-cycle discovery and execution accumulators so prior-session
+            # state cannot pollute the discovered-model coverage gate or the
+            # chart preconditions. Preserves semantic preflight cache.
+            state.begin_analysis_cycle()
             state.record_semantic_tool_call("preflight_analytics_request")
             cached = state.get_cached_semantic_preflight(
                 query=query,

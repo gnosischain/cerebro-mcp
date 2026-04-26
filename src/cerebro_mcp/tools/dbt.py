@@ -167,7 +167,11 @@ def register_dbt_tools(mcp):
 
         from cerebro_mcp.tools.session_state import state
 
-        state.record_search_models(query, len(results))
+        state.record_search_models(
+            query,
+            len(results),
+            model_names=[m["name"] for m in results if m.get("name")],
+        )
 
         if len(results) >= 5:
             result += (
@@ -237,7 +241,11 @@ def register_dbt_tools(mcp):
         results = manifest.search_models(
             query=query, tags=tags, module=module, limit=50
         )
-        state.record_search_models(query, len(results))
+        state.record_search_models(
+            query,
+            len(results),
+            model_names=[m["name"] for m in results if m.get("name")],
+        )
 
         if not results:
             return (

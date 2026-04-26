@@ -150,20 +150,30 @@ def _get_report_dir() -> Path:
     return d
 
 
-_REPORT_FILENAME_GLOBS = ("cerebro_report_*.html", "cerebro_research_*.html")
+_REPORT_FILENAME_GLOBS = (
+    "cerebro_report_*.html",
+    "cerebro_research_*.html",
+    "cerebro_case_study_*.html",
+)
 
 
 def _report_filename(report_id: str, title: str, kind: str = "report") -> str:
     """Build a durable report filename.
 
-    kind="report"   -> cerebro_report_<UTC>_<slug>_<full-id>.html
-    kind="research" -> cerebro_research_<UTC>_<slug>_<full-id>.html
+    kind="report"     -> cerebro_report_<UTC>_<slug>_<full-id>.html
+    kind="research"   -> cerebro_research_<UTC>_<slug>_<full-id>.html
+    kind="case_study" -> cerebro_case_study_<UTC>_<slug>_<full-id>.html
     """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     # Slug: first 3 words of title, lowercased, non-alpha stripped, joined by hyphen
     words = re.sub(r"[^a-zA-Z0-9 ]", "", title).split()[:3]
     slug = "-".join(w.lower() for w in words) if words else kind
-    prefix = "cerebro_research" if kind == "research" else "cerebro_report"
+    if kind == "research":
+        prefix = "cerebro_research"
+    elif kind == "case_study":
+        prefix = "cerebro_case_study"
+    else:
+        prefix = "cerebro_report"
     return f"{prefix}_{ts}_{slug}_{report_id}.html"
 
 
@@ -189,10 +199,11 @@ def _find_report_on_disk(report_ref: str) -> Path | None:
     report_dir = _get_report_dir()
     if not report_dir.exists():
         return None
-    # Try exact match first (full UUID in filename) across both patterns
+    # Try exact match first (full UUID in filename) across all patterns
     for pattern in (
         f"cerebro_report_*_{report_ref}.html",
         f"cerebro_research_*_{report_ref}.html",
+        f"cerebro_case_study_*_{report_ref}.html",
     ):
         for f in report_dir.glob(pattern):
             return f
@@ -216,8 +227,12 @@ def _extract_report_id_from_path(path: Path) -> str:
 
 
 def _report_kind_from_path(path: Path) -> str:
-    """Return 'research' for research reports, else 'report'."""
-    return "research" if path.name.startswith("cerebro_research_") else "report"
+    """Return 'research', 'case_study', or 'report' based on filename prefix."""
+    if path.name.startswith("cerebro_research_"):
+        return "research"
+    if path.name.startswith("cerebro_case_study_"):
+        return "case_study"
+    return "report"
 
 
 def _resolve_report(
@@ -316,6 +331,7 @@ def create_report_artifact(
     reset_session_state: bool = True,
     presentation_mode: str | None = None,
     research_metadata: dict | None = None,
+    case_study_metadata: dict | None = None,
 ) -> dict:
     from cerebro_mcp.tools.session_state import state
 
@@ -325,13 +341,7 @@ def create_report_artifact(
             "visual_answer" if semantic_mode in {"answer", "chart"} else "report"
         )
     research_mode = presentation_mode == "research"
-
-    if enforce_quality_gate:
-        passed, reason, _warnings = state.check_report_preconditions(
-            _chart_registry
-        )
-        if not passed:
-            raise ValueError(f"Report quality gate failed: {reason}")
+    case_study_mode = presentation_mode == "scrollytelling"
 
     chart_ids_in_content = re.findall(
         r"\{\{chart:(\w+)\}\}",
@@ -348,6 +358,37 @@ def create_report_artifact(
             if fid not in seen:
                 chart_ids_in_content.append(fid)
                 seen.add(fid)
+    if case_study_mode:
+        # Scrollytelling layout references charts via {{scene chart="..."}}
+        # and {{step chart="..."}} attributes.
+        scene_ids = re.findall(
+            r'\{\{scene\b[^}]*?chart\s*=\s*"(\w+)"',
+            content_markdown,
+        )
+        step_ids = re.findall(
+            r'\{\{step\b[^}]*?chart\s*=\s*"(\w+)"',
+            content_markdown,
+        )
+        seen = set(chart_ids_in_content)
+        for cid in (*scene_ids, *step_ids):
+            if cid not in seen:
+                chart_ids_in_content.append(cid)
+                seen.add(cid)
+
+    if enforce_quality_gate:
+        # Scope the gate to charts actually referenced by this report's
+        # markdown. The global _chart_registry persists across sessions and
+        # turns, so unreferenced legacy charts must not block a clean report.
+        scoped_registry = {
+            cid: _chart_registry[cid]
+            for cid in chart_ids_in_content
+            if cid in _chart_registry
+        }
+        passed, reason, _warnings = state.check_report_preconditions(
+            scoped_registry
+        )
+        if not passed:
+            raise ValueError(f"Report quality gate failed: {reason}")
 
     has_grid = "{{grid:" in content_markdown
     kpi_count = sum(
@@ -381,7 +422,11 @@ def create_report_artifact(
             f"Available: {', '.join(_chart_registry.keys()) or 'none'}."
         )
 
-    rendered_html = _markdown_to_html(content_markdown, research_mode=research_mode)
+    rendered_html = _markdown_to_html(
+        content_markdown,
+        research_mode=research_mode,
+        case_study_mode=case_study_mode,
+    )
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     structured = {
@@ -395,6 +440,8 @@ def create_report_artifact(
     }
     if research_metadata:
         structured["research_metadata"] = research_metadata
+    if case_study_metadata:
+        structured["case_study_metadata"] = case_study_metadata
 
     html = _build_standalone_html(
         title,
@@ -404,11 +451,17 @@ def create_report_artifact(
         chart_queries,
         presentation_mode=presentation_mode,
         research_metadata=research_metadata,
+        case_study_metadata=case_study_metadata,
     )
 
     report_id = str(uuid.uuid4())
     report_dir = _get_report_dir()
-    kind = "research" if research_mode else "report"
+    if research_mode:
+        kind = "research"
+    elif case_study_mode:
+        kind = "case_study"
+    else:
+        kind = "report"
     report_path = report_dir / _report_filename(report_id, title, kind=kind)
     report_path.write_text(html, encoding="utf-8")
 
@@ -428,25 +481,36 @@ def create_report_artifact(
     if reset_session_state:
         state.reset()
 
+    link_line = f"\n\n[Open Report]({file_uri})" if file_uri else ""
+
     if presentation_mode == "visual_answer":
         reply_text = (
-            f"**Visualization:** {title}\n\n"
+            f"**Visualization:** {title}{link_line}\n\n"
             f"View ID: `{report_id[:8]}` | "
             f"Charts: {len(chart_specs)}\n\n"
             f"To reopen: `open_report(\"{report_id[:8]}\")`"
         )
     elif presentation_mode == "research":
         reply_text = (
-            f"**Research report:** {title}\n\n"
+            f"**Research report:** {title}{link_line}\n\n"
             f"Report ID: `{report_id[:8]}` | "
             f"Charts: {len(chart_specs)}\n\n"
             f"To reopen: `open_report(\"{report_id[:8]}\")`\n"
             f"To export HTML: `export_report(\"{report_id[:8]}\")`\n\n"
             f"_Summarize the headline finding in 2–3 sentences, then offer docx/pdf conversion._"
         )
+    elif presentation_mode == "scrollytelling":
+        reply_text = (
+            f"**Case study:** {title}{link_line}\n\n"
+            f"Report ID: `{report_id[:8]}` | "
+            f"Charts: {len(chart_specs)}\n\n"
+            f"To reopen: `open_report(\"{report_id[:8]}\")`\n"
+            f"To export HTML: `export_report(\"{report_id[:8]}\")`\n\n"
+            f"_Summarize the headline narrative in 2–3 sentences and offer docx/pdf conversion._"
+        )
     else:
         reply_text = (
-            f"**Report:** {title}\n\n"
+            f"**Report:** {title}{link_line}\n\n"
             f"Report ID: `{report_id[:8]}` | "
             f"Charts: {len(chart_specs)}\n\n"
             f"To reopen: `open_report(\"{report_id[:8]}\")`\n"
@@ -536,6 +600,75 @@ def create_research_report_artifact(
         reset_session_state=reset_session_state,
         presentation_mode="research",
         research_metadata=research_metadata,
+    )
+
+
+def create_case_study_artifact(
+    title: str,
+    deck: str,
+    content_markdown: str,
+    *,
+    hero_image: str | None = None,
+    hero_chart_id: str | None = None,
+    authors: list[str] | None = None,
+    published_date: str | None = None,
+    category: str | None = None,
+    cta: dict | None = None,
+    key_points: list[str] | None = None,
+    enforce_quality_gate: bool = True,
+    reset_session_state: bool = True,
+) -> dict:
+    """Build a scrollytelling case-study report (Anthropic customer-story style).
+
+    Reuses the same chart registry and quality gates as `create_report_artifact`
+    but emits `presentation_mode="scrollytelling"` with case-study metadata so
+    the React layer renders the sticky-visual + scrolling-narrative layout.
+    """
+    deck = (deck or "").strip()
+    if not deck:
+        raise ValueError("Case studies require a non-empty `deck` (sub-headline).")
+    if len(deck) > 240:
+        raise ValueError(
+            f"Deck is too long ({len(deck)} chars). Keep it under 240 characters."
+        )
+
+    points = [p.strip() for p in (key_points or []) if p and p.strip()]
+    if not 3 <= len(points) <= 6:
+        raise ValueError(
+            "Case studies require 3–6 `key_points` items "
+            f"(got {len(points)})."
+        )
+
+    authors = [a.strip() for a in (authors or []) if a and a.strip()]
+    published = published_date or date.today().isoformat()
+    reading_minutes = _estimate_reading_minutes(content_markdown)
+
+    cta_clean: dict | None = None
+    if cta:
+        label = str(cta.get("label") or "").strip()
+        href = str(cta.get("href") or "").strip()
+        if label and href:
+            cta_clean = {"label": label, "href": href}
+
+    case_study_metadata = {
+        "deck": deck,
+        "authors": authors,
+        "published_date": published,
+        "category": (category or "").strip() or None,
+        "hero_image": (hero_image or "").strip() or None,
+        "hero_chart_id": (hero_chart_id or "").strip() or None,
+        "cta": cta_clean,
+        "key_points": points,
+        "reading_minutes": reading_minutes,
+    }
+
+    return create_report_artifact(
+        title,
+        content_markdown,
+        enforce_quality_gate=enforce_quality_gate,
+        reset_session_state=reset_session_state,
+        presentation_mode="scrollytelling",
+        case_study_metadata=case_study_metadata,
     )
 
 
@@ -1448,7 +1581,12 @@ def _slugify_heading(text: str) -> str:
     return re.sub(r"\s+", "-", plain) or "section"
 
 
-def _markdown_to_html(text: str, *, research_mode: bool = False) -> str:
+def _markdown_to_html(
+    text: str,
+    *,
+    research_mode: bool = False,
+    case_study_mode: bool = False,
+) -> str:
     """Convert markdown to HTML. Handles headers, bold, tables, lists, code, and chart placeholders.
 
     When research_mode=True, additionally parses research-layout directives:
@@ -1458,6 +1596,18 @@ def _markdown_to_html(text: str, *, research_mode: bool = False) -> str:
       {{sidebar title="..."}} ... {{/sidebar}}
       [^id] inline + [^id]: text at end-of-doc footnotes
     All h2 headings get slug anchors for the floating TOC.
+
+    When case_study_mode=True, additionally parses scrollytelling directives:
+      {{scene chart="ID" | image="url" side="left|right"}} ... {{/scene}}
+        - sticky visual + scrolling narrative; inner content is markdown
+      {{step chart="ID" state="..."}} narrative {{/step}}
+        - inside a scene, defines ordered chart states as the reader scrolls
+      {{reveal}} - bullet\n - bullet {{/reveal}}
+        - bullet list with progressive fade-in via IntersectionObserver
+      {{image src="..." caption="..." full_bleed=true}}
+        - hero/full-bleed image
+      {{cta label="..." href="..."}}
+        - call-to-action block
     """
     lines = text.split("\n")
     html_lines: list[str] = []
@@ -1480,12 +1630,20 @@ def _markdown_to_html(text: str, *, research_mode: bool = False) -> str:
             html_lines.append("</div>")  # close .content-card
             in_content_card = False
 
+    # Case-study-only block state
+    cs_block: str | None = None  # "scene" | "step" | "reveal"
+    cs_block_buffer: list[str] = []
+    cs_block_attrs: dict[str, str] = {}
+    cs_step_counter = 0  # resets inside each scene
+
     def _flush_research_block() -> None:
         nonlocal research_block, research_block_buffer, research_block_attrs
         if research_block is None:
             return
         inner_html = _markdown_to_html(
-            "\n".join(research_block_buffer), research_mode=research_mode
+            "\n".join(research_block_buffer),
+            research_mode=research_mode,
+            case_study_mode=case_study_mode,
         )
         if research_block == "pullquote":
             html_lines.append(f'<blockquote class="rr-pullquote">{inner_html}</blockquote>')
@@ -1509,9 +1667,100 @@ def _markdown_to_html(text: str, *, research_mode: bool = False) -> str:
         research_block_buffer = []
         research_block_attrs = {}
 
+    def _render_cs_visual(attrs: dict[str, str], *, hero: bool = False) -> str:
+        """Render the sticky visual side of a scene as HTML."""
+        chart_id = attrs.get("chart", "").strip()
+        image_src = attrs.get("image", "").strip()
+        caption = attrs.get("caption", "")
+        alt = attrs.get("alt", caption)
+        if chart_id:
+            if chart_id not in _chart_registry:
+                return (
+                    f'<div class="cs-visual cs-visual--missing">'
+                    f'Missing chart: {_escape_html(chart_id)}</div>'
+                )
+            return (
+                f'<div class="cs-visual cs-visual--chart" data-cs-chart="{_escape_html(chart_id)}">'
+                f'<div id="chart-{chart_id}" class="chart-container"></div>'
+                f'</div>'
+            )
+        if image_src:
+            cap_html = (
+                f'<figcaption class="cs-visual-caption">{_inline_format(caption)}</figcaption>'
+                if caption
+                else ""
+            )
+            return (
+                f'<figure class="cs-visual cs-visual--image">'
+                f'<img src="{_escape_html(image_src)}" alt="{_escape_html(alt)}" />'
+                f'{cap_html}'
+                f'</figure>'
+            )
+        return '<div class="cs-visual cs-visual--empty"></div>'
+
+    def _flush_cs_block() -> None:
+        nonlocal cs_block, cs_block_buffer, cs_block_attrs
+        nonlocal cs_step_counter
+        if cs_block is None:
+            return
+        inner_html = _markdown_to_html(
+            "\n".join(cs_block_buffer),
+            research_mode=research_mode,
+            case_study_mode=case_study_mode,
+        )
+        if cs_block == "scene":
+            side = cs_block_attrs.get("side", "left").strip().lower()
+            side_class = "cs-scene--right" if side == "right" else "cs-scene--left"
+            visual_html = _render_cs_visual(cs_block_attrs)
+            html_lines.append(
+                f'<section class="cs-scene {side_class}">'
+                f'<div class="cs-scene-visual">{visual_html}</div>'
+                f'<div class="cs-scene-narrative">{inner_html}</div>'
+                f'</section>'
+            )
+        elif cs_block == "step":
+            idx = cs_block_attrs.get("_idx", "0")
+            state_attr = cs_block_attrs.get("state", "")
+            chart_id = cs_block_attrs.get("chart", "")
+            html_lines.append(
+                f'<div class="cs-step" data-step-index="{_escape_html(idx)}"'
+                f' data-step-state="{_escape_html(state_attr)}"'
+                f' data-step-chart="{_escape_html(chart_id)}">'
+                f'{inner_html}</div>'
+            )
+        elif cs_block == "reveal":
+            # inner_html contains a <ul> / <ol>; wrap with cs-reveal class.
+            # If the caller put bullets inside, there will be a <ul>…</ul>.
+            html_lines.append(
+                f'<div class="cs-reveal" data-cs-reveal="true">{inner_html}</div>'
+            )
+        cs_block = None
+        cs_block_buffer = []
+        cs_block_attrs = {}
+
     footnote_defs: list[tuple[str, str]] = []
 
     for line in lines:
+        # While inside a case-study block, buffer until matching close tag.
+        # Scenes may contain nested steps; handle that by stripping only the
+        # *outermost* matching close tag.
+        if cs_block is not None and case_study_mode:
+            stripped_line = line.strip()
+            if cs_block == "scene":
+                # Allow {{step ...}} / {{/step}} to be buffered as-is and
+                # recursively parsed when the scene is flushed.
+                if stripped_line == "{{/scene}}":
+                    _flush_cs_block()
+                    cs_step_counter = 0
+                    continue
+            else:
+                close_tag = "{{/" + cs_block + "}}"
+                if stripped_line == close_tag:
+                    _flush_cs_block()
+                    continue
+            cs_block_buffer.append(line)
+            continue
+
         # While inside a research block, buffer until matching close tag
         if research_block is not None and research_mode:
             stripped_line = line.strip()
@@ -1521,6 +1770,101 @@ def _markdown_to_html(text: str, *, research_mode: bool = False) -> str:
                 continue
             research_block_buffer.append(line)
             continue
+
+        # Case-study-only block openers and inline directives
+        if case_study_mode:
+            stripped_line = line.strip()
+            # {{scene ...}}
+            scene_open = re.match(r"^\{\{scene\b([^}]*)\}\}$", stripped_line)
+            if scene_open:
+                _close_content_card()
+                attrs = {
+                    k: v for k, v in _RESEARCH_ATTR_RE.findall(scene_open.group(1))
+                }
+                cs_block = "scene"
+                cs_block_attrs = attrs
+                cs_block_buffer = []
+                cs_step_counter = 0
+                continue
+            # {{step ...}} — only at top-level buffer gets recursed when scene flushes;
+            # when _markdown_to_html is called on scene inner content, we hit this path
+            step_open = re.match(r"^\{\{step\b([^}]*)\}\}$", stripped_line)
+            if step_open:
+                _close_content_card()
+                cs_step_counter += 1
+                attrs = {
+                    k: v for k, v in _RESEARCH_ATTR_RE.findall(step_open.group(1))
+                }
+                attrs.setdefault("_idx", str(cs_step_counter))
+                cs_block = "step"
+                cs_block_attrs = attrs
+                cs_block_buffer = []
+                continue
+            # {{reveal}}
+            if stripped_line == "{{reveal}}":
+                _close_content_card()
+                cs_block = "reveal"
+                cs_block_attrs = {}
+                cs_block_buffer = []
+                continue
+            # {{image src="..." caption="..." full_bleed=true}}
+            image_open = re.match(r"^\{\{image\b([^}]*)\}\}$", stripped_line)
+            if image_open:
+                _close_content_card()
+                raw_attrs = image_open.group(1) or ""
+                attrs = {
+                    k: v for k, v in _RESEARCH_ATTR_RE.findall(raw_attrs)
+                }
+                src = attrs.get("src", "").strip()
+                caption = attrs.get("caption", "")
+                alt = attrs.get("alt", caption)
+                # full_bleed can be quoted ("true") or bare (true). Check both.
+                full_bleed_bare = re.search(
+                    r"full_bleed\s*=\s*([A-Za-z0-9]+)", raw_attrs
+                )
+                full_bleed_val = (
+                    attrs.get("full_bleed")
+                    or (full_bleed_bare.group(1) if full_bleed_bare else "")
+                )
+                full_bleed = str(full_bleed_val).lower() in {
+                    "1", "true", "yes",
+                }
+                fb_class = " cs-image--full" if full_bleed else ""
+                if not src:
+                    html_lines.append(
+                        '<figure class="cs-image cs-image--missing">'
+                        'Missing image src</figure>'
+                    )
+                    continue
+                cap_html = (
+                    f'<figcaption class="cs-image-caption">{_inline_format(caption)}</figcaption>'
+                    if caption
+                    else ""
+                )
+                html_lines.append(
+                    f'<figure class="cs-image{fb_class}">'
+                    f'<img src="{_escape_html(src)}" alt="{_escape_html(alt)}" />'
+                    f'{cap_html}'
+                    f'</figure>'
+                )
+                continue
+            # {{cta label="..." href="..."}}
+            cta_open = re.match(r"^\{\{cta\b([^}]*)\}\}$", stripped_line)
+            if cta_open:
+                _close_content_card()
+                attrs = {
+                    k: v for k, v in _RESEARCH_ATTR_RE.findall(cta_open.group(1))
+                }
+                label = attrs.get("label", "Learn more")
+                href = attrs.get("href", "#")
+                html_lines.append(
+                    f'<div class="cs-cta">'
+                    f'<a class="cs-cta-btn" href="{_escape_html(href)}" '
+                    f'target="_blank" rel="noopener noreferrer">'
+                    f'{_inline_format(label)}</a>'
+                    f'</div>'
+                )
+                continue
 
         # Research-only block openers
         if research_mode:
@@ -1663,20 +2007,28 @@ def _markdown_to_html(text: str, *, research_mode: bool = False) -> str:
             if in_grid:
                 grid_chart_ids.append(chart_id)
                 continue
-            # Outside grid: emit standalone card
+            # Outside grid: emit standalone card.
             _close_content_card()
-            chart_title = _chart_registry.get(chart_id, {}).get("title", "")
-            title_html = (
-                f'<div class="chart-title">{_escape_html(chart_title)}</div>'
-                if chart_title
-                else ""
-            )
-            html_lines.append(
-                f'<div class="chart-card">'
-                f'{title_html}'
-                f'<div id="chart-{chart_id}" class="chart-container"></div>'
-                f'</div>'
-            )
+            # In case-study / research modes, omit the server-rendered title
+            # div — the React ChartCard portal renders its own title, and
+            # emitting both produces duplicates.
+            if case_study_mode or research_mode:
+                html_lines.append(
+                    f'<div id="chart-{chart_id}" class="chart-container"></div>'
+                )
+            else:
+                chart_title = _chart_registry.get(chart_id, {}).get("title", "")
+                title_html = (
+                    f'<div class="chart-title">{_escape_html(chart_title)}</div>'
+                    if chart_title
+                    else ""
+                )
+                html_lines.append(
+                    f'<div class="chart-card">'
+                    f'{title_html}'
+                    f'<div id="chart-{chart_id}" class="chart-container"></div>'
+                    f'</div>'
+                )
             continue
 
         # Headers
@@ -1810,6 +2162,8 @@ def _markdown_to_html(text: str, *, research_mode: bool = False) -> str:
     _close_content_card()
     if research_mode and research_block is not None:
         _flush_research_block()
+    if case_study_mode and cs_block is not None:
+        _flush_cs_block()
 
     output = "\n".join(html_lines)
 
@@ -1900,6 +2254,7 @@ def _build_standalone_html(
     *,
     presentation_mode: str | None = None,
     research_metadata: dict | None = None,
+    case_study_metadata: dict | None = None,
 ) -> str:
     """Build self-contained HTML with embedded data for disk saves / direct file access.
 
@@ -1918,6 +2273,8 @@ def _build_standalone_html(
         data_dict["presentation_mode"] = presentation_mode
     if research_metadata:
         data_dict["research_metadata"] = research_metadata
+    if case_study_metadata:
+        data_dict["case_study_metadata"] = case_study_metadata
     data = json.dumps(data_dict, default=str)
 
     html = _get_report_html()
@@ -2963,6 +3320,122 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                         type="text",
                         text=(
                             f"Research report generated: {title} "
+                            f"({report['chart_count']} charts). "
+                            f"Report ID: `{report['report_id'][:8]}`"
+                        ),
+                    ),
+                ],
+                structuredContent=report["structured"],
+            )
+
+        except Exception as e:
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"Error: {e}")],
+                isError=True,
+            )
+
+    @mcp.tool(meta={
+        "ui": {"resourceUri": REPORT_URI},
+        "ui/resourceUri": REPORT_URI,
+    })
+    def generate_case_study_report(
+        title: str,
+        deck: str,
+        content_markdown: str,
+        key_points: list[str],
+        authors: list[str] | None = None,
+        published_date: str | None = None,
+        category: str | None = None,
+        hero_image: str | None = None,
+        hero_chart_id: str | None = None,
+        cta: dict | None = None,
+    ) -> CallToolResult:
+        """Create a scrollytelling case-study report (marketing / growth pitch style).
+
+        Use this (instead of `generate_report` or `generate_research_report`)
+        when the deliverable is a marketing case study, customer story,
+        growth pitch, or narrative-first investor update — i.e. when the
+        goal is *persuasion* with scroll-triggered visuals, not a whitepaper
+        or analytical dashboard. Reuses the same chart registry and
+        enforcement gates — call `generate_charts` (batch) first.
+
+        Layout features: a hero header (chart or image), sticky visuals with
+        scrolling narrative (`{{scene}}`), stepped chart animations
+        (`{{step}}`), progressive bullet reveals (`{{reveal}}`), full-bleed
+        imagery (`{{image}}`), and an end-of-page CTA (`{{cta}}` or the
+        structured `cta` arg).
+
+        Extra markdown directives (only parsed in this tool):
+
+            {{scene chart="chart_1" side="left"}}
+            Narrative paragraphs...
+
+            {{step chart="chart_1" state="highlight=GNO"}}
+            Beat 1 narrative.
+            {{/step}}
+
+            {{step chart="chart_1" state="highlight=ETH"}}
+            Beat 2 narrative.
+            {{/step}}
+            {{/scene}}
+
+            {{reveal}}
+            - First bullet
+            - Second bullet
+            {{/reveal}}
+
+            {{image src="https://..." caption="..." full_bleed=true}}
+
+            {{cta label="Book a call" href="https://..."}}
+
+        Standard `{{chart:CHART_ID}}` and `{{grid:N}}` still work for inline
+        chart placements between scenes.
+
+        Args:
+            title: Report title.
+            deck: Sub-headline / one-line thesis (≤240 chars).
+            content_markdown: Narrative body. Use `##` for section headings.
+            key_points: 3–6 punchline takeaways rendered at the top.
+            authors: Author names (optional).
+            published_date: ISO date (YYYY-MM-DD). Defaults to today.
+            category: Category chip (e.g. "Customer Story").
+            hero_image: Absolute URL or data URI for a hero image in the header.
+            hero_chart_id: Chart ID to render in the header (mutually exclusive with hero_image).
+            cta: {"label": "...", "href": "..."} for the footer CTA.
+
+        Returns:
+            Interactive UI resource rendered as a scrollytelling case study.
+        """
+        try:
+            report = create_case_study_artifact(
+                title=title,
+                deck=deck,
+                content_markdown=content_markdown,
+                hero_image=hero_image,
+                hero_chart_id=hero_chart_id,
+                authors=authors,
+                published_date=published_date,
+                category=category,
+                cta=cta,
+                key_points=key_points,
+                enforce_quality_gate=True,
+                reset_session_state=True,
+            )
+
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=report["reply_text"],
+                        annotations=Annotations(
+                            audience=["assistant"],
+                            priority=1.0,
+                        ),
+                    ),
+                    TextContent(
+                        type="text",
+                        text=(
+                            f"Case study generated: {title} "
                             f"({report['chart_count']} charts). "
                             f"Report ID: `{report['report_id'][:8]}`"
                         ),

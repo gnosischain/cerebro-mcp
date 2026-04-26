@@ -62,6 +62,13 @@
       }
     },
     {
+      "name": "case-study-smoke",
+      "cwd": ".scratch/case_study_smoke",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "5190"],
+      "port": 5190
+    },
+    {
       "name": "quarterly-review",
       "cwd": "ui",
       "runtimeExecutable": "npm",

@@ -82,7 +82,17 @@ def restore_logging_state():
 
 
 def _histogram_count(metric, **labels) -> float:
-    return metric.labels(**labels)._buckets[-1].get()
+    """Return the total observation count for a histogram label set.
+
+    Uses the `_count` sample emitted by prometheus_client (works across
+    versions; `_buckets[-1]` is per-bucket, not cumulative, in newer
+    releases).
+    """
+    child = metric.labels(**labels)
+    for sample in child._samples():
+        if sample.name == "_count":
+            return float(sample.value)
+    return 0.0
 
 
 def _histogram_sum(metric, **labels) -> float:
@@ -279,12 +289,12 @@ def test_clickhouse_query_metrics_record_success_and_error():
     rows = [[idx] for idx in range(3)]
     fake_result = SimpleNamespace(column_names=["id"], result_rows=rows)
     success_client = SimpleNamespace(
-        query_arrow=lambda sql: (_ for _ in ()).throw(RuntimeError("no arrow")),
-        query=lambda sql: fake_result,
+        query_arrow=lambda sql, parameters=None: (_ for _ in ()).throw(RuntimeError("no arrow")),
+        query=lambda sql, parameters=None: fake_result,
     )
     error_client = SimpleNamespace(
-        query_arrow=lambda sql: (_ for _ in ()).throw(RuntimeError("arrow failed")),
-        query=lambda sql: (_ for _ in ()).throw(RuntimeError("query failed")),
+        query_arrow=lambda sql, parameters=None: (_ for _ in ()).throw(RuntimeError("arrow failed")),
+        query=lambda sql, parameters=None: (_ for _ in ()).throw(RuntimeError("query failed")),
     )
 
     success_duration_before = _histogram_count(

@@ -15,6 +15,7 @@ Standard-mode users should never need any of these tools.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from mcp.types import CallToolResult, TextContent
@@ -90,6 +91,65 @@ def _research_metadata_from_snapshot(snap: StorytellerSnapshot) -> dict[str, Any
         "key_takeaways": takeaways,
         "category": category,
         "footnotes": footnotes,
+    }
+
+
+def _case_study_metadata_from_snapshot(snap: StorytellerSnapshot) -> dict[str, Any]:
+    """Map a fully-baked storyteller snapshot to case-study metadata.
+
+    Field mapping:
+      - deck           ← big_idea.sentence (declarative POV, capped at 240 chars)
+      - key_points     ← storyboard scene intents (3–6 items, padded with
+                         big_idea sentence + stakes if fewer than 3 scenes)
+      - category       ← context_brief.mechanism, title-cased
+      - cta            ← derived from context_brief.required_action if it
+                         contains a URL; else left None
+    """
+    big_idea = snap.big_idea
+    storyboard = snap.storyboard
+    brief = snap.context_brief
+
+    deck_raw = (big_idea.sentence if big_idea else "").strip()
+    if len(deck_raw) > 240:
+        deck_raw = deck_raw[:237].rstrip() + "…"
+
+    points: list[str] = []
+    if storyboard is not None:
+        for scene in storyboard.scenes:
+            intent = (scene.intent or "").strip()
+            if intent:
+                points.append(intent)
+    if big_idea is not None:
+        if len(points) < 3 and big_idea.sentence:
+            sentence = big_idea.sentence.strip()
+            if sentence and sentence not in points:
+                points.append(sentence)
+        if len(points) < 3 and big_idea.stakes:
+            stakes = big_idea.stakes.strip()
+            if stakes and stakes not in points:
+                points.append(stakes)
+    points = points[:6]
+
+    category = None
+    if brief is not None:
+        mechanism = getattr(brief, "mechanism", None)
+        if mechanism:
+            category = str(mechanism).replace("_", " ").title()
+
+    cta: dict[str, str] | None = None
+    if brief is not None:
+        action = (getattr(brief, "required_action", "") or "").strip()
+        url_match = re.search(r"https?://\S+", action)
+        if url_match:
+            url = url_match.group(0)
+            label = action.replace(url, "").strip(" -:—") or "Learn more"
+            cta = {"label": label, "href": url}
+
+    return {
+        "deck": deck_raw,
+        "key_points": points,
+        "category": category,
+        "cta": cta,
     }
 
 
@@ -496,13 +556,14 @@ def register_storyteller_tools(mcp, ch=None) -> None:
         the story is rendered.
 
         Args:
-            style: Layout style. "research" (default) emits the long-form
-                Anthropic-style essay layout — display title, deck (from the
-                big idea), key-takeaways block (from storyboard scene
-                intents), floating TOC, and editorial typography. This is
-                the natural fit for narrative-first storyteller output.
-                "dashboard" emits the standard `generate_report` layout
-                (kept for back-compat).
+            style: Layout style.
+                "research" (default) — long-form Anthropic-style essay
+                    layout. Best when the mechanism is memo / decision brief.
+                "scrollytelling" — marketing / case-study / growth-pitch
+                    layout with sticky visuals, stepped charts, and
+                    progressive bullet reveals. Best when the mechanism is
+                    pitch / customer-story / investor-update.
+                "dashboard" — standard `generate_report` layout (back-compat).
         """
         # Import inside the function to avoid a circular import at module load.
         from cerebro_mcp.tools.visualization import create_report_artifact
@@ -513,9 +574,10 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             assert snap.context_brief is not None  # checked by require_ready_for_handoff
 
             normalized_style = (style or "research").strip().lower()
-            if normalized_style not in {"research", "dashboard"}:
+            if normalized_style not in {"research", "dashboard", "scrollytelling"}:
                 raise ValueError(
-                    f"Unknown style '{style}'. Use 'research' or 'dashboard'."
+                    f"Unknown style '{style}'. "
+                    "Use 'research', 'scrollytelling', or 'dashboard'."
                 )
 
             extra_kwargs: dict[str, Any] = {}
@@ -523,6 +585,11 @@ def register_storyteller_tools(mcp, ch=None) -> None:
                 extra_kwargs["presentation_mode"] = "research"
                 extra_kwargs["research_metadata"] = (
                     _research_metadata_from_snapshot(snap)
+                )
+            elif normalized_style == "scrollytelling":
+                extra_kwargs["presentation_mode"] = "scrollytelling"
+                extra_kwargs["case_study_metadata"] = (
+                    _case_study_metadata_from_snapshot(snap)
                 )
 
             report = create_report_artifact(

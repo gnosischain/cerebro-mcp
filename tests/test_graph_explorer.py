@@ -257,9 +257,15 @@ def test_load_seed_with_explicit_profile(fake_snapshot):
     assert AVATAR in node_ids
     assert TRUSTEE in node_ids
     assert sc["view_state"]["selected_profiles"] == ["circles_trust"]
-    # Suggestions come from semantic relationships sharing the node kind
+    # `suggested_next_hops` returns CROSS-sector pivots only — same-kind
+    # profiles (circles_avatar -> circles_avatar) are intentionally filtered
+    # out because they describe in-sector expansion, not a pivot. The
+    # circles_trust profile itself is a self-loop on `circles_avatar`, so no
+    # suggestion includes it. The fixture contains no profile that bridges
+    # `circles_avatar` to a different kind, so the list is legitimately empty.
     suggestions = sc["view_state"]["suggested_next_hops"]
-    assert any(s["profile"] == "circles_trust" for s in suggestions)
+    assert isinstance(suggestions, list)
+    assert all(s.get("target_kind") != "circles_avatar" for s in suggestions)
 
 
 def test_load_seed_auto_detects_via_roles(fake_snapshot):
@@ -304,7 +310,13 @@ def test_load_seed_auto_detects_via_roles(fake_snapshot):
     # since roles matched specific profiles.
 
 
-def test_expand_node_caps_at_two_hops(fake_snapshot):
+def test_expand_node_caps_at_max_hops(fake_snapshot, monkeypatch):
+    """Expand calls beyond MAX_HOPS are rejected with a "Max X hops reached"
+    error. Patches MAX_HOPS to 2 so the test stays cheap; the production
+    default is higher (currently 20)."""
+    import cerebro_mcp.tools.graph_explorer as ge
+    monkeypatch.setattr(ge, "MAX_HOPS", 2)
+
     ch = StubCH(edge_rows={
         "api_execution_circles_v2_trust_relations_current": [
             [AVATAR, TRUSTEE, 1.0, 1],
@@ -328,7 +340,7 @@ def test_expand_node_caps_at_two_hops(fake_snapshot):
         "expand_graph_explorer_node",
         {"view_id": view_id, "node_id": TRUSTEE, "relation_types": ["circles_trust"]},
     )
-    # Third call is rejected with "Max 2 hops"
+    # Third call is rejected once MAX_HOPS is reached.
     assert result.isError is True
     text = result.content[0].text
     assert "Max 2 hops" in text or "Max" in text

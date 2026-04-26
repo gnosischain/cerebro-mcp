@@ -4,6 +4,7 @@ import { ReportHeader } from "./components/ReportHeader";
 import { ReportContent } from "./components/ReportContent";
 import { ReportFooter } from "./components/ReportFooter";
 import { ResearchReportLayout } from "./components/ResearchReportLayout";
+import { CaseStudyLayout } from "./components/CaseStudyLayout";
 import { LoadingState } from "./components/LoadingState";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { parseHtmlSections } from "./utils/parseHtmlSections";
@@ -13,7 +14,9 @@ export default function App() {
 
   const sections = useMemo(
     () =>
-      data && data.presentation_mode !== "research"
+      data &&
+      data.presentation_mode !== "research" &&
+      data.presentation_mode !== "scrollytelling"
         ? parseHtmlSections(data.sections_html)
         : [],
     [data]
@@ -27,6 +30,14 @@ export default function App() {
     return (
       <ErrorBoundary fallbackLabel="Research report">
         <ResearchReportLayout data={data} />
+      </ErrorBoundary>
+    );
+  }
+
+  if (data.presentation_mode === "scrollytelling") {
+    return (
+      <ErrorBoundary fallbackLabel="Case study">
+        <CaseStudyLayout data={data} />
       </ErrorBoundary>
     );
   }

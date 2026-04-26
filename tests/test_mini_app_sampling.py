@@ -97,10 +97,14 @@ def test_small_dataset_uses_exact_bounded_mode():
 
 
 def test_large_dataset_uses_random_sample_mode():
-    ch = StubCH(total=10_000)
+    # SAMPLE_TARGET (10_000) is the inclusive upper bound for exact_bounded
+    # per `load_bounded_dataset` step 3 ("count <= SAMPLE_TARGET → exact_bounded"),
+    # so we need `total > SAMPLE_TARGET` to take the sampling path.
+    total = SAMPLE_TARGET + 1
+    ch = StubCH(total=total)
     dataset = load_bounded_dataset(ch, "SELECT * FROM big")
     assert dataset.stats.mode == "random_sample"
-    assert dataset.stats.sample_source_rows == 10_000
+    assert dataset.stats.sample_source_rows == total
     assert dataset.stats.row_count >= SAMPLE_TARGET // 2
     assert any("approximate random sample" in w for w in dataset.stats.warnings)
 
@@ -108,19 +112,22 @@ def test_large_dataset_uses_random_sample_mode():
 def test_random_sample_retries_with_wider_cutoff():
     """First sample attempt under-samples; second attempt with a wider cutoff hits target."""
     attempts = {"n": 0}
+    total = SAMPLE_TARGET + 1  # must exceed SAMPLE_TARGET to take sample path
 
     def handler(sql, parameters, requested_max_rows):
         if "count()" in sql:
-            return ExecutedQuery(sql=sql, executed_sql=sql, database="dbt", columns=["c"], rows=[[10000]], row_count=1, elapsed_seconds=0.0, fetch_mode="rows", warnings=[])
+            return ExecutedQuery(sql=sql, executed_sql=sql, database="dbt", columns=["c"], rows=[[total]], row_count=1, elapsed_seconds=0.0, fetch_mode="rows", warnings=[])
         attempts["n"] += 1
-        n = 100 if attempts["n"] == 1 else 2100
+        # Production accepts the sample when it has at least SAMPLE_TARGET // 2
+        # rows. First attempt under-samples; second attempt clears the bar.
+        n = 100 if attempts["n"] == 1 else SAMPLE_TARGET // 2 + 100
         rows = [[i, f"r_{i}"] for i in range(n)]
         return ExecutedQuery(
             sql=sql, executed_sql=sql, database="dbt", columns=["id", "label"], rows=rows,
             row_count=n, elapsed_seconds=0.0, fetch_mode="rows", warnings=[],
         )
 
-    ch = StubCH(total=10_000, fetch_handler=handler)
+    ch = StubCH(total=total, fetch_handler=handler)
     dataset = load_bounded_dataset(ch, "SELECT * FROM tricky")
     assert dataset.stats.mode == "random_sample"
     assert attempts["n"] == 2  # one undersample, one successful retry

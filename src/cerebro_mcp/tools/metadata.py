@@ -252,6 +252,96 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
             return f"Error: {e}"
 
     @mcp.tool()
+    def quality_metrics() -> str:
+        """Show quality-discipline gate evaluations and discovered-model coverage.
+
+        Returns aggregate counts for the report-quality gates introduced to
+        catch the recurring failure modes (stock-vs-flow misuse, residual
+        bucket exclusion, time-series correlation without stationarity,
+        aggregator volume double-counting, and discovered-model coverage).
+        Aggregates are read directly from the in-process Prometheus counters,
+        which makes the surface useful for ad-hoc inspection without standing
+        up Grafana / a metrics scraper.
+        """
+        from cerebro_mcp.observability import (
+            cerebro_discovered_model_coverage_total,
+            cerebro_quality_gate_evaluations_total,
+            cerebro_quality_report_generations_total,
+        )
+
+        def _read_counter(counter, label_keys: list[str]) -> dict[tuple, float]:
+            """Sum the metric values per label combination."""
+            out: dict[tuple, float] = {}
+            for child_labels, child in list(counter._metrics.items()):
+                # child_labels is a tuple aligned with the counter's label
+                # ordering; child has a `_value.get()` accessor.
+                value = float(child._value.get())
+                if value:
+                    out[child_labels] = value
+            return out
+
+        lines: list[str] = ["# Quality Metrics\n"]
+
+        # 1) Per-gate evaluations
+        gate_data = _read_counter(
+            cerebro_quality_gate_evaluations_total, ["rule", "outcome"]
+        )
+        lines.append("## Gate evaluations\n")
+        if not gate_data:
+            lines.append("_No gate evaluations recorded yet._\n")
+        else:
+            # Pivot: rule -> {outcome: count}
+            by_rule: dict[str, dict[str, float]] = {}
+            for (rule, outcome), v in gate_data.items():
+                by_rule.setdefault(rule, {})[outcome] = v
+            lines.append("| Rule | Pass | Fail | Warn | Override | Fail rate |")
+            lines.append("|---|---:|---:|---:|---:|---:|")
+            for rule in sorted(by_rule):
+                row = by_rule[rule]
+                p = int(row.get("pass", 0))
+                f = int(row.get("fail", 0))
+                w = int(row.get("warn", 0))
+                o = int(row.get("override", 0))
+                total = p + f
+                rate = f"{(100 * f / total):.1f}%" if total else "n/a"
+                lines.append(f"| `{rule}` | {p} | {f} | {w} | {o} | {rate} |")
+            lines.append("")
+
+        # 2) Discovered-model coverage
+        cov_data = _read_counter(cerebro_discovered_model_coverage_total, ["outcome"])
+        lines.append("## Discovered-model coverage\n")
+        if not cov_data:
+            lines.append("_No reports generated yet (no coverage data)._\n")
+        else:
+            lines.append("| Outcome | Count |")
+            lines.append("|---|---:|")
+            for (outcome,), v in sorted(cov_data.items()):
+                lines.append(f"| `{outcome}` | {int(v)} |")
+            lines.append("")
+
+        # 3) Report generations by outcome
+        rep_data = _read_counter(
+            cerebro_quality_report_generations_total, ["report_type", "outcome"]
+        )
+        lines.append("## Report generations\n")
+        if not rep_data:
+            lines.append("_No report generations tagged yet._\n")
+        else:
+            lines.append("| Report type | Outcome | Count |")
+            lines.append("|---|---|---:|")
+            for (rtype, outcome), v in sorted(rep_data.items()):
+                lines.append(f"| `{rtype}` | `{outcome}` | {int(v)} |")
+            lines.append("")
+
+        lines.append("---")
+        lines.append(
+            "_Aggregates are in-process Prometheus counters and reset on "
+            "server restart. For long-window analysis, scrape `/metrics` "
+            "into Prometheus._"
+        )
+        return "\n".join(lines)
+
+    @mcp.tool()
     def system_status() -> str:
         """Show server status: ClickHouse connectivity, manifest state, config."""
         from cerebro_mcp.tools.reasoning import get_tracing_status

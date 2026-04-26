@@ -39,6 +39,23 @@ export interface ResearchMetadata {
   reading_minutes?: number;
 }
 
+export interface CaseStudyCta {
+  label: string;
+  href: string;
+}
+
+export interface CaseStudyMetadata {
+  deck: string;
+  authors?: string[];
+  published_date?: string;
+  category?: string | null;
+  hero_image?: string | null;
+  hero_chart_id?: string | null;
+  cta?: CaseStudyCta | null;
+  key_points?: string[];
+  reading_minutes?: number;
+}
+
 export interface ReportData {
   title: string;
   timestamp: string;
@@ -47,8 +64,13 @@ export interface ReportData {
   queries?: Record<string, QueryInfo>;
   file_uri?: string;
   analysis_path?: string;
-  presentation_mode?: "report" | "visual_answer" | "research";
+  presentation_mode?:
+    | "report"
+    | "visual_answer"
+    | "research"
+    | "scrollytelling";
   research_metadata?: ResearchMetadata;
+  case_study_metadata?: CaseStudyMetadata;
 }
 
 export interface HtmlSection {

@@ -35,6 +35,20 @@ def reset_visualization_state(monkeypatch):
     monkeypatch.setattr(query_mod, "_last_nudge_time", 0.0)
     state.reset()
 
+    # The deployed env may set SEMANTIC_ENABLED=True; force to False as the
+    # test default. Individual tests that exercise the semantic path opt back
+    # in via `monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)`.
+    monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", False)
+    monkeypatch.setattr(dbt_mod.settings, "SEMANTIC_ENABLED", False)
+
+    # Disable the chart-precondition / report-precondition gates by default
+    # so tests can exercise the underlying machinery without having to set
+    # up full discovery + EDA flows. Tests that exercise the gates themselves
+    # explicitly re-enable via monkeypatch.
+    monkeypatch.setattr(
+        session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", False
+    )
+
     yield
 
 
@@ -550,7 +564,10 @@ class TestChartInputShapeValidation:
             title="Validator-Owned Wallets",
         )
 
-        assert "multiple numeric columns" in result
+        # Error message wording was updated to "requires an explicit main KPI
+        # column when the query returns multiple fields"; the original test
+        # was checking for the older "multiple numeric columns" phrasing.
+        assert "explicit main KPI column" in result
         assert "change_field" in result
         assert viz._chart_registry == {}
 
@@ -668,6 +685,18 @@ class TestChartInputShapeValidation:
 
 
 class TestSemanticChartRouting:
+    @pytest.fixture(autouse=True)
+    def _enable_chart_gate(self, monkeypatch):
+        """The class-wide outer autouse disables ENFORCE_CHART_PRECONDITIONS
+        for test convenience; this class actually exercises the gate, so
+        re-enable it for every test in this class."""
+        monkeypatch.setattr(
+            session_state_mod.settings,
+            "ENFORCE_CHART_PRECONDITIONS",
+            True,
+        )
+        yield
+
     def _semantic_result(self):
         return SimpleNamespace(
             sql="SELECT day, validators_active FROM semantic_query",
@@ -1620,6 +1649,189 @@ class TestResearchReport:
                 content_markdown="{{chart:chart_1}}\n",
                 key_takeaways=["only one"],
                 enforce_quality_gate=False,
+                reset_session_state=False,
+            )
+
+
+    def test_quality_gate_scoped_to_referenced_charts(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: legacy/unreferenced charts in the global registry must
+        not block a clean report. The residual_bucket_disclosure gate (and
+        peers) should evaluate only charts cited via {{chart:}} / {{figure:}}
+        in the report's content_markdown.
+        """
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+
+        # Re-enable the gate that the autouse fixture disables, and turn on
+        # only the residual-bucket heuristic so the test stays focused.
+        s = session_state_mod.settings
+        monkeypatch.setattr(s, "ENFORCE_CHART_PRECONDITIONS", True)
+        monkeypatch.setattr(s, "ENFORCE_RESIDUAL_BUCKET_DISCLOSURE", True)
+        monkeypatch.setattr(s, "ENFORCE_STOCK_FLOW_DISCIPLINE", False)
+        monkeypatch.setattr(s, "ENFORCE_STATIONARITY_ON_CORRELATIONS", False)
+        monkeypatch.setattr(s, "ENFORCE_AGGREGATOR_VOLUME_DEDUP", False)
+        monkeypatch.setattr(s, "ENFORCE_DISCOVERED_MODEL_COVERAGE", False)
+        monkeypatch.setattr(s, "REQUIRE_CHART_DIVERSITY", False)
+        monkeypatch.setattr(s, "REQUIRE_DIMENSIONAL_BREAKDOWN", False)
+        monkeypatch.setattr(s, "REQUIRE_RELATIONAL_CHART", False)
+        monkeypatch.setattr(s, "MIN_CHARTS_FOR_REPORT", 1)
+        monkeypatch.setattr(s, "MIN_EXPLORATORY_QUERIES", 0)
+        monkeypatch.setattr(s, "MIN_STATISTICAL_QUERIES", 0)
+        monkeypatch.setattr(s, "MIN_CORRELATION_QUERIES", 0)
+
+        # Clean chart — no residual-bucket filter, will be referenced by the
+        # report's markdown.
+        viz._chart_registry["chart_clean"] = {
+            "option": {"xAxis": {"data": ["a"]}, "series": [{"data": [1]}]},
+            "title": "Clean trend",
+            "chart_type": "line",
+            "data_points": 1,
+            "created_at": datetime.now(),
+            "sql": "SELECT toDate(ts) AS d, count() AS c FROM t GROUP BY d",
+            "description": "",
+        }
+        # Polluting legacy chart — residual-bucket filter without metadata
+        # acknowledgment. Must NOT be referenced by the report. With the bug
+        # present, this charts blocks generate_report. With the fix, it does
+        # not, because the gate is scoped to referenced charts.
+        viz._chart_registry["chart_legacy"] = {
+            "option": {"xAxis": {"data": ["a"]}, "series": [{"data": [1]}]},
+            "title": "Legacy chart with hidden residual bucket",
+            "chart_type": "line",
+            "data_points": 1,
+            "created_at": datetime.now(),
+            "sql": (
+                "SELECT label, count() AS c FROM t "
+                "WHERE label != '' GROUP BY label"
+            ),
+            "description": "",
+        }
+
+        out = viz.create_report_artifact(
+            title="Scoped Gate Regression",
+            content_markdown="## Section\n\n{{chart:chart_clean}}\n",
+            enforce_quality_gate=True,
+            reset_session_state=False,
+        )
+        # Success path: artifact built, structured content present, and the
+        # legacy chart did NOT leak into the rendered report.
+        assert out["structured"]["title"] == "Scoped Gate Regression"
+        assert "chart_clean" in out["structured"]["charts"]
+        assert "chart_legacy" not in out["structured"]["charts"]
+
+    def test_begin_analysis_cycle_clears_discovery_accumulators(self):
+        """Regression: prior-session discovered_models must not leak into a
+        new analysis. begin_analysis_cycle() resets per-cycle accumulators
+        but preserves semantic preflight cache."""
+        # Simulate prior-session state
+        state.discovered_models.update({"old_model_a", "old_model_b"})
+        state.explored_models.add("explored_x")
+        state.explored_tables.add("table_y")
+        state.verified_query_surfaces.add("dbt.fct_z")
+        state.excluded_models.add("excluded_w")
+        state.search_models_count = 3
+        state.execute_query_count = 5
+        state.statistical_query_count = 2
+        state.correlation_query_count = 1
+        state.chart_types_generated.update({"line", "scatter"})
+        state.semantic_preflight_cache["key1"] = {"foo": "bar"}
+
+        state.begin_analysis_cycle()
+
+        assert state.discovered_models == set()
+        assert state.explored_models == set()
+        assert state.explored_tables == set()
+        assert state.verified_query_surfaces == set()
+        assert state.excluded_models == set()
+        assert state.search_models_count == 0
+        assert state.execute_query_count == 0
+        assert state.statistical_query_count == 0
+        assert state.correlation_query_count == 0
+        assert state.chart_types_generated == set()
+        # Preflight cache preserved across cycles
+        assert "key1" in state.semantic_preflight_cache
+
+    def test_record_model_exclusion_satisfies_coverage_gate(self, monkeypatch):
+        """record_model_exclusion marks a discovered model as excluded so it
+        no longer counts toward the coverage gate."""
+        s = session_state_mod.settings
+        monkeypatch.setattr(s, "ENFORCE_CHART_PRECONDITIONS", True)
+        monkeypatch.setattr(s, "ENFORCE_DISCOVERED_MODEL_COVERAGE", True)
+        monkeypatch.setattr(s, "ENFORCE_RESIDUAL_BUCKET_DISCLOSURE", False)
+        monkeypatch.setattr(s, "ENFORCE_STOCK_FLOW_DISCIPLINE", False)
+        monkeypatch.setattr(s, "ENFORCE_STATIONARITY_ON_CORRELATIONS", False)
+        monkeypatch.setattr(s, "ENFORCE_AGGREGATOR_VOLUME_DEDUP", False)
+        monkeypatch.setattr(s, "REQUIRE_CHART_DIVERSITY", False)
+        monkeypatch.setattr(s, "REQUIRE_DIMENSIONAL_BREAKDOWN", False)
+        monkeypatch.setattr(s, "REQUIRE_RELATIONAL_CHART", False)
+        monkeypatch.setattr(s, "MIN_CHARTS_FOR_REPORT", 1)
+        monkeypatch.setattr(s, "MIN_EXPLORATORY_QUERIES", 0)
+        monkeypatch.setattr(s, "MIN_STATISTICAL_QUERIES", 0)
+        monkeypatch.setattr(s, "MIN_CORRELATION_QUERIES", 0)
+
+        # One discovered, unused model. Without exclusion → gate fails.
+        state.discovered_models.add("fct_some_unused_model")
+        viz._chart_registry["chart_1"] = {
+            "option": {"xAxis": {"data": ["a"]}, "series": [{"data": [1]}]},
+            "title": "Trend",
+            "chart_type": "line",
+            "data_points": 1,
+            "created_at": datetime.now(),
+            "sql": "SELECT 1",
+            "description": "",
+        }
+
+        passed, reason, _ = state.check_report_preconditions(viz._chart_registry)
+        assert not passed
+        assert "Discovered-but-unused" in reason
+
+        # After exclusion → gate passes.
+        state.record_model_exclusion("fct_some_unused_model", "out of scope")
+        passed, reason, _ = state.check_report_preconditions(viz._chart_registry)
+        assert passed, f"Expected pass after exclusion, got: {reason}"
+
+    def test_quality_gate_still_fires_on_referenced_polluting_chart(
+        self, tmp_path, monkeypatch
+    ):
+        """Counterpart: when the polluting chart IS referenced, the gate
+        must still reject. Confirms the scoping fix didn't silently disable
+        enforcement.
+        """
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        s = session_state_mod.settings
+        monkeypatch.setattr(s, "ENFORCE_CHART_PRECONDITIONS", True)
+        monkeypatch.setattr(s, "ENFORCE_RESIDUAL_BUCKET_DISCLOSURE", True)
+        monkeypatch.setattr(s, "ENFORCE_STOCK_FLOW_DISCIPLINE", False)
+        monkeypatch.setattr(s, "ENFORCE_STATIONARITY_ON_CORRELATIONS", False)
+        monkeypatch.setattr(s, "ENFORCE_AGGREGATOR_VOLUME_DEDUP", False)
+        monkeypatch.setattr(s, "ENFORCE_DISCOVERED_MODEL_COVERAGE", False)
+        monkeypatch.setattr(s, "REQUIRE_CHART_DIVERSITY", False)
+        monkeypatch.setattr(s, "REQUIRE_DIMENSIONAL_BREAKDOWN", False)
+        monkeypatch.setattr(s, "REQUIRE_RELATIONAL_CHART", False)
+        monkeypatch.setattr(s, "MIN_CHARTS_FOR_REPORT", 1)
+        monkeypatch.setattr(s, "MIN_EXPLORATORY_QUERIES", 0)
+        monkeypatch.setattr(s, "MIN_STATISTICAL_QUERIES", 0)
+        monkeypatch.setattr(s, "MIN_CORRELATION_QUERIES", 0)
+
+        viz._chart_registry["chart_dirty"] = {
+            "option": {"xAxis": {"data": ["a"]}, "series": [{"data": [1]}]},
+            "title": "Chart with hidden residual bucket",
+            "chart_type": "line",
+            "data_points": 1,
+            "created_at": datetime.now(),
+            "sql": (
+                "SELECT label, count() AS c FROM t "
+                "WHERE label != '' GROUP BY label"
+            ),
+            "description": "",
+        }
+
+        with pytest.raises(ValueError, match="Quality"):
+            viz.create_report_artifact(
+                title="Should Reject",
+                content_markdown="{{chart:chart_dirty}}\n",
+                enforce_quality_gate=True,
                 reset_session_state=False,
             )
 

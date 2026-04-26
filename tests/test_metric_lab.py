@@ -81,7 +81,10 @@ def test_open_metric_lab_from_sql_small_dataset_is_exact_bounded():
 
 
 def test_open_metric_lab_from_sql_large_dataset_is_random_sample():
-    server = _build_server(total=10_000)
+    # SAMPLE_TARGET (10_000) is the inclusive ceiling for exact_bounded;
+    # need total > SAMPLE_TARGET to take the random_sample path.
+    from cerebro_mcp.tools.mini_apps import SAMPLE_TARGET
+    server = _build_server(total=SAMPLE_TARGET + 1)
     fn = _get_tool(server, "open_metric_lab_from_sql")
     result = fn(sql="SELECT * FROM big")
     sc = result.structuredContent

@@ -99,6 +99,19 @@ class Settings(BaseSettings):
     REQUIRE_DIMENSIONAL_BREAKDOWN: bool = True  # hard gate: at least 1 chart with series_field or pie/treemap/heatmap/sankey
     REQUIRE_RELATIONAL_CHART: bool = True       # hard gate: at least 1 scatter/heatmap chart OR correlation query
 
+    # Quality discipline gates (apply to every chart's SQL at report time).
+    # Each is a hard reject when True; agent can override via chart metadata
+    # (override_reason / description carrying explicit acknowledgment).
+    ENFORCE_STOCK_FLOW_DISCIPLINE: bool = True
+    ENFORCE_RESIDUAL_BUCKET_DISCLOSURE: bool = True
+    ENFORCE_STATIONARITY_ON_CORRELATIONS: bool = True
+    ENFORCE_AGGREGATOR_VOLUME_DEDUP: bool = True
+    ENFORCE_DISCOVERED_MODEL_COVERAGE: bool = True
+
+    # Stock-measure column names recognised by the stock/flow heuristic.
+    # Extend in env if domain-specific stock columns appear (e.g. wave-2 metrics).
+    STOCK_MEASURE_COLUMNS_EXTRA: list[str] = []
+
     # Report serving
     REPORT_SERVER_PORT: int = 0  # 0 = disabled; set to e.g. 8765 for HTTP serving
     REPORT_BASE_URL: str = ""   # Override full URL prefix for deployed setups

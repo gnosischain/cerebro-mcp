@@ -11,6 +11,15 @@ import threading
 from dataclasses import dataclass, field
 
 from cerebro_mcp.config import settings
+from cerebro_mcp.observability import (
+    observe_discovered_model_coverage,
+    observe_quality_gate,
+)
+from cerebro_mcp.tools.sql_heuristics import (
+    DEFAULT_STOCK_COLUMNS,
+    HeuristicViolation,
+    evaluate_all,
+)
 
 _STATISTICAL_RE = re.compile(
     r"quantile|quantiles|stddev|corr|covar|simpleLinearRegression"
@@ -35,6 +44,13 @@ class SessionState:
     explored_models: set[str] = field(default_factory=set)
     explored_tables: set[str] = field(default_factory=set)
     verified_query_surfaces: set[str] = field(default_factory=set)
+    # Models surfaced by search_models / discover_models / discover_metrics
+    # but not (yet) explicitly explored or queried. The discovered-model
+    # coverage gate compares this to verified_query_surfaces + explored_models.
+    discovered_models: set[str] = field(default_factory=set)
+    # Models the agent explicitly excludes from a report — populated via
+    # `record_model_exclusion(name, reason)` so the coverage gate can ignore them.
+    excluded_models: set[str] = field(default_factory=set)
 
     # Execution tracking
     execute_query_count: int = 0
@@ -138,11 +154,23 @@ class SessionState:
         results_count: int,
         *,
         source: str = "raw",
+        model_names: list[str] | None = None,
     ) -> None:
         with self.lock:
             self.search_models_count += 1
+            if model_names:
+                self.discovered_models.update(model_names)
             if source == "raw":
                 self._record_path_unlocked("raw")
+
+    def record_model_exclusion(self, model_name: str, reason: str = "") -> None:
+        """Mark a discovered model as deliberately excluded from the report.
+
+        Suppresses the discovered-model-coverage gate for this model.
+        The reason is recorded in the session trace for auditability.
+        """
+        with self.lock:
+            self.excluded_models.add(model_name)
 
     def record_get_model_details(
         self,
@@ -441,6 +469,113 @@ class SessionState:
                     "plot to visualize strong correlations (|r| > 0.5)."
                 )
 
+            # ── Quality-discipline gates ───────────────────────────
+            # SQL-text heuristics over each chart's SQL. Each gate is
+            # individually toggleable via settings; metadata-based override
+            # works when the chart's title/description acknowledges the
+            # antipattern (see _shared_quality_rules.md).
+            heuristic_enabled = {
+                "stock_flow": settings.ENFORCE_STOCK_FLOW_DISCIPLINE,
+                "residual_bucket": settings.ENFORCE_RESIDUAL_BUCKET_DISCLOSURE,
+                "stationarity": settings.ENFORCE_STATIONARITY_ON_CORRELATIONS,
+                "aggregator_dedup": settings.ENFORCE_AGGREGATOR_VOLUME_DEDUP,
+            }
+            if any(heuristic_enabled.values()):
+                stock_cols = frozenset(DEFAULT_STOCK_COLUMNS).union(
+                    settings.STOCK_MEASURE_COLUMNS_EXTRA or []
+                )
+                violations: list[HeuristicViolation] = []
+                for chart_id, chart in chart_registry.items():
+                    chart_sql = chart.get("sql", "") or ""
+                    if not chart_sql:
+                        continue
+                    chart_meta = {
+                        "title": chart.get("title", ""),
+                        "subtitle": chart.get("subtitle", ""),
+                        "description": chart.get("description", ""),
+                        "override_reason": chart.get("override_reason", ""),
+                    }
+                    violations.extend(evaluate_all(
+                        chart_id=chart_id,
+                        sql=chart_sql,
+                        chart_metadata=chart_meta,
+                        enabled=heuristic_enabled,
+                        stock_columns=stock_cols,
+                    ))
+
+                # Telemetry: count pass/fail per rule across the chart set.
+                # A rule "passes" for a chart when no violation is recorded.
+                violations_by_rule: dict[str, int] = {}
+                for v in violations:
+                    violations_by_rule[v.rule] = (
+                        violations_by_rule.get(v.rule, 0) + 1
+                    )
+                rule_to_setting = {
+                    "stock_flow_discipline": "stock_flow",
+                    "residual_bucket_disclosure": "residual_bucket",
+                    "stationarity_on_correlations": "stationarity",
+                    "aggregator_volume_dedup": "aggregator_dedup",
+                }
+                for rule_name, settings_key in rule_to_setting.items():
+                    if not heuristic_enabled.get(settings_key, False):
+                        continue
+                    failures = violations_by_rule.get(rule_name, 0)
+                    passes = max(0, len(chart_registry) - failures)
+                    for _ in range(passes):
+                        observe_quality_gate(rule_name, "pass")
+                    for _ in range(failures):
+                        observe_quality_gate(rule_name, "fail")
+
+                if violations:
+                    detail_lines = [
+                        f"- {v.chart_id} [{v.rule}]: {v.message}"
+                        for v in violations
+                    ]
+                    return False, (
+                        "Quality discipline violation(s) on "
+                        f"{len(violations)} chart(s). Either rewrite the SQL "
+                        "to follow the rules in `_shared_quality_rules.md`, "
+                        "or attach an explicit `override_reason` / "
+                        "`description` to the chart that acknowledges the "
+                        "antipattern with a stated reason.\n\n"
+                        + "\n".join(detail_lines)
+                    ), []
+
+            # Discovered-model coverage gate: every model surfaced by
+            # search_models / discover_models that is not explored, queried,
+            # or explicitly excluded counts as an unused discovery.
+            if settings.ENFORCE_DISCOVERED_MODEL_COVERAGE and self.discovered_models:
+                covered = (
+                    self.explored_models
+                    | self.verified_query_surfaces
+                    | self.excluded_models
+                )
+                uncovered = self.discovered_models - covered
+                if uncovered:
+                    observe_discovered_model_coverage("fail")
+                    observe_quality_gate("discovered_model_coverage", "fail")
+                    sample = ", ".join(sorted(uncovered)[:10])
+                    extra = (
+                        f" (and {len(uncovered) - 10} more)"
+                        if len(uncovered) > 10
+                        else ""
+                    )
+                    return False, (
+                        f"Discovered-but-unused models: {len(uncovered)} "
+                        f"model(s) returned by `search_models` / "
+                        f"`discover_models` were never queried with "
+                        f"`execute_query` / `start_query`, never explored "
+                        f"with `get_model_details`, and were not marked as "
+                        f"excluded via `record_model_exclusion`. "
+                        f"Either query them, get details on them, or call "
+                        f"`record_model_exclusion(name, reason)` for each "
+                        f"one before generating the report. "
+                        f"Uncovered: {sample}{extra}."
+                    ), []
+                else:
+                    observe_discovered_model_coverage("pass")
+                    observe_quality_gate("discovered_model_coverage", "pass")
+
         return True, "", warnings
 
     # ── Reporting helpers ───────────────────────────────────────────
@@ -464,6 +599,28 @@ class SessionState:
 
     # ── Reset ───────────────────────────────────────────────────────
 
+    def begin_analysis_cycle(self) -> None:
+        """Reset per-analysis discovery and execution accumulators.
+
+        Called at the start of each new analysis cycle (i.e. each
+        ``preflight_analytics_request``) so discovery state from prior
+        sessions cannot leak into the discovered-model coverage gate or
+        the chart-precondition counters. Preserves semantic preflight
+        cache so repeated identical preflights still hit the cache.
+        """
+        with self.lock:
+            self.search_models_count = 0
+            self.explored_models.clear()
+            self.explored_tables.clear()
+            self.verified_query_surfaces.clear()
+            self.discovered_models.clear()
+            self.excluded_models.clear()
+            self.execute_query_count = 0
+            self.generate_chart_count = 0
+            self.statistical_query_count = 0
+            self.correlation_query_count = 0
+            self.chart_types_generated.clear()
+
     def reset(self) -> None:
         """Clear all tracked state. Called after successful generate_report."""
         with self.lock:
@@ -471,6 +628,8 @@ class SessionState:
             self.explored_models.clear()
             self.explored_tables.clear()
             self.verified_query_surfaces.clear()
+            self.discovered_models.clear()
+            self.excluded_models.clear()
             self.execute_query_count = 0
             self.generate_chart_count = 0
             self.statistical_query_count = 0

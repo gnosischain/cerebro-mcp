@@ -24,8 +24,8 @@ def test_run_query_caps_tool_rows_and_wraps_existing_limit():
     rows = [[idx] for idx in range(500)]
     fake_result = SimpleNamespace(column_names=["id"], result_rows=rows)
     fake_client = SimpleNamespace(
-        query_arrow=lambda sql: (_ for _ in ()).throw(RuntimeError("no arrow")),
-        query=lambda sql: fake_result,
+        query_arrow=lambda sql, parameters=None: (_ for _ in ()).throw(RuntimeError("no arrow")),
+        query=lambda sql, parameters=None: fake_result,
     )
 
     with patch.object(manager, "get_client", return_value=fake_client):

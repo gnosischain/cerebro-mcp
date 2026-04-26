@@ -599,6 +599,57 @@ def test_storyteller_generate_story_report_research_default(
     assert len(files) == 1
 
 
+def test_storyteller_generate_story_report_scrollytelling_style(
+    valid_brief, valid_big_idea, valid_storyboard, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+    mcp = FastMCP("test-storyteller-scrolly")
+    register_storyteller_tools(mcp)
+
+    _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard)
+    generate = mcp._tool_manager._tools["storyteller_generate_story_report"].fn
+
+    result = generate(style="scrollytelling")
+    assert not result.isError, result.content[0].text
+    structured = result.structuredContent
+    assert structured["presentation_mode"] == "scrollytelling"
+    meta = structured["case_study_metadata"]
+    assert meta["deck"].startswith("The summer learning pilot")
+    assert len(meta["key_points"]) >= 3
+
+    files = list(tmp_path.glob("cerebro_case_study_*.html"))
+    assert len(files) == 1
+
+
+def test_case_study_metadata_from_snapshot_maps_fields(
+    valid_brief, valid_big_idea, valid_storyboard
+):
+    from cerebro_mcp.tools.storyteller import _case_study_metadata_from_snapshot
+
+    _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard)
+    snap = storyteller_state.snapshot()
+    meta = _case_study_metadata_from_snapshot(snap)
+
+    assert meta["deck"].startswith("The summer learning pilot")
+    assert len(meta["key_points"]) >= 3
+    assert meta["category"]  # derived from brief.mechanism
+
+
+def test_storyteller_generate_story_report_rejects_unknown_style(
+    valid_brief, valid_big_idea, valid_storyboard, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+    mcp = FastMCP("test-storyteller-bad-style")
+    register_storyteller_tools(mcp)
+
+    _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard)
+    generate = mcp._tool_manager._tools["storyteller_generate_story_report"].fn
+
+    result = generate(style="bogus")
+    assert result.isError
+    assert "Unknown style" in result.content[0].text
+
+
 def test_storyteller_generate_story_report_dashboard_opt_out(
     valid_brief, valid_big_idea, valid_storyboard, tmp_path, monkeypatch
 ):

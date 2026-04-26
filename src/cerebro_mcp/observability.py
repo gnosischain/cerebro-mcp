@@ -306,6 +306,54 @@ cerebro_report_token_auth_total = Counter(
     ("status",),
 )
 
+# ---------------------------------------------------------------------------
+# Quality-discipline gate counters
+# ---------------------------------------------------------------------------
+# Fired by `tools/session_state.py:check_report_preconditions` whenever a
+# quality-discipline gate evaluates a chart / report. `outcome` is one of
+# `pass`, `fail`, `warn`, `override`.
+
+cerebro_quality_gate_evaluations_total = Counter(
+    "cerebro_quality_gate_evaluations_total",
+    "Quality-discipline gate evaluations on report-time charts.",
+    ("rule", "outcome"),
+)
+
+cerebro_quality_report_generations_total = Counter(
+    "cerebro_quality_report_generations_total",
+    "Report-generation attempts grouped by terminal gate outcome.",
+    ("report_type", "outcome"),
+)
+
+cerebro_discovered_model_coverage_total = Counter(
+    "cerebro_discovered_model_coverage_total",
+    "Discovered-model coverage outcome at report-generation time.",
+    ("outcome",),
+)
+
+
+def observe_quality_gate(rule: str, outcome: str) -> None:
+    """Record a quality-discipline gate evaluation.
+
+    `rule` is one of `stock_flow_discipline`, `residual_bucket_disclosure`,
+    `stationarity_on_correlations`, `aggregator_volume_dedup`,
+    `discovered_model_coverage`. `outcome` is `pass`, `fail`, `warn`, or
+    `override`.
+    """
+    cerebro_quality_gate_evaluations_total.labels(rule=rule, outcome=outcome).inc()
+
+
+def observe_report_generation(report_type: str, outcome: str) -> None:
+    """Record a report generation attempt with its terminal outcome."""
+    cerebro_quality_report_generations_total.labels(
+        report_type=report_type, outcome=outcome
+    ).inc()
+
+
+def observe_discovered_model_coverage(outcome: str) -> None:
+    """Record discovered-model coverage outcome for a report."""
+    cerebro_discovered_model_coverage_total.labels(outcome=outcome).inc()
+
 
 SEMANTIC_ENABLED_STATES = (
     "disabled",

@@ -33,6 +33,15 @@ Never skip the `generate_charts` -> `generate_report` pipeline.
 - At least 1 scatter/heatmap chart OR correlation query (relational analysis)
 - At least 1 statistical query (quantiles/stddev/corr)
 - At least 2 exploratory queries
+- **Quality-discipline checks** (each rule independently toggleable in `settings.py`):
+    - **stock_flow_discipline** — rejects `SUM(tvl_usd|balance|supply|cumulative_*)` over a date range without a point-in-time constraint. TVL etc. are stock measures; aggregating over time is meaningless. Suggested fix: `argMax(col, date)` or `WHERE date = (SELECT max(date) ...)` or use the canonical snapshot model.
+    - **residual_bucket_disclosure** — rejects `WHERE label != ''` / `WHERE col IS NOT NULL` filters that exclude residual buckets without acknowledging the exclusion in the chart title/subtitle/description.
+    - **stationarity_on_correlations** — rejects `corr(x, y)` over a series with a `date` / `month` / `week` column unless the SQL or chart metadata mentions stationarity, first-differencing, Spearman, ADF, cointegration, or `lagInFrame`.
+    - **aggregator_volume_dedup** — rejects `SUM(volume_usd)` over `fct_execution_pools_daily` / `fct_execution_trades_by_protocol_daily` / `fct_execution_trades_by_token_daily` without a deduplication CTE or first-hop-only acknowledgment.
+    - **discovered_model_coverage** — rejects reports where any model returned by `search_models` / `discover_models` was not subsequently queried (`execute_query` / `start_query`) or explored (`get_model_details`) or excluded with a stated reason via `record_model_exclusion(name, reason)`.
+- All eight design principles are documented in [`src/cerebro_mcp/prompts/agents/_shared_quality_rules.md`](src/cerebro_mcp/prompts/agents/_shared_quality_rules.md). Every analysis persona references this file at the top of its operational rules.
+
+**Telemetry**: gate evaluations and discovered-model coverage are recorded as Prometheus counters (`cerebro_quality_gate_evaluations_total`, `cerebro_quality_report_generations_total`, `cerebro_discovered_model_coverage_total`). The `quality_metrics` MCP tool returns a markdown summary of in-process counts; for long-window analysis scrape `/metrics`.
 
 **After `generate_report` or `open_report` succeeds:**
 - ALWAYS include the file:// link from the tool response in your reply
@@ -43,9 +52,9 @@ Never skip the `generate_charts` -> `generate_report` pipeline.
 Use `list_reports()` and `open_report(id)` to reopen past reports. The list
 includes both dashboard reports and research-essay reports (`kind` column).
 
-### When to use `generate_research_report` instead of `generate_report`
+### Picking a report tool
 
-Both tools share the chart pipeline and enforcement gates. Pick based on the
+All tools share the chart pipeline and enforcement gates. Pick based on the
 artifact the user is asking for:
 
 - **`generate_report`** — analytical dashboard. Dense charts, grids, KPIs,
@@ -58,13 +67,27 @@ artifact the user is asking for:
   `{{figure:CHART_ID caption="..." source="..."}}`, `{{pullquote}}`,
   `{{callout kind=...}}`, `{{sidebar title="..."}}`, and `[^fnid]` footnotes.
   Standard `{{chart:ID}}` and `{{grid:N}}` still work inline.
+- **`generate_case_study_report`** — scrollytelling layout modeled on
+  Anthropic customer-story pages. Use when the deliverable is a marketing
+  case study, customer story, growth pitch, or narrative-first investor
+  update — i.e. persuasion with scroll-triggered visuals, NOT a whitepaper
+  or dashboard. Requires `deck` and `key_points` (3–6). Supports extra
+  markdown directives:
+  `{{scene chart="..." side="left|right"}} ... {{/scene}}` (sticky visual +
+  scrolling narrative), `{{step chart="..." state="..."}} ... {{/step}}`
+  inside a scene (stepped chart beats), `{{reveal}} - bullet ... {{/reveal}}`
+  (progressive bullet reveal), `{{image src="..." caption="..."
+  full_bleed=true}}` (full-bleed imagery), `{{cta label="..." href="..."}}`.
+  Optional structured `hero_image`, `hero_chart_id`, and `cta` args.
 - **`storyteller_generate_story_report`** — final step of the storyteller
-  pipeline (memos, decision briefs, investor updates, narrative-first
-  deliverables). Defaults to the **research-essay layout**, automatically
-  populating `deck` from the recorded big idea, `key_takeaways` from
-  storyboard scene intents, and `category` from the context-brief mechanism.
-  Pass `style="dashboard"` to opt back into the original dashboard layout
-  for back-compat.
+  pipeline (memos, decision briefs, pitches, investor updates, narrative-first
+  deliverables).
+    - Default `style="research"` → research-essay layout.
+    - `style="scrollytelling"` → case-study / growth-pitch layout. Natural
+      fit when the context-brief mechanism is pitch / customer-story /
+      investor-update. Maps big idea → deck, storyboard scene intents →
+      key_points, context-brief mechanism → category.
+    - `style="dashboard"` → standard dashboard layout (back-compat).
 
 **Key takeaways formatting:**
 - Key takeaways / summary sections in reports MUST use a 3-column table:

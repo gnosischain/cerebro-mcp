@@ -251,6 +251,34 @@ LIMIT {limit:UInt32}
             return f"Error: {e}"
 
     @mcp.tool()
+    def record_model_exclusion(
+        model_name: str,
+        reason: str = "",
+    ) -> str:
+        """Mark a model surfaced by `search_models` / `discover_models` as
+        deliberately excluded from the current analysis. This suppresses the
+        discovered-model coverage gate for that model so it does not block
+        `generate_report` / `generate_research_report` /
+        `generate_case_study_report`.
+
+        Use when a discovered model is out of scope for the current report
+        (wrong topic, downstream of the chosen lineage, or covered by a
+        sibling model that was queried). Always pass a short `reason` for
+        audit trail.
+        """
+        from cerebro_mcp.tools.session_state import state
+
+        if not model_name or not isinstance(model_name, str):
+            return "Error: model_name is required"
+        state.record_model_exclusion(model_name.strip(), reason.strip())
+        excluded_count = len(state.excluded_models)
+        return (
+            f"Excluded '{model_name}' from coverage gate "
+            f"(reason: {reason or 'unspecified'}). "
+            f"Total excluded this cycle: {excluded_count}."
+        )
+
+    @mcp.tool()
     def describe_table(
         table: str,
         database: str = "dbt",
