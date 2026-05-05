@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 
 def normalize(text: str) -> str:
@@ -94,3 +94,36 @@ def score_metric(query: str, metric: dict[str, Any]) -> int:
     if metric.get("module") == infer_module_from_query(q):
         score += 15
     return score
+
+
+def rrf_fuse(
+    rankings: Sequence[Iterable[str]],
+    k: int = 60,
+    top_k: int | None = None,
+) -> list[tuple[str, float]]:
+    """Reciprocal Rank Fusion across multiple ranked lists.
+
+    Each input is an ordered iterable of item identifiers (e.g. model names),
+    best-first. The output is a single fused ranking sorted by descending RRF
+    score. The constant `k=60` is the value from the original Cormack/Clarke/
+    Buettcher (2009) paper; it dampens the contribution of low-rank items so
+    that an item appearing at rank 1 in any list dominates one appearing at
+    rank 30 in two lists, which is what we want when mixing keyword + token
+    overlap rankings of dbt models.
+
+    Items missing from a ranking simply contribute 0 from that list — there
+    is no penalty for absence. Duplicates within a single ranking are
+    collapsed (only the first occurrence's rank counts).
+    """
+    scores: dict[str, float] = {}
+    for ranking in rankings:
+        seen: set[str] = set()
+        for rank, name in enumerate(ranking, start=1):
+            if name in seen:
+                continue
+            seen.add(name)
+            scores[name] = scores.get(name, 0.0) + 1.0 / (k + rank)
+    fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    if top_k is not None:
+        fused = fused[:top_k]
+    return fused

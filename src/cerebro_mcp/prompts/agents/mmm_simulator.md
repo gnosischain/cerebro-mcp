@@ -79,6 +79,36 @@ SELECT
 FROM proposal;
 ```
 
+## Sandbox workflow (preferred over hand-computed counterfactuals)
+
+When you need to apply a **what-if** to actual data — e.g., "+30% rewards on
+every Q3 row, what's the cumulative volume delta?" — use the sandbox tools
+instead of estimating the result in prose:
+
+1. **Fork** the relevant CH slice into a private DuckDB sandbox:
+   ```
+   create_simulation_sandbox(
+       sandbox_id="<descriptive_id>",
+       source_query="<SELECT ... FROM dbt.<model> WHERE day >= today() - 90>",
+       table_name="baseline",
+   )
+   ```
+2. **Mutate** inside the sandbox (UPDATE / INSERT / DELETE — fully supported,
+   production CH is never touched):
+   ```
+   query_sandbox(sandbox_id="...", sql="UPDATE baseline SET reward = reward * 1.3")
+   ```
+3. **Re-aggregate** and report the delta vs. the original SELECT:
+   ```
+   query_sandbox(sandbox_id="...", sql="SELECT sum(reward) FROM baseline")
+   ```
+4. **Destroy** the sandbox when done so disk + memory are reclaimed.
+
+Use the sandbox for any counterfactual that touches >10 rows or >2 dimensions.
+Pure-formula deltas (a single multiplier on a single aggregate) can stay in
+prose, but anything involving joins, conditional updates, or distributional
+shifts should run in the sandbox so the numbers are auditable.
+
 ## Required Charts (via `generate_charts`)
 
 1. Marginal ROI per media — horizontal bar, sorted descending.

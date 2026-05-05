@@ -144,6 +144,26 @@ def register_query_tools(
                 warnings=result.warnings,
                 extra_notes=extra_notes,
             )
+            # Step 1 expansion — record the query in the workflow event
+            # log. Only fires when the agent passed `research_project_id`,
+            # so non-research queries don't pollute the log. Captures sql
+            # preview, row count, latency, evidence_title, and the
+            # artifact_ref_id when persist_result was set. Resume can
+            # then surface "agent ran 88 queries, 3 failed" instead of
+            # nothing.
+            if research_project_id:
+                from cerebro_mcp.event_store_sync import (
+                    record_research_query_executed,
+                )
+                record_research_query_executed(
+                    project_id=research_project_id,
+                    sql=executed.sql,
+                    database=executed.database,
+                    row_count=result.row_count,
+                    elapsed_seconds=result.elapsed_seconds,
+                    evidence_title=evidence_title,
+                    artifact_ref_id=result_ref_id,
+                )
             return result.model_copy(
                 update={
                     "summary_markdown": summary,
@@ -152,6 +172,32 @@ def register_query_tools(
             )
         except Exception as e:
             error_msg = str(e)
+            # Step 1 expansion — record the failed query too. The agent
+            # on resume sees "queries that failed with what error_class"
+            # so it doesn't blindly retry the same hallucinated SQL.
+            if research_project_id:
+                try:
+                    from cerebro_mcp.event_store_sync import (
+                        record_research_query_executed,
+                    )
+                    # Best-effort error class extraction: "Code: NN" comes
+                    # from ClickHouse messages; otherwise use exception type.
+                    import re as _re
+                    m = _re.search(r"Code:\s*(\d+)", error_msg)
+                    error_class = (
+                        f"clickhouse_code_{m.group(1)}" if m
+                        else type(e).__name__
+                    )
+                    record_research_query_executed(
+                        project_id=research_project_id,
+                        sql=sql, database=database,
+                        row_count=0, elapsed_seconds=0.0,
+                        evidence_title=evidence_title,
+                        error_class=error_class,
+                    )
+                except Exception:
+                    # Event-log failure must never break a tool response.
+                    pass
             if "UNKNOWN_IDENTIFIER" in error_msg or "Unknown expression" in error_msg:
                 import re
 

@@ -24,6 +24,17 @@ from cerebro_mcp.research_models import (
     VerificationResult,
 )
 from cerebro_mcp.research_store import ResearchStore
+from cerebro_mcp.event_store_sync import (
+    record_research_evidence_attached,
+    record_research_finding_recorded,
+    record_research_memory_recorded,
+    record_research_peer_review,
+    record_research_phase_completed,
+    record_research_phase_planned,
+    record_research_published,
+    record_research_started,
+    record_research_verification,
+)
 from cerebro_mcp.research_workflow import (
     advance_phase,
     build_phase_detail,
@@ -236,6 +247,11 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 scope=scope,
                 target_models=target_models or [],
             )
+            # Phase 3: register the project as a workflow in the event log
+            # so phase transitions and peer-review verdicts become
+            # replayable. Failures here are intentionally swallowed —
+            # event-log writes are observability, not correctness.
+            record_research_started(project.project_id, hypothesis, scope)
             return _project_summary(store, project.project_id)
         except Exception as e:
             return f"Error: {e}"
@@ -262,6 +278,9 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
             project.phases[phase].plan_markdown = plan_markdown.strip()
             project.phases[phase].status = "planned"
             store.save_project(project)
+            # Phase 3: emit the phase_planned event AFTER persistence so
+            # the event log is consistent with the on-disk state.
+            record_research_phase_planned(project_id, phase, plan_markdown)
             return build_phase_detail(project, phase)
         except Exception as e:
             return f"Error: {e}"
@@ -287,6 +306,11 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
             )
             advance_phase(project)
             store.save_project(project)
+            # Phase 3: record the completion + the new current_phase so
+            # replay knows where to pick up.
+            record_research_phase_completed(
+                project_id, phase, advanced_to=project.current_phase,
+            )
             return build_phase_detail(project, phase)
         except Exception as e:
             return f"Error: {e}"
@@ -408,6 +432,14 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 summary=summary or resolved_summary,
             )
             store.append_evidence(project_id, evidence)
+            # Step 1 expansion — surface evidence attachments in the
+            # workflow event stream so resume can list "3 execution-phase
+            # query results attached" without rescanning the on-disk
+            # research_store.
+            record_research_evidence_attached(
+                project_id, kind=kind, ref_id=final_ref_id,
+                phase=str(phase), title=evidence.title,
+            )
             return evidence
         except Exception as e:
             return f"Error: {e}"
@@ -445,6 +477,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 summary=f"Schema snapshot for {database}.{table}",
             )
             store.append_evidence(project_id, evidence)
+            record_research_evidence_attached(
+                project_id, kind="schema_snapshot", ref_id=ref_id,
+                phase=str(phase), title=evidence.title,
+            )
             return evidence
         except Exception as e:
             return f"Error: {e}"
@@ -474,6 +510,15 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 evidence_refs=validated_refs,
             )
             store.append_memory(project_id, entry)
+            # Step 1 expansion — surface the observation in the workflow
+            # event stream. Critical for resume: lets `recompute_workflow_resume_hint`
+            # show "agent recorded 3 observations including 'marketplace
+            # has TWO distinct activity waves...'" instead of just the
+            # phase name.
+            record_research_memory_recorded(
+                project_id, memory_id=entry.id, kind=entry.kind,
+                statement=entry.statement, confidence=entry.confidence,
+            )
             return entry
         except Exception as e:
             return f"Error: {e}"
@@ -501,6 +546,12 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 evidence_refs=validated_refs,
             )
             store.append_finding(project_id, finding)
+            # Step 1 expansion — surface the conclusion in the event log.
+            record_research_finding_recorded(
+                project_id, finding_id=finding.id,
+                title=finding.title, confidence=finding.confidence,
+                evidence_count=len(finding.evidence_refs),
+            )
             return finding
         except Exception as e:
             return f"Error: {e}"
@@ -596,6 +647,15 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
             project.phases["verification"].verification_summary = summary
             store.save_project(project)
 
+            # Phase 3: emit verification_completed + flip the gate. The
+            # gate status drives the dispatcher's "no publication without
+            # passing verification" rule once the dispatcher is consulted.
+            record_research_verification(
+                project_id, "verification",
+                passed=(overall_status != "failed"),
+                summary=summary,
+            )
+
             return VerificationResult(
                 project_id=project_id,
                 checks=checks,
@@ -652,6 +712,14 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 else "reviewed"
             )
             store.save_project(project)
+            # Phase 3: peer-review verdict flips the canonical gate the
+            # dispatcher checks before allowing publication.
+            record_research_peer_review(
+                project_id,
+                status=("approved" if result.overall_decision != "rejected"
+                        else "rejected"),
+                summary=getattr(result, "summary", "") or "",
+            )
             return result
         except Exception as e:
             return f"Error: {e}"
@@ -689,6 +757,9 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
             project.phases["publication"].status = "completed"
             project.status = "completed"
             store.save_project(project)
+            # Phase 3: workflow terminates — record the published artifact
+            # and mark the workflow as completed in the event log.
+            record_research_published(project_id, report["report_id"], title)
             summary = truncate_response(
                 f"## Published report\n\n"
                 f"- Project: `{project_id}`\n"

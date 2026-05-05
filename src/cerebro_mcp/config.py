@@ -87,6 +87,36 @@ class Settings(BaseSettings):
     # Manifest refresh
     MANIFEST_REFRESH_INTERVAL_SECONDS: int = 300
 
+    # Phase 1: column-scoped schema injection. Tables narrower than the
+    # threshold are injected verbatim into LLM prompts; wider tables are
+    # BM25-scoped to the top K columns plus key/date columns.
+    SQL_COMPILER_FULL_SCHEMA_THRESHOLD: int = 30
+    SQL_COMPILER_TOP_COLUMNS: int = 20
+
+    # Phase 2: DuckDB + Parquet simulation sandbox. CH data is exported
+    # into a private DuckDB instance per sandbox so simulator agents can
+    # run UPDATE/INSERT/DELETE on a snapshot without touching production.
+    SANDBOX_ROOT: str = ".cerebro/sandboxes"
+    SANDBOX_MAX_CONCURRENT: int = 4         # LRU-evicted past this
+    SANDBOX_TTL_SECONDS: int = 1800         # 30 min idle → swept
+    SANDBOX_MAX_BYTES_PER_EXPORT: int = 2 * 1024 * 1024 * 1024   # 2 GB
+
+    # Phase 3: resumable gated workflows. SQLite event log records every
+    # phase transition / LLM call / gate flip so a workflow that's
+    # interrupted (Anthropic 529, network blip, kill -9) can be replayed
+    # without losing the queries it already ran.
+    EVENT_STORE_PATH: str = ".cerebro/cerebro_state.db"
+    # Workflows older than this in `running` / `waiting_gate` state are
+    # marked `orphaned` on server startup. 24h covers a long quarterly
+    # review without nuking a workflow that's legitimately paused for
+    # human review overnight.
+    WORKFLOW_ORPHAN_AGE_SECONDS: int = 24 * 60 * 60
+    # Compress event payloads larger than this with gzip before insert.
+    # LLM message-history payloads can be 10-100 KB per turn.
+    EVENT_PAYLOAD_COMPRESSION_THRESHOLD_BYTES: int = 4096
+    # Cap on workers in the parallel fan-out runner (analyst sub-tasks).
+    WORKFLOW_MAX_PARALLEL: int = 8
+
     # Agent enforcement settings
     ENFORCE_CHART_PRECONDITIONS: bool = True
     MIN_MODELS_DETAILED: int = 3      # get_model_details calls required

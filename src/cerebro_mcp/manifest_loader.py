@@ -6,10 +6,17 @@ import re
 import time
 from typing import Any, Optional
 
+import networkx as nx
 import requests
 
 from cerebro_mcp.artifact_loader import local_artifact_candidates
 from cerebro_mcp.config import settings
+from cerebro_mcp.semantic_bm25 import (
+    BM25Index,
+    ColumnBM25Index,
+    build_bm25_indices_from_manifest_data,
+)
+from cerebro_mcp.semantic_index import rrf_fuse
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +34,13 @@ class ManifestLoader:
         self._search_index: dict[str, str] = {}
         self._tests_by_model: dict[str, list[dict]] = {}
         self._owner_index: dict[str, list[str]] = {}
+        # Phase 1: BM25 search + networkx lineage. Built once per manifest
+        # reload by `_build_indexes_internal` and swapped atomically with
+        # the rest of the indexes.
+        self._bm25_models: BM25Index = BM25Index([])
+        self._bm25_columns: ColumnBM25Index = ColumnBM25Index([])
+        self._lineage_graph: nx.DiGraph = nx.DiGraph()
+        self._unique_id_by_name: dict[str, str] = {}
         self._loaded = False
 
         # Conditional GET state
@@ -216,12 +230,32 @@ class ManifestLoader:
                 if owner:
                     owner_index.setdefault(owner, []).append(name)
 
-                # Include owner in searchable text
+                # Include owner in searchable text.
+                #
+                # Phase 1.5: enrich with column metadata and path tokens.
+                # Column names + descriptions are the most direct query→data
+                # signal in the manifest. Path tokens (e.g. "execution dex
+                # marts") add category context that's missing from generic
+                # descriptions like "Daily aggregate". Both are appended at
+                # the end so BM25's IDF still gives the most weight to
+                # distinctive tokens in the model name and description.
+                #
+                # `meta.inference_notes` is included when present — analysts
+                # author it specifically for retrieval.
                 desc = node.get("description", "")
                 tags_str = " ".join(node.get("tags", []))
+                column_text = " ".join(
+                    f"{col_name} {(col_meta or {}).get('description', '')}"
+                    for col_name, col_meta in (node.get("columns") or {}).items()
+                )
+                path_tokens = path.replace("/", " ").replace(".sql", "")
+                inference_notes = ""
+                if meta and isinstance(meta, dict):
+                    inference_notes = str(meta.get("inference_notes", "") or "")
                 search_index[name] = (
                     f"{name.lower()} {desc.lower()} {tags_str.lower()}"
-                    f" {owner.lower()}"
+                    f" {owner.lower()} {column_text.lower()}"
+                    f" {path_tokens.lower()} {inference_notes.lower()}"
                 )
 
             elif resource_type == "test":
@@ -279,6 +313,44 @@ class ManifestLoader:
             len(module_index),
         )
 
+        # --- Phase 1: BM25 indices over models + columns --------------------
+        # Pure data — picklable, safe to rebuild in a worker process if Phase 4
+        # later offloads manifest parsing.
+        bm25_models, bm25_columns = build_bm25_indices_from_manifest_data(
+            models, search_index
+        )
+
+        # --- Phase 1: networkx lineage DAG ---------------------------------
+        # Built from the dbt-emitted parent_map / child_map. Nodes are the
+        # full unique_ids ("model.<project>.<name>"), edges go parent -> child.
+        # We additionally hydrate model name -> unique_id for cheap lookups
+        # from public methods that take a model name.
+        lineage_graph = nx.DiGraph()
+        unique_id_by_name: dict[str, str] = {}
+        for model_name, node in models.items():
+            uid = node.get("unique_id", "")
+            if uid:
+                unique_id_by_name[model_name] = uid
+                lineage_graph.add_node(
+                    uid, kind="model", model_name=model_name
+                )
+        # Source nodes are referenced by parent_map entries; add them as
+        # placeholder nodes so ancestor walks don't drop edges silently.
+        for src_key, src_node in sources.items():
+            uid = src_node.get("unique_id", "")
+            if uid:
+                lineage_graph.add_node(
+                    uid, kind="source", source_key=src_key
+                )
+        # Edges: parent_map["model.x.b"] = ["model.x.a"] means a -> b.
+        for child_uid, parents in parent_map.items():
+            if child_uid not in lineage_graph:
+                lineage_graph.add_node(child_uid, kind="unknown")
+            for parent_uid in parents:
+                if parent_uid not in lineage_graph:
+                    lineage_graph.add_node(parent_uid, kind="unknown")
+                lineage_graph.add_edge(parent_uid, child_uid)
+
         return {
             "models": models,
             "sources": sources,
@@ -289,6 +361,10 @@ class ManifestLoader:
             "search_index": search_index,
             "tests_by_model": tests_by_model,
             "owner_index": owner_index,
+            "bm25_models": bm25_models,
+            "bm25_columns": bm25_columns,
+            "lineage_graph": lineage_graph,
+            "unique_id_by_name": unique_id_by_name,
         }
 
     def _apply_indexes(self, indexes: dict) -> None:
@@ -302,6 +378,13 @@ class ManifestLoader:
         self._search_index = indexes["search_index"]
         self._tests_by_model = indexes["tests_by_model"]
         self._owner_index = indexes["owner_index"]
+        # Phase 1 additions — fall back to empty indices for older callers
+        # that may have hand-built an indexes dict (none in tree today, but
+        # `.get` keeps tests forward-compatible).
+        self._bm25_models = indexes.get("bm25_models", BM25Index([]))
+        self._bm25_columns = indexes.get("bm25_columns", ColumnBM25Index([]))
+        self._lineage_graph = indexes.get("lineage_graph", nx.DiGraph())
+        self._unique_id_by_name = indexes.get("unique_id_by_name", {})
 
     @property
     def is_loaded(self) -> bool:
@@ -385,29 +468,44 @@ class ManifestLoader:
                     break
             return results
 
-        # Tokenize query: split on whitespace/underscores, drop short words
+        # ---- Phase 1: hybrid search (token-overlap + BM25 fused via RRF) ----
+        #
+        # The legacy token-overlap scorer is kept because it carries hand-tuned
+        # behavior (substring match, short-token fallback, stable alphabetical
+        # tie-break). BM25 adds proper IDF weighting so that distinctive tokens
+        # (e.g. "trades", "tvl") dominate noise tokens (e.g. "daily", "by").
+        # We fuse the two ranked lists with RRF; items present in both rise.
         tokens = re.split(r"[\s_]+", query.lower())
         tokens = [t for t in tokens if len(t) >= 3]
-
         if not tokens:
-            # All words were too short — use the original query as-is
             tokens = [query.lower()]
 
-        # Score each model by number of matching tokens
-        scored: list[tuple[int, str]] = []
+        token_scored: list[tuple[int, str]] = []
         for name in candidates:
-            searchable = self._search_index[name]
-
+            searchable = self._search_index.get(name, "")
             hits = sum(1 for t in tokens if t in searchable)
             if hits > 0:
-                scored.append((hits, name))
+                token_scored.append((hits, name))
+        token_scored.sort(key=lambda x: (-x[0], x[1]))
+        token_ranking = [name for _, name in token_scored]
 
-        # Sort by relevance (most matching tokens first), then alphabetical
-        scored.sort(key=lambda x: (-x[0], x[1]))
+        # BM25 ranks the entire model corpus; restrict to the candidates
+        # surviving the tag/module filters before fusion.
+        bm25_ranking_full = self._bm25_models.ranking(query, top_k=200)
+        bm25_ranking = [n for n in bm25_ranking_full if n in candidates]
 
-        results = []
-        for _score, name in scored[:limit]:
-            results.append(self._model_summary(self._models[name]))
+        if not token_ranking and not bm25_ranking:
+            return []
+
+        fused = rrf_fuse([token_ranking, bm25_ranking], top_k=limit)
+        results: list[dict[str, Any]] = []
+        for name, _score in fused:
+            node = self._models.get(name)
+            if node is None:
+                continue
+            results.append(self._model_summary(node))
+            if len(results) >= limit:
+                break
         return results
 
     def get_model_details(self, model_name: str) -> Optional[dict[str, Any]]:
@@ -482,6 +580,74 @@ class ManifestLoader:
             result["downstream"] = self._traverse(unique_id, self._child_map, depth)
 
         return result
+
+    # ------------------------------------------------------------------
+    # Phase 1: networkx-backed lineage
+    #
+    # `get_lineage` (above) is kept for API compatibility — it does a bounded
+    # BFS via the dbt-emitted parent_map/child_map. The methods below operate
+    # on the same data via `networkx`, which gives transitive closure
+    # (`ancestors` / `descendants`) cheaply and lets analysts/reviewers ask
+    # "everything upstream" without picking a depth.
+    # ------------------------------------------------------------------
+
+    def _resolve_unique_id(self, model_name: str) -> Optional[str]:
+        """Resolve a dbt model short name to its full unique_id."""
+        return self._unique_id_by_name.get(model_name)
+
+    def upstream(self, model_name: str) -> list[str]:
+        """Return all transitive ancestor model/source unique_ids for `model_name`.
+
+        Uses networkx ancestors over the lineage DAG. Returns [] if the model
+        is unknown. Order is unspecified — callers that need a sorted list
+        should sort by `unique_id` (path-based) themselves.
+        """
+        uid = self._resolve_unique_id(model_name)
+        if uid is None or uid not in self._lineage_graph:
+            return []
+        return list(nx.ancestors(self._lineage_graph, uid))
+
+    def downstream(self, model_name: str) -> list[str]:
+        """Return all transitive descendant model unique_ids for `model_name`."""
+        uid = self._resolve_unique_id(model_name)
+        if uid is None or uid not in self._lineage_graph:
+            return []
+        return list(nx.descendants(self._lineage_graph, uid))
+
+    def upstream_named(self, model_name: str) -> list[str]:
+        """Same as `upstream` but returns short model names (not unique_ids).
+
+        Sources are skipped because they don't have a corresponding dbt model
+        name in `self._models`. Use `upstream` if you need source coverage.
+        """
+        out = []
+        for uid in self.upstream(model_name):
+            data = self._lineage_graph.nodes[uid]
+            if data.get("kind") == "model" and "model_name" in data:
+                out.append(data["model_name"])
+        return out
+
+    def downstream_named(self, model_name: str) -> list[str]:
+        """Same as `downstream` but returns short model names."""
+        out = []
+        for uid in self.downstream(model_name):
+            data = self._lineage_graph.nodes[uid]
+            if data.get("kind") == "model" and "model_name" in data:
+                out.append(data["model_name"])
+        return out
+
+    # ------------------------------------------------------------------
+    # Phase 1: column-scoped BM25 (used by the SQL compiler to keep prompt
+    # context small on wide tables — see `semantic_sql_compiler.py`).
+    # ------------------------------------------------------------------
+
+    def top_columns_for_model(
+        self, model_name: str, query: str, top_k: int = 20
+    ) -> list[str]:
+        """Rank columns of `model_name` by BM25 relevance to `query`."""
+        return self._bm25_columns.top_columns_for_model(
+            model_name, query, top_k=top_k
+        )
 
     def _traverse(
         self, start_id: str, graph: dict[str, list[str]], max_depth: int

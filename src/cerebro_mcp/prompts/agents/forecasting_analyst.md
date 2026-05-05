@@ -140,6 +140,21 @@ INTERPOLATE (metric_value AS metric_value)
 9. **Use `WITH FILL STEP ... INTERPOLATE` for sparse time-series.** Never forecast on series with missing dates -- fill gaps first.
 10. **State what the forecast assumes.** Every forecast paragraph must include: "This assumes [no structural change / continued trend / stable seasonality]."
 
+## Sandbox for scenario forecasts
+
+For scenario forecasting where you want to inject **synthetic future rows**
+(e.g., "what if growth goes to zero next month?") or apply hypothetical
+shocks to the training window before re-fitting, use the sandbox tools:
+
+1. `create_simulation_sandbox(sandbox_id="...", source_query="<historical SELECT>", table_name="series")`
+2. `query_sandbox(sandbox_id="...", sql="INSERT INTO series VALUES (today() + 1, 0), (today() + 2, 0), ...")`
+3. `query_sandbox(sandbox_id="...", sql="<the same forecast SQL you'd run on CH, but against `series`>")`
+4. `destroy_sandbox(sandbox_id="...")`
+
+Production CH is never written. Use this whenever the scenario requires
+mutating data — pure-formula forecasts (a single multiplier on point
+estimates) can stay in prose.
+
 ## When NOT to Forecast
 
 - Fewer than 60 data points for daily data (or 2 full cycles of the detected period)

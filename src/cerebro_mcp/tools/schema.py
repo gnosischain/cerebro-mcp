@@ -113,6 +113,21 @@ def build_table_schema(
         )
     )
 
+    # Phase 1.5 nudge: wide tables blow up LLM context if every column is
+    # carried into the SQL-author prompt. The new `get_relevant_columns`
+    # tool returns a BM25-scoped block (top-K columns + always-keep keys
+    # and date columns). Hint at it from the describe_table response so
+    # agents discover it without needing a persona prompt rewrite.
+    threshold = getattr(settings, "SQL_COMPILER_FULL_SCHEMA_THRESHOLD", 30)
+    if len(columns) > threshold:
+        summary_parts.append(
+            f"\n> **Wide table ({len(columns)} columns).** Before writing SQL, "
+            f"prefer `get_relevant_columns(model_name=\"{table}\", "
+            f"query=\"<your question>\")` to get a focused schema block "
+            "scoped to the columns you actually need (always includes join "
+            "keys and date columns)."
+        )
+
     if record_state:
         from cerebro_mcp.tools.session_state import state
 

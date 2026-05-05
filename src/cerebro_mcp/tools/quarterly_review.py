@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.resources
 import logging
+import uuid
 from typing import Any
 
 from mcp.types import CallToolResult
@@ -421,6 +422,19 @@ def register_quarterly_review_tools(
                 ],
             )
             project_id = project.project_id
+            # Phase 3 / Sprint 2 — register the QBR as a `quarterly_review`
+            # workflow in the event log. Failures here are intentionally
+            # swallowed by the event_store_sync helpers; QBR creation must
+            # never fail because observability did.
+            from cerebro_mcp.event_store_sync import (
+                record_quarterly_review_started,
+            )
+            record_quarterly_review_started(
+                project_id,
+                quarter=quarter_label,
+                hypothesis=f"Quarterly Review {quarter_label}",
+                scope="quarterly_review",
+            )
 
         ctx = _sql_context(quarter_label, compare_label)
 
@@ -720,6 +734,12 @@ def register_quarterly_review_tools(
         from cerebro_mcp.tools.visualization import get_chart_record
 
         evidence_refs: list[EvidenceRef] = []
+        # Phase 3 / Sprint 2 — record evidence in the event log. Resume
+        # handler uses these events to compute the QBR's progress without
+        # rescanning the on-disk research_store.
+        from cerebro_mcp.event_store_sync import (
+            record_quarterly_evidence_attached,
+        )
         for cid in chart_ids:
             rec = get_chart_record(cid)
             chart_title = (rec or {}).get("title") or cid
@@ -733,6 +753,10 @@ def register_quarterly_review_tools(
             )
             store.append_evidence(project_id, evidence)
             evidence_refs.append(evidence)
+            record_quarterly_evidence_attached(
+                project_id, kind="chart", ref_id=cid,
+                quarter=state.get("current_quarter"),
+            )
 
         finding = ResearchFinding(
             title=title,
@@ -816,7 +840,11 @@ def register_quarterly_review_tools(
                 meta_parts.append(f"due={due_date}")
             full_statement = f"{statement} [{', '.join(meta_parts)}]"
 
+        # Pre-existing bug surfaced 2026-04-30 live smoke — `id` is required
+        # on ResearchMemoryEntry but the QBR tool never minted one. Match
+        # the research_memory pattern.
         entry = ResearchMemoryEntry(
+            id=f"mem_{uuid.uuid4().hex[:12]}",
             kind=kind,
             statement=full_statement,
             confidence=0.5,
@@ -824,6 +852,15 @@ def register_quarterly_review_tools(
             evidence_refs=[],
         )
         store.append_memory(project_id, entry)
+        # Step 1 expansion — capture the note in the QBR event log so
+        # resume can surface "agent has 3 priorities and 2 actions
+        # already" instead of just phase + evidence count.
+        from cerebro_mcp.event_store_sync import (
+            record_quarterly_note_recorded,
+        )
+        record_quarterly_note_recorded(
+            project_id, kind=kind, statement=full_statement,
+        )
 
         # Refresh the matching list in view_state.
         if kind == "priority":
@@ -933,6 +970,16 @@ def register_quarterly_review_tools(
         project.phases["publication"].status = "completed"
         project.status = "completed"
         store.save_project(project)
+
+        # Phase 3 / Sprint 2 — workflow terminates. Emit `report_published`
+        # and flip the workflow row to `completed`. Resume handler treats
+        # this as `action: complete` and stops surfacing the workflow.
+        from cerebro_mcp.event_store_sync import (
+            record_quarterly_review_published,
+        )
+        record_quarterly_review_published(
+            project_id, report["report_id"], report_title,
+        )
 
         state["status_message"] = f"Published: {report['report_id'][:8]}"
         mini_apps.patch_view_state(view_id, state)

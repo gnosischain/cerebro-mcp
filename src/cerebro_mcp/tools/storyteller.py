@@ -192,6 +192,65 @@ def register_storyteller_tools(mcp, ch=None) -> None:
     persona routing; data access happens through the standard Cerebro tools.
     """
 
+    # ──────────────────────────────────────────────────────────────────
+    # Phase 3 / Sprint 3 — observability layer.
+    #
+    # Storyteller has only one active session per process (the
+    # `storyteller_state` singleton). We mint a session_id on
+    # `start_session`, hold it in this closure, use it as the workflow_id
+    # for every event we emit during the session, and clear it on
+    # `end_session`. The state machine itself is unchanged — we just
+    # record what's happening.
+    # ──────────────────────────────────────────────────────────────────
+
+    import uuid as _uuid
+    from cerebro_mcp.storyteller_state import _PHASE_ORDER as _ST_PHASE_ORDER
+    from cerebro_mcp.event_store_sync import (
+        record_storyteller_big_idea_recorded,
+        record_storyteller_context_brief_recorded,
+        record_storyteller_final_story_recorded,
+        record_storyteller_gate_failed,
+        record_storyteller_handoff_completed,
+        record_storyteller_phase_advanced,
+        record_storyteller_session_started,
+        record_storyteller_storyboard_recorded,
+        record_storyteller_visual_spec_recorded,
+    )
+
+    # Closure-local mutable holder so the inner event helpers all see
+    # the same active session_id without passing it explicitly.
+    _session = {"id": None}
+
+    def _emit_phase_event_if_changed(
+        before: str, gate_name: str | None = None,
+    ) -> None:
+        """Compare phase before / after a state mutation; emit
+        `phase_advanced` on a forward move, `gate_failed` on a rollback,
+        nothing on a no-op (e.g. visual_spec adding one of N scenes
+        without advancing the phase yet)."""
+        sid = _session["id"]
+        if sid is None:
+            return
+        after = storyteller_state.phase
+        if after == before:
+            return
+        try:
+            before_idx = _ST_PHASE_ORDER.index(before)
+            after_idx = _ST_PHASE_ORDER.index(after)
+        except ValueError:
+            # Unknown phase — emit a phase_advanced anyway so the trail
+            # captures the transition.
+            record_storyteller_phase_advanced(sid, before, after)
+            return
+        if after_idx < before_idx:
+            record_storyteller_gate_failed(
+                sid,
+                gate=gate_name or f"{before}_check",
+                blocking_phase=after,
+            )
+        else:
+            record_storyteller_phase_advanced(sid, before, after)
+
     # ── Session lifecycle ───────────────────────────────────────────
 
     @mcp.tool()
@@ -215,6 +274,11 @@ def register_storyteller_tools(mcp, ch=None) -> None:
         """
         try:
             snap = storyteller_state.start_session()
+            # Sprint 3 — register a new workflow in the event log. Failures
+            # in the event_store_sync helper are silenced; storyteller
+            # operation must never fail because observability did.
+            _session["id"] = _uuid.uuid4().hex[:16]
+            record_storyteller_session_started(_session["id"])
             return _ok(snap, "Storyteller session started.")
         except Exception as exc:  # pragma: no cover - defensive
             return _err(exc)
@@ -224,6 +288,7 @@ def register_storyteller_tools(mcp, ch=None) -> None:
         """End the current storyteller session and clear all artifacts."""
         try:
             snap = storyteller_state.end_session()
+            _session["id"] = None
             return _ok(snap, "Storyteller session ended.")
         except Exception as exc:  # pragma: no cover
             return _err(exc)
@@ -287,7 +352,19 @@ def register_storyteller_tools(mcp, ch=None) -> None:
                 constraints=constraints,
                 success_definition=success_definition,
             )
+            before = storyteller_state.phase
             snap = storyteller_state.record_context_brief(brief)
+            _emit_phase_event_if_changed(before)
+            # Step 1 content event — capture the brief's key signals so
+            # resume sees audience / mechanism / required_action.
+            sid = _session["id"]
+            if sid is not None:
+                record_storyteller_context_brief_recorded(
+                    sid,
+                    audience=audience,
+                    mechanism=mechanism,
+                    required_action=required_action,
+                )
             return _ok(snap, "Context brief recorded.")
         except Exception as exc:
             return _err(exc)
@@ -315,7 +392,14 @@ def register_storyteller_tools(mcp, ch=None) -> None:
         """
         try:
             idea = BigIdea(sentence=sentence, stakes=stakes)
+            before = storyteller_state.phase
             snap = storyteller_state.record_big_idea(idea)
+            _emit_phase_event_if_changed(before)
+            sid = _session["id"]
+            if sid is not None:
+                record_storyteller_big_idea_recorded(
+                    sid, sentence=sentence, stakes=stakes,
+                )
             return _ok(snap, "Big idea recorded.")
         except Exception as exc:
             return _err(exc)
@@ -355,7 +439,17 @@ def register_storyteller_tools(mcp, ch=None) -> None:
                 narrative_order=narrative_order,  # type: ignore[arg-type]
                 rationale=rationale,
             )
+            before = storyteller_state.phase
             snap = storyteller_state.record_storyboard(storyboard)
+            _emit_phase_event_if_changed(before)
+            sid = _session["id"]
+            if sid is not None:
+                record_storyteller_storyboard_recorded(
+                    sid,
+                    scene_count=len(parsed_scenes),
+                    narrative_order=narrative_order,
+                    rationale=rationale,
+                )
             return _ok(snap, f"Storyboard recorded with {len(parsed_scenes)} scenes.")
         except Exception as exc:
             return _err(exc)
@@ -412,7 +506,20 @@ def register_storyteller_tools(mcp, ch=None) -> None:
                 justification=justification,
                 chart_id=chart_id,
             )
+            before = storyteller_state.phase
             snap = storyteller_state.record_visual_spec(spec)
+            # Visual specs are incremental: phase only advances once all
+            # scenes are filled. Helper no-ops on equal phases.
+            _emit_phase_event_if_changed(before)
+            sid = _session["id"]
+            if sid is not None:
+                record_storyteller_visual_spec_recorded(
+                    sid,
+                    scene_index=scene_index,
+                    chart_family=chart_family,
+                    relationship=relationship,
+                    action_title=action_title,
+                )
             return _ok(snap, f"Visual spec recorded for scene {scene_index}.")
         except Exception as exc:
             return _err(exc)
@@ -442,7 +549,14 @@ def register_storyteller_tools(mcp, ch=None) -> None:
                 grid directives.
         """
         try:
+            before = storyteller_state.phase
             snap = storyteller_state.record_final_story(title, content_markdown)
+            _emit_phase_event_if_changed(before)
+            sid = _session["id"]
+            if sid is not None:
+                record_storyteller_final_story_recorded(
+                    sid, title=title, content_length=len(content_markdown or ""),
+                )
             return _ok(snap, "Final story recorded.")
         except Exception as exc:
             return _err(exc)
@@ -498,7 +612,12 @@ def register_storyteller_tools(mcp, ch=None) -> None:
                 ready_for_handoff=len(blocking) == 0,
                 blocking_issues=blocking,
             )
+            before = storyteller_state.phase
             snap = storyteller_state.record_review(report)
+            # Clarity review: PASS advances to `accessibility`; FAIL rolls
+            # back to the earliest failing phase. The helper emits the
+            # appropriate phase_advanced or gate_failed event.
+            _emit_phase_event_if_changed(before, gate_name="clarity_review")
             heading = (
                 "Clarity review passed."
                 if report.ready_for_handoff
@@ -527,7 +646,10 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             notes: Specific issues found. Required when passed=False.
         """
         try:
+            before = storyteller_state.phase
             snap = storyteller_state.record_accessibility_pass(passed, notes)
+            # Accessibility: PASS → handoff, FAIL → back to write.
+            _emit_phase_event_if_changed(before, gate_name="accessibility")
             heading = (
                 "Accessibility passed."
                 if passed
@@ -599,6 +721,17 @@ def register_storyteller_tools(mcp, ch=None) -> None:
                 reset_session_state=False,   # keep standard state for the user
                 **extra_kwargs,
             )
+            # Sprint 3 — terminal event. Marks the storyteller workflow
+            # complete in the event log; the resume handler will see
+            # `handoff_completed` and return action=complete.
+            sid = _session["id"]
+            if sid is not None:
+                record_storyteller_handoff_completed(
+                    sid,
+                    report_id=str(report.get("report_id", "")),
+                    style=normalized_style,
+                )
+                _session["id"] = None
             # End the session after a successful handoff.
             storyteller_state.end_session()
             return CallToolResult(

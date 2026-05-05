@@ -4,6 +4,7 @@ from typing import Optional
 
 from cerebro_mcp.config import settings
 from cerebro_mcp.manifest_loader import manifest
+from cerebro_mcp.schema_context import build_scoped_schema_block
 from cerebro_mcp.tools.query import truncate_response
 
 _last_manifest_check: float = 0.0
@@ -462,3 +463,174 @@ def register_dbt_tools(mcp):
         parts.append(_semantic_nudge_for_model(model_name))
 
         return truncate_response("\n".join(parts))
+
+    @mcp.tool()
+    def get_relevant_columns(
+        model_name: str,
+        query: str,
+        top_k: int = 20,
+    ) -> str:
+        """Return a column-scoped schema block for a dbt model, ranked by
+        relevance to `query`. Use this BEFORE writing SQL on wide models
+        (100+ columns) to keep your context window small while guaranteeing
+        you have the columns you actually need.
+
+        Always includes join keys (address, tx_hash, ...) and time/partition
+        columns (date, day, month, ...) regardless of BM25 score.
+
+        Args:
+            model_name: Exact dbt model name.
+            query: Free-text question describing what you intend to compute.
+                   Drives the BM25 column ranking.
+            top_k: Max columns to keep before always-keep additions. Default 20.
+
+        Returns:
+            Markdown schema block listing column name + type + description,
+            with a footer telling you which columns were omitted and how to
+            request them.
+        """
+        _maybe_refresh_manifest()
+        if not manifest.is_loaded:
+            return "Error: dbt manifest not loaded."
+
+        details = manifest.get_model_details(model_name)
+        if not details:
+            suggestions = manifest.search_models(query=model_name, limit=5)
+            if suggestions:
+                names = "\n".join(f"  - {s['name']}" for s in suggestions)
+                return (
+                    f"Model '{model_name}' not found. Did you mean:\n{names}"
+                )
+            return f"Model '{model_name}' not found."
+
+        scoped = build_scoped_schema_block(
+            model_name,
+            details.get("columns", {}) or {},
+            query,
+            top_columns_for_model=manifest.top_columns_for_model,
+            top_k=top_k,
+        )
+        header_lines = [
+            f"**Table:** `{details['table_name']}`",
+            f"**Materialization:** {details['materialized']}",
+            (
+                f"**Scoped to query:** `{query}` — "
+                f"kept {len(scoped.kept_columns)} of {scoped.total_columns} columns"
+                if scoped.was_scoped
+                else f"**Full schema** ({scoped.total_columns} columns)"
+            ),
+            "",
+        ]
+        return truncate_response(
+            "\n".join(header_lines) + scoped.block
+        )
+
+    @mcp.tool()
+    def get_upstream_lineage(
+        model_name: str, max_results: int = 100
+    ) -> str:
+        """Return the full transitive set of upstream dependencies for a dbt model.
+
+        Unlike `get_model_details` (which only shows immediate parents), this
+        walks the entire networkx lineage DAG and returns every model/source
+        the target depends on, however deep. Use this BEFORE writing SQL when
+        you need to confirm where a column originates, or to decide whether
+        a row-level metric is reasonable to compute from this model.
+
+        Args:
+            model_name: Exact dbt model name (e.g., 'api_tvl_summary').
+            max_results: Cap on returned ancestors to avoid huge dumps.
+                         Default 100. The full count is reported separately.
+
+        Returns:
+            Markdown listing of ancestors with their kind (model/source) and
+            unique_id. Sorted alphabetically by unique_id for deterministic
+            review.
+        """
+        _maybe_refresh_manifest()
+        if not manifest.is_loaded:
+            return "Error: dbt manifest not loaded."
+
+        ancestors = manifest.upstream(model_name)
+        if not ancestors:
+            # Fall back to fuzzy match so misspellings get a useful response.
+            suggestions = manifest.search_models(query=model_name, limit=5)
+            if suggestions:
+                names = "\n".join(f"  - {s['name']}" for s in suggestions)
+                return (
+                    f"Model '{model_name}' not found in lineage graph. "
+                    f"Did you mean:\n{names}"
+                )
+            return (
+                f"Model '{model_name}' has no upstream dependencies (or is "
+                "not in the manifest)."
+            )
+
+        sorted_uids = sorted(ancestors)
+        total = len(sorted_uids)
+        capped = sorted_uids[:max_results]
+        lines = [
+            f"# Upstream lineage of `{model_name}`",
+            f"**{total} ancestor(s)**" + (
+                f" — showing first {len(capped)}" if total > len(capped) else ""
+            ),
+            "",
+        ]
+        for uid in capped:
+            data = manifest._lineage_graph.nodes[uid]
+            kind = data.get("kind", "unknown")
+            label = data.get("model_name") or data.get("source_key") or uid
+            lines.append(f"- `{label}` ({kind}) — `{uid}`")
+        return truncate_response("\n".join(lines))
+
+    @mcp.tool()
+    def get_downstream_impact(
+        model_name: str, max_results: int = 100
+    ) -> str:
+        """Return the full transitive set of dbt models that depend on this one.
+
+        Use this BEFORE proposing schema changes or deprecations — it tells
+        you exactly which downstream models, dashboards, and metrics would
+        break.
+
+        Args:
+            model_name: Exact dbt model name.
+            max_results: Cap on returned descendants. Default 100.
+
+        Returns:
+            Markdown listing of downstream models, sorted alphabetically.
+        """
+        _maybe_refresh_manifest()
+        if not manifest.is_loaded:
+            return "Error: dbt manifest not loaded."
+
+        descendants = manifest.downstream(model_name)
+        if not descendants:
+            suggestions = manifest.search_models(query=model_name, limit=5)
+            if suggestions:
+                names = "\n".join(f"  - {s['name']}" for s in suggestions)
+                return (
+                    f"Model '{model_name}' has no downstream consumers, or "
+                    f"the model is unknown. Did you mean:\n{names}"
+                )
+            return (
+                f"Model '{model_name}' has no downstream consumers."
+            )
+
+        sorted_uids = sorted(descendants)
+        total = len(sorted_uids)
+        capped = sorted_uids[:max_results]
+        lines = [
+            f"# Downstream impact of `{model_name}`",
+            f"**{total} consumer(s)**" + (
+                f" — showing first {len(capped)}" if total > len(capped) else ""
+            ),
+            "",
+            "> Schema changes to this model will affect every entry below.",
+            "",
+        ]
+        for uid in capped:
+            data = manifest._lineage_graph.nodes[uid]
+            label = data.get("model_name") or uid
+            lines.append(f"- `{label}` — `{uid}`")
+        return truncate_response("\n".join(lines))

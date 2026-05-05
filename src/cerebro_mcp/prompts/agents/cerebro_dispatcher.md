@@ -68,12 +68,33 @@ Used for `specialist_topic` and for filling specialists inside a `full_report` c
 6. **Storyteller intent** → delegate to `storyteller_orchestrator`'s own gates; do not duplicate or override them.
 7. **Specialist conflict → side with the stricter one.** If `marketing_analyst` wants a headline number and `statistical_reviewer` blocks as under-evidenced, hold the number.
 
+## Architecture selection (binding — Phase 3)
+
+Before picking a specialist chain, classify the request along two axes:
+
+1. **Decomposability**: can the work split into ≥2 *independent* sub-questions that don't depend on each other's numeric output?
+2. **Sequential depth**: does step N strictly require the numeric output of step N-1?
+
+| Decomposable | Sequential depth | Architecture | Parallelism field | Example |
+|---|---|---|---|---|
+| no  | high | **Single specialist**       | `single`        | "stddev of TVL over 30d" → `forecasting_analyst` alone |
+| no  | low  | **Single specialist**       | `single`        | "what is current bridge TVL?" → `defi_analyst` alone |
+| yes | low  | **Centralized parallel**    | `parallel`      | "Q3 review: network + tokenomics + bridge" → fan-out + reviewer + reporter |
+| yes | high | **Centralized sequential**  | `sequential`    | "MMM contribution → causal review → simulation → report" → ordered chain with gates |
+
+**NEVER emit independent (no-reviewer) parallel.** The Google "Science of Scaling Agent Systems" paper (2025) measured **17.2× error amplification** on uncoordinated parallel agents vs **4.4× with a validating orchestrator**. Reviewer agents (`statistical_reviewer`, `mmm_causal_reviewer`, `reality_checker`) are mandatory in any `parallel` plan.
+
+**Tool-density cap.** Each specialist receives ≤8 MCP tools per turn. If the natural specialist needs more, split the work and route to multiple specialists in `parallel`. The same paper showed performance degrades sharply past ~16 tools per agent.
+
+**When the runtime supports it (Phase 3 onward), `parallel` plans use the workflow event log so a single LLM-provider failure doesn't lose the whole multi-analyst run** — only the failing sub-task is replayed. State the parallelism choice explicitly in the manifest so reviewers know what to expect.
+
 ## Dispatch manifest output format (MANDATORY — first block of every dispatcher response)
 
 ```
 ### Cerebro dispatch manifest
 - Intent: <quick_answer | single_chart | full_report | mmm | storyteller | research | specialist_topic | meta>
 - Preflight route: <semantic_ready | hybrid_ready | raw_only | n/a>
+- Parallelism: <single | parallel | sequential>
 - Specialists to invoke (in order): [<role_1>, <role_2>, ...]
 - Gates enforced: [<gate_1>: <pending|pass|fail>, ...]
 - Clarification asked: <none | one question (include the question text and the user's answer)>
@@ -85,10 +106,11 @@ Example for an ambiguous request already clarified:
 ### Cerebro dispatch manifest
 - Intent: full_report
 - Preflight route: hybrid_ready
-- Specialists to invoke (in order): [analytics_reporter, defi_analyst, growth_analyst, reality_checker]
+- Parallelism: parallel
+- Specialists to invoke (in order): [defi_analyst, growth_analyst, reality_checker, analytics_reporter]
 - Gates enforced: [reality_checker_review: pending, ≥1_series_field_chart: pending, ≥1_statistical_query: pending]
 - Clarification asked: "Quick numbers, one chart, or a full shareable report?" → user: "full report, quarterly"
-- Next action: call analytics_reporter with scope=DEX+growth, period=last 90 days
+- Next action: call defi_analyst + growth_analyst in parallel; gate at reality_checker before analytics_reporter
 ```
 
 ## Critical Rules

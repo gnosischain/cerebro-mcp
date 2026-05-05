@@ -46,6 +46,8 @@ from cerebro_mcp.tools.reasoning import (
 from cerebro_mcp.tools.agents import register_agent_tools
 from cerebro_mcp.tools.dashboard_builder import register_dashboard_tools
 from cerebro_mcp.tools.custom_queries import register_custom_query_tools
+from cerebro_mcp.tools.sandbox import register_sandbox_tools
+from cerebro_mcp.tools.workflow_resume import register_workflow_resume_tools
 from cerebro_mcp.tools.cross_check import register_cross_check_tools
 from cerebro_mcp.tools.storyteller import register_storyteller_tools
 from cerebro_mcp.tools.mini_apps import register_mini_app_infra
@@ -298,6 +300,8 @@ register_reasoning_tools(mcp)
 register_agent_tools(mcp)
 register_dashboard_tools(mcp)
 register_custom_query_tools(mcp, ch)
+register_sandbox_tools(mcp, ch)
+register_workflow_resume_tools(mcp)
 register_cross_check_tools(mcp, ch)
 register_storyteller_tools(mcp, ch)
 
@@ -405,10 +409,52 @@ def main():
     docs_index.load()
     semantic_runtime.load()
 
+    # Phase 2: ensure simulation sandboxes are torn down on exit. The
+    # periodic sweeper is installed lazily by the first sandbox tool call
+    # (so it can grab the running event loop), not here at process boot.
+    from cerebro_mcp.bootstrap import install_sandbox_atexit, init_event_store_sync
+    install_sandbox_atexit()
+
+    # Phase 3: open the workflow event store and run the WorkflowRegistry
+    # resume sweep on abandoned workflows from previous crashes. Stale
+    # `running` / `waiting_gate` rows get a resume_hint event; rows
+    # without a registered handler fall back to `orphaned`. Non-fatal —
+    # log and continue if the SQLite db can't be opened, since most tools
+    # don't depend on it.
+    try:
+        counts = init_event_store_sync()
+        if isinstance(counts, dict) and any(counts.values()):
+            logger.warning(
+                "Workflow resume sweep on startup: %s",
+                ", ".join(f"{k}={v}" for k, v in counts.items() if v),
+            )
+    except Exception:
+        logger.exception("event store bootstrap failed (non-fatal)")
+
     if transport == "sse":
         validate_remote_transport_auth(os.environ.get("MCP_AUTH_TOKEN"))
         _run_sse_with_auth()
     else:
+        # Phase 3 multi-tenant: stdio is single-user-per-process. Read
+        # CEREBRO_OWNER once at boot and stash the (hashed) identifier in
+        # the contextvar for the lifetime of this process. Every workflow
+        # written from this stdio session is stamped with this owner.
+        # Unset env var → contextvar stays None → workflows go in with
+        # owner=NULL (single-tenant fallback, backward compatible).
+        from cerebro_mcp.identity import (
+            get_current_owner,
+            initial_stdio_owner,
+            set_current_owner,
+        )
+        stdio_owner = initial_stdio_owner()
+        if stdio_owner:
+            set_current_owner(stdio_owner)
+            # Log only the hash prefix — plaintext never enters the log.
+            owner_hash = get_current_owner() or ""
+            log_event(
+                logger, "stdio_owner_set",
+                owner_hash_prefix=owner_hash[:12],
+            )
         mcp.run(transport="stdio")
 
 
@@ -455,7 +501,35 @@ class BearerAuthMiddleware:
             await unauthorized(scope, receive, send)
             return
 
-        await self.app(scope, receive, send)
+        # Phase 3 multi-tenant: scope the per-request owner from the
+        # `X-Cerebro-Owner` header. The bearer token authenticates the
+        # connection; the owner header carries the identity claim. We
+        # do NOT verify the claim here — that's the upstream proxy's
+        # job (or, in deployments without a proxy, this is
+        # self-attested and the trust model is documented in
+        # docs/phase3_resumable_workflows.md). `set_current_owner`
+        # hashes before storage; plaintext never persists.
+        owner_plain: str | None = None
+        for name, value in scope.get("headers", []):
+            if name == b"x-cerebro-owner":
+                try:
+                    owner_plain = value.decode("latin-1").strip() or None
+                except Exception:
+                    owner_plain = None
+                break
+
+        from cerebro_mcp.identity import (
+            reset_current_owner,
+            set_current_owner,
+        )
+        token = set_current_owner(owner_plain)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            # Restore the prior contextvar state — critical so the
+            # next request on this worker doesn't inherit the previous
+            # caller's owner.
+            reset_current_owner(token)
 
 
 def build_sse_app(auth_token: str | None = None):

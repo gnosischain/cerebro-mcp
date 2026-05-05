@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 import clickhouse_connect
@@ -23,6 +25,85 @@ from cerebro_mcp.tool_output import fit_rows_to_budget, normalize_rows
 from cerebro_mcp.tool_models import QueryResult
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Parquet sanitization
+#
+# ClickHouse → Arrow type mapping is not 1:1. Exporting certain CH types
+# (Enum*, IPv4/v6, UUID, big Decimals, deeply nested arrays, DateTime64 with
+# nanosecond precision) into a parquet file that DuckDB can mount cleanly
+# requires casting them in the SELECT clause first. We DESCRIBE the inner
+# query to learn its column types, build a sanitizing outer SELECT, and
+# stream THAT through query_arrow_stream.
+# ---------------------------------------------------------------------------
+
+_DECIMAL_RE = re.compile(r"^Decimal\d*\((\d+)\s*,\s*\d+\)$", re.IGNORECASE)
+_DATETIME64_PRECISION_RE = re.compile(r"^DateTime64\((\d+)", re.IGNORECASE)
+
+
+def _decimal_precision(t: str) -> int:
+    """Return precision P from `Decimal(P,S)` / `Decimal128(P,S)` / etc."""
+    m = _DECIMAL_RE.match(t.strip())
+    return int(m.group(1)) if m else 0
+
+
+def _datetime64_precision(t: str) -> int:
+    """Return the precision N from `DateTime64(N, ...)` (0 if unparseable)."""
+    m = _DATETIME64_PRECISION_RE.match(t.strip())
+    return int(m.group(1)) if m else 0
+
+
+def _sanitize_column_for_parquet(name: str, ch_type: str) -> str:
+    """Emit a SELECT-clause expression for `name` that's safe to write into
+    parquet and read back via DuckDB.
+
+    Returns either the bare column name (no cast needed) or
+    `<expr> AS <name>`. Backtick-quoted column names are produced so reserved
+    words / unusual chars don't break the wrapping SELECT.
+    """
+    quoted = f"`{name}`"
+    bare_type = ch_type.strip()
+
+    # Strip Nullable() / LowCardinality() wrappers for type pattern matching;
+    # the cast still produces nullable output where applicable because
+    # CAST(NULL AS T) = NULL.
+    inner = bare_type
+    while True:
+        m = re.match(r"^(?:Nullable|LowCardinality)\((.*)\)$", inner, re.IGNORECASE)
+        if not m:
+            break
+        inner = m.group(1).strip()
+
+    upper = inner.upper()
+
+    if upper.startswith("ENUM"):
+        return f"CAST({quoted} AS String) AS {quoted}"
+    if upper == "UUID":
+        return f"toString({quoted}) AS {quoted}"
+    if upper.startswith("IPV4") or upper.startswith("IPV6"):
+        return f"toString({quoted}) AS {quoted}"
+    if upper == "DATE":
+        # CH `Date` is 16-bit unsigned days-since-epoch. clickhouse-connect
+        # surfaces it as Arrow `uint16` in some configurations, which DuckDB
+        # then reads as `USMALLINT` — not as a real DATE — and date functions
+        # like `strftime` fail at the binder. `Date32` is wider (Int32) and
+        # consistently exports as Arrow `date32[day]`, which DuckDB infers
+        # as DATE. Always upcast for parquet roundtrips.
+        return f"toDate32({quoted}) AS {quoted}"
+    if upper.startswith("DATETIME64") and _datetime64_precision(inner) > 6:
+        # Arrow handles us-precision (DateTime64(6)); ns can lose precision
+        # in some pyarrow builds. Downcast.
+        return f"toDateTime64({quoted}, 6) AS {quoted}"
+    if upper.startswith("DECIMAL") and _decimal_precision(inner) > 38:
+        # Arrow's decimal128 caps at precision 38.
+        return f"CAST({quoted} AS Float64) AS {quoted}"
+    if "ARRAY(TUPLE" in upper or upper.count("ARRAY(") > 1:
+        # Deeply-nested arrays read back as opaque BLOBs in DuckDB. Fall
+        # back to a stringified rendering so the sandbox at least sees
+        # something — agent can JSON_PARSE in DuckDB if needed.
+        return f"toString({quoted}) AS {quoted}"
+    return quoted
 
 
 @dataclass
@@ -92,6 +173,83 @@ class ClickHouseManager:
         result = client.query("SELECT version()")
         version = str(result.result_rows[0][0]) if result.result_rows else "unknown"
         return {"version": version}
+
+    def export_to_parquet(
+        self,
+        sql: str,
+        output_path: Path,
+        max_bytes: int,
+        database: str = "dbt",
+    ) -> int:
+        """Phase 2: stream a SELECT result to a parquet file.
+
+        Used by the sandbox manager to fork CH data into a private DuckDB
+        sandbox for "what-if" simulations. The flow is:
+
+            DESCRIBE (sql)  →  build sanitized outer SELECT  →  stream Arrow
+                            →  write parquet (zstd) batch by batch
+                            →  enforce max_bytes mid-stream
+
+        Returns:
+            Total bytes written to `output_path`.
+
+        Raises:
+            ValueError: if the SQL fails safety validation, or if the
+                streamed parquet exceeds `max_bytes` (in which case the
+                partial file is removed).
+        """
+        # Defer pyarrow import: only sandbox callers pay this cost.
+        import pyarrow.parquet as pq
+
+        self._validate_database(database)
+        is_valid, error = validate_query(sql, settings.MAX_QUERY_LENGTH)
+        if not is_valid:
+            raise ValueError(f"Query rejected: {error}")
+
+        client = self.get_client(database)
+
+        # Step 1: introspect the inner-query schema. CH supports
+        # `DESCRIBE (subquery)` natively; it returns rows of (name, type, ...).
+        describe_rows = client.query(f"DESCRIBE ({sql})").result_rows
+        casts = [
+            _sanitize_column_for_parquet(str(r[0]), str(r[1]))
+            for r in describe_rows
+            if r and r[0] is not None
+        ]
+        if not casts:
+            raise ValueError("Source query returned no columns; nothing to export.")
+
+        safe_sql = f"SELECT {', '.join(casts)} FROM ({sql})"
+
+        # Step 2: stream-write parquet, abort if max_bytes exceeded.
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        bytes_written = 0
+        writer: pq.ParquetWriter | None = None
+        try:
+            with client.query_arrow_stream(safe_sql) as stream:
+                for batch in stream:
+                    if writer is None:
+                        writer = pq.ParquetWriter(
+                            str(output_path), batch.schema, compression="zstd"
+                        )
+                    writer.write_batch(batch)
+                    bytes_written = output_path.stat().st_size
+                    if bytes_written > max_bytes:
+                        raise ValueError(
+                            f"Sandbox export exceeded {max_bytes} bytes "
+                            f"(written: {bytes_written}). Aborting."
+                        )
+        except Exception:
+            if writer is not None:
+                writer.close()
+                writer = None
+            output_path.unlink(missing_ok=True)
+            raise
+        finally:
+            if writer is not None:
+                writer.close()
+
+        return bytes_written
 
     def execute_raw(
         self, sql: str, database: str = "dbt", parameters: dict | None = None
