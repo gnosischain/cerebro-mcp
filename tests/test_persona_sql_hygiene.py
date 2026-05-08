@@ -25,6 +25,23 @@ PERSONAS_NEEDING_WARNING = [
     "network_health_analyst",
     "bridge_security_analyst",
     "esg_analyst",
+    "mta_analyst",
+]
+
+# Model names that appeared in the MTA persona's planning context. They
+# illustrate the kind of models a live run looks for, but the persona
+# must NOT treat them as a contract — every appearance must be inside a
+# clearly-marked context block that tells the agent to rediscover.
+CONTEXT_ONLY_MODEL_NAMES = [
+    "int_execution_gnosis_app_user_events",
+    "int_execution_gnosis_app_user_activity_daily",
+    "int_execution_gnosis_app_swaps",
+    "int_execution_gnosis_app_gpay_topups",
+    "int_execution_gnosis_app_token_offer_claims",
+    "int_execution_gnosis_app_marketplace_payments",
+    "int_execution_gnosis_app_users_current",
+    "fct_execution_gnosis_app_retention_monthly",
+    "fct_execution_gnosis_app_churn_monthly",
 ]
 
 # Phrase the warning must contain, case-insensitively.
@@ -80,6 +97,32 @@ def test_growth_analyst_uses_uniqexactif_not_countif_distinct():
     assert "uniqExactIf(" in content, (
         "growth_analyst must show the correct uniqExactIf pattern as a fix"
     )
+
+
+def test_mta_context_models_are_not_required_contracts():
+    """MTA persona may mention example models, but only inside a context block.
+
+    The risk we're locking out: a future edit pastes one of these names into
+    the SQL toolkit verbatim, making it look like a guaranteed table. Every
+    appearance must sit near language that tells the agent these are
+    examples and that runtime discovery is mandatory.
+    """
+    content = _load_persona("mta_analyst").lower()
+
+    for model_name in CONTEXT_ONLY_MODEL_NAMES:
+        if model_name not in content:
+            continue
+        idx = content.find(model_name)
+        window = content[max(idx - 1500, 0): idx + 1500]
+        assert "context" in window, (
+            f"`{model_name}` must appear inside a 'context' block"
+        )
+        assert "rediscover" in window or "search_models" in window, (
+            f"`{model_name}` block must instruct agent to rediscover / search_models"
+        )
+        assert "not guaranteed" in window or "do not assume" in window, (
+            f"`{model_name}` block must disclaim that the name is not guaranteed"
+        )
 
 
 def test_mmm_analyst_range_length_fix():

@@ -1054,6 +1054,13 @@ Available personas:
 | `marketing_analyst` | Ecosystem growth framing, competitive benchmarking, external comms |
 | `esg_analyst` | Carbon footprint, energy efficiency, sustainability reporting |
 | `statistical_reviewer` | Confidence intervals, effect sizes, methodology validation |
+| `mmm_analyst` | Marketing Mix Modeling SOP — adstock, response curves, contribution decomposition |
+| `mmm_causal_reviewer` | DAG gate before MMM `generate_report`: chronological / non-inclusion / identifiability |
+| `mmm_simulator` | Bounded MMM budget reallocation and marginal ROI (±30% per period cap) |
+| `mta_analyst` | Multi-Touch Attribution: journey paths, funnels, rule-based + Markov / Shapley credit |
+| `unified_causal_reviewer` | MMM/MTA reconciliation gate: incrementality bound, coverage, leakage, identity grain |
+| `unified_allocator` | Bounded micro / tactical allocation using MMM lift and MTA shares (calibrated) |
+| `cerebro_dispatcher` | Top-level intent triage and gated specialist routing |
 
 ## Prompts
 

@@ -21,6 +21,17 @@ from cerebro_mcp.semantic_index import rrf_fuse
 logger = logging.getLogger(__name__)
 
 
+# Tag-based deny list. Models carrying any of these tags are filtered out
+# at indexing time and become invisible to every MCP code path that reads
+# from the manifest (search_models, get_model_details, lineage, BM25,
+# etc.). This is the load-bearing privacy control for identity-bridge
+# models that hold raw addresses + pseudonyms together — the bridge tables
+# never appear in `search_models` results, so an MCP caller has no way to
+# discover their existence and `execute_query` is also rejected (see
+# `_reject_internal_only_query` in tools/query.py).
+INTERNAL_ONLY_TAGS = frozenset({"internal_only", "privacy:tier_internal"})
+
+
 class ManifestLoader:
     """Loads and indexes dbt manifest.json for efficient lookups."""
 
@@ -212,10 +223,31 @@ class ManifestLoader:
 
             if resource_type == "model":
                 name = node["name"]
+
+                # ── internal_only filter (load-bearing privacy control) ─────
+                # Any model tagged `internal_only` or `privacy:tier_internal`,
+                # or carrying `meta.expose_to_mcp = false`, is invisible to
+                # the MCP semantic layer entirely. Not indexed, not
+                # searchable, not lookupable by name. This is the primary
+                # control that protects identity-bridge tables (the only
+                # place where raw addresses + pseudonyms coexist) from
+                # `execute_query`-style raw-SQL recovery.
+                tags = node.get("tags", []) or []
+                if any(t in INTERNAL_ONLY_TAGS for t in tags):
+                    continue
+                _meta = node.get("config", {}).get("meta") or node.get("meta") or {}
+                if isinstance(_meta, dict) and _meta.get("expose_to_mcp") is False:
+                    continue
+
                 models[name] = node
 
-                for tag in node.get("tags", []):
+                for tag in tags:
                     tags_index.setdefault(tag, []).append(name)
+
+                # Reuse the locally-bound `_meta` we already computed above
+                # (was re-read from the node a few lines down originally —
+                # consolidated into one read).
+                meta = _meta
 
                 path = node.get("path", "")
                 if "/" in path:
@@ -223,9 +255,6 @@ class ManifestLoader:
                     module_index.setdefault(module, []).append(name)
 
                 # Index by owner from meta
-                meta = node.get("config", {}).get("meta", {})
-                if not meta:
-                    meta = node.get("meta", {})
                 owner = meta.get("owner", "") if meta else ""
                 if owner:
                     owner_index.setdefault(owner, []).append(name)

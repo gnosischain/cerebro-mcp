@@ -29,6 +29,10 @@ _VALID_ROLES = {
     "mmm_analyst",
     "mmm_causal_reviewer",
     "mmm_simulator",
+    # Multi-Touch Attribution + unified MMM/MTA reconciliation
+    "mta_analyst",
+    "unified_causal_reviewer",
+    "unified_allocator",
     # Cerebro Dispatcher — top-level intent triage + gated routing
     "cerebro_dispatcher",
 }
@@ -57,6 +61,9 @@ def register_agent_tools(mcp):
                 'marketing_analyst', 'esg_analyst',
                 'statistical_reviewer'), an MMM agent
                 ('mmm_analyst', 'mmm_causal_reviewer', 'mmm_simulator'),
+                a unified MMM+MTA measurement agent
+                ('mta_analyst', 'unified_causal_reviewer',
+                'unified_allocator'),
                 or the top-level dispatcher ('cerebro_dispatcher').
         """
         if role not in _VALID_ROLES:

@@ -114,12 +114,12 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
       continue;
     }
 
-    // Regular HTML content — wrap in card like charts
+    // Regular HTML content — render as plain prose (no card wrapper)
     if (part.trim()) {
       elements.push(
         <div
           key={`html-${i}`}
-          className="content-card report-html"
+          className="report-html"
           dangerouslySetInnerHTML={{ __html: part }}
         />
       );

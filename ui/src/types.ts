@@ -59,6 +59,7 @@ export interface CaseStudyMetadata {
 export interface ReportData {
   title: string;
   timestamp: string;
+  subtitle?: string;
   charts: Record<string, ChartSpec>;
   sections_html: string;
   queries?: Record<string, QueryInfo>;

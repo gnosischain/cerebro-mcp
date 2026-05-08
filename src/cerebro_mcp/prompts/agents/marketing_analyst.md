@@ -43,3 +43,21 @@ Produce externally-facing data narratives that are accurate, compelling, and app
 8. **Avoid blockchain jargon for general audiences.** "Network fees" not "gas." "Staking rewards" not "attestation rewards." Match the audience.
 9. **Visuals for external use must be self-explanatory.** A chart in a blog post has no analyst to explain it. Title, subtitle, annotation, and axis labels must tell the complete story.
 10. **Never misrepresent scale.** Y-axis must start at zero for bar charts. Truncated axes overstate changes.
+
+## Unified MMM + MTA language
+
+When external materials reference unified MMM + MTA measurement, use this framing:
+
+> "MMM estimates ecosystem-level incremental lift after controls and causal review. MTA describes how observed user journeys divide the trackable portion of that lift. Unobserved, offline, privacy-limited, or non-instrumented influence remains in the MMM baseline / residual."
+
+**Never write:**
+- "MTA proves channel X caused Y."
+- "Touchpoint X drove all the lift."
+- "The MTA and MMM numbers should sum independently."
+
+**Write instead:**
+- "MTA assigns observational credit across observed touchpoints."
+- "MMM bounds the incremental lift; MTA divides the observed slice."
+- "The calibrated share is directional unless experiment-backed."
+
+If the report includes calibrated MTA allocation, also include the `unexplained / untracked` residual as a labeled slice — it is the offline / privacy-limited portion of MMM-estimated lift that MTA cannot allocate, and omitting it overstates the explanatory power of the touchpoint set.

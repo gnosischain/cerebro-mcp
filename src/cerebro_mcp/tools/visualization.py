@@ -323,6 +323,38 @@ def _get_report_download_url(report_id: str) -> str | None:
     return None
 
 
+def _render_summary_numbers_html(summary_numbers: list[dict]) -> str:
+    """Render a leading KPI strip table from a list of {label, value, hint} dicts."""
+    rows = []
+    for item in summary_numbers[:6]:
+        label = str(item.get("label", "")).strip()
+        value = str(item.get("value", "")).strip()
+        hint = str(item.get("hint", "")).strip()
+        if not label and not value:
+            continue
+        hint_cell = (
+            f'<td class="kpi-table-hint">{hint}</td>' if hint else '<td class="kpi-table-hint"></td>'
+        )
+        rows.append(
+            f'<tr><th scope="row" class="kpi-table-label">{label}</th>'
+            f'<td class="kpi-table-value">{value}</td>'
+            f"{hint_cell}</tr>"
+        )
+    if not rows:
+        return ""
+    body = "".join(rows)
+    return (
+        '<section class="report-kpi-strip">'
+        '<table class="kpi-table">'
+        '<thead><tr><th scope="col">Metric</th>'
+        '<th scope="col">Value</th>'
+        '<th scope="col">Change</th></tr></thead>'
+        f"<tbody>{body}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
 def create_report_artifact(
     title: str,
     content_markdown: str,
@@ -332,6 +364,8 @@ def create_report_artifact(
     presentation_mode: str | None = None,
     research_metadata: dict | None = None,
     case_study_metadata: dict | None = None,
+    subtitle: str | None = None,
+    summary_numbers: list[dict] | None = None,
 ) -> dict:
     from cerebro_mcp.tools.session_state import state
 
@@ -427,6 +461,10 @@ def create_report_artifact(
         research_mode=research_mode,
         case_study_mode=case_study_mode,
     )
+    if summary_numbers and not research_mode and not case_study_mode:
+        kpi_html = _render_summary_numbers_html(summary_numbers)
+        if kpi_html:
+            rendered_html = kpi_html + rendered_html
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     structured = {
@@ -438,6 +476,8 @@ def create_report_artifact(
         "queries": chart_queries,
         "analysis_path": state.analysis_path,
     }
+    if subtitle:
+        structured["subtitle"] = subtitle
     if research_metadata:
         structured["research_metadata"] = research_metadata
     if case_study_metadata:
@@ -452,6 +492,7 @@ def create_report_artifact(
         presentation_mode=presentation_mode,
         research_metadata=research_metadata,
         case_study_metadata=case_study_metadata,
+        subtitle=subtitle,
     )
 
     report_id = str(uuid.uuid4())
@@ -2255,6 +2296,7 @@ def _build_standalone_html(
     presentation_mode: str | None = None,
     research_metadata: dict | None = None,
     case_study_metadata: dict | None = None,
+    subtitle: str | None = None,
 ) -> str:
     """Build self-contained HTML with embedded data for disk saves / direct file access.
 
@@ -2275,6 +2317,8 @@ def _build_standalone_html(
         data_dict["research_metadata"] = research_metadata
     if case_study_metadata:
         data_dict["case_study_metadata"] = case_study_metadata
+    if subtitle:
+        data_dict["subtitle"] = subtitle
     data = json.dumps(data_dict, default=str)
 
     html = _get_report_html()
@@ -3160,6 +3204,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
     def generate_report(
         title: str,
         content_markdown: str,
+        subtitle: str | None = None,
+        summary_numbers: list[dict] | None = None,
     ) -> CallToolResult:
         """Create an interactive report rendered as a native UI in the chat client.
 
@@ -3203,6 +3249,10 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         Args:
             title: Report title displayed in the header.
             content_markdown: Markdown content with {{chart:CHART_ID}} placeholders.
+            subtitle: Optional one-line subtitle shown under the title in the header.
+            summary_numbers: Optional list of up to 6 leading KPIs. Each entry is
+                {"label": "...", "value": "...", "hint": "..."}. Rendered as a
+                table at the top of the report body (Metric | Value | Change).
 
         Returns:
             Interactive UI resource rendered natively in the chat client.
@@ -3213,6 +3263,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 content_markdown,
                 enforce_quality_gate=True,
                 reset_session_state=True,
+                subtitle=subtitle,
+                summary_numbers=summary_numbers,
             )
 
             return CallToolResult(

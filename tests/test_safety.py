@@ -209,3 +209,64 @@ class TestExtractTableNames:
     def test_multi_join(self):
         sql = "SELECT * FROM a LEFT JOIN b ON 1=1 RIGHT JOIN c ON 1=1"
         assert extract_table_names(sql) == ["a", "b", "c"]
+
+
+class TestInternalOnlyTables:
+    """Verify that execute_query rejects raw SQL referring to internal-only
+    bridge tables. These hold raw addresses + pseudonyms together; querying
+    them would defeat the pseudonymization boundary.
+    """
+
+    def test_reject_ga_bridge_unqualified(self):
+        valid, err = validate_query(
+            "SELECT * FROM int_execution_gnosis_app_user_identity_bridge LIMIT 10"
+        )
+        assert not valid
+        assert "internal-only" in err.lower()
+
+    def test_reject_ga_bridge_qualified(self):
+        valid, err = validate_query(
+            "SELECT address, user_pseudonym "
+            "FROM dbt.int_execution_gnosis_app_user_identity_bridge LIMIT 10"
+        )
+        assert not valid
+        assert "internal-only" in err.lower()
+
+    def test_reject_gp_bridge(self):
+        valid, err = validate_query(
+            "SELECT * FROM int_execution_gpay_user_identity_bridge"
+        )
+        assert not valid
+        assert "internal-only" in err.lower()
+
+    def test_reject_bridge_in_join(self):
+        valid, err = validate_query(
+            "SELECT t.user_pseudonym, b.address "
+            "FROM dbt.fct_execution_gnosis_app_attribution_30d t "
+            "JOIN dbt.int_execution_gnosis_app_user_identity_bridge b "
+            "  ON b.user_pseudonym = t.user_pseudonym"
+        )
+        assert not valid
+        assert "internal-only" in err.lower()
+
+    def test_allow_pseudonym_only_marts(self):
+        # The MTA marts hold only user_pseudonym (no raw addresses) and
+        # should be queryable normally.
+        valid, err = validate_query(
+            "SELECT * FROM dbt.int_execution_gnosis_app_conversions LIMIT 10"
+        )
+        assert valid
+        valid, err = validate_query(
+            "SELECT * FROM dbt.fct_execution_gpay_attribution_30d LIMIT 10"
+        )
+        assert valid
+
+    def test_allow_pseudonym_table_in_join(self):
+        valid, err = validate_query(
+            "SELECT a.event_kind, b.conversion_kind "
+            "FROM dbt.int_execution_gnosis_app_user_events_unified a "
+            "JOIN dbt.int_execution_gnosis_app_conversions b "
+            "  ON a.user_pseudonym = b.user_pseudonym "
+            "LIMIT 10"
+        )
+        assert valid

@@ -123,3 +123,32 @@ Required charts in the final MMM report (on top of the standard `generate_report
 - Response curve per media (scatter + fitted line)
 - Adstock decay (bar, per media, showing λ)
 - Causal-review table (from `mmm_causal_reviewer`)
+
+## MTA Workflow (user-journey attribution)
+
+Use when the user asks for touchpoint attribution, conversion paths, or "which app actions precede topup / swap / claim".
+
+1. `get_agent_persona("mta_analyst")` — adopt the MTA SOP.
+2. **Discovery is mandatory every run.** Run `search_models` / `discover_models`, then `describe_table` on every model used. The persona's "context examples" are illustrative and not a contract.
+3. Build a runtime mapping (user, timestamp, touchpoint, conversion columns + identity grain) from `describe_table` output.
+4. Volume gates: <30 conversions → descriptive only; 30–499 → rule-based + funnel; ≥500 → Markov + Shapley proxy allowed. Default lookback = 30 days; sweep 7/14/30/60 when volume permits.
+5. Hand numerical claims to `statistical_reviewer`.
+
+MTA output is **observational**. No causal claim is allowed unless paired with MMM PASS, an experiment, or a named quasi-experimental design.
+
+See [docs/measurement/mta_overview.md](docs/measurement/mta_overview.md) and [docs/measurement/identity_grain.md](docs/measurement/identity_grain.md) for the conceptual framing.
+
+## Unified MMM + MTA Workflow
+
+Use when the user asks to combine MMM and MTA — e.g. "attribute MMM-measured lift across observed user journeys" or "calibrate our MTA shares against the MMM lift estimate".
+
+1. `get_agent_persona("mmm_analyst")` and run the MMM workflow (steps above).
+2. Submit the DAG to `mmm_causal_reviewer`. **Only after PASS** proceed to step 3.
+3. `get_agent_persona("mta_analyst")` and run the MTA workflow.
+4. `get_agent_persona("unified_causal_reviewer")` and pass BOTH the MMM artifact AND the MTA artifact in the next user message. The reviewer runs eight checks (MMM-gate, conversion consistency, incrementality bound, coverage, leakage, identity grain, selection bias, method stability) and returns PASS / BLOCK with calibration applied: `calibrated_credit_i = raw_mta_credit_i × MMM_lift / Σ raw_credit`.
+5. **Do NOT call `generate_report` until the unified verdict is PASS.** On BLOCK, apply the prescribed fix and resubmit.
+6. Optional prescription: `get_agent_persona("unified_allocator")` for bounded micro / tactical recommendations. Inherits the ±30%/period cap from `mmm_simulator`. Refuses to run without `unified_causal_reviewer` PASS.
+
+The unified report MUST disclose the `unexplained / untracked` residual — the portion of MMM-estimated lift no observed touchpoint can claim. Omitting it overstates the explanatory power of the touchpoint set.
+
+See [docs/measurement/unified_measurement.md](docs/measurement/unified_measurement.md) for the calibration formula, [docs/measurement/causal_review.md](docs/measurement/causal_review.md) for what each gate enforces, and [docs/measurement/examples/unified_pay_subsidy.md](docs/measurement/examples/unified_pay_subsidy.md) for an end-to-end worked example.

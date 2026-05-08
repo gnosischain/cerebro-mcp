@@ -667,3 +667,107 @@ class TestLocalArtifactPreference:
         loader.load()
 
         assert loader.get_model("recovered_model") is not None
+
+
+class TestInternalOnlyFilter:
+    """Verify that models tagged `internal_only` or carrying
+    meta.expose_to_mcp = false are filtered out at indexing time and become
+    invisible to every MCP code path that reads from the manifest.
+    """
+
+    @pytest.fixture
+    def loader_with_internal(self):
+        loader = ManifestLoader()
+        sample = {
+            "nodes": {
+                # Public model — should be indexed
+                "model.gnosis_dbt.fct_public_mart": {
+                    "resource_type": "model",
+                    "unique_id": "model.gnosis_dbt.fct_public_mart",
+                    "name": "fct_public_mart",
+                    "description": "Public mart",
+                    "schema": "dbt",
+                    "alias": "fct_public_mart",
+                    "path": "execution/public/marts/fct_public_mart.sql",
+                    "tags": ["production", "execution"],
+                    "config": {"materialized": "table"},
+                    "columns": {},
+                    "raw_code": "",
+                    "compiled_code": "",
+                    "depends_on": {"nodes": []},
+                },
+                # internal_only via tag — should be SKIPPED
+                "model.gnosis_dbt.int_secret_bridge": {
+                    "resource_type": "model",
+                    "unique_id": "model.gnosis_dbt.int_secret_bridge",
+                    "name": "int_secret_bridge",
+                    "description": "Raw <-> pseudonym bridge",
+                    "schema": "dbt",
+                    "alias": "int_secret_bridge",
+                    "path": "execution/sector/intermediate/int_secret_bridge.sql",
+                    "tags": ["internal_only", "privacy:tier_internal"],
+                    "config": {"materialized": "table"},
+                    "columns": {},
+                    "raw_code": "",
+                    "compiled_code": "",
+                    "depends_on": {"nodes": []},
+                },
+                # internal_only via meta.expose_to_mcp = false — should be SKIPPED
+                "model.gnosis_dbt.int_meta_blocked": {
+                    "resource_type": "model",
+                    "unique_id": "model.gnosis_dbt.int_meta_blocked",
+                    "name": "int_meta_blocked",
+                    "description": "Blocked via meta.expose_to_mcp",
+                    "schema": "dbt",
+                    "alias": "int_meta_blocked",
+                    "path": "execution/sector/intermediate/int_meta_blocked.sql",
+                    "tags": ["production"],
+                    "config": {
+                        "materialized": "table",
+                        "meta": {"expose_to_mcp": False},
+                    },
+                    "columns": {},
+                    "raw_code": "",
+                    "compiled_code": "",
+                    "depends_on": {"nodes": []},
+                },
+            },
+            "sources": {},
+            "parent_map": {},
+            "child_map": {},
+        }
+        indexes = loader._build_indexes_internal(sample)
+        loader._apply_indexes(indexes)
+        loader._loaded = True
+        return loader
+
+    def test_internal_only_tag_excluded(self, loader_with_internal):
+        assert loader_with_internal.get_model("int_secret_bridge") is None
+
+    def test_meta_expose_to_mcp_false_excluded(self, loader_with_internal):
+        assert loader_with_internal.get_model("int_meta_blocked") is None
+
+    def test_public_model_still_indexed(self, loader_with_internal):
+        assert loader_with_internal.get_model("fct_public_mart") is not None
+
+    def test_search_does_not_return_internal(self, loader_with_internal):
+        # Even searching by the exact model name shouldn't find internal_only.
+        results = loader_with_internal.search_models(query="int_secret_bridge")
+        names = [r["name"] for r in results]
+        assert "int_secret_bridge" not in names
+        results = loader_with_internal.search_models(query="int_meta_blocked")
+        names = [r["name"] for r in results]
+        assert "int_meta_blocked" not in names
+
+    def test_search_by_internal_tag_returns_nothing(self, loader_with_internal):
+        # Filtering on the deny-tag itself shouldn't return internal models.
+        results = loader_with_internal.search_models(
+            query="", tags=["internal_only"]
+        )
+        assert results == []
+
+    def test_only_public_models_in_full_listing(self, loader_with_internal):
+        names = loader_with_internal.get_all_model_names()
+        assert "fct_public_mart" in names
+        assert "int_secret_bridge" not in names
+        assert "int_meta_blocked" not in names

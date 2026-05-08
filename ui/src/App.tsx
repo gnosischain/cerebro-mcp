@@ -49,6 +49,7 @@ export default function App() {
           <ReportHeader
             title={data.title}
             timestamp={data.timestamp}
+            subtitle={data.subtitle}
             fileUri={data.file_uri}
           />
           <ReportContent data={data} sections={sections} />

@@ -30,6 +30,8 @@ Classify the user's request into exactly ONE of these categories:
 | `single_chart` | "plot", "chart", "show me X over time" + single metric | `analytics_reporter` minimal flow. 1–2 charts via `generate_charts` (or `generate_metric_charts`). Do NOT call `generate_report`. |
 | `full_report` | "report", "dashboard", "overview", multi-topic, "weekly/monthly summary" | `analytics_reporter` → topic specialist(s) per routing table → `reality_checker` → `generate_report`. |
 | `mmm` | "contribution", "attribution", "ROI of emissions/incentives/rewards", "which incentive drove X", "budget allocation", "reallocate incentives" | `mmm_analyst` → `mmm_causal_reviewer` **(mandatory gate)** → `mmm_simulator` (only if user asks "what should we do next?"). |
+| `mta` | "touchpoints", "journey attribution", "which app actions convert", "path to conversion", "first touch", "last touch", "Shapley", "Markov" | `mta_analyst` → `statistical_reviewer`. Output is observational unless paired with MMM PASS or experiment evidence. |
+| `unified_measurement` | "MMM and MTA", "unified attribution", "macro and micro attribution", "combine mix model with user journeys", "calibrate MTA to MMM" | `mmm_analyst` → `mmm_causal_reviewer` **(gate)** → `mta_analyst` → `unified_causal_reviewer` **(gate)** → `unified_allocator` (only if recommendations are requested). |
 | `storyteller` | "memo", "narrative", "decision brief", "investor update", "blog post draft", "explain this to leadership" | `storyteller_orchestrator` (handles its own sub-orchestration — you delegate and step out). |
 | `research` | "research project", "multi-phase investigation", "peer review", "publish findings" | `gnosis_research_analyst` via the research tools (`start_research_project`, `plan_research_phase`, …). |
 | `specialist_topic` | Topic words map 1:1 to a specialist, no report needed | Route to the single specialist per the topic table below. |
@@ -63,6 +65,7 @@ Used for `specialist_topic` and for filling specialists inside a `full_report` c
 1. **Manifest is mandatory.** Every dispatcher response begins with the manifest block below. No routing without it.
 2. **`preflight_analytics_request` must run before specialist selection** for any analytics intent (`quick_answer`, `single_chart`, `full_report`, `specialist_topic`). MMM / storyteller / research have their own entry points but still benefit from the preflight route.
 3. **`mmm` → no `generate_report` until `mmm_causal_reviewer` returns `VERDICT: PASS`.** Mirrors the existing MMM rule in [CLAUDE.md](CLAUDE.md).
+3a. **`unified_measurement` → no `generate_report` and no `unified_allocator` invocation until BOTH `mmm_causal_reviewer` AND `unified_causal_reviewer` return `VERDICT: PASS`.** The unified reviewer additionally requires `mta_analyst` to have enumerated and either used or excluded every model returned by its `search_models` / `discover_models` calls.
 4. **`full_report` touching ≥3 sectors → `reality_checker` must review before final `generate_report`.**
 5. **External-audience deliverables (`marketing_analyst` in the chain) → every numeric claim requires `statistical_reviewer` co-sign.**
 6. **Storyteller intent** → delegate to `storyteller_orchestrator`'s own gates; do not duplicate or override them.
@@ -112,6 +115,19 @@ Example for an ambiguous request already clarified:
 - Clarification asked: "Quick numbers, one chart, or a full shareable report?" → user: "full report, quarterly"
 - Next action: call defi_analyst + growth_analyst in parallel; gate at reality_checker before analytics_reporter
 ```
+
+Example for a unified MMM + MTA request:
+```
+### Cerebro dispatch manifest
+- Intent: unified_measurement
+- Preflight route: hybrid_ready
+- Parallelism: sequential
+- Specialists to invoke (in order): [mmm_analyst, mmm_causal_reviewer, mta_analyst, unified_causal_reviewer, unified_allocator]
+- Gates enforced: [mmm_causal_review: pending, unified_causal_review: pending, discovered_model_coverage: pending]
+- Clarification asked: none
+- Next action: call mmm_analyst (gate at mmm_causal_reviewer before MTA can run)
+```
+
 
 ## Critical Rules
 

@@ -199,6 +199,22 @@ SELECT quantile(0.05)(fit.2), quantile(0.95)(fit.2) FROM bootstraps;
 12. **Baseline extraction before log-log.** Compute baseline KPI (median during bottom-decile adstock weeks) and regress `log(KPI − baseline)` on `log(adstock)`. Prevents `log(0)` and prevents the multiplicative model from implying KPI = 0 when spend = 0.
 13. **Curve-shape selection must cite MAE on holdout.** Report both candidate MAEs in the methodology section.
 
+## Optional MTA calibration context
+
+If an `mta_analyst` run is available for the same KPI / window, treat it as **soft context only** — never as a substitute for MMM controls, baseline extraction, or causal review. See [`docs/measurement/unified_measurement.md`](../../../../docs/measurement/unified_measurement.md) for the reconciliation contract.
+
+Allowed uses:
+- Use MTA conversion-lag distributions to inform plausible adstock decay ranges.
+- Use MTA touchpoint shares as a sensitivity check against MMM contribution shares — disagreement is a flag, not a fix.
+- Treat app-action variables surfaced by MTA as candidate front-door intermediates for `mmm_causal_reviewer` Check 3.
+- Use MTA coverage gaps to explain residual / untracked lift in the MMM baseline.
+
+Forbidden uses:
+- Treating MTA credit as incremental lift.
+- Forcing MMM coefficients to match MTA shares.
+- Reporting causal language unless `mmm_causal_reviewer` passes.
+- Skipping controls because "MTA already did the attribution".
+
 ## When NOT to Use
 
 - Sector with <60 weekly rows of either KPI or media data.

@@ -48,6 +48,21 @@ def _strip_comments_and_strings(sql: str) -> str:
     return sql
 
 
+# Internal-only tables: hardcoded deny list for `execute_query`-style raw
+# SQL access. These tables hold raw addresses + pseudonyms together (the
+# pseudonymization boundary) and must never be queryable by an MCP caller,
+# even by exact-name reference. The manifest_loader already filters them
+# out of `search_models` / `discover_models` indexes, but a determined
+# caller could in principle hardcode the table name; this list is the
+# defence-in-depth check.
+#
+# Keep this list in sync with the dbt-cerebro models tagged `internal_only`.
+INTERNAL_ONLY_TABLES = frozenset({
+    "int_execution_gnosis_app_user_identity_bridge",
+    "int_execution_gpay_user_identity_bridge",
+})
+
+
 def validate_query(sql: str, max_length: int = 10000) -> Tuple[bool, str]:
     """Validate a SQL query for safety.
 
@@ -95,6 +110,20 @@ def validate_query(sql: str, max_length: int = 10000) -> Tuple[bool, str]:
     for pattern in FORBIDDEN_PATTERNS:
         if re.search(pattern, clean_sql, flags=re.IGNORECASE):
             return False, f"Forbidden SQL pattern detected: {pattern}"
+
+    # Reject any reference to internal_only tables (privacy boundary).
+    # The bridge tables hold raw addresses + pseudonyms together; querying
+    # them would defeat the whole pseudonymization design.
+    for table in extract_table_names(sql):
+        # extract_table_names returns either "db.table" or just "table".
+        bare_name = table.split(".")[-1]
+        if bare_name in INTERNAL_ONLY_TABLES:
+            return False, (
+                f"Table '{bare_name}' is internal-only (raw + pseudonym "
+                f"pairing) and cannot be queried via execute_query. "
+                f"Pseudonym-keyed marts in the same sector are queryable; "
+                f"see the GA/GP MTA stack docs."
+            )
 
     return True, ""
 

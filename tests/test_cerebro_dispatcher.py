@@ -68,6 +68,10 @@ SPECIALISTS_DISPATCHER_MUST_NAME = [
     "mmm_analyst",
     "mmm_causal_reviewer",
     "mmm_simulator",
+    # MTA + unified-measurement chain
+    "mta_analyst",
+    "unified_causal_reviewer",
+    "unified_allocator",
     # sub-orchestrators and core roles
     "storyteller_orchestrator",
     "analytics_reporter",
@@ -90,6 +94,28 @@ def test_dispatcher_references_real_specialist(role):
 
 
 # ── gate language present ────────────────────────────────────────
+
+
+def test_dispatcher_has_mta_intent_category():
+    """The dispatcher must route MTA and unified-measurement intents."""
+    content = _load_persona()
+    lower = content.lower()
+    # Both new intents must appear in the routing table
+    assert "`mta`" in content or " mta " in lower
+    assert "unified_measurement" in lower
+    # The unified reviewer must be named in the chain
+    assert "unified_causal_reviewer" in content
+    # Allocator named for the prescription path
+    assert "unified_allocator" in content
+
+
+def test_dispatcher_enforces_unified_review_gate():
+    """The unified-measurement chain has its own PASS gate stacked on MMM."""
+    content = _load_persona()
+    lower = content.lower()
+    assert "unified_causal_review" in lower
+    # Must mention the gate is binding (PASS / VERDICT language somewhere)
+    assert "PASS" in content
 
 
 def test_dispatcher_enforces_mmm_reviewer_gate():
@@ -140,6 +166,9 @@ def test_dispatcher_prompt_registered_in_templates():
         "forecasting_analyst",
         "mmm_analyst",
         "storyteller_orchestrator",
+        "mta_analyst",
+        "unified_causal_reviewer",
+        "unified_allocator",
     ],
 )
 def test_existing_roles_still_registered(role):

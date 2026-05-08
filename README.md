@@ -64,6 +64,9 @@ Cerebro ships with **23 agent personas** loadable via `get_agent_persona(role)`.
 | `mmm_analyst` | Marketing Mix Modeling SOP — spine-fill → multicollinearity → baseline → adstock/Hill → contribution decomposition. |
 | `mmm_causal_reviewer` | DAG gate before any MMM `generate_report`: chronological, non-inclusion, identifiability checks per Hakuhodo Guidebook Ch.3. |
 | `mmm_simulator` | Budget reallocation and marginal-ROI — bounded at ±30%/period. |
+| `mta_analyst` | Multi-Touch Attribution — discovery-first journey attribution, funnel + path diagnostics, rule-based + Markov / sampled-Shapley credit. |
+| `unified_causal_reviewer` | Reconciliation gate between MMM and MTA: incrementality bound, coverage haircut, leakage, identity grain, selection bias. |
+| `unified_allocator` | Bounded micro / tactical allocation using MMM-estimated lift and calibrated MTA shares (±30%/period cap). |
 
 ### Tier 3 — Domain specialists (consulted as needed)
 
@@ -130,6 +133,8 @@ Artifacts created by the server:
 | Research workflow | multi-step investigations that need memory, evidence, review, and publication | `start_research_project`, phase tools, evidence tools, verification, peer review, `publish_research_report` | durable research project plus report artifact |
 | Storyteller workflow | decision-oriented narratives, executive briefs, stakeholder memos, recommendation artifacts where an audience must be moved to action | `storyteller_start_session`, `storyteller_record_*`, `storyteller_run_clarity_checks`, `storyteller_generate_story_report` | gated, narrative-first report artifact with action titles, focal-point design, and adversarial clarity review |
 | MMM workflow | sector contribution attribution, ROI across incentive programs, "which emissions drove TVL", budget reallocation | `get_agent_persona("mmm_analyst")` → `get_agent_persona("mmm_causal_reviewer")` (gate) → `get_agent_persona("mmm_simulator")` (optional) → `generate_charts` → `generate_report` | contribution stacked-area, spend-vs-effectiveness share, response-curve scatter, adstock decay, causal-review table |
+| MTA workflow | user-journey attribution, conversion paths, "which app actions precede topup / swap / claim", funnel + drop-off | `get_agent_persona("mta_analyst")` → `get_agent_persona("statistical_reviewer")` → `generate_charts` → `generate_report` (see [docs/measurement](docs/measurement/)) | journey spine, coverage block, funnel, attribution comparison table (first/last/linear/time-decay/Markov/Shapley) |
+| Unified measurement | reconcile MMM-estimated lift with MTA-attributed journeys, calibrated micro / tactical allocation | `mmm_analyst` → `mmm_causal_reviewer` (gate) → `mta_analyst` → `unified_causal_reviewer` (gate) → `unified_allocator` (optional) → `generate_report` (see [docs/measurement](docs/measurement/)) | calibrated allocation, unexplained / untracked residual, bounded reallocation proposal |
 | Custom query tools | common domain questions with known parameters | `get_validator_balance_history`, `get_token_transfers_for_address`, etc. | parameterized query result |
 | Dashboard scaffolding | creating new dashboard tabs from semantic metrics | `discover_dashboard_metrics`, `scaffold_dashboard_tab` | JS query files + YAML config |
 | Number verification | any computed numbers before reporting to user | `verify_numbers` | PASS/MISMATCH verdict |
@@ -762,6 +767,50 @@ On top of the standard `generate_report` gates, an MMM report must include:
 - Causal-review table (markdown, from `mmm_causal_reviewer`)
 
 See [docs/cerebro-docs — MCP / MMM](https://docs.analytics.gnosis.io/mcp/mmm/) for the full SQL toolkit, worked example on real Gnosis App data, and the 4 SQL bugs surfaced by the live smoke test (with patched snippets).
+
+### 7. MTA + Unified Measurement Workflow
+
+Use this when the user asks about **user-journey attribution, observed touchpoint paths, "which app actions precede X"**, or — when paired with MMM — about reconciling macro lift with micro touchpoint credit. MTA (Multi-Touch Attribution) is the journey-grain, observational complement to MMM.
+
+The unified stack is grounded in one rule:
+
+```
+MMM estimates the incremental pie.
+MTA divides the observed, trackable slice of that pie.
+Experiments give the strongest causal validation.
+```
+
+MTA **cannot** create lift beyond MMM; it can only allocate within MMM. When MTA runs alongside MMM, the `unified_causal_reviewer` checks eight conditions (MMM-gate-pass, conversion consistency, incrementality bound, coverage disclosure, leakage, identity grain, selection bias, method stability) before the report can ship, and applies the calibration `calibrated_credit_i = raw_credit_i × MMM_lift / Σ raw_credit` so MTA shares are bounded by MMM-estimated lift. The portion of MMM lift that no observed touchpoint can claim appears in the report as `unexplained / untracked`.
+
+#### Workflow
+
+```text
+1. get_agent_persona("mta_analyst")
+   - Discovery-first: search_models / discover_models, then describe_table on every model used
+   - Build a runtime mapping (user_id, timestamp, touchpoint, conversion, identity grain)
+   - Default lookback 30 days (sweep 7/14/30/60 when volume permits)
+   - Volume gates: <30 conversions → descriptive only; <500 → no Markov / Shapley
+2. (Unified path) get_agent_persona("mmm_analyst") + mmm_causal_reviewer first; only after PASS proceed to MTA
+3. After MTA, get_agent_persona("unified_causal_reviewer") and pass MMM + MTA artifacts together
+4. On PASS: apply the calibration, then either generate_report directly OR
+5. Optional prescription: get_agent_persona("unified_allocator") for bounded reallocation (inherits ±30%/period cap from mmm_simulator)
+```
+
+#### Hard rules
+
+- **Discovery-first.** The MTA persona's "context examples" are illustrative and must be rediscovered each run — enforced by the SQL hygiene lint.
+- **No causal language.** MTA output is observational unless paired with MMM PASS or experiment evidence; `marketing_analyst` enforces approved phrasings for external use.
+- **Identity grain stated and justified.** Wallet vs app_user vs Safe vs owner changes everything; reviewer Check 6 fails the report otherwise.
+- **Coverage disclosed.** Tracked / total conversions must appear; the residual must be reported as `unexplained / untracked` in any unified report.
+
+#### Required charts (unified report)
+
+- Calibrated allocation per touchpoint, with the unexplained / untracked slice rendered explicitly.
+- Calibrated ROI proxy per touchpoint with the ±30% bound annotated.
+- Current vs proposed allocation (grouped bar) when `unified_allocator` runs.
+- Causal-review table from `unified_causal_reviewer`.
+
+See [docs/measurement/](docs/measurement/) for concept docs (MMM overview, MTA overview, unified measurement, causal review, identity grain, glossary) and two end-to-end worked examples (`examples/mta_app_topups.md`, `examples/unified_pay_subsidy.md`).
 
 ---
 

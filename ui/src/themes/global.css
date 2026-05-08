@@ -38,9 +38,8 @@ body {
 /* --- Report Header --- */
 .report-header {
   background: transparent;
-  padding: 0 1.25rem;
+  padding: 2rem 1.5rem 1.5rem;
   border-bottom: 1px solid var(--border);
-  min-height: var(--header-height);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -49,11 +48,54 @@ body {
 
 .report-header-inner {
   width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.5rem 0;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.report-header-titleblock {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.report-header-logo {
+  width: 32px;
+  height: 32px;
+  margin-top: 0.25rem;
+  flex-shrink: 0;
+}
+
+.report-header-text {
+  min-width: 0;
+}
+
+.report-header-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.report-header-subtitle {
+  margin: 0.35rem 0 0;
+  font-size: 1rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.report-header-meta {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
 }
 
 .theme-toggle {
@@ -78,36 +120,56 @@ body {
 /* --- Report Content --- */
 .report-content {
   flex: 1;
-  padding: 1rem 1.25rem 1.5rem;
+  padding: 1.5rem 1.5rem 2.5rem;
   max-width: 1280px;
   width: 100%;
+  margin: 0 auto;
+}
+
+/* --- Dashboard prose font (near-research) --- */
+:root {
+  --report-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia,
+    ui-serif, serif;
+  --report-prose-width: 720px;
 }
 
 /* --- Typography (for dangerouslySetInnerHTML sections) --- */
-.report-html h1 {
-  font-size: 1.5rem;
-  font-weight: 700;
-  margin: 1.25rem 0 0.5rem;
+.report-html {
+  max-width: var(--report-prose-width);
 }
-.report-html h2 {
-  font-size: 1.125rem;
-  font-weight: 700;
-  margin: 1.75rem 0 0.5rem;
-  padding-bottom: 0.375rem;
-  border-bottom: 1px solid var(--section-divider);
+.report-html h1 {
+  font-family: var(--report-serif);
+  font-size: 1.875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  margin: 2rem 0 1rem;
   color: var(--text-primary);
 }
-.report-html h3 {
-  font-size: 0.9375rem;
+.report-html h2 {
+  font-family: var(--report-serif);
+  font-size: 1.5rem;
   font-weight: 600;
-  margin: 0.75rem 0 0.375rem;
-  padding-left: 0.625rem;
-  border-left: 2px solid var(--primary);
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  margin: 2.5rem 0 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  scroll-margin-top: 4rem;
+}
+.report-html h3 {
+  font-family: var(--report-serif);
+  font-size: 1.1875rem;
+  font-weight: 600;
+  margin: 1.75rem 0 0.5rem;
   color: var(--text-primary);
 }
 .report-html p {
-  margin: 0.25rem 0;
-  font-size: 0.875rem;
+  font-family: var(--report-serif);
+  margin: 0 0 1rem;
+  font-size: 1rem;
+  line-height: 1.7;
   color: var(--text-primary);
 }
 .report-html hr {
@@ -115,15 +177,17 @@ body {
   border-top: 1px solid var(--border);
   margin: 1rem 0;
 }
-.report-html ul {
+.report-html ul,
+.report-html ol {
   padding-left: 1.5rem;
-  margin: 0.375rem 0;
+  margin: 0 0 1.25rem;
 }
 .report-html li {
-  margin: 0.25rem 0;
-  font-size: 0.875rem;
+  font-family: var(--report-serif);
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
   color: var(--text-primary);
-  line-height: 1.5;
+  line-height: 1.65;
 }
 .report-html li::marker {
   color: var(--primary);
@@ -287,6 +351,67 @@ body {
 .report-html td.kpi-cell .kpi-change-label {
   color: var(--text-muted);
   font-weight: 600;
+}
+
+/* --- Leading KPI strip (summary_numbers) --- */
+.report-kpi-strip {
+  margin: 0 0 2rem;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  max-width: 880px;
+}
+.report-kpi-strip .kpi-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: transparent;
+  border: none;
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+}
+.report-kpi-strip .kpi-table thead th {
+  text-align: left;
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+  padding: 0 0.5rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+}
+.report-kpi-strip .kpi-table tbody tr {
+  background: transparent;
+}
+.report-kpi-strip .kpi-table tbody tr + tr th,
+.report-kpi-strip .kpi-table tbody tr + tr td {
+  border-top: 1px solid var(--section-divider);
+}
+.report-kpi-strip .kpi-table tbody td,
+.report-kpi-strip .kpi-table tbody th {
+  padding: 0.65rem 0.5rem;
+  vertical-align: baseline;
+  border-top: none;
+}
+.report-kpi-strip .kpi-table-label {
+  text-align: left;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  width: 45%;
+}
+.report-kpi-strip .kpi-table-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  width: 30%;
+}
+.report-kpi-strip .kpi-table-hint {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  width: 25%;
 }
 
 /* --- Value coloring (positive/negative) --- */

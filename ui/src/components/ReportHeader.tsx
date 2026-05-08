@@ -6,10 +6,11 @@ import { WATERMARK_LIGHT, WATERMARK_DARK } from "../assets/watermark";
 interface Props {
   title: string;
   timestamp: string;
+  subtitle?: string;
   fileUri?: string;
 }
 
-export function ReportHeader({ title, timestamp, fileUri }: Props) {
+export function ReportHeader({ title, timestamp, subtitle, fileUri }: Props) {
   const { isDark, toggle } = useTheme();
   const [copied, setCopied] = useState(false);
 
@@ -19,31 +20,18 @@ export function ReportHeader({ title, timestamp, fileUri }: Props) {
   return (
     <header className="report-header">
       <div className="report-header-inner">
-        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+        <div className="report-header-titleblock">
           <img
             src={logoSrc}
             alt="Gnosis"
-            style={{ width: 28, height: 28 }}
+            className="report-header-logo"
           />
-          <div>
-            <h1
-              style={{
-                fontSize: "1.125rem",
-                fontWeight: 600,
-                letterSpacing: "-0.01em",
-                margin: 0,
-                color: "var(--text-primary)",
-              }}
-            >
-              {title}
-            </h1>
-            <p
-              style={{
-                color: "var(--text-muted)",
-                fontSize: "0.75rem",
-                margin: 0,
-              }}
-            >
+          <div className="report-header-text">
+            <h1 className="report-header-title">{title}</h1>
+            {subtitle && (
+              <p className="report-header-subtitle">{subtitle}</p>
+            )}
+            <p className="report-header-meta">
               {timestamp} &middot; Cerebro / dbt-cerebro
             </p>
           </div>
