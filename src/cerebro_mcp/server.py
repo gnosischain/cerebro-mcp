@@ -302,7 +302,7 @@ register_dashboard_tools(mcp)
 register_custom_query_tools(mcp, ch)
 if settings.SANDBOX_ENABLED:
     register_sandbox_tools(mcp, ch)
-if settings.EVENT_STORE_ENABLED:
+if settings.WORKFLOW_RESUME_TOOLS_ENABLED:
     register_workflow_resume_tools(mcp)
 register_cross_check_tools(mcp, ch)
 register_storyteller_tools(mcp, ch)

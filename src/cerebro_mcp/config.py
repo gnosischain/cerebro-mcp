@@ -108,11 +108,23 @@ class Settings(BaseSettings):
     # phase transition / LLM call / gate flip so a workflow that's
     # interrupted (Anthropic 529, network blip, kill -9) can be replayed
     # without losing the queries it already ran.
-    # When False, the user-facing workflow_resume tools are not
-    # registered. The store itself is still opened (used internally by
-    # quarterly/MMM/research workflows) — point EVENT_STORE_PATH at
-    # tmpfs in deployed envs to avoid needing persistent storage.
-    EVENT_STORE_ENABLED: bool = False
+    #
+    # WORKFLOW_RESUME_TOOLS_ENABLED only gates the user-facing
+    # `list_resumable_workflows` / `get_workflow_resume_hint` /
+    # `recompute_workflow_resume_hint` tool registrations. The
+    # underlying event store is initialized at server start and used
+    # unconditionally by `workflow_registry`, `workflow_runner`, and
+    # the `*_resume.py` handlers (research, quarterly review,
+    # storyteller). Disabling this flag does NOT disable those writes.
+    WORKFLOW_RESUME_TOOLS_ENABLED: bool = False
+    # EVENT_STORE_PATH must resolve to a path the server process can
+    # open and write. The default lives under the project working dir,
+    # which is fine for local dev. In containers with
+    # `read_only_root_filesystem=true`, override this to a writable
+    # location (`/tmp/cerebro_state.db` for ephemeral; a PVC-backed
+    # path if you need workflow resumability across pod restarts).
+    # Leaving the default in a read-only container will hang or error
+    # every workflow tool call.
     EVENT_STORE_PATH: str = ".cerebro/cerebro_state.db"
     # Workflows older than this in `running` / `waiting_gate` state are
     # marked `orphaned` on server startup. 24h covers a long quarterly
