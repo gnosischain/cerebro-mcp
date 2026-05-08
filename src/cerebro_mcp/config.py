@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     # Phase 2: DuckDB + Parquet simulation sandbox. CH data is exported
     # into a private DuckDB instance per sandbox so simulator agents can
     # run UPDATE/INSERT/DELETE on a snapshot without touching production.
+    # Off by default — opt-in for local laptop use; deployed env keeps
+    # this off to avoid provisioning persistent storage.
+    SANDBOX_ENABLED: bool = False
     SANDBOX_ROOT: str = ".cerebro/sandboxes"
     SANDBOX_MAX_CONCURRENT: int = 4         # LRU-evicted past this
     SANDBOX_TTL_SECONDS: int = 1800         # 30 min idle → swept
@@ -105,6 +108,11 @@ class Settings(BaseSettings):
     # phase transition / LLM call / gate flip so a workflow that's
     # interrupted (Anthropic 529, network blip, kill -9) can be replayed
     # without losing the queries it already ran.
+    # When False, the user-facing workflow_resume tools are not
+    # registered. The store itself is still opened (used internally by
+    # quarterly/MMM/research workflows) — point EVENT_STORE_PATH at
+    # tmpfs in deployed envs to avoid needing persistent storage.
+    EVENT_STORE_ENABLED: bool = False
     EVENT_STORE_PATH: str = ".cerebro/cerebro_state.db"
     # Workflows older than this in `running` / `waiting_gate` state are
     # marked `orphaned` on server startup. 24h covers a long quarterly

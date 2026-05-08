@@ -300,8 +300,10 @@ register_reasoning_tools(mcp)
 register_agent_tools(mcp)
 register_dashboard_tools(mcp)
 register_custom_query_tools(mcp, ch)
-register_sandbox_tools(mcp, ch)
-register_workflow_resume_tools(mcp)
+if settings.SANDBOX_ENABLED:
+    register_sandbox_tools(mcp, ch)
+if settings.EVENT_STORE_ENABLED:
+    register_workflow_resume_tools(mcp)
 register_cross_check_tools(mcp, ch)
 register_storyteller_tools(mcp, ch)
 
@@ -413,7 +415,8 @@ def main():
     # periodic sweeper is installed lazily by the first sandbox tool call
     # (so it can grab the running event loop), not here at process boot.
     from cerebro_mcp.bootstrap import install_sandbox_atexit, init_event_store_sync
-    install_sandbox_atexit()
+    if settings.SANDBOX_ENABLED:
+        install_sandbox_atexit()
 
     # Phase 3: open the workflow event store and run the WorkflowRegistry
     # resume sweep on abandoned workflows from previous crashes. Stale
