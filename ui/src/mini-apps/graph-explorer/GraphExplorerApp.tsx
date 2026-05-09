@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MiniAppPayload } from "../shared/miniAppTypes";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
+import { MiniAppChrome } from "../shared/MiniAppChrome";
 import { CatalogScreen } from "./CatalogScreen";
 import { DetailsPanel } from "./DetailsPanel";
 import { FilterBar } from "./FilterBar";
@@ -396,7 +397,7 @@ export default function GraphExplorerApp() {
     );
   };
 
-  if (!view) return <div className="ge-shell">Loading…</div>;
+  if (!view) return <MiniAppChrome activeTabId="graph"><div className="ge-shell">Loading…</div></MiniAppChrome>;
 
   const activeSet = new Set(state.relation_types);
   const statusFilter = state.semantic_status_filter;
@@ -417,6 +418,7 @@ export default function GraphExplorerApp() {
   const trimmedCount = state.relation_types.length - effectiveRelationTypes.length;
 
   return (
+    <MiniAppChrome activeTabId="graph">
     <div className="ge-shell">
       <WarningBanner warnings={view.warnings ?? []} />
       {isEmpty ? (
@@ -531,5 +533,6 @@ export default function GraphExplorerApp() {
         </>
       )}
     </div>
+    </MiniAppChrome>
   );
 }

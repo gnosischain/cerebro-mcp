@@ -6,6 +6,7 @@ import { TabBar, type TabDef } from "../shared/TabBar";
 import { DataCard } from "../shared/DataCard";
 import { AsyncButton } from "../shared/AsyncButton";
 import { SegmentedControl } from "../shared/SegmentedControl";
+import { MiniAppChrome } from "../shared/MiniAppChrome";
 import { CollapsibleSection } from "../shared/CollapsibleSection";
 import { PaginatedTable } from "../shared/PaginatedTable";
 import type {
@@ -794,10 +795,12 @@ export function QuarterlyReviewApp() {
 
   if (!view || !view.view_state) {
     return (
+      <MiniAppChrome activeTabId="quarterly">
       <div className="qr-loading">
         Open the Quarterly Review from a chat prompt (or append <code>?demo=loaded</code>
         in dev).
       </div>
+      </MiniAppChrome>
     );
   }
 
@@ -825,6 +828,7 @@ export function QuarterlyReviewApp() {
   ];
 
   return (
+    <MiniAppChrome activeTabId="quarterly">
     <div className="qr-canvas">
       <header className="qr-header">
         <div>
@@ -890,5 +894,6 @@ export function QuarterlyReviewApp() {
         <NotesPanel view={view} state={state} handle={handle} isDark={isDark} />
       </div>
     </div>
+    </MiniAppChrome>
   );
 }

@@ -5,6 +5,8 @@ import { SummaryCards } from "../shared/SummaryCards";
 import { DatasetTable } from "../shared/DatasetTable";
 import { TabBar, type TabDef } from "../shared/TabBar";
 import { AsyncButton } from "../shared/AsyncButton";
+import { MiniAppChrome, MaIdentity } from "../shared/MiniAppChrome";
+import { shortAddr } from "../../utils/format";
 import type { DatasetDescriptor, MiniAppPayload } from "../shared/miniAppTypes";
 
 type PortfolioSection = "overview" | "relationships" | "yields" | "gpay" | "circles";
@@ -380,6 +382,7 @@ export default function PortfolioApp() {
   const sectionFilters = state.section_filters?.[activeSection] ?? { start_date: "", token: "", action: "" };
 
   return (
+    <MiniAppChrome activeTabId="portfolio">
     <div className="mini-app-root">
       <header className="mini-app-header">
         <div>
@@ -388,6 +391,14 @@ export default function PortfolioApp() {
         </div>
         {pending ? <span className="mini-app-pill mini-app-pill--warning">Updating…</span> : null}
       </header>
+
+      {hasAddress && state.current_address ? (
+        <MaIdentity
+          label="Address"
+          value={shortAddr(state.current_address, 10, 8)}
+          onCopy={() => navigator.clipboard?.writeText(state.current_address)}
+        />
+      ) : null}
 
       <WarningBanner warnings={view.warnings ?? []} />
       <SummaryCards cards={view.summary_cards ?? []} />
@@ -645,5 +656,6 @@ export default function PortfolioApp() {
         </>
       )}
     </div>
+    </MiniAppChrome>
   );
 }

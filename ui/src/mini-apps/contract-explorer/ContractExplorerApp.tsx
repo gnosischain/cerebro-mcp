@@ -1,8 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
-import { SummaryCards } from "../shared/SummaryCards";
-import { CollapsibleSection } from "../shared/CollapsibleSection";
+import { MiniAppChrome, MaIdentity, MaSection } from "../shared/MiniAppChrome";
 
 // ---------------------------------------------------------------------------
 // Wire types — mirror src/cerebro_mcp/tools/contract_explorer.py
@@ -172,6 +171,7 @@ export default function ContractExplorerApp() {
     "auto" | "implementation" | "proxy"
   >("auto");
   const [defaultBlock, setDefaultBlock] = useState<string>("latest");
+  const [subTab, setSubTab] = useState<"read" | "write" | "events">("read");
 
   const state = view?.view_state;
 
@@ -182,14 +182,11 @@ export default function ContractExplorerApp() {
 
   if (!view) {
     return (
-      <div className="contract-explorer-loading">
-        <p>Loading Contract Explorer…</p>
-      </div>
+      <MiniAppChrome activeTabId="contract">
+        <div className="ma-empty">Loading Contract Explorer…</div>
+      </MiniAppChrome>
     );
   }
-
-  // Empty state — no address yet.
-  const isEmpty = !state || !state.address;
 
   async function loadAddress(addr: string, target: typeof pendingTarget) {
     if (!addr.trim()) return;
@@ -207,241 +204,184 @@ export default function ContractExplorerApp() {
     }
   }
 
-  return (
-    <div className="contract-explorer-app">
-      <header className="contract-explorer-header">
-        <div>
-          <h1>{view.title || "Contract Explorer"}</h1>
-          {state?.contract_name ? (
-            <div className="contract-explorer-subtitle">
-              <strong>{state.contract_name}</strong>{" "}
-              <code>{state.address}</code>
-              {state.implementation_address ? (
-                <span className="contract-explorer-badge">
-                  proxy → {shortAddr(state.implementation_address)}
-                </span>
-              ) : null}
-              <span className="contract-explorer-source">
-                ABI: {state.abi_source || "—"}
-              </span>
-              <span className="contract-explorer-source">
-                target: <code>{state.target}</code>
-              </span>
-            </div>
-          ) : null}
-        </div>
+  const visibleFns: AbiFunction[] =
+    subTab === "read"
+      ? state?.read_functions ?? []
+      : subTab === "write"
+        ? state?.write_functions ?? []
+        : [];
+  const visibleEvents: AbiEvent[] = subTab === "events" ? state?.events ?? [] : [];
 
+  return (
+    <MiniAppChrome activeTabId="contract">
+      <div className="contract-explorer-app">
+        {/* Load form — always visible, compact */}
         <form
-          className="contract-explorer-address-bar"
+          className="ma-call-row"
+          style={{ marginBottom: 14 }}
           onSubmit={(e) => {
             e.preventDefault();
             void loadAddress(pendingAddress, pendingTarget);
           }}
         >
-          <label className="contract-explorer-address-field">
-            <span>Contract address</span>
-            <input
-              type="text"
-              placeholder="0x… paste a Gnosis Chain contract address"
-              value={pendingAddress}
-              onChange={(e) => setPendingAddress(e.target.value)}
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-            />
-          </label>
-          <label
-            className="contract-explorer-target-label"
-            title="Which ABI to load when the address is a proxy. Most users want 'auto'."
+          <input
+            type="text"
+            placeholder="0x… paste a Gnosis Chain contract address"
+            value={pendingAddress}
+            onChange={(e) => setPendingAddress(e.target.value)}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+          />
+          <select
+            value={pendingTarget}
+            onChange={(e) =>
+              setPendingTarget(
+                e.target.value as "auto" | "implementation" | "proxy",
+              )
+            }
+            style={{
+              padding: "6px 10px",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              background: "var(--surface)",
+              color: "var(--text-primary)",
+              border: "1px solid var(--border)",
+              borderRadius: 3,
+            }}
           >
-            <span>target</span>
-            <select
-              value={pendingTarget}
-              onChange={(e) =>
-                setPendingTarget(
-                  e.target.value as "auto" | "implementation" | "proxy",
-                )
-              }
-            >
-              <option value="auto">auto (impl ABI on proxies)</option>
-              <option value="implementation">implementation only</option>
-              <option value="proxy">proxy own ABI (advanced)</option>
-            </select>
-          </label>
-          <button type="submit">Load</button>
+            <option value="auto">auto (impl ABI on proxies)</option>
+            <option value="implementation">implementation only</option>
+            <option value="proxy">proxy own ABI</option>
+          </select>
+          <button type="submit" className="ma-call-btn">
+            Load
+          </button>
+          <input
+            type="text"
+            value={defaultBlock}
+            onChange={(e) => setDefaultBlock(e.target.value)}
+            placeholder="latest"
+            title="Default block: latest, finalized, safe, or a numeric block."
+            style={{ flex: "0 1 140px" }}
+          />
         </form>
 
-        <div className="contract-explorer-block-bar">
-          <label className="contract-explorer-block-label">
-            <span>Default block</span>
-            <input
-              type="text"
-              value={defaultBlock}
-              onChange={(e) => setDefaultBlock(e.target.value)}
-              placeholder="latest"
-              spellCheck={false}
-              autoCapitalize="off"
-              title="latest, finalized, safe, or a numeric block (e.g. 30000000). Historical blocks require GNOSIS_ARCHIVE_RPC_URL."
-            />
-          </label>
-          <div className="contract-explorer-block-presets">
-            {(["latest", "finalized", "safe"] as const).map((preset) => (
+        <WarningBanner warnings={view.warnings ?? []} />
+        {state?.warnings?.length ? (
+          <WarningBanner warnings={state.warnings} />
+        ) : null}
+
+        {/* Identity card — only when a contract is loaded */}
+        {state?.address ? (
+          <MaIdentity
+            label={`Contract${state.contract_name ? " · " + state.contract_name : ""}`}
+            value={state.address}
+            onCopy={() => navigator.clipboard?.writeText(state.address)}
+            rightSlot={
+              state.implementation_address ? (
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 11,
+                    color: "var(--success)",
+                    padding: "2px 8px",
+                    border: "1px solid var(--success)",
+                    borderRadius: 3,
+                  }}
+                  title={state.implementation_address}
+                >
+                  proxy → {shortAddr(state.implementation_address)}
+                </span>
+              ) : null
+            }
+          />
+        ) : (
+          <div className="ma-empty">
+            Paste a contract address above to inspect its ABI and call any
+            view/pure function. Proxies are followed automatically.
+          </div>
+        )}
+
+        {/* Sub-nav: [01] read · [02] write · [03] events */}
+        {state?.address ? (
+          <div className="ma-subnav">
+            {(
+              [
+                ["read", "01", state.read_functions.length],
+                ["write", "02", state.write_functions.length],
+                ["events", "03", state.events.length],
+              ] as const
+            ).map(([id, num, count]) => (
               <button
-                key={preset}
+                key={id}
                 type="button"
-                onClick={() => setDefaultBlock(preset)}
-                className={
-                  defaultBlock === preset
-                    ? "contract-explorer-preset active"
-                    : "contract-explorer-preset"
-                }
+                className={`ma-subnav-item ${subTab === id ? "is-active" : ""}`}
+                onClick={() => setSubTab(id as "read" | "write" | "events")}
               >
-                {preset}
+                <span className="ma-subnav-num">[{num}]</span> {id}
+                {count ? (
+                  <span style={{ color: "var(--text-muted)", marginLeft: 4 }}>
+                    {count}
+                  </span>
+                ) : null}
               </button>
             ))}
           </div>
-          <p className="contract-explorer-block-hint">
-            Calls fall back to this block if the function card doesn't override
-            it. Numeric blocks query historical state via the archive node.
-          </p>
-        </div>
-      </header>
+        ) : null}
 
-      <WarningBanner warnings={view.warnings ?? []} />
-      {state?.warnings?.length ? (
-        <WarningBanner warnings={state.warnings} />
-      ) : null}
+        {/* Function sections */}
+        {state?.address && subTab !== "events" && visibleFns.length === 0 ? (
+          <div className="ma-empty">
+            No {subTab} functions on this contract.
+          </div>
+        ) : null}
 
-      {view.summary_cards?.length ? (
-        <SummaryCards cards={view.summary_cards} />
-      ) : null}
+        {state?.address && subTab === "events" && visibleEvents.length === 0 ? (
+          <div className="ma-empty">No events on this contract.</div>
+        ) : null}
 
-      {isEmpty ? (
-        <div className="contract-explorer-empty">
-          <p>
-            Paste a contract address above to inspect its ABI and call any
-            view/pure function. Proxies are followed automatically.
-          </p>
-        </div>
-      ) : (
-        <>
-          {state!.read_functions.length === 0 ? (
-            <div className="contract-explorer-empty-result">
-              <strong>No view/pure functions found</strong>
-              <p>
-                Resolved target: <code>{state!.target}</code>
-                {state!.contract_name ? (
-                  <>
-                    {" "}
-                    — contract reported as <code>{state!.contract_name}</code>
-                  </>
-                ) : null}
-                .
-              </p>
-              {state!.target === "proxy" ? (
-                <p>
-                  This is the proxy's own ABI — most proxies (e.g.
-                  ERC1967Proxy) have no public functions of their own. Switch
-                  the target dropdown to <strong>auto</strong> and click Load
-                  again to see the implementation contract's functions.
-                </p>
-              ) : (
-                <p>
-                  The resolved ABI has no view/pure functions. Check the
-                  address, or try a different target if this is a proxy.
-                </p>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingTarget("auto");
-                  void loadAddress(state!.address, "auto");
-                }}
-              >
-                Retry with target=auto
-              </button>
-            </div>
-          ) : null}
-
-          <CollapsibleSection
-            title={`Read functions (${state!.read_functions.length})`}
-            defaultOpen
+        {visibleFns.map((fn, i) => (
+          <MaSection
+            key={fn.signature}
+            index={`[${String(i + 1).padStart(2, "0")}]`}
+            title={fn.signature}
+            meta={`${fn.stateMutability} → ${fn.outputs.map((o) => o.type).join(", ") || "void"}`}
           >
-            <div className="contract-explorer-fn-list">
-              {state!.read_functions.map((fn) => (
-                <FunctionCard
-                  key={fn.signature}
-                  fn={fn}
-                  viewId={view.view_id}
-                  callTool={callTool}
-                  lastResult={lastResults.get(fn.signature)}
-                  defaultBlock={defaultBlock}
-                />
+            <FunctionCard
+              fn={fn}
+              viewId={view.view_id}
+              callTool={callTool}
+              lastResult={lastResults.get(fn.signature)}
+              defaultBlock={defaultBlock}
+              isWrite={subTab === "write"}
+            />
+          </MaSection>
+        ))}
+
+        {visibleEvents.map((ev, i) => (
+          <MaSection
+            key={ev.signature}
+            index={`[${String(i + 1).padStart(2, "0")}]`}
+            title={ev.signature}
+            meta="event"
+          >
+            <pre className="ma-abi-block">
+              <span className="kw">event</span> {ev.name}(
+              {ev.inputs.map((inp, j) => (
+                <span key={j}>
+                  {"\n  "}
+                  {inp.indexed ? <span className="kw">indexed </span> : null}
+                  <span className="ty">{inp.type}</span> {inp.name}
+                  {j < ev.inputs.length - 1 ? "," : ""}
+                </span>
               ))}
-            </div>
-          </CollapsibleSection>
-
-          {state!.write_functions.length > 0 ? (
-            <CollapsibleSection
-              title={`Write functions (${state!.write_functions.length}) — read-only mode, calls disabled`}
-            >
-              <div className="contract-explorer-fn-list">
-                {state!.write_functions.map((fn) => (
-                  <div key={fn.signature} className="contract-explorer-fn-card disabled">
-                    <code>{fn.signature}</code>
-                    <span className="contract-explorer-mutability">
-                      {fn.stateMutability}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </CollapsibleSection>
-          ) : null}
-
-          {state!.events.length > 0 ? (
-            <CollapsibleSection title={`Events (${state!.events.length})`}>
-              <div className="contract-explorer-fn-list">
-                {state!.events.map((ev) => (
-                  <div key={ev.signature} className="contract-explorer-fn-card">
-                    <code>{ev.signature}</code>
-                  </div>
-                ))}
-              </div>
-            </CollapsibleSection>
-          ) : null}
-
-          {state!.call_history.length > 0 ? (
-            <CollapsibleSection title="Call history">
-              <ul className="contract-explorer-history">
-                {state!.call_history.map((entry, i) => (
-                  <li key={`${i}-${entry.called_at}`}>
-                    <code>{entry.signature}</code>
-                    <span className="contract-explorer-history-args">
-                      ({entry.args.map((a) => String(a)).join(", ")})
-                    </span>
-                    <span className="contract-explorer-history-block">
-                      @ {String(entry.block ?? "latest")}
-                    </span>
-                    <span
-                      className={
-                        entry.ok
-                          ? "contract-explorer-ok"
-                          : "contract-explorer-err"
-                      }
-                    >
-                      {entry.ok ? renderResult(entry.result) : `error: ${entry.error}`}
-                    </span>
-                    <span className="contract-explorer-history-meta">
-                      {entry.elapsed_seconds}s
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </CollapsibleSection>
-          ) : null}
-        </>
-      )}
-    </div>
+              {ev.inputs.length > 0 ? "\n" : ""})
+            </pre>
+          </MaSection>
+        ))}
+      </div>
+    </MiniAppChrome>
   );
 }
 
@@ -458,6 +398,7 @@ interface FunctionCardProps {
   ) => Promise<T | null>;
   lastResult?: CallEntry;
   defaultBlock: string;
+  isWrite?: boolean;
 }
 
 function FunctionCard({
@@ -466,16 +407,13 @@ function FunctionCard({
   callTool,
   lastResult,
   defaultBlock,
+  isWrite,
 }: FunctionCardProps) {
   const [args, setArgs] = useState<string[]>(() =>
     fn.inputs.map(() => ""),
   );
-  const [block, setBlock] = useState<string>("");
   const [pending, setPending] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
-
-  // Per-card override falls back to the global default if blank.
-  const effectiveBlock = block.trim() || defaultBlock;
 
   function setArg(idx: number, value: string) {
     setArgs((prev) => {
@@ -489,12 +427,9 @@ function FunctionCard({
     setCallError(null);
     setPending(true);
     try {
-      // Coerce numeric inputs from strings; leave addresses as strings (the
-      // server auto-checksums them via _checksum_args).
       const coerced = args.map((v, i) => {
         const t = fn.inputs[i].type;
         if (t.startsWith("uint") || t.startsWith("int")) {
-          // Pass as string — web3.py accepts numeric strings for big ints.
           return v.trim();
         }
         if (t === "bool") {
@@ -507,7 +442,7 @@ function FunctionCard({
         function_name: fn.name,
         function_signature: fn.signature,
         args: coerced,
-        block_identifier: effectiveBlock || "latest",
+        block_identifier: defaultBlock || "latest",
       });
     } catch (err) {
       setCallError(err instanceof Error ? err.message : String(err));
@@ -516,78 +451,90 @@ function FunctionCard({
     }
   }
 
+  const returnsClause =
+    fn.outputs.length > 0
+      ? ` returns ${fn.outputs.map((o) => o.type).join(", ")}`
+      : "";
+
   return (
-    <div className="contract-explorer-fn-card">
-      <header>
-        <code>{fn.signature}</code>
-        <span className="contract-explorer-mutability">{fn.stateMutability}</span>
-      </header>
-      {fn.outputs.length > 0 ? (
-        <div className="contract-explorer-outputs">
-          → {fn.outputs.map((o) => o.type).join(", ")}
-        </div>
-      ) : null}
-      <div className="contract-explorer-form">
+    <>
+      {/* Mono ABI block */}
+      <pre className="ma-abi-block">
+        <span className="kw">function</span> {fn.name}(
+        {fn.inputs.length === 0 ? (
+          <>{`)${fn.stateMutability !== "nonpayable" ? ` ${fn.stateMutability}` : ""}${returnsClause}`}</>
+        ) : (
+          <>
+            {fn.inputs.map((inp, i) => (
+              <span key={i}>
+                {"\n  "}
+                <span>{inp.name || `arg${i}`}</span>:{" "}
+                <span className="ty">{inp.type}</span>
+                {i < fn.inputs.length - 1 ? "," : ""}
+              </span>
+            ))}
+            {`\n)${fn.stateMutability !== "nonpayable" ? ` ${fn.stateMutability}` : ""}${returnsClause}`}
+          </>
+        )}
+      </pre>
+
+      {/* Inputs + Call button */}
+      <div className="ma-call-row">
         {fn.inputs.map((input, i) => (
-          <label key={`${input.name}-${i}`}>
-            <span>
-              {input.name} <em>({input.type})</em>
-            </span>
-            <input
-              type="text"
-              value={args[i] ?? ""}
-              onChange={(e) => setArg(i, e.target.value)}
-              placeholder={input.type}
-              spellCheck={false}
-              autoCapitalize="off"
-            />
-          </label>
-        ))}
-        <label>
-          <span>
-            block <em>(override; blank = default)</em>
-          </span>
           <input
+            key={`${input.name}-${i}`}
             type="text"
-            value={block}
-            onChange={(e) => setBlock(e.target.value)}
-            placeholder={defaultBlock}
+            value={args[i] ?? ""}
+            onChange={(e) => setArg(i, e.target.value)}
+            placeholder={`${input.name || `arg${i}`}: ${input.type}`}
             spellCheck={false}
             autoCapitalize="off"
-            title="latest, finalized, safe, or a numeric block. Falls back to the default block above."
+            disabled={isWrite}
           />
-        </label>
-        <div className="contract-explorer-call-row">
-          <button onClick={call} disabled={pending} type="button">
-            {pending ? "Calling…" : `Call @ ${effectiveBlock || "latest"}`}
-          </button>
-        </div>
+        ))}
+        <button
+          className="ma-call-btn"
+          onClick={call}
+          type="button"
+          disabled={pending || isWrite}
+          title={isWrite ? "Read-only mode — write calls are disabled" : undefined}
+        >
+          {pending ? "Calling…" : isWrite ? "Disabled" : "Call"}
+        </button>
       </div>
+
+      {/* Result line */}
       {callError ? (
-        <div className="contract-explorer-err">Error: {callError}</div>
+        <div className="ma-result-line">
+          <span className="ma-result-arrow">↳</span>
+          <span className="ma-result-label">error:</span>
+          <span className="ma-result-value ma-result-value--err">{callError}</span>
+        </div>
       ) : null}
       {lastResult ? (
-        <div
-          className={
-            lastResult.ok
-              ? "contract-explorer-result"
-              : "contract-explorer-result error"
-          }
-        >
-          <strong>{lastResult.ok ? "Result" : "Error"}:</strong>{" "}
-          <code>
+        <div className="ma-result-line">
+          <span className="ma-result-arrow">↳</span>
+          <span className="ma-result-label">
+            {lastResult.ok ? "result:" : "error:"}
+          </span>
+          <span
+            className={`ma-result-value ${!lastResult.ok ? "ma-result-value--err" : ""}`}
+          >
             {lastResult.ok
               ? renderResult(lastResult.result)
               : lastResult.error}
-          </code>
-          <span className="contract-explorer-result-block">
-            @ block {String(lastResult.block ?? "latest")}
           </span>
-          <span className="contract-explorer-history-meta">
+          {lastResult.ok && fn.outputs.length > 0 ? (
+            <span className="ma-result-type">
+              ({fn.outputs.map((o) => o.type).join(", ")})
+            </span>
+          ) : null}
+          <span className="ma-result-type">
+            @ {String(lastResult.block ?? "latest")} ·{" "}
             {lastResult.elapsed_seconds}s
           </span>
         </div>
       ) : null}
-    </div>
+    </>
   );
 }

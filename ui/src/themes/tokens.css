@@ -53,6 +53,7 @@
   /* Type — Gnosis system (shared with light) */
   --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
   --font-body: "Inter", system-ui, -apple-system, sans-serif;
+  --font-sans: var(--font-body);
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
 
   /* Layout */
@@ -102,5 +103,71 @@
   /* Type — same system as dark */
   --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
   --font-body: "Inter", system-ui, -apple-system, sans-serif;
+  --font-sans: var(--font-body);
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+
+/* Mini-app scope — full Etherscan-mono palette override.
+ * The dashboard/reports outside this scope keep the warm-sage palette;
+ * everything inside `.mini-app-scope` swaps to the cool near-black +
+ * sky-cyan + emerald look from the mini-apps reference mock.
+ */
+.mini-app-scope {
+  /* Surfaces — cool near-black, not warm ink */
+  --bg: #0b0e12;
+  --surface: #12161c;
+  --surface-1: #12161c;
+  --surface-2: #1a1f26;
+  --surface-3: #232932;
+  --table-header: #1a1f26;
+  --table-stripe: rgba(255, 255, 255, 0.025);
+
+  /* Cool grayscale text */
+  --text-primary: #e6e9ee;
+  --text-secondary: #9aa3ae;
+  --text-muted: #6b7280;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-hover: rgba(255, 255, 255, 0.16);
+  --section-divider: rgba(255, 255, 255, 0.06);
+
+  /* Sky-cyan accent (brighter than the planned #4dd0e1 to match the mock) */
+  --primary: #67e8f9;
+  --primary-hover: #7dd3fc;
+  --accent-soft: rgba(103, 232, 249, 0.18);
+  --accent-softer: rgba(103, 232, 249, 0.08);
+
+  /* Status — emerald positive for result values, coral negative */
+  --success: #34d399;
+  --warning: #fbbf24;
+  --error: #f87171;
+}
+
+[data-theme="light"] .mini-app-scope {
+  /* Pure-white paper, not warm cream */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-1: #ffffff;
+  --surface-2: #f4f6f8;
+  --surface-3: #e8ecef;
+  --table-header: #f4f6f8;
+  --table-stripe: rgba(15, 23, 42, 0.02);
+
+  /* Cool ink */
+  --text-primary: #111418;
+  --text-secondary: #4b5563;
+  --text-muted: #9ca3af;
+  --border: rgba(15, 23, 42, 0.10);
+  --border-hover: rgba(15, 23, 42, 0.20);
+  --section-divider: rgba(15, 23, 42, 0.06);
+
+  /* Deeper cyan for contrast on white */
+  --primary: #0891b2;
+  --primary-hover: #0e7490;
+  --accent-soft: rgba(8, 145, 178, 0.12);
+  --accent-softer: rgba(8, 145, 178, 0.06);
+
+  /* Status */
+  --success: #059669;
+  --warning: #b45309;
+  --error: #dc2626;
 }

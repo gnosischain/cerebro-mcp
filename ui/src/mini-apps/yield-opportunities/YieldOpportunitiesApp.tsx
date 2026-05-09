@@ -6,6 +6,7 @@ import { SummaryCards } from "../shared/SummaryCards";
 import { DatasetTable } from "../shared/DatasetTable";
 import { SegmentedControl } from "../shared/SegmentedControl";
 import { AsyncButton } from "../shared/AsyncButton";
+import { MiniAppChrome } from "../shared/MiniAppChrome";
 import type { DatasetDescriptor, MiniAppPayload } from "../shared/miniAppTypes";
 
 type OpportunityType = "LP" | "Lending";
@@ -359,7 +360,7 @@ export default function YieldOpportunitiesApp() {
   }, [state?.selected_opportunity_key, state?.active_tab]);
 
   if (!view || !state) {
-    return <div className="mini-app-loading">Loading Yield Opportunities…</div>;
+    return <MiniAppChrome activeTabId="yields"><div className="mini-app-loading">Loading Yield Opportunities…</div></MiniAppChrome>;
   }
 
   const filtered = sortOpportunities(
@@ -441,6 +442,7 @@ export default function YieldOpportunitiesApp() {
   };
 
   return (
+    <MiniAppChrome activeTabId="yields">
     <div className="mini-app-root">
       <header className="mini-app-header">
         <div>
@@ -731,5 +733,6 @@ export default function YieldOpportunitiesApp() {
         </div>
       </section>
     </div>
+    </MiniAppChrome>
   );
 }

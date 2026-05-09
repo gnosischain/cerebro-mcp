@@ -384,8 +384,8 @@
 }
 
 .mini-app-picker__item.is-selected {
-  border-color: rgba(129, 140, 248, 0.6);
-  background: rgba(129, 140, 248, 0.12);
+  border-color: var(--primary);
+  background: var(--accent-soft);
 }
 
 .mini-app-picker__item-name {
@@ -482,9 +482,9 @@
 .mini-app-picker__load-btn {
   align-self: flex-start;
   padding: 8px 16px;
-  background: rgba(129, 140, 248, 0.16);
-  border: 1px solid rgba(129, 140, 248, 0.5);
-  color: #c7d2fe;
+  background: var(--accent-soft);
+  border: 1px solid var(--primary);
+  color: var(--text-primary);
   border-radius: 6px;
   font-size: 0.85rem;
   font-weight: 600;
@@ -493,7 +493,8 @@
 }
 
 .mini-app-picker__load-btn:hover:not(:disabled) {
-  background: rgba(129, 140, 248, 0.28);
+  background: var(--accent-soft);
+  filter: brightness(1.15);
 }
 
 .mini-app-picker__load-btn:disabled {
@@ -518,9 +519,9 @@
   color: var(--text-secondary, #cbd5e1);
 }
 .mini-app-picker__load-btn--secondary:hover:not(:disabled) {
-  background: var(--accent-softer, rgba(99, 102, 241, 0.1));
+  background: var(--accent-softer);
   color: var(--text-primary, #e2e8f0);
-  border-color: var(--primary, #818cf8);
+  border-color: var(--primary);
 }
 
 .mini-app-picker__filters {
@@ -563,8 +564,8 @@
   font-size: 0.65rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  background: rgba(129, 140, 248, 0.18);
-  color: #c7d2fe;
+  background: var(--accent-soft);
+  color: var(--primary);
   vertical-align: middle;
 }
 
@@ -655,7 +656,7 @@
 
 .mini-app-picker__combo-input:focus {
   outline: none;
-  border-color: var(--primary, #818cf8);
+  border-color: var(--primary);
 }
 
 .mini-app-picker__count-pill {
@@ -760,8 +761,8 @@
   align-items: center;
   gap: 6px;
   padding: 4px 10px 4px 6px;
-  background: rgba(129, 140, 248, 0.18);
-  border: 1px solid rgba(129, 140, 248, 0.35);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-soft);
   border-radius: 6px;
   font-size: 0.82rem;
   color: inherit;
@@ -876,7 +877,7 @@
 
 .mini-app-analysis__tab.is-active {
   color: var(--text-primary, #e2e8f0);
-  border-bottom-color: var(--primary, #818cf8);
+  border-bottom-color: var(--primary);
 }
 
 .mini-app-analysis__tab:hover {
@@ -1101,13 +1102,13 @@
 
 .mini-app-ranking-item:hover,
 .mini-app-relation-card:hover {
-  border-color: rgba(129, 140, 248, 0.38);
+  border-color: var(--primary);
   transform: translateY(-1px);
 }
 
 .mini-app-ranking-item.is-selected {
-  border-color: rgba(129, 140, 248, 0.58);
-  background: rgba(129, 140, 248, 0.08);
+  border-color: var(--primary);
+  background: var(--accent-softer);
 }
 
 .mini-app-ranking-item__head,
@@ -1223,13 +1224,14 @@
  * ------------------------------------------------------------------------- */
 
 [data-theme="light"] .mini-app-picker__load-btn {
-  background: var(--accent-soft, rgba(79, 70, 229, 0.1));
-  color: var(--primary, #4f46e5);
-  border-color: var(--primary, #4f46e5);
+  background: var(--accent-soft);
+  color: var(--primary);
+  border-color: var(--primary);
 }
 
 [data-theme="light"] .mini-app-picker__load-btn:hover:not(:disabled) {
-  background: rgba(79, 70, 229, 0.18);
+  background: var(--accent-soft);
+  filter: brightness(0.95);
 }
 
 [data-theme="light"] .mini-app-picker__load-btn--secondary {
@@ -1237,9 +1239,9 @@
   border-color: var(--border, rgba(15, 23, 42, 0.12));
 }
 [data-theme="light"] .mini-app-picker__load-btn--secondary:hover:not(:disabled) {
-  background: var(--accent-softer, rgba(79, 70, 229, 0.06));
-  color: var(--primary, #4f46e5);
-  border-color: var(--primary, #4f46e5);
+  background: var(--accent-softer);
+  color: var(--primary);
+  border-color: var(--primary);
 }
 
 [data-theme="light"] .mini-app-picker__dropdown {
@@ -1276,14 +1278,14 @@
 }
 
 [data-theme="light"] .mini-app-picker__chip {
-  background: var(--accent-soft, rgba(79, 70, 229, 0.1));
-  border-color: rgba(79, 70, 229, 0.3);
+  background: var(--accent-soft);
+  border-color: var(--primary);
   color: var(--text-primary, #0f172a);
 }
 
 [data-theme="light"] .mini-app-picker__kind-pill {
-  background: var(--accent-soft, rgba(79, 70, 229, 0.1));
-  color: var(--primary, #4f46e5);
+  background: var(--accent-soft);
+  color: var(--primary);
 }
 
 [data-theme="light"] .mini-app-summary-card {
@@ -1374,12 +1376,12 @@
   --tone-neutral-fg: #cbd5e1;
   --tone-neutral-border: rgba(148, 163, 184, 0.3);
 
-  /* Interactive tokens */
-  --segment-active-bg: rgba(129, 140, 248, 0.18);
-  --segment-active-border: rgba(129, 140, 248, 0.55);
-  --button-primary-bg: rgba(129, 140, 248, 0.2);
-  --button-primary-border: rgba(129, 140, 248, 0.55);
-  --button-primary-fg: #c7d2fe;
+  /* Interactive tokens — derive from --primary so they re-tint inside .mini-app-scope */
+  --segment-active-bg: var(--accent-soft);
+  --segment-active-border: var(--primary);
+  --button-primary-bg: var(--accent-soft);
+  --button-primary-border: var(--primary);
+  --button-primary-fg: var(--primary);
 
   /* Motion */
   --motion-fast: 150ms;
@@ -1401,11 +1403,11 @@
   --tone-neutral-bg: rgba(15, 23, 42, 0.06);
   --tone-neutral-fg: #334155;
   --tone-neutral-border: rgba(15, 23, 42, 0.14);
-  --segment-active-bg: rgba(79, 70, 229, 0.12);
-  --segment-active-border: rgba(79, 70, 229, 0.5);
-  --button-primary-bg: rgba(79, 70, 229, 0.1);
-  --button-primary-border: rgba(79, 70, 229, 0.5);
-  --button-primary-fg: #4338ca;
+  --segment-active-bg: var(--accent-soft);
+  --segment-active-border: var(--primary);
+  --button-primary-bg: var(--accent-soft);
+  --button-primary-border: var(--primary);
+  --button-primary-fg: var(--primary);
 }
 
 /* SegmentedControl */

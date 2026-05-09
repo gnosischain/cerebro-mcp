@@ -3,6 +3,7 @@ import ReactECharts from "echarts-for-react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { CollapsibleSection } from "../shared/CollapsibleSection";
+import { MiniAppChrome } from "../shared/MiniAppChrome";
 import { useDebouncedValue } from "../shared/useDebouncedValue";
 import type { DatasetMode, MiniAppPayload } from "../shared/miniAppTypes";
 
@@ -379,7 +380,7 @@ function buildMultiMetricChartOption(
     xLabels.map((x) => valMaps[m].get(x) ?? 0),
   );
 
-  const colors = ["#818cf8", "#34d399", "#f97316", "#ec4899", "#06b6d4"];
+  const colors = ["#67e8f9", "#34d399", "#f97316", "#ec4899", "#06b6d4"];
   return {
     backgroundColor: "transparent",
     tooltip: { trigger: "axis" },
@@ -1500,6 +1501,7 @@ export default function MetricLabApp() {
   const hasData = !!(view.datasets?.primary && state?.mode === "loaded");
 
   return (
+    <MiniAppChrome activeTabId="metric">
     <div className="mini-app-root mini-app-metric-lab">
       <header className="mini-app-header">
         <h1>{view.title}</h1>
@@ -1533,5 +1535,6 @@ export default function MetricLabApp() {
         />
       )}
     </div>
+    </MiniAppChrome>
   );
 }

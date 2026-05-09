@@ -1,0 +1,169 @@
+import type { ReactNode } from "react";
+import { useState } from "react";
+import { MaThemeToggle } from "./MaThemeToggle";
+import "./mini-app-chrome.css";
+
+export interface MiniAppTab {
+  id: string;
+  label: string;
+  href?: string;
+}
+
+/** Cross-app navigation. Each mini-app passes `activeTabId` to highlight its slot. */
+export const DEFAULT_APP_TABS: MiniAppTab[] = [
+  { id: "portfolio", label: "Portfolio", href: "/portfolio.html" },
+  { id: "token", label: "Token", href: "/token-explorer.html" },
+  { id: "contract", label: "Contract", href: "/contract-explorer.html" },
+  { id: "graph", label: "Graph", href: "/graph-explorer.html" },
+  { id: "metric", label: "Metric Lab", href: "/metric-lab.html" },
+  { id: "yields", label: "Yields", href: "/yield-opportunities.html" },
+  { id: "quarterly", label: "Quarterly", href: "/quarterly-review.html" },
+];
+
+interface MiniAppChromeProps {
+  brand?: string;
+  tabs?: MiniAppTab[];
+  activeTabId?: string;
+  onTabClick?: (id: string) => void;
+  rightSlot?: ReactNode;
+  children: ReactNode;
+}
+
+/** True when the bundle is loaded as the top-level document (standalone browser
+ * or `npm run dev`). False when iframed inside an MCP host like Claude Desktop —
+ * in that case cross-app navigation via plain href would 404 because the host
+ * doesn't share our root path. We hide the tabs there; users switch apps via
+ * the host's chat (e.g. "open portfolio"). Dev mode always shows tabs.
+ */
+function isStandaloneContext(): boolean {
+  if (typeof window === "undefined") return false;
+  if (import.meta.env?.DEV) return true;
+  try {
+    return window.parent === window;
+  } catch {
+    // Cross-origin parent access throws — definitely iframed.
+    return false;
+  }
+}
+
+export function MiniAppChrome({
+  brand = "CEREBRO ◇ GNOSIS",
+  tabs,
+  activeTabId,
+  onTabClick,
+  rightSlot,
+  children,
+}: MiniAppChromeProps) {
+  // If caller passes explicit tabs, honor them. Otherwise default to the
+  // cross-app nav when standalone, or no tabs at all in MCP host context.
+  const effectiveTabs =
+    tabs !== undefined
+      ? tabs
+      : isStandaloneContext()
+        ? DEFAULT_APP_TABS
+        : [];
+
+  return (
+    <div className="ma-chrome mini-app-scope">
+      <nav className="ma-bar">
+        <span className="ma-brand">{brand}</span>
+        {effectiveTabs.map((t) => (
+          <a
+            key={t.id}
+            href={t.href ?? "#"}
+            className={`ma-tab${t.id === activeTabId ? " is-active" : ""}`}
+            onClick={(e) => {
+              if (onTabClick) {
+                e.preventDefault();
+                onTabClick(t.id);
+              }
+            }}
+          >
+            {t.label}
+          </a>
+        ))}
+        <span className="ma-bar-right">
+          {rightSlot}
+          <MaThemeToggle />
+        </span>
+      </nav>
+      <div className="ma-body">{children}</div>
+    </div>
+  );
+}
+
+interface MaIdentityProps {
+  label: string;
+  value: string;
+  onCopy?: () => void;
+  rightSlot?: ReactNode;
+}
+
+export function MaIdentity({ label, value, onCopy, rightSlot }: MaIdentityProps) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    if (!onCopy) return;
+    onCopy();
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
+  };
+
+  return (
+    <div className="ma-identity">
+      <div className="ma-identity-text">
+        <div className="ma-identity-label">{label}</div>
+        <div className="ma-identity-value">{value}</div>
+      </div>
+      {onCopy && (
+        <button className="ma-identity-copy" onClick={handleCopy} type="button">
+          {copied ? "✓ Copied" : "⎘ Copy"}
+        </button>
+      )}
+      {rightSlot}
+    </div>
+  );
+}
+
+export function MaKpiGrid({ children }: { children: ReactNode }) {
+  return <div className="ma-kpi-grid">{children}</div>;
+}
+
+interface MaKpiProps {
+  label: string;
+  value: string;
+  delta?: string;
+  deltaTone?: "positive" | "negative" | "neutral";
+}
+
+export function MaKpi({ label, value, delta, deltaTone = "neutral" }: MaKpiProps) {
+  return (
+    <div className="ma-kpi">
+      <div className="ma-kpi-label">{label}</div>
+      <div className="ma-kpi-value">{value}</div>
+      {delta && <div className={`ma-kpi-delta ma-kpi-delta--${deltaTone}`}>{delta}</div>}
+    </div>
+  );
+}
+
+interface MaSectionProps {
+  index?: string;
+  title: string;
+  meta?: string;
+  children: ReactNode;
+}
+
+export function MaSection({ index, title, meta, children }: MaSectionProps) {
+  return (
+    <section className="ma-section">
+      <header className="ma-section-head">
+        {index && <span className="ma-section-index">{index}</span>}
+        <h2 className="ma-section-title">{title}</h2>
+        {meta && <span className="ma-section-meta">{meta}</span>}
+      </header>
+      <div className="ma-section-body">{children}</div>
+    </section>
+  );
+}
+
+export { MaThemeToggle };

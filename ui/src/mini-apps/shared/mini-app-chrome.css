@@ -1,0 +1,456 @@
+/* Etherscan-mono mini-app chrome.
+ * Cyan accent comes from `.mini-app-scope` token override (tokens.css).
+ * All colors here resolve through theme tokens — never hard-code hex.
+ */
+
+.ma-chrome {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  min-height: 100vh;
+}
+
+/* ---------- top nav bar ---------- */
+.ma-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.ma-brand {
+  padding: 9px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--primary);
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+}
+
+.ma-tab {
+  padding: 9px 14px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  border-right: 1px solid var(--border);
+  text-decoration: none;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border-top: none;
+  border-left: none;
+  border-bottom: none;
+  cursor: pointer;
+}
+
+.ma-tab:hover {
+  color: var(--text-primary);
+  background: var(--surface-2);
+}
+
+.ma-tab.is-active {
+  color: var(--text-primary);
+  background: var(--bg);
+  box-shadow: inset 0 -2px 0 var(--primary);
+}
+
+.ma-bar-right {
+  margin-left: auto;
+  padding: 9px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  border-left: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ma-theme-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+
+.ma-theme-toggle:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* ---------- body ---------- */
+.ma-body {
+  padding: 14px 18px 32px;
+}
+
+/* ---------- identity card ---------- */
+.ma-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 4px;
+  margin-bottom: 14px;
+}
+
+.ma-identity-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ma-identity-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.ma-identity-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ma-identity-copy {
+  margin-left: auto;
+  padding: 4px 9px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.ma-identity-copy:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* ---------- KPI grid ---------- */
+.ma-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 720px) {
+  .ma-kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.ma-kpi {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.ma-kpi-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.ma-kpi-value {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ma-kpi-delta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ma-kpi-delta--positive { color: var(--success); }
+.ma-kpi-delta--negative { color: var(--error); }
+.ma-kpi-delta--neutral  { color: var(--text-secondary); }
+
+/* ---------- section ---------- */
+.ma-section {
+  margin-bottom: 18px;
+}
+
+.ma-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  background: var(--surface-2);
+  border-radius: 4px 4px 0 0;
+}
+
+.ma-section-index {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--primary);
+}
+
+.ma-section-title {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 13.5px;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.ma-section-meta {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+.ma-section-body {
+  border: 1px solid var(--border);
+  border-radius: 0 0 4px 4px;
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+/* ---------- shared data table ---------- */
+.ma-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.ma-table thead th {
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ma-table tbody td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--table-stripe);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.ma-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.ma-table tbody tr:hover td {
+  background: var(--accent-softer);
+}
+
+.ma-table .num { text-align: right; }
+.ma-table .sym { color: var(--primary); }
+.ma-table .pos { color: var(--success); }
+.ma-table .neg { color: var(--error); }
+.ma-table .muted { color: var(--text-secondary); }
+
+/* ---------- skeleton + empty states ---------- */
+@keyframes ma-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+.ma-skeleton {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent-softer) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: ma-shimmer 1.4s ease-in-out infinite;
+  height: 56px;
+}
+
+.ma-empty {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 32px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+}
+
+/* ---------- subnav: bracketed numeric tabs (read/write/events etc.) ---------- */
+.ma-subnav {
+  display: flex;
+  gap: 18px;
+  padding: 6px 0 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.ma-subnav-item {
+  background: transparent;
+  border: none;
+  padding: 4px 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.ma-subnav-item .ma-subnav-num {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.ma-subnav-item:hover {
+  color: var(--text-primary);
+}
+
+.ma-subnav-item.is-active {
+  color: var(--text-primary);
+  border-bottom-color: var(--primary);
+}
+
+.ma-subnav-item.is-active .ma-subnav-num {
+  color: var(--primary);
+}
+
+/* ---------- ABI block: indented, mono, inside MaSection body ---------- */
+.ma-abi-block {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin: 0;
+  white-space: pre;
+  color: var(--text-primary);
+  overflow-x: auto;
+}
+
+.ma-abi-block .kw { color: var(--primary); }
+.ma-abi-block .ty { color: var(--text-secondary); }
+
+/* ---------- Inline call row: inputs + cyan Call button + result ---------- */
+.ma-call-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.ma-call-row input[type="text"],
+.ma-call-row input[type="number"] {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.ma-call-row input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.ma-call-btn {
+  padding: 6px 18px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--primary);
+  color: var(--bg);
+  border: 1px solid var(--primary);
+  border-radius: 3px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.ma-call-btn:hover:not(:disabled) {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+
+.ma-call-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ma-result-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ma-result-line .ma-result-arrow {
+  color: var(--text-muted);
+}
+
+.ma-result-line .ma-result-label {
+  color: var(--text-secondary);
+}
+
+.ma-result-line .ma-result-value {
+  color: var(--success);
+  word-break: break-all;
+}
+
+.ma-result-line .ma-result-value--err {
+  color: var(--error);
+}
+
+.ma-result-line .ma-result-type {
+  color: var(--text-muted);
+}

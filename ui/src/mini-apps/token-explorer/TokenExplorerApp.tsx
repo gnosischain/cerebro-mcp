@@ -3,6 +3,7 @@ import ReactECharts from "echarts-for-react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { CollapsibleSection } from "../shared/CollapsibleSection";
+import { MiniAppChrome } from "../shared/MiniAppChrome";
 import type {
   DatasetDescriptor,
   MiniAppPayload,
@@ -834,7 +835,7 @@ function buildCorrelationScatter(
     grid: { left: 60, right: 24, top: 24, bottom: 48 },
     xAxis: { type: "value", name: label1 },
     yAxis: { type: "value", name: label2 },
-    series: [{ type: "scatter", data, symbolSize: 6, itemStyle: { opacity: 0.7, color: isDark ? "#818cf8" : "#4f46e5" } }],
+    series: [{ type: "scatter", data, symbolSize: 6, itemStyle: { opacity: 0.7, color: isDark ? "#67e8f9" : "#0891b2" } }],
   };
 }
 
@@ -912,12 +913,13 @@ export default function TokenExplorerApp() {
     }
   };
 
-  if (!view) return <div className="mini-app-loading">Loading Token Explorer...</div>;
+  if (!view) return <MiniAppChrome activeTabId="token"><div className="mini-app-loading">Loading Token Explorer...</div></MiniAppChrome>;
 
   const state = view.view_state;
   const hasData = !!((state?.mode === "loaded" || state?.mode === "comparison") && view.datasets && Object.keys(view.datasets).length > 0);
 
   return (
+    <MiniAppChrome activeTabId="token">
     <div className="mini-app-root mini-app-token-explorer">
       <header className="mini-app-header">
         <h1>{view.title}</h1>
@@ -954,5 +956,6 @@ export default function TokenExplorerApp() {
         </div>
       )}
     </div>
+    </MiniAppChrome>
   );
 }

@@ -34,8 +34,8 @@
   border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.12));
   background: linear-gradient(
     180deg,
-    rgba(99, 102, 241, 0.08) 0%,
-    rgba(99, 102, 241, 0.02) 100%
+    var(--accent-soft) 0%,
+    transparent 100%
   );
 }
 
@@ -111,8 +111,8 @@
 
 .contract-explorer-address-bar input[type="text"]:focus {
   outline: none;
-  border-color: rgba(99, 102, 241, 0.7);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .contract-explorer-address-bar select {
@@ -140,7 +140,7 @@
 
 .contract-explorer-address-bar button {
   padding: 0.75rem 1.4rem;
-  background: var(--mini-app-accent, #6366f1);
+  background: var(--primary);
   color: white;
   border: none;
   border-radius: 8px;
@@ -149,7 +149,7 @@
   font-weight: 600;
   letter-spacing: 0.02em;
   transition: opacity 0.15s ease, transform 0.05s ease;
-  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.25);
+  box-shadow: 0 4px 14px var(--accent-soft);
 }
 
 .contract-explorer-address-bar button:active {
@@ -158,7 +158,7 @@
 
 .contract-explorer-fn-card button {
   padding: 0.5rem 1rem;
-  background: var(--mini-app-accent, #6366f1);
+  background: var(--primary);
   color: white;
   border: none;
   border-radius: 6px;
@@ -231,14 +231,14 @@
 }
 
 .contract-explorer-preset:hover {
-  background: rgba(99, 102, 241, 0.12);
+  background: var(--accent-softer);
   color: var(--mini-app-text, #e5e7eb);
 }
 
 .contract-explorer-preset.active {
-  background: rgba(99, 102, 241, 0.25);
-  color: #c7d2fe;
-  border-color: rgba(99, 102, 241, 0.5);
+  background: var(--accent-soft);
+  color: var(--primary);
+  border-color: var(--primary);
 }
 
 .contract-explorer-block-hint {
@@ -263,14 +263,14 @@
   font-size: 0.7rem;
   padding: 0.05rem 0.4rem;
   border-radius: 4px;
-  background: rgba(99, 102, 241, 0.18);
-  color: #a5b4fc;
+  background: var(--accent-soft);
+  color: var(--primary);
 }
 
 .contract-explorer-history-block {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 0.7rem;
-  color: #a5b4fc;
+  color: var(--primary);
 }
 
 /* Empty state ---------------------------------------------------------- */
@@ -367,8 +367,8 @@
   font-size: 0.7rem;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
-  background: rgba(99, 102, 241, 0.15);
-  color: #a5b4fc;
+  background: var(--accent-soft);
+  color: var(--primary);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
