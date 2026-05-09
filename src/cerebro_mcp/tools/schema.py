@@ -280,6 +280,11 @@ LIMIT {limit:UInt32}
         (wrong topic, downstream of the chosen lineage, or covered by a
         sibling model that was queried). Always pass a short `reason` for
         audit trail.
+
+        For more than one model, use `record_model_exclusion_batch`,
+        `exclude_models_by_prefix`, `exclude_module`, or
+        `exclude_all_discovered_except` — calling this tool in a loop
+        is the slowest possible path.
         """
         from cerebro_mcp.tools.session_state import state
 
@@ -290,6 +295,156 @@ LIMIT {limit:UInt32}
         return (
             f"Excluded '{model_name}' from coverage gate "
             f"(reason: {reason or 'unspecified'}). "
+            f"Total excluded this cycle: {excluded_count}."
+        )
+
+    @mcp.tool()
+    def record_model_exclusion_batch(
+        model_names: list[str],
+        reason: str = "",
+    ) -> str:
+        """Exclude multiple discovered models from the coverage gate in
+        a single call. The `reason` applies to all entries.
+
+        Prefer this over calling `record_model_exclusion` in a loop —
+        the singular tool has the same gate semantics but costs one MCP
+        round-trip per model. Use when you have an explicit list of
+        out-of-scope model names; otherwise reach for
+        `exclude_models_by_prefix`, `exclude_module`, or
+        `exclude_all_discovered_except`.
+        """
+        from cerebro_mcp.tools.session_state import state
+
+        if not isinstance(model_names, list):
+            return "Error: model_names must be a list of strings"
+        cleaned = [
+            n.strip() for n in model_names
+            if isinstance(n, str) and n.strip()
+        ]
+        if not cleaned:
+            return "Error: model_names is empty"
+        reason_clean = reason.strip()
+        for name in cleaned:
+            state.record_model_exclusion(name, reason_clean)
+        excluded_count = len(state.excluded_models)
+        return (
+            f"Excluded {len(cleaned)} model(s) from coverage gate "
+            f"(reason: {reason_clean or 'unspecified'}). "
+            f"Total excluded this cycle: {excluded_count}."
+        )
+
+    @mcp.tool()
+    def exclude_models_by_prefix(
+        prefix: str,
+        reason: str = "",
+    ) -> str:
+        """Exclude every discovered model whose name starts with `prefix`.
+
+        Resolves against the in-session ``discovered_models`` set
+        (populated by ``search_models`` / ``discover_models`` /
+        ``discover_metrics``), so callers do not have to enumerate
+        names. Useful for sweeps like
+        ``exclude_models_by_prefix("api_execution_circles_v2_",
+        reason="trust network out of scope for referral analysis")``.
+        """
+        from cerebro_mcp.tools.session_state import state
+
+        if not isinstance(prefix, str) or not prefix.strip():
+            return "Error: prefix is required"
+        prefix_clean = prefix.strip()
+        reason_clean = reason.strip()
+        # Snapshot the set under the lock so the iteration is consistent.
+        with state.lock:
+            matches = sorted(
+                m for m in state.discovered_models
+                if m.startswith(prefix_clean)
+            )
+        for name in matches:
+            state.record_model_exclusion(name, reason_clean)
+        excluded_count = len(state.excluded_models)
+        return (
+            f"Excluded {len(matches)} model(s) matching prefix "
+            f"'{prefix_clean}' (reason: "
+            f"{reason_clean or 'unspecified'}). "
+            f"Total excluded this cycle: {excluded_count}."
+        )
+
+    @mcp.tool()
+    def exclude_module(
+        module: str,
+        reason: str = "",
+    ) -> str:
+        """Exclude every discovered model belonging to a dbt module.
+
+        Reuses the manifest's module index (the same lookup that backs
+        ``search_models(module=...)``). Only discovered models are
+        excluded — models in the module that were never surfaced by a
+        search are left untouched.
+
+        Common modules: ``execution``, ``consensus``, ``contracts``,
+        ``bridges``, ``p2p``, ``circles``, ``ESG``.
+        """
+        from cerebro_mcp.manifest_loader import manifest
+        from cerebro_mcp.tools.session_state import state
+
+        if not isinstance(module, str) or not module.strip():
+            return "Error: module is required"
+        module_clean = module.strip()
+        reason_clean = reason.strip()
+        if not manifest.is_loaded:
+            return "Error: manifest not loaded — cannot resolve module"
+        module_models = set(manifest.model_names_in_module(module_clean))
+        if not module_models:
+            return (
+                f"No models found for module '{module_clean}'. "
+                f"Available modules: "
+                f"{', '.join(sorted(manifest.get_modules().keys()))}."
+            )
+        with state.lock:
+            matches = sorted(state.discovered_models & module_models)
+        for name in matches:
+            state.record_model_exclusion(name, reason_clean)
+        excluded_count = len(state.excluded_models)
+        return (
+            f"Excluded {len(matches)} discovered model(s) in module "
+            f"'{module_clean}' (reason: "
+            f"{reason_clean or 'unspecified'}). "
+            f"Total excluded this cycle: {excluded_count}."
+        )
+
+    @mcp.tool()
+    def exclude_all_discovered_except(
+        keep: list[str],
+        reason: str = "",
+    ) -> str:
+        """Inverse exclusion: keep the named discovered models in scope,
+        exclude every other discovered model in one call.
+
+        Use when discovery returned many models but only a handful are
+        relevant. Pass the names you intend to query / explore as
+        ``keep``; everything else surfaced by ``search_models`` /
+        ``discover_models`` / ``discover_metrics`` this cycle is
+        excluded with the shared ``reason``.
+        """
+        from cerebro_mcp.tools.session_state import state
+
+        if not isinstance(keep, list):
+            return "Error: keep must be a list of model names"
+        keep_clean = {
+            n.strip() for n in keep
+            if isinstance(n, str) and n.strip()
+        }
+        reason_clean = reason.strip()
+        with state.lock:
+            targets = sorted(state.discovered_models - keep_clean)
+            kept_present = len(keep_clean & state.discovered_models)
+        for name in targets:
+            state.record_model_exclusion(name, reason_clean)
+        excluded_count = len(state.excluded_models)
+        return (
+            f"Excluded {len(targets)} discovered model(s); kept "
+            f"{kept_present} (reason: "
+            f"{reason_clean or 'unspecified'}). "
             f"Total excluded this cycle: {excluded_count}."
         )
 

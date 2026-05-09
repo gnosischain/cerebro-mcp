@@ -67,14 +67,26 @@ class MiniAppCache:
         return self._ttl
 
     def get(self, key: str) -> CachedDataset | None:
+        # Telemetry import is local so a missing observability module
+        # (e.g. during isolated unit-tests) cannot break cache lookups.
+        try:
+            from cerebro_mcp.observability import (
+                observe_cache_hit,
+                observe_cache_miss,
+            )
+        except Exception:  # pragma: no cover - defensive
+            observe_cache_hit = observe_cache_miss = lambda _src: None
         with self._lock:
             self._prune_locked()
             entry = self._store.get(key)
             if entry is None:
+                observe_cache_miss("mini_app_dataset")
                 return None
             if datetime.now(timezone.utc) > entry.expires:
                 del self._store[key]
+                observe_cache_miss("mini_app_dataset")
                 return None
+            observe_cache_hit("mini_app_dataset")
             return entry
 
     def put(self, key: str, dataset: CachedDataset) -> None:

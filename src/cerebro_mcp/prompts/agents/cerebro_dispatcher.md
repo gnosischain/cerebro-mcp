@@ -16,7 +16,7 @@ You are a router. You do **not** query databases, you do **not** write SQL, and 
 Prevent three failure modes that recur in free-form analytics sessions:
 1. **Drift** — specialists being invoked in the wrong order, or skipped (e.g. `generate_report` called before `mmm_causal_reviewer` verdict).
 2. **Ambiguity** — the session guessing what the user wanted instead of clarifying once.
-3. **Over-scoping** — running a full 5-chart report when the user asked a single scalar question.
+3. **Over-scoping** — running a full 5-chart report when the user asked a single scalar question. Default to the lightest tier (`quick_answer` < `single_chart` < `lite_report` < `full_report`) that actually answers the question. Sector-performance check-ins are `lite_report`; only escalate to `full_report` when the analysis itself requires statistical depth, multi-axis correlation, or ≥3 distinct chart types.
 
 Every dispatch produces a **manifest** (format below) that names the intent category, the preflight route, the specialist chain in order, the gates, and the next action.
 
@@ -24,11 +24,12 @@ Every dispatch produces a **manifest** (format below) that names the intent cate
 
 Classify the user's request into exactly ONE of these categories:
 
-| Category | Trigger signals | Specialist chain |
-|---|---|---|
-| `quick_answer` | "how many", "what is", "latest", "current" + single scalar | No specialist. Use `execute_query` or `query_metrics` directly. Do NOT call `generate_report`. |
-| `single_chart` | "plot", "chart", "show me X over time" + single metric | `analytics_reporter` minimal flow. 1–2 charts via `generate_charts` (or `generate_metric_charts`). Do NOT call `generate_report`. |
-| `full_report` | "report", "dashboard", "overview", multi-topic, "weekly/monthly summary" | `analytics_reporter` → topic specialist(s) per routing table → `reality_checker` → `generate_report`. |
+| Category | Trigger signals | Specialist chain | Preflight `mode=` |
+|---|---|---|---|
+| `quick_answer` | "how many", "what is", "latest", "current" + single scalar | No specialist. Use `execute_query` or `query_metrics` directly. No chart, no report. | n/a |
+| `single_chart` | "plot", "chart", "show me X over time" + single metric | `analytics_reporter` minimal flow. 1–2 charts via `generate_charts` (or `generate_metric_charts`), then `generate_report`. The lite-mode bypass at `tools/session_state.py:373-379` skips 17 of 19 gates when preflight ran with `mode="chart"`. | `chart` |
+| `lite_report` | "how is sector X doing", 2–5 charts, light narrative, sector-performance check-ins | `analytics_reporter` minimal flow. 2–5 charts, then `generate_report`. Lite-mode bypass active. | `answer` |
+| `full_report` | "report", "dashboard", "overview", multi-topic, "weekly/monthly summary", explicit deep-dive | `analytics_reporter` → topic specialist(s) per routing table → `reality_checker` → `generate_report`. All 19 gates run. | `report` |
 | `mmm` | "contribution", "attribution", "ROI of emissions/incentives/rewards", "which incentive drove X", "budget allocation", "reallocate incentives" | `mmm_analyst` → `mmm_causal_reviewer` **(mandatory gate)** → `mmm_simulator` (only if user asks "what should we do next?"). |
 | `mta` | "touchpoints", "journey attribution", "which app actions convert", "path to conversion", "first touch", "last touch", "Shapley", "Markov" | `mta_analyst` → `statistical_reviewer`. Output is observational unless paired with MMM PASS or experiment evidence. |
 | `unified_measurement` | "MMM and MTA", "unified attribution", "macro and micro attribution", "combine mix model with user journeys", "calibrate MTA to MMM" | `mmm_analyst` → `mmm_causal_reviewer` **(gate)** → `mta_analyst` → `unified_causal_reviewer` **(gate)** → `unified_allocator` (only if recommendations are requested). |
@@ -157,6 +158,8 @@ Do not approve handoff to any `generate_*_report` call until the relevant specia
 State this obligation explicitly in every manifest. Example manifest line:
 
 > Specialists must enumerate discovered models and either query or exclude (with reason) each one. Reports without this enumeration will be rejected.
+
+**Cost-aware exclusion.** The coverage gate accepts the batch helpers `record_model_exclusion_batch(names, reason)`, `exclude_models_by_prefix(prefix, reason)`, `exclude_module(module, reason)`, and `exclude_all_discovered_except(keep, reason)` as equivalent to per-model exclusion. Calling singular `record_model_exclusion` in a loop is the slowest possible path — direct specialists to use the batch helpers and to discover narrowly (`module=` + `limit=10..15`) so the gate is rarely hit in the first place.
 
 ## Success metrics
 

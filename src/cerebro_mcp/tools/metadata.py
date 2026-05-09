@@ -264,9 +264,15 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
         up Grafana / a metrics scraper.
         """
         from cerebro_mcp.observability import (
+            cerebro_cache_hits_total,
+            cerebro_cache_misses_total,
             cerebro_discovered_model_coverage_total,
+            cerebro_quality_gate_evaluation_seconds,
             cerebro_quality_gate_evaluations_total,
             cerebro_quality_report_generations_total,
+            cerebro_session_generate_report_retries_total,
+            cerebro_session_time_to_first_report_seconds,
+            cerebro_session_tool_calls_per_session,
         )
 
         def _read_counter(counter, label_keys: list[str]) -> dict[tuple, float]:
@@ -279,6 +285,35 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                 if value:
                     out[child_labels] = value
             return out
+
+        def _read_histogram(histogram, label_keys: list[str]) -> dict[tuple, dict]:
+            """Read a Histogram's per-label-combo count + sum.
+
+            Walks the metric's ``collect()`` samples (the same surface
+            Prometheus scrapes) so the reader doesn't depend on private
+            attributes that vary between labelled / unlabelled
+            histograms.
+
+            Returns ``{label_tuple: {"count": float, "sum": float}}``.
+            For an unlabelled histogram, ``label_tuple`` is ``()``.
+            """
+            out: dict[tuple, dict] = {}
+            try:
+                metrics = list(histogram.collect())
+            except Exception:
+                return out
+            for metric in metrics:
+                for sample in metric.samples:
+                    if sample.name.endswith("_count"):
+                        key = tuple(sample.labels.get(k, "") for k in label_keys)
+                        out.setdefault(key, {"count": 0.0, "sum": 0.0})
+                        out[key]["count"] = float(sample.value)
+                    elif sample.name.endswith("_sum"):
+                        key = tuple(sample.labels.get(k, "") for k in label_keys)
+                        out.setdefault(key, {"count": 0.0, "sum": 0.0})
+                        out[key]["sum"] = float(sample.value)
+            # Drop entries with zero count to keep the rendering tidy.
+            return {k: v for k, v in out.items() if v["count"]}
 
         lines: list[str] = ["# Quality Metrics\n"]
 
@@ -332,6 +367,84 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
             for (rtype, outcome), v in sorted(rep_data.items()):
                 lines.append(f"| `{rtype}` | `{outcome}` | {int(v)} |")
             lines.append("")
+
+        # 4) Session-level latency / cost telemetry
+        lines.append("## Session cost\n")
+
+        tool_calls_hist = _read_histogram(
+            cerebro_session_tool_calls_per_session, []
+        )
+        if tool_calls_hist:
+            for _, payload in tool_calls_hist.items():
+                count = int(payload["count"])
+                avg = (payload["sum"] / count) if count else 0.0
+                lines.append(
+                    f"- **Tool calls per session** — {count} session(s) "
+                    f"recorded; avg {avg:.1f} tool calls/session."
+                )
+        else:
+            lines.append("- **Tool calls per session** — _no sessions finalized yet._")
+
+        ttfr = _read_histogram(
+            cerebro_session_time_to_first_report_seconds, ["report_type"]
+        )
+        if ttfr:
+            lines.append("- **Time to first report (median proxy = sum/count):**")
+            for (report_type,), payload in sorted(ttfr.items()):
+                count = int(payload["count"])
+                avg = (payload["sum"] / count) if count else 0.0
+                lines.append(
+                    f"    - `{report_type}` — {count} report(s); "
+                    f"avg {avg:.1f}s to first report."
+                )
+        else:
+            lines.append("- **Time to first report** — _no reports recorded yet._")
+
+        retry_data = _read_counter(
+            cerebro_session_generate_report_retries_total, ["report_type"]
+        )
+        if retry_data:
+            for (rtype,), v in sorted(retry_data.items()):
+                lines.append(
+                    f"- **Within-session report retries (`{rtype}`):** {int(v)}"
+                )
+        else:
+            lines.append("- **Within-session report retries** — none recorded.")
+
+        gate_lat = _read_histogram(
+            cerebro_quality_gate_evaluation_seconds, ["rule"]
+        )
+        if gate_lat:
+            lines.append("- **Gate evaluation latency:**")
+            for (rule,), payload in sorted(gate_lat.items()):
+                count = int(payload["count"])
+                avg_ms = (payload["sum"] / count * 1000.0) if count else 0.0
+                lines.append(
+                    f"    - `{rule}` — {count} eval(s); avg {avg_ms:.2f} ms."
+                )
+        else:
+            lines.append(
+                "- **Gate evaluation latency** — no evaluations timed yet."
+            )
+
+        cache_hits = _read_counter(cerebro_cache_hits_total, ["source"])
+        cache_misses = _read_counter(cerebro_cache_misses_total, ["source"])
+        if cache_hits or cache_misses:
+            sources = sorted({s for (s,) in cache_hits} | {s for (s,) in cache_misses})
+            lines.append("- **Cache hit rate:**")
+            for source in sources:
+                hits = int(cache_hits.get((source,), 0))
+                misses = int(cache_misses.get((source,), 0))
+                total = hits + misses
+                rate = f"{(100 * hits / total):.1f}%" if total else "n/a"
+                lines.append(
+                    f"    - `{source}` — {hits} hit(s) / {misses} miss(es) "
+                    f"({rate})."
+                )
+        else:
+            lines.append("- **Cache hit rate** — no cache lookups recorded.")
+
+        lines.append("")
 
         lines.append("---")
         lines.append(

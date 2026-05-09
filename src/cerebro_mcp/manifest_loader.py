@@ -715,6 +715,14 @@ class ManifestLoader:
         """Return modules and their model counts."""
         return {mod: len(models) for mod, models in self._module_index.items()}
 
+    def model_names_in_module(self, module: str) -> list[str]:
+        """Return just the model names belonging to a module.
+
+        Lightweight counterpart to ``get_module_models`` for callers
+        (e.g. the batch exclusion tools) that only need names.
+        """
+        return list(self._module_index.get(module.lower(), []))
+
     def get_module_models(self, module: str) -> list[dict[str, str]]:
         """Return models for a specific module."""
         names = self._module_index.get(module.lower(), [])

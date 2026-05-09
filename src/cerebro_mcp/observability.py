@@ -331,6 +331,73 @@ cerebro_discovered_model_coverage_total = Counter(
     ("outcome",),
 )
 
+# ── Speedup-observability metrics ────────────────────────────────────────
+# These quantify session-level cost: how many tool calls a session burns,
+# how long it takes to land the first report, how often the agent hits a
+# gate and retries, and how long each gate evaluation takes. They are the
+# instruments that prove the batch-exclusion + lite-mode work is paying
+# off.
+
+# Bucketed for both quick chart-only sessions (≤30 calls) and runaway
+# loops (>200 calls).
+SESSION_TOOL_CALLS_BUCKETS = (5, 10, 20, 30, 50, 80, 120, 200, 300, 500)
+
+cerebro_session_tool_calls_per_session = Histogram(
+    "cerebro_session_tool_calls_per_session",
+    "Number of tool calls recorded in a session trace at finalize time.",
+    buckets=SESSION_TOOL_CALLS_BUCKETS,
+)
+
+# Time-to-first-report covers everything from session start to the first
+# successful generate_report / generate_research_report /
+# generate_case_study_report call. Buckets stretch from 30s to 30min.
+TIME_TO_FIRST_REPORT_BUCKETS = (
+    30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0,
+)
+
+cerebro_session_time_to_first_report_seconds = Histogram(
+    "cerebro_session_time_to_first_report_seconds",
+    "Seconds from session start to the session's first successful report.",
+    ("report_type",),
+    buckets=TIME_TO_FIRST_REPORT_BUCKETS,
+)
+
+cerebro_session_generate_report_retries_total = Counter(
+    "cerebro_session_generate_report_retries_total",
+    "Successive generate_*_report calls within the same session beyond "
+    "the first — proxy for gate-induced retry friction.",
+    ("report_type",),
+)
+
+# Gate-evaluation latency. Tightly bucketed because the SQL heuristics
+# regex-parse every chart on every report attempt; values >100ms warrant
+# attention.
+GATE_EVAL_BUCKETS = (
+    0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+)
+
+cerebro_quality_gate_evaluation_seconds = Histogram(
+    "cerebro_quality_gate_evaluation_seconds",
+    "Wall-clock time spent evaluating a single quality gate against a "
+    "report's chart set.",
+    ("rule",),
+    buckets=GATE_EVAL_BUCKETS,
+)
+
+# Mini-app dataset cache (Token Explorer / Metric Lab) and semantic
+# preflight cache hit/miss counters.
+cerebro_cache_hits_total = Counter(
+    "cerebro_cache_hits_total",
+    "In-process cache hits, tagged by source.",
+    ("source",),
+)
+
+cerebro_cache_misses_total = Counter(
+    "cerebro_cache_misses_total",
+    "In-process cache misses, tagged by source.",
+    ("source",),
+)
+
 
 def observe_quality_gate(rule: str, outcome: str) -> None:
     """Record a quality-discipline gate evaluation.
@@ -353,6 +420,46 @@ def observe_report_generation(report_type: str, outcome: str) -> None:
 def observe_discovered_model_coverage(outcome: str) -> None:
     """Record discovered-model coverage outcome for a report."""
     cerebro_discovered_model_coverage_total.labels(outcome=outcome).inc()
+
+
+def observe_session_tool_calls(count: int) -> None:
+    """Record tool-call count for a finalized session trace."""
+    if count < 0:
+        return
+    cerebro_session_tool_calls_per_session.observe(float(count))
+
+
+def observe_time_to_first_report(report_type: str, seconds: float) -> None:
+    """Record seconds from session start to the first successful report."""
+    if seconds < 0:
+        return
+    cerebro_session_time_to_first_report_seconds.labels(
+        report_type=report_type
+    ).observe(seconds)
+
+
+def observe_generate_report_retry(report_type: str) -> None:
+    """Record a within-session generate_report call beyond the first."""
+    cerebro_session_generate_report_retries_total.labels(
+        report_type=report_type
+    ).inc()
+
+
+def observe_gate_evaluation_seconds(rule: str, seconds: float) -> None:
+    """Record wall-clock time spent evaluating a single quality gate."""
+    if seconds < 0:
+        return
+    cerebro_quality_gate_evaluation_seconds.labels(rule=rule).observe(seconds)
+
+
+def observe_cache_hit(source: str) -> None:
+    """Record a hit on an in-process cache (mini-app, semantic preflight)."""
+    cerebro_cache_hits_total.labels(source=source).inc()
+
+
+def observe_cache_miss(source: str) -> None:
+    """Record a miss on an in-process cache (mini-app, semantic preflight)."""
+    cerebro_cache_misses_total.labels(source=source).inc()
 
 
 SEMANTIC_ENABLED_STATES = (

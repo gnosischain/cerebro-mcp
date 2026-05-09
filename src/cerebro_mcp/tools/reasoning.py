@@ -20,7 +20,10 @@ from typing import Any, Callable
 from cerebro_mcp.config import settings
 from cerebro_mcp.observability import (
     log_event,
+    observe_generate_report_retry,
     observe_mcp_request,
+    observe_session_tool_calls,
+    observe_time_to_first_report,
     observe_tool_call,
 )
 
@@ -63,6 +66,10 @@ class SessionTrace:
     user_prompt: str = ""
     steps: list[ReasoningStep] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
+    # Number of generate_*_report calls that have completed in this
+    # session. The first emits ``time_to_first_report``; every subsequent
+    # call increments the retry counter (gate-induced friction proxy).
+    reports_emitted: int = 0
 
 
 # --- Module state ---
@@ -1053,6 +1060,41 @@ def _finalize_session(session: SessionTrace) -> None:
     session.summary = _compute_session_summary(session)
     _maybe_prune_old_sessions_unlocked(force=True)
     _save_session(session)
+    # Telemetry: tool-call count per session. Tool-call steps carry
+    # ``event_kind == "tool_call"`` (set by the auto-trace wrapper).
+    tool_call_count = sum(
+        1 for step in session.steps
+        if getattr(step, "event_kind", "") == "tool_call"
+    )
+    observe_session_tool_calls(tool_call_count)
+
+
+def record_report_generation(report_type: str) -> None:
+    """Called by report-generating tools after a successful gate pass.
+
+    Emits ``time_to_first_report`` on the first report in a session and
+    increments the within-session retry counter on every subsequent
+    report. Callers should be `create_report_artifact`-style entry
+    points, NOT inner helpers, so each user-visible report counts once.
+
+    Safe to call when no session is active — just a no-op.
+    """
+    global _current_session
+    with _lock:
+        session = _current_session
+        if session is None:
+            return
+        # Compute elapsed first so the timestamp is captured under lock.
+        if session.reports_emitted == 0:
+            started = _parse_iso_ts(session.started_at)
+            if started is not None:
+                elapsed = (
+                    datetime.now(timezone.utc) - started
+                ).total_seconds()
+                observe_time_to_first_report(report_type, max(elapsed, 0.0))
+        else:
+            observe_generate_report_retry(report_type)
+        session.reports_emitted += 1
 
 
 def _list_session_files(last_n: int = 0) -> list[Path]:

@@ -15,6 +15,21 @@ Skip the dispatcher only for:
 
 The dispatcher is a router only. It does not query the DB, write SQL, or produce analysis. It names *who* should act and *in what order*.
 
+## Reporting tiers — pick `mode=` deliberately
+
+There is one report tool (`generate_report`) but **four effective tiers**, selected by the `mode=` argument you pass to `preflight_analytics_request`. Mode is the single decisive switch between the heavy and light pipelines — get it right at preflight and the rest of the workflow follows automatically.
+
+| Tier | When to use | Preflight call | What runs |
+|---|---|---|---|
+| `quick_answer` | Scalar lookups: "current X", "how many Y", "latest Z". | None — call `execute_query` / `query_metrics` directly. | No chart, no report. |
+| `single_chart` | "Plot X over time", a single metric, no narrative needed. | `preflight_analytics_request(query, mode="chart")` | 1–2 charts via `generate_charts` / `generate_metric_charts`. `generate_report` runs in **lite mode** (skips 17 of 19 gates — only ≥1 chart required). |
+| `lite_report` | "How is sector X doing", 2–5 charts, light narrative. Most sector-performance questions live here. | `preflight_analytics_request(query, mode="answer")` | 2–5 charts; `generate_report` runs in lite mode. |
+| `full_report` | Analytical deep-dive: ≥3 charts, statistical depth, dimensional breakdown, correlations. | `preflight_analytics_request(query, mode="report")` | All 19 gates active (Fast Path SOP below). |
+
+**Default to the lightest tier that actually answers the question.** A "how did the bridge sector do last quarter?" question is a `lite_report`, not a `full_report`. Only escalate to `full_report` when the analysis itself requires statistical depth, multi-axis correlation, or ≥3 distinct chart types.
+
+The lite-mode bypass is enforced in `tools/session_state.py:373-379`: when `semantic_mode_last` is `"answer"` or `"chart"`, `check_report_preconditions` short-circuits after confirming ≥1 chart. So calling `preflight_analytics_request(mode="chart")` is what actually unlocks the fast path — there is no separate "lite report" tool.
+
 ## Report Workflow (CRITICAL)
 
 When a user asks for a report, trends, or visual analysis using cerebro:
@@ -38,8 +53,16 @@ Never skip the `generate_charts` -> `generate_report` pipeline.
     - **residual_bucket_disclosure** — rejects `WHERE label != ''` / `WHERE col IS NOT NULL` filters that exclude residual buckets without acknowledging the exclusion in the chart title/subtitle/description.
     - **stationarity_on_correlations** — rejects `corr(x, y)` over a series with a `date` / `month` / `week` column unless the SQL or chart metadata mentions stationarity, first-differencing, Spearman, ADF, cointegration, or `lagInFrame`.
     - **aggregator_volume_dedup** — rejects `SUM(volume_usd)` over `fct_execution_pools_daily` / `fct_execution_trades_by_protocol_daily` / `fct_execution_trades_by_token_daily` without a deduplication CTE or first-hop-only acknowledgment.
-    - **discovered_model_coverage** — rejects reports where any model returned by `search_models` / `discover_models` was not subsequently queried (`execute_query` / `start_query`) or explored (`get_model_details`) or excluded with a stated reason via `record_model_exclusion(name, reason)`.
+    - **discovered_model_coverage** — rejects reports where any model returned by `search_models` / `discover_models` / `discover_metrics` was not subsequently queried (`execute_query` / `start_query`) or explored (`get_model_details`) or excluded via `record_model_exclusion(name, reason)`. The discovered set is shared across model and metric discovery — sloppy `discover_metrics` floods the gate identically. **Use the batch helpers below; calling singular `record_model_exclusion` per model is the slowest possible path.**
 - All eight design principles are documented in [`src/cerebro_mcp/prompts/agents/_shared_quality_rules.md`](src/cerebro_mcp/prompts/agents/_shared_quality_rules.md). Every analysis persona references this file at the top of its operational rules.
+
+**Batch / scope-shortcut exclusion tools** (use ONE of these; not the singular `record_model_exclusion` in a loop):
+- `record_model_exclusion_batch(model_names, reason)` — explicit list, one call.
+- `exclude_models_by_prefix(prefix, reason)` — sweep a name prefix (e.g. `api_execution_circles_v2_`).
+- `exclude_module(module, reason)` — sweep a dbt module (`circles`, `bridges`, `p2p`, …).
+- `exclude_all_discovered_except(keep, reason)` — inverse: keep listed names, exclude every other discovered model.
+
+The coverage gate accepts these as equivalent to per-model exclusion. Prefer `exclude_module` / `exclude_models_by_prefix` for broad sweeps, `exclude_all_discovered_except` when only a handful of discovered models are in scope, and `record_model_exclusion_batch` for explicit lists.
 
 **Telemetry**: gate evaluations and discovered-model coverage are recorded as Prometheus counters (`cerebro_quality_gate_evaluations_total`, `cerebro_quality_report_generations_total`, `cerebro_discovered_model_coverage_total`). The `quality_metrics` MCP tool returns a markdown summary of in-process counts; for long-window analysis scrape `/metrics`.
 
@@ -100,13 +123,34 @@ Do NOT use bullet lists for key takeaways. Always use the table format above.
 
 ## Data Query SOP
 
-1. DISCOVER: `search_models` — find models across ALL tiers (api_*, fct_*, int_*), not just the first match
+1. DISCOVER: `search_models` — find models across ALL tiers (api_*, fct_*, int_*), not just the first match. **Pass `module=` and a tight `query=`; the default `limit=50` is a ceiling, not a target — drop to 10–15 for focused tasks.** Every model returned counts toward the discovered-model coverage gate.
 2. EXPLORE: `get_model_details` for top 3-5 models — map lineage, identify all dimensions (token, action, segment)
 3. VERIFY: `describe_table` for exact column names
 4. EDA: Quick distribution check — `quantiles`, `stddevPop`, `min/max`, `count` to assess data shape and outliers
 5. QUERY: `execute_query` with date filters, LIMIT, and statistical functions (medians over means). Include correlation queries (corr/covarPop/simpleLinearRegression).
 6. VISUALIZE: `generate_charts` (batch) — all charts in ONE call. Include dimensional breakdowns (series_field) and scatter/heatmap charts.
 7. REPORT: `generate_report` with {{chart:CHART_ID}} placeholders
+
+### Fast Path: minimum-cost full report
+
+A clean run of the **full_report** tier hits all gates with O(1) tool calls per gate plus one sweep call for coverage. Target shape:
+
+1. **Preflight (1 call):** `preflight_analytics_request(query, mode="report")`. Resets the analysis cycle.
+2. **Narrow discovery (1–2 calls):** `search_models(query=…, module=…, limit=15)`. The discovered set is the only gate that scales with N — keep it small.
+3. **Lineage (3 calls):** `get_model_details` on the 3 models you will actually use → satisfies `MIN_MODELS_DETAILED`.
+4. **Verify (1 call):** `describe_table` on the primary fact table → satisfies `MIN_TABLES_VERIFIED`.
+5. **EDA (≥2 calls):** `execute_query` for distribution + at least one statistical query (`quantiles` / `stddev` / `corr`) → satisfies `MIN_EXPLORATORY_QUERIES`, `MIN_STATISTICAL_QUERIES`, and feeds `REQUIRE_RELATIONAL_CHART`.
+6. **Coverage sweep (1 call — pick ONE):**
+   - `exclude_module(module, reason="…")`
+   - `exclude_models_by_prefix(prefix, reason="…")`
+   - `exclude_all_discovered_except(keep=[…], reason="…")`
+   - `record_model_exclusion_batch([…], reason="…")`
+
+   Use singular `record_model_exclusion` only for genuine one-off cases. Calling it in a loop is the slowest path possible — the batch tools satisfy the gate in one round-trip.
+7. **Charts (1 call):** `generate_charts([...])` — must include ≥1 chart with `series_field` (or pie/treemap/heatmap/sankey), ≥1 scatter/heatmap (or correlation already done in EDA), and ≥3 charts total. Wrap any KPIs in `{{grid:3}}`.
+8. **Report (1 call):** `generate_report(...)`.
+
+For `single_chart` / `lite_report` tiers, skip steps 6–7's enforcement; only step 1 (with `mode="chart"` or `"answer"`) and step 7 (≥1 chart) are required.
 
 ## MMM Workflow (sector contribution / ROI analysis)
 

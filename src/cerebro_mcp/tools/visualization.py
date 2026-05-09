@@ -519,6 +519,23 @@ def create_report_artifact(
             "title": title,
         }
 
+    # Telemetry: record time-to-first-report on the first successful
+    # report of a session, retry counter on every subsequent call.
+    # Done before reset_session_state so it captures the cycle that
+    # actually produced the report.
+    try:
+        from cerebro_mcp.tools.reasoning import record_report_generation
+        if research_mode:
+            _report_kind = "research"
+        elif case_study_mode:
+            _report_kind = "case_study"
+        else:
+            _report_kind = "report"
+        record_report_generation(_report_kind)
+    except Exception:
+        # Telemetry must never break a successful report.
+        pass
+
     if reset_session_state:
         state.reset()
 

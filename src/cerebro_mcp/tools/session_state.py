@@ -8,11 +8,13 @@ threading.Lock so the singleton is safe under concurrent tool calls.
 import hashlib
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 
 from cerebro_mcp.config import settings
 from cerebro_mcp.observability import (
     observe_discovered_model_coverage,
+    observe_gate_evaluation_seconds,
     observe_quality_gate,
 )
 from cerebro_mcp.tools.sql_heuristics import (
@@ -485,6 +487,7 @@ class SessionState:
                     settings.STOCK_MEASURE_COLUMNS_EXTRA or []
                 )
                 violations: list[HeuristicViolation] = []
+                heuristics_started = time.perf_counter()
                 for chart_id, chart in chart_registry.items():
                     chart_sql = chart.get("sql", "") or ""
                     if not chart_sql:
@@ -502,6 +505,10 @@ class SessionState:
                         enabled=heuristic_enabled,
                         stock_columns=stock_cols,
                     ))
+                observe_gate_evaluation_seconds(
+                    "sql_heuristics_all",
+                    time.perf_counter() - heuristics_started,
+                )
 
                 # Telemetry: count pass/fail per rule across the chart set.
                 # A rule "passes" for a chart when no violation is recorded.
@@ -545,12 +552,17 @@ class SessionState:
             # search_models / discover_models that is not explored, queried,
             # or explicitly excluded counts as an unused discovery.
             if settings.ENFORCE_DISCOVERED_MODEL_COVERAGE and self.discovered_models:
+                coverage_started = time.perf_counter()
                 covered = (
                     self.explored_models
                     | self.verified_query_surfaces
                     | self.excluded_models
                 )
                 uncovered = self.discovered_models - covered
+                observe_gate_evaluation_seconds(
+                    "discovered_model_coverage",
+                    time.perf_counter() - coverage_started,
+                )
                 if uncovered:
                     observe_discovered_model_coverage("fail")
                     observe_quality_gate("discovered_model_coverage", "fail")

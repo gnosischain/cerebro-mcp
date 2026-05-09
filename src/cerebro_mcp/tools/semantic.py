@@ -16,6 +16,8 @@ from cerebro_mcp.config import settings
 from cerebro_mcp.manifest_loader import manifest
 from cerebro_mcp.observability import (
     log_event,
+    observe_cache_hit,
+    observe_cache_miss,
     observe_research_semantic_evidence,
     observe_semantic_bypass,
     observe_semantic_docs_read,
@@ -954,6 +956,10 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 mode=normalized_mode,
             )
             cache_hit = cached is not None
+            if cache_hit:
+                observe_cache_hit("semantic_preflight")
+            else:
+                observe_cache_miss("semantic_preflight")
             result = (
                 AnalyticsPreflightResult(**cached)
                 if cached is not None
