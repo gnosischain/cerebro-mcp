@@ -1,7 +1,7 @@
 """Shared pydantic models for the cerebro mini-app platform.
 
 These types describe the wire format passed between mini-app launcher tools
-(e.g. ``open_token_explorer``, ``open_metric_lab_from_sql``) and their
+(e.g. ``open_metric_lab_from_sql``, ``open_contract_explorer``) and their
 React frontends via ``CallToolResult.structuredContent``.
 
 Pure data — no I/O, no MCP imports — so this module is safe to import from

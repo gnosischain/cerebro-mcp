@@ -6,24 +6,21 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 
 // Each cerebro mini app is a self-contained single-file HTML bundle.
 // `vite-plugin-singlefile` cannot inline more than one entry at a time, so
-// the Makefile invokes this config three times — once per app — selecting
-// the entry via the CEREBRO_UI_ENTRY env var.
+// the Makefile invokes this config once per app — selecting the entry via
+// the CEREBRO_UI_ENTRY env var.
 //
 // Valid values:
-//   report          (default — original report renderer)
-//   tokenExplorer
+//   report           (default — original report renderer)
 //   metricLab
-//   yieldOpportunities
 //   portfolio
+//   graphExplorer
+//   contractExplorer
 
 const ENTRY_MAP: Record<string, { html: string; out: string }> = {
-  report:        { html: "index.html",          out: "index.html" },
-  tokenExplorer: { html: "token-explorer.html", out: "token-explorer.html" },
-  metricLab:     { html: "metric-lab.html",     out: "metric-lab.html" },
-  yieldOpportunities: { html: "yield-opportunities.html", out: "yield-opportunities.html" },
-  portfolio:     { html: "portfolio.html",      out: "portfolio.html" },
-  graphExplorer: { html: "graph-explorer.html", out: "graph-explorer.html" },
-  quarterlyReview: { html: "quarterly-review.html", out: "quarterly-review.html" },
+  report:           { html: "index.html",            out: "index.html" },
+  metricLab:        { html: "metric-lab.html",       out: "metric-lab.html" },
+  portfolio:        { html: "portfolio.html",        out: "portfolio.html" },
+  graphExplorer:    { html: "graph-explorer.html",   out: "graph-explorer.html" },
   contractExplorer: { html: "contract-explorer.html", out: "contract-explorer.html" },
 };
 

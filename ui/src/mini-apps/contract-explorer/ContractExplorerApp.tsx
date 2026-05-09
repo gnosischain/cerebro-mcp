@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { MiniAppChrome, MaIdentity, MaSection } from "../shared/MiniAppChrome";
+import { shortAddr } from "../../utils/format";
 
 // ---------------------------------------------------------------------------
 // Wire types — mirror src/cerebro_mcp/tools/contract_explorer.py
@@ -57,11 +58,6 @@ const APP_ID = "contract_explorer";
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function shortAddr(addr: string): string {
-  if (!addr || addr.length < 12) return addr || "—";
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
 
 function lastResultPerFunction(history: CallEntry[]): Map<string, CallEntry> {
   // history is most-recent first; keep first entry seen per signature.

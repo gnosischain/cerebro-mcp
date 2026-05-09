@@ -117,9 +117,6 @@ async def init_event_store_async() -> dict[str, int]:
     # Lazy imports — keep startup paths that don't use the event store
     # off the aiosqlite / registry import chains.
     from cerebro_mcp.event_store import default_event_store
-    from cerebro_mcp.quarterly_review_resume import (
-        install_quarterly_review_resume_handler,
-    )
     from cerebro_mcp.research_resume import install_research_resume_handler
     from cerebro_mcp.storyteller_resume import (
         install_storyteller_resume_handler,
@@ -139,7 +136,6 @@ async def init_event_store_async() -> dict[str, int]:
     # Register all known kinds. New handlers (storyteller, mmm, etc.)
     # land here as they're migrated.
     install_research_resume_handler()
-    install_quarterly_review_resume_handler()
     install_storyteller_resume_handler()
 
     registry = default_workflow_registry()

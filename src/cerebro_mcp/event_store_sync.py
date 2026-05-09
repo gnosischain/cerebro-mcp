@@ -538,49 +538,6 @@ def record_research_evidence_attached(
 # ---------------------------------------------------------------------------
 
 
-def workflow_id_for_quarterly(project_id: str) -> str:
-    """Stable mapping from QBR `project_id` to event-log `workflow_id`.
-    Namespaced to avoid collision with `research_<project_id>`."""
-    return f"quarterly_{project_id}"
-
-
-def record_quarterly_review_started(
-    project_id: str, quarter: str, hypothesis: str, scope: str,
-) -> None:
-    wid = workflow_id_for_quarterly(project_id)
-    create_workflow_safe(
-        wid, "quarterly_review",
-        {"project_id": project_id, "quarter": quarter,
-         "hypothesis": hypothesis, "scope": scope},
-    )
-    append_event_safe(
-        wid, "workflow_started",
-        {"project_id": project_id, "quarter": quarter,
-         "hypothesis": hypothesis, "scope": scope},
-    )
-
-
-def record_quarterly_evidence_attached(
-    project_id: str, kind: str, ref_id: str, quarter: str | None = None,
-) -> None:
-    """An analysis chart / query / artifact got attached to the QBR.
-    Captures the kind + ref so replay can reconstruct evidence count."""
-    append_event_safe(
-        workflow_id_for_quarterly(project_id),
-        "evidence_attached",
-        {"kind": kind, "ref_id": ref_id, "quarter": quarter},
-    )
-
-
-def record_quarterly_review_published(
-    project_id: str, report_id: str, title: str,
-) -> None:
-    wid = workflow_id_for_quarterly(project_id)
-    append_event_safe(wid, "report_published",
-                      {"report_id": report_id, "title": title})
-    mark_workflow_status_safe(wid, WORKFLOW_COMPLETED)
-
-
 # ---------------------------------------------------------------------------
 # Storyteller session domain helpers (Sprint 3 — observability layer)
 #
@@ -736,23 +693,3 @@ def record_storyteller_final_story_recorded(
     )
 
 
-# ---------------------------------------------------------------------------
-# QBR content events (Step 1 expansion — analog of research memory_recorded)
-# ---------------------------------------------------------------------------
-
-
-def record_quarterly_note_recorded(
-    project_id: str, kind: str, statement: str,
-) -> None:
-    """Capture a QBR note (observation / priority / action) as an event
-    so resume hints carry 'agent has recorded 3 priorities and 2 actions
-    so far' instead of just phase + evidence count."""
-    append_event_safe(
-        workflow_id_for_quarterly(project_id),
-        "note_recorded",
-        {
-            "kind": kind,
-            "statement_preview": (statement or "")[:600],
-            "statement_full_len": len(statement or ""),
-        },
-    )

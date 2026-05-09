@@ -42,23 +42,13 @@
       }
     },
     {
-      "name": "yield-opportunities",
+      "name": "contract-explorer",
       "cwd": "ui",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--", "--port", "5182"],
       "port": 5182,
       "env": {
-        "CEREBRO_UI_ENTRY": "yieldOpportunities"
-      }
-    },
-    {
-      "name": "token-explorer",
-      "cwd": "ui",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5183"],
-      "port": 5183,
-      "env": {
-        "CEREBRO_UI_ENTRY": "tokenExplorer"
+        "CEREBRO_UI_ENTRY": "contractExplorer"
       }
     },
     {
@@ -67,16 +57,6 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "5190"],
       "port": 5190
-    },
-    {
-      "name": "quarterly-review",
-      "cwd": "ui",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5184"],
-      "port": 5184,
-      "env": {
-        "CEREBRO_UI_ENTRY": "quarterlyReview"
-      }
     }
   ]
 }

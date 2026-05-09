@@ -12,12 +12,9 @@ export interface MiniAppTab {
 /** Cross-app navigation. Each mini-app passes `activeTabId` to highlight its slot. */
 export const DEFAULT_APP_TABS: MiniAppTab[] = [
   { id: "portfolio", label: "Portfolio", href: "/portfolio.html" },
-  { id: "token", label: "Token", href: "/token-explorer.html" },
   { id: "contract", label: "Contract", href: "/contract-explorer.html" },
   { id: "graph", label: "Graph", href: "/graph-explorer.html" },
   { id: "metric", label: "Metric Lab", href: "/metric-lab.html" },
-  { id: "yields", label: "Yields", href: "/yield-opportunities.html" },
-  { id: "quarterly", label: "Quarterly", href: "/quarterly-review.html" },
 ];
 
 interface MiniAppChromeProps {

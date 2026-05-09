@@ -3,7 +3,7 @@ import ReactECharts from "echarts-for-react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { CollapsibleSection } from "../shared/CollapsibleSection";
-import { MiniAppChrome } from "../shared/MiniAppChrome";
+import { MiniAppChrome, MaIdentity } from "../shared/MiniAppChrome";
 import { useDebouncedValue } from "../shared/useDebouncedValue";
 import type { DatasetMode, MiniAppPayload } from "../shared/miniAppTypes";
 
@@ -1494,21 +1494,25 @@ export default function MetricLabApp() {
   }, [handleLoadMetric]);
 
   if (!view) {
-    return <div className="mini-app-loading">Loading Metric Lab...</div>;
+    return <MiniAppChrome activeTabId="metric"><div className="ma-empty">Loading Metric Lab…</div></MiniAppChrome>;
   }
 
   const state = view.view_state;
   const hasData = !!(view.datasets?.primary && state?.mode === "loaded");
+  const selectedMetricName =
+    state?.selected_metric ||
+    (state?.selected_metrics && state.selected_metrics[0]) ||
+    "";
 
   return (
     <MiniAppChrome activeTabId="metric">
     <div className="mini-app-root mini-app-metric-lab">
-      <header className="mini-app-header">
-        <h1>{view.title}</h1>
-        <span className="mini-app-subtitle">
-          view_id: {view.view_id.slice(0, 8)}
-        </span>
-      </header>
+      {selectedMetricName ? (
+        <MaIdentity
+          label="Metric"
+          value={selectedMetricName}
+        />
+      ) : null}
 
       <WarningBanner warnings={view.warnings ?? []} />
 

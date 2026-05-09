@@ -397,7 +397,7 @@ export default function GraphExplorerApp() {
     );
   };
 
-  if (!view) return <MiniAppChrome activeTabId="graph"><div className="ge-shell">Loading…</div></MiniAppChrome>;
+  if (!view) return <MiniAppChrome activeTabId="graph"><div className="ma-empty">Loading Graph Explorer…</div></MiniAppChrome>;
 
   const activeSet = new Set(state.relation_types);
   const statusFilter = state.semantic_status_filter;

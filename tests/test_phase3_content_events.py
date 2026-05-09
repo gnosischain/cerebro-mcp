@@ -18,7 +18,6 @@ import pytest_asyncio
 from cerebro_mcp import config as cerebro_config
 from cerebro_mcp import event_store_sync as ev
 from cerebro_mcp.event_store import EventStore
-from cerebro_mcp.quarterly_review_resume import resume_quarterly_review
 from cerebro_mcp.storyteller_resume import (
     _scan_content,
     resume_storyteller_session,
@@ -240,75 +239,3 @@ class TestStorytellerResumeHintIncludesContent:
         assert "storyboard has 3 scenes" in out.summary
 
 
-# ---------------------------------------------------------------------------
-# QBR note event + enriched resume hint
-# ---------------------------------------------------------------------------
-
-
-class TestQuarterlyNoteEvent:
-    async def test_note_recorded_event(self, store):
-        ev.record_quarterly_review_started("qbr_n", "2026Q1", "h", "s")
-        ev.record_quarterly_note_recorded(
-            "qbr_n", kind="priority",
-            statement="Investigate validator income drop in Feb",
-        )
-        wid = ev.workflow_id_for_quarterly("qbr_n")
-        events = await store.replay(wid)
-        last = events[-1]
-        assert last["kind"] == "note_recorded"
-        assert last["payload"]["kind"] == "priority"
-        assert "validator income drop" in last["payload"]["statement_preview"]
-
-
-@pytest_asyncio.fixture
-async def qbr_with_notes(store):
-    workflow_id = ev.workflow_id_for_quarterly("qbr_full")
-    await store.create_workflow(
-        workflow_id, "quarterly_review",
-        metadata={"project_id": "qbr_full", "quarter": "2026Q1"},
-    )
-    await store.append_event(
-        workflow_id, "workflow_started",
-        {"project_id": "qbr_full", "quarter": "2026Q1"},
-    )
-    # 2 observations, 1 priority, 1 action
-    for kind, statement in [
-        ("observation", "DEX volume up 12% MoM."),
-        ("observation", "Bridge inflows concentrated in 3 wallets."),
-        ("priority", "Investigate the bridge concentration risk."),
-        ("action", "Schedule security review by 2026-02-15."),
-    ]:
-        await store.append_event(
-            workflow_id, "note_recorded",
-            {"kind": kind, "statement_preview": statement,
-             "statement_full_len": len(statement)},
-        )
-    return workflow_id
-
-
-class TestQuarterlyResumeHintIncludesNotes:
-    async def test_resume_hint_groups_notes_by_kind(self, store, qbr_with_notes):
-        wf = await store.get_workflow(qbr_with_notes)
-        events = await store.replay(qbr_with_notes)
-        out = await resume_quarterly_review(qbr_with_notes, wf, events)
-        nbk = out.resume_hint["notes_by_kind"]
-        assert nbk == {"observation": 2, "priority": 1, "action": 1}
-
-    async def test_resume_hint_recent_notes_capped(self, store, qbr_with_notes):
-        wf = await store.get_workflow(qbr_with_notes)
-        events = await store.replay(qbr_with_notes)
-        out = await resume_quarterly_review(qbr_with_notes, wf, events)
-        recent = out.resume_hint["recent_notes"]
-        assert len(recent) == 4   # we wrote 4; cap is 5
-        assert any("bridge concentration" in (n["statement_preview"] or "")
-                   for n in recent)
-
-    async def test_resume_summary_lists_notes(self, store, qbr_with_notes):
-        wf = await store.get_workflow(qbr_with_notes)
-        events = await store.replay(qbr_with_notes)
-        out = await resume_quarterly_review(qbr_with_notes, wf, events)
-        # Summary should list note counts per kind.
-        assert "Notes:" in out.summary
-        assert "2 observation" in out.summary
-        assert "1 priority" in out.summary
-        assert "1 action" in out.summary

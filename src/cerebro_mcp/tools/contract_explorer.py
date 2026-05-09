@@ -342,8 +342,7 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         With an empty ``address``, opens an empty explorer that prompts the
         user to paste a contract address.
 
-        Sibling of ``open_token_explorer`` (which is for ERC-20 token analytics
-        and bridge flows, not arbitrary contract inspection).
+        For ABI-level read/write inspection of arbitrary EVM contracts.
         """
         title = title.strip() or APP_TITLE
 

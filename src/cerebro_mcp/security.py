@@ -116,9 +116,6 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "open_metric_lab_from_metrics": _RO,
     "load_metric_lab_metric": _RO,
     "update_metric_lab_chart": _RO,
-    "open_token_explorer": _RO,
-    "load_token_explorer_token": _RO,
-    "update_token_explorer_focus": _RO,
     "open_contract_explorer": _RO,
     "load_contract_explorer_address": _RO,
     "contract_explorer_call_function": _RO,
@@ -126,12 +123,6 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "load_graph_explorer_seed": _RO,
     "expand_graph_explorer_node": _RO,
     "update_graph_explorer_focus": _RO,
-    # quarterly review — open/update/template are read-only; save & publish
-    # mutate the on-disk ResearchProject and the chart registry so they are
-    # intentionally NOT in the read-only set.
-    "open_quarterly_review": _RO,
-    "update_quarterly_review_focus": _RO,
-    "add_quarterly_analysis_template": _RO,
     # custom query tools (parameterized, read-only SQL)
     # — dynamically registered; defaults to _RO via get_risk_classes()
     # research read
