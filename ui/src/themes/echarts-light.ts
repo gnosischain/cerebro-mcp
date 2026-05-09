@@ -1,35 +1,51 @@
-const FONT = '"Plus Jakarta Sans", system-ui, sans-serif';
+const sage = "#4a5a3c";
+const sageMid = "#7d8a6a";
+const sageSoft = "#9ea88e";
+const tan = "#c0c4a4";
+const sand = "#d6c9a3";
+const clay = "#b59569";
+const brick = "#a64a3b";
+
+const ink = "#1a1a1a";
+const muted = "#8a8275";
+const rule = "rgba(31,29,24,0.07)";
+const surface = "#ffffff";
+
+const fontMono = "JetBrains Mono, ui-monospace, Menlo, monospace";
+const fontDisplay = "Instrument Serif, Iowan Old Style, Georgia, serif";
 
 export const ECHARTS_LIGHT = {
-  color: [
-    "#4F46E5", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6",
-    "#3B82F6", "#EC4899", "#14B8A6", "#F97316", "#84CC16",
-    "#06B6D4", "#A855F7", "#22C55E", "#FB7185", "#0EA5E9",
-  ],
+  color: [sage, clay, sageMid, sand, sageSoft, tan, brick],
   backgroundColor: "transparent",
-  textStyle: { color: "#334155", fontFamily: FONT },
-  title: { textStyle: { color: "#0F172A", fontFamily: FONT } },
-  legend: { textStyle: { color: "#334155" } },
+  textStyle: { fontFamily: fontMono, color: muted },
+  title: {
+    textStyle: { fontFamily: fontDisplay, color: ink, fontWeight: 400 },
+  },
+  legend: {
+    textStyle: { color: muted, fontFamily: fontMono, fontSize: 11 },
+  },
   tooltip: {
-    backgroundColor: "rgba(251,250,247,0.97)",
-    borderColor: "rgba(15,23,42,0.08)",
+    backgroundColor: "rgba(255,255,255,0.97)",
+    borderColor: rule,
     borderWidth: 1,
-    borderRadius: 6,
-    extraCssText: "box-shadow:0 4px 12px -4px rgba(15,23,42,0.12);",
-    textStyle: { color: "#0F172A", fontFamily: FONT },
+    borderRadius: 8,
+    extraCssText: "box-shadow:0 4px 16px -8px rgba(31,29,24,0.12);",
+    textStyle: { color: ink, fontFamily: fontMono, fontSize: 12 },
   },
   categoryAxis: {
-    axisLine: { lineStyle: { color: "rgba(148,163,184,0.3)" } },
-    axisLabel: { color: "#94A3B8" },
-    splitLine: {
-      lineStyle: { color: "rgba(148,163,184,0.15)", type: "dashed" as const },
-    },
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: { color: muted, fontFamily: fontMono, fontSize: 10 },
+    splitLine: { show: false },
   },
   valueAxis: {
-    axisLine: { lineStyle: { color: "rgba(148,163,184,0.3)" } },
-    axisLabel: { color: "#94A3B8" },
+    axisLine: { show: false },
+    axisLabel: { color: muted, fontFamily: fontMono, fontSize: 10 },
     splitLine: {
-      lineStyle: { color: "rgba(148,163,184,0.15)", type: "dashed" as const },
+      lineStyle: { color: rule, type: [2, 3] as unknown as "dashed" },
     },
   },
+  line: { lineStyle: { width: 2 }, smooth: true, symbolSize: 0 },
+  bar: { itemStyle: { borderRadius: [4, 4, 0, 0] } },
+  pie: { itemStyle: { borderColor: surface, borderWidth: 2 } },
 };

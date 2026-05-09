@@ -3,6 +3,7 @@ import { useReportData } from "./hooks/useReportData";
 import { ReportHeader } from "./components/ReportHeader";
 import { ReportContent } from "./components/ReportContent";
 import { ReportFooter } from "./components/ReportFooter";
+import { StatusStrip } from "./components/StatusStrip";
 import { ResearchReportLayout } from "./components/ResearchReportLayout";
 import { CaseStudyLayout } from "./components/CaseStudyLayout";
 import { LoadingState } from "./components/LoadingState";
@@ -46,6 +47,12 @@ export default function App() {
     <ErrorBoundary fallbackLabel="Report">
       <div className="dashboard">
         <div className="dashboard-main">
+          <StatusStrip
+            kind="dashboard"
+            chartCount={Object.keys(data.charts).length}
+            queryCount={Object.keys(data.queries ?? {}).length}
+            timestamp={data.timestamp}
+          />
           <ReportHeader
             title={data.title}
             timestamp={data.timestamp}
@@ -53,7 +60,10 @@ export default function App() {
             fileUri={data.file_uri}
           />
           <ReportContent data={data} sections={sections} />
-          <ReportFooter />
+          <ReportFooter
+            fileUri={data.file_uri}
+            timestamp={data.timestamp}
+          />
         </div>
       </div>
     </ErrorBoundary>

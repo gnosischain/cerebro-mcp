@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<style data-omelette-injected>html,body{background:transparent}</style><script data-omelette-injected>(()=>{var j=["https://claude.ai","https://preview.claude.ai"];var x=true;var S=30000;var f=3000;document.addEventListener("DOMContentLoaded",()=>{const H=window.Babel;const G="om-src-id";if(H&&H.registerPlugin&&!(H.availablePlugins&&H.availablePlugins[G])){H.registerPlugin(G,({types:Y})=>({visitor:{JSXOpeningElement(U,Q){const J=U.node;if(J.name&&J.name.type==="JSXMemberExpression")return;for(let V=0;V<J.attributes.length;V++){const L=J.attributes[V];if(L.type==="JSXAttribute"&&L.name&&L.name.name==="data-om-id")return}const W=Q.file&&Q.file.opts&&Q.file.opts.filename||"?";const Z=J.loc&&J.loc.start;const z=`jsx:${W}:${J.start??0}:${Z?Z.line:0}:${Z?Z.column+1:0}`;J.attributes.push(Y.jsxAttribute(Y.jsxIdentifier("data-om-id"),Y.stringLiteral(z)))}}}))}const k="om-text-extract";let A=false;if(x&&H&&H.registerPlugin&&!(H.availablePlugins&&H.availablePlugins[k])){const Y=window.React;if(Y&&Y.useSyncExternalStore&&Y.createElement){A=true;const U={};const Q=new Set;let J=0;window.__omTextO=U;window.__omTextSet=(z)=>{for(const V in z){const L=z[V];if(L==null)delete U[V];else U[V]=L}J++;Q.forEach((V)=>V())};const W=(z)=>{Q.add(z);return()=>Q.delete(z)};const Z=()=>J;window.__OmT=function z(V){Y.useSyncExternalStore(W,Z,Z);return Y.createElement("span",{"data-om-text":V.i,className:"__om-t"},V.i in U?U[V.i]:V.children)};H.registerPlugin(k,({types:z})=>{const V={style:1,script:1,noscript:1,textarea:1,title:1,option:1,text:1,tspan:1,textPath:1};const L={placeholder:1,alt:1,title:1,label:1,"aria-label":1,"aria-description":1,"aria-placeholder":1};const _=($,C)=>z.logicalExpression("??",z.memberExpression(z.logicalExpression("||",z.memberExpression(z.identifier("window"),z.identifier("__omTextO")),z.objectExpression([])),z.stringLiteral($),true),C);const E=($)=>$.file&&$.file.opts&&$.file.opts.filename||"?";const B=($)=>$.file&&$.file.code||"";const b=($,C)=>{const X=(F)=>F&&F.start!=null&&F.end!=null&&(F.type==="StringLiteral"||F.type==="TemplateLiteral"&&F.expressions.length===0)?[F.start,F.end]:null;const N=X(C);if(N)return N;if(C&&C.type==="Identifier"){const F=$.scope.getBinding(C.name);if(F&&F.constant&&F.path.node.type==="VariableDeclarator"){return X(F.path.node.init)}}return null};const M=($,C,X)=>{const N=$.node;let F=false;const w=(K,q)=>{F=true;return z.jsxElement(z.jsxOpeningElement(z.jsxIdentifier("__OmT"),[z.jsxAttribute(z.jsxIdentifier("i"),z.stringLiteral(K))],false),z.jsxClosingElement(z.jsxIdentifier("__OmT")),[q],false)};const D=N.children.map((K)=>{if(K.type==="JSXText"){if(K.start==null||K.end==null)return K;const q=X.slice(K.start,K.end);const R=q.length-q.trimStart().length;const m=q.length-q.trimEnd().length;if(R+m>=q.length)return K;return w(`txt:${C}:${K.start+R}:${K.end-m}`,K)}if(K.type==="JSXExpressionContainer"){const q=b($,K.expression);if(q)return w(`str:${C}:${q[0]}:${q[1]}`,K)}return K});if(F)N.children=D};return{visitor:{JSXOpeningElement($,C){const X=$.node;const N=E(C);const F={};for(let w=0;w<X.attributes.length;w++){const D=X.attributes[w];if(D.type!=="JSXAttribute"||!D.name)continue;const K=D.name.name;if(!L[K])continue;if(!D.value||D.value.type!=="StringLiteral")continue;if(D.value.start==null||D.value.end==null)continue;const q=`txt:${N}:${D.value.start}:${D.value.end}`;F[K]=q;D.value=z.jsxExpressionContainer(_(q,z.stringLiteral(D.value.value)))}if(Object.keys(F).length){X.attributes.push(z.jsxAttribute(z.jsxIdentifier("data-om-text-attrs"),z.stringLiteral(JSON.stringify(F))))}},JSXElement($,C){const X=$.node.openingElement;const N=X&&X.name&&X.name.name;if(N==="__OmT")return;if(typeof N==="string"&&V[N])return;M($,E(C),B(C))},JSXFragment($,C){M($,E(C),B(C))}}}})}}const u=A?["transform-react-jsx-source",G,k]:["transform-react-jsx-source",G];document.querySelectorAll('script[type="text/babel"],script[type="text/jsx"]').forEach((Y,U)=>{const Q=Y.getAttribute("data-plugins")||"";const J=u.filter((W)=>Q.indexOf(W)<0);if(J.length){Y.setAttribute("data-plugins",Q?`${Q},${J.join(",")}`:J.join(","))}if(!Y.hasAttribute("data-filename")){Y.setAttribute("data-filename",Y.getAttribute("src")||`inline-${U}`)}})});var y=window.parent;if(y&&y!==window){const H=(Q,J)=>{try{y.postMessage({__omelette_log:true,type:Q,data:J},"*")}catch{}};["log","warn","error"].forEach((Q)=>{const J=console[Q];console[Q]=(...W)=>{const Z=W.map((z)=>{try{return typeof z==="object"?JSON.stringify(z):String(z)}catch{try{return String(z)}catch{return"[unstringifiable]"}}}).join(" ");H(Q,Z);J.apply(console,W)}});window.addEventListener("error",(Q)=>{const J=Q.target;if(J&&J!==window&&J.tagName){const W=J.src||J.href||"";H("resource_error",`${J.tagName} failed to load: ${W}`)}else{H("error",`${Q.message||"Unknown error"} at ${Q.filename||"?"}:${Q.lineno||0}:${Q.colno||0}`)}},true);window.addEventListener("unhandledrejection",(Q)=>{const J=Q.reason;const W=J instanceof Error?`${J.message} ${J.stack}`:String(J);H("error",`Unhandled rejection: ${W}`)});const G=()=>{try{y.postMessage({type:"omelette:height",height:document.documentElement.scrollHeight},"*")}catch{}};if(document.readyState==="complete")G();else window.addEventListener("load",G);if(window.ResizeObserver)new ResizeObserver(G).observe(document.documentElement);const k={};let A=0;window.claude={complete(Q){return new Promise((J,W)=>{if(!j.length){W(new Error("claude.complete: no parent origin"));return}const Z=`c${++A}`;const z=()=>setTimeout(()=>{delete k[Z];W(new Error(`claude.complete: no data for ${S/1000}s`))},S);const V=z();k[Z]={resolve:J,reject:W,text:"",t:V,arm:z};try{for(const L of j){y.postMessage({__om_api:true,id:Z,body:Q},L)}}catch(L){clearTimeout(V);delete k[Z];W(L)}})}};const u={};let Y=0;window.omelette={writeFile:(Q,J)=>new Promise((W,Z)=>{if(!j.length){W();return}const z=`f${++Y}`;const V=setTimeout(()=>{delete u[z];W()},f);u[z]={resolve:W,reject:Z,t:V};try{for(const L of j){y.postMessage({__om_file:true,id:z,op:"write",path:Q,content:J},L)}}catch{clearTimeout(V);delete u[z];W()}})};const U=(Q)=>{try{return JSON.stringify(Q)}catch{return JSON.stringify(String(Q))}};window.addEventListener("message",(Q)=>{if(j.indexOf(Q.origin)<0)return;if(Q.source!==y)return;const J=Q.data;if(!J)return;if(J.type==="omelette-preview-refresh"){if(typeof J.token!=="string"||!/^[0-9a-f.-]+$/.test(J.token))return;const z=Math.max(1,Math.floor((J.expiresAt||0)-Date.now()/1000));document.cookie="__Host-omelette-preview="+J.token+"; Path=/; Secure; SameSite=None; Partitioned; Max-Age="+z;return}if(J.__om_file_r){const z=u[J.id];if(!z)return;clearTimeout(z.t);delete u[J.id];if(J.ok)z.resolve();else z.reject(new Error(J.error||"write failed"));return}if(J.__om_api_r){const z=k[J.id];if(!z)return;if(J.error!=null){clearTimeout(z.t);delete k[J.id];z.reject(new Error(J.error));return}if(J.chunk!=null){clearTimeout(z.t);z.t=z.arm();z.text+=J.chunk;return}if(J.done){clearTimeout(z.t);delete k[J.id];z.resolve(J.text!=null?J.text:z.text);return}return}if(!J.__om_eval)return;const W=J;const Z=(z)=>{Q.source.postMessage({...z,__om_eval_r:1,id:W.id},Q.origin)};try{const z=(0,eval)(W.code);if(z&&typeof z.then==="function"){z.then((V)=>Z({ok:1,v:U(V)}),(V)=>Z({ok:0,e:String(V)}))}else{Z({ok:1,v:U(z)})}}catch(z){Z({ok:0,e:String(z)})}})}})();
+</script>
+
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cerebro Report — Gnosis style (implemented preview)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+  /* ============================================================
+     This file mirrors the eventual production CSS exactly.
+     Every selector below is one we'd add/replace in the real repo:
+       - tokens.css        →  :root + [data-theme="light"]
+       - global.css        →  .dashboard, .report-*, .chart-*, .report-kpi-strip
+       - echarts-light.ts  →  see <script> at the bottom
+     ============================================================ */
+
+  :root {
+    --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+    --font-body:    "Inter", system-ui, -apple-system, sans-serif;
+    --font-mono:    "JetBrains Mono", ui-monospace, Menlo, monospace;
+  }
+
+  [data-theme="dark"] {
+    /* Surfaces — deep warm ink, not cold slate */
+    --bg: #14130f;
+    --surface: #1c1a15;
+    --surface-1: #1c1a15;
+    --surface-2: #24221c;
+    --surface-3: #2d2a23;
+    --table-header: #24221c;
+    --table-stripe: rgba(241, 236, 226, 0.02);
+
+    /* Paper-cream text */
+    --text-primary: #f1ece2;
+    --text-secondary: #c9c2b3;
+    --text-muted: #8a8275;
+    --border: rgba(241, 236, 226, 0.07);
+    --border-hover: rgba(241, 236, 226, 0.14);
+    --section-divider: rgba(241, 236, 226, 0.06);
+
+    /* Accent — brighter sage */
+    --primary: #9ec081;
+    --primary-hover: #b5d195;
+    --accent-soft: rgba(158, 192, 129, 0.14);
+    --accent-softer: rgba(158, 192, 129, 0.07);
+
+    /* Status */
+    --success: #9ec081;
+    --warning: #d4b483;
+    --error:   #d97565;
+
+    /* Geometry — same as light */
+    --radius-sm: 6px;
+    --radius-base: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
+    --radius-card: 12px;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.25);
+    --shadow-base: 0 6px 24px -10px rgba(0,0,0,0.5);
+  }
+
+  [data-theme="light"] {
+    /* Surfaces — soft warm paper, more breathing room */
+    --bg: #f6f2eb;
+    --surface: #ffffff;
+    --surface-1: #ffffff;
+    --surface-2: #f1ece2;
+    --surface-3: #e8e2d4;
+    --table-header: #f6f2eb;
+    --table-stripe: rgba(31, 29, 24, 0.018);
+
+    /* Ink + rules — softer */
+    --text-primary: #1a1a1a;
+    --text-secondary: #4a463e;
+    --text-muted: #8a8275;
+    --border: rgba(31, 29, 24, 0.07);
+    --border-hover: rgba(31, 29, 24, 0.14);
+    --section-divider: rgba(31, 29, 24, 0.06);
+
+    /* Accent — sage */
+    --primary: #4a5a3c;
+    --primary-hover: #3a4830;
+    --accent-soft: rgba(74, 90, 60, 0.10);
+    --accent-softer: rgba(74, 90, 60, 0.06);
+
+    /* Status */
+    --success: #4a5a3c;
+    --warning: #b59569;
+    --error:   #a64a3b;
+
+    /* Geometry — modern, soft */
+    --radius-sm: 6px;
+    --radius-base: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
+    --radius-card: 12px;
+    --shadow-sm: 0 1px 2px rgba(31,29,24,0.04);
+    --shadow-base: 0 4px 16px -8px rgba(31,29,24,0.08);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--font-body);
+    background: var(--bg);
+    color: var(--text-primary);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- Top status strip (light, modern) ---------- */
+  .report-cli {
+    background: var(--bg);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    padding: 12px 28px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+  }
+  .report-cli .prompt { color: var(--primary); font-weight: 500; }
+  .report-cli .spacer { flex: 1; }
+  .report-cli .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--surface);
+  }
+  .report-cli .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); }
+
+  /* ---------- Report header (modern, airy) ---------- */
+  .report-header {
+    background: transparent;
+    padding: 3rem 2rem 2rem;
+    position: relative;
+  }
+  .report-header-inner { max-width: 1280px; margin: 0 auto; }
+  .report-header-meta {
+    display: flex; gap: 12px; align-items: center;
+    font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-bottom: 18px;
+  }
+  .report-header-meta .dot { opacity: 0.4; }
+  .report-header-meta .tag {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--surface);
+    color: var(--primary);
+  }
+  .report-header-meta .tag::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--primary);
+  }
+  .report-header-title {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 3rem;
+    line-height: 1.04;
+    letter-spacing: -0.025em;
+    color: var(--text-primary);
+    margin: 0;
+    max-width: 22ch;
+  }
+  .report-header-title em { font-style: italic; color: var(--primary); font-weight: 400; }
+  .report-header-subtitle {
+    margin: 0.85rem 0 0;
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    color: var(--text-secondary);
+    max-width: none;
+    font-family: var(--font-body);
+  }
+  .report-header-mark {
+    position: absolute; top: 36px; right: 32px;
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--primary);
+  }
+  .report-header-mark svg { width: 26px; height: 26px; }
+  .report-header-mark svg circle, .report-header-mark svg path { stroke: #f6f2eb; }
+  .report-header-mark svg circle[fill] { fill: #f6f2eb; stroke: none; }
+  .theme-toggle {
+    position: absolute; top: 36px; right: 88px;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text-muted);
+    width: 44px; height: 44px; border-radius: 50%;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-size: 14px;
+  }
+  .theme-toggle:hover { background: var(--accent-softer); color: var(--primary); border-color: var(--primary); }
+
+  /* ---------- Content shell ---------- */
+  .report-content {
+    flex: 1;
+    padding: 1.75rem 1.5rem 2.5rem;
+    max-width: 1280px;
+    width: 100%;
+    margin: 0 auto;
+    counter-reset: rr-section;
+  }
+
+  /* ---------- Section headings (subtle, modern) ---------- */
+  .report-html h2 {
+    counter-increment: rr-section;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 1.875rem;
+    letter-spacing: -0.015em;
+    line-height: 1.2;
+    margin: 2.75rem 0 1.25rem;
+    padding: 0;
+    border-bottom: none;
+    display: flex; align-items: baseline; gap: 12px;
+    color: var(--text-primary);
+  }
+  .report-html h2::before {
+    content: counter(rr-section, decimal-leading-zero);
+    font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: 0.04em;
+    color: var(--text-muted);
+    flex: 0 0 auto;
+    transform: translateY(-4px);
+  }
+  .report-html h3 {
+    font-family: var(--font-display); font-weight: 400;
+    font-size: 1.25rem; margin: 1.75rem 0 0.5rem;
+    color: var(--text-primary);
+  }
+
+  /* ---------- Prose ---------- */
+  .report-html { max-width: none; }
+  .report-html p {
+    font-family: var(--font-display);
+    font-size: 1.0625rem; line-height: 1.65;
+    color: var(--text-primary);
+    margin: 0 0 1rem;
+    max-width: none;
+  }
+  .report-html strong { font-weight: 600; }
+  .report-html code {
+    background: var(--accent-softer);
+    color: var(--primary);
+    padding: 0.1rem 0.35rem;
+    border-radius: 0;
+    font-family: var(--font-mono); font-size: 0.85em;
+  }
+
+  /* ---------- KPI strip (soft 3-up cards) ---------- */
+  .report-kpi-strip {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    background: transparent;
+    margin: 1.5rem 0 2.25rem;
+    border-radius: 0;
+    padding: 0;
+    max-width: none;
+    border: none;
+  }
+  .report-kpi-strip .kpi-cell {
+    padding: 1.4rem 1.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    display: flex; flex-direction: column; gap: 0.55rem;
+  }
+  .report-kpi-strip .kpi-label {
+    font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: 0.02em;
+    color: var(--text-muted);
+  }
+  .report-kpi-strip .kpi-value {
+    font-family: var(--font-display);
+    font-weight: 400; font-size: 2.625rem; line-height: 1;
+    letter-spacing: -0.025em;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+  .report-kpi-strip .kpi-delta {
+    font-family: var(--font-body);
+    font-size: 13px; color: var(--success);
+    display: inline-flex; gap: 6px; align-items: center;
+    font-weight: 500;
+  }
+  .report-kpi-strip .kpi-delta.neg { color: var(--error); }
+  .report-kpi-strip .kpi-delta.flat { color: var(--text-muted); }
+
+  /* ---------- Chart cards (RESKINNED) ---------- */
+  .chart-grid { display: grid; gap: 1rem; margin: 1rem 0; }
+  .chart-grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .chart-grid-3 { grid-template-columns: repeat(3, 1fr); }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+    margin: 0.75rem 0;
+    display: flex; flex-direction: column;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .chart-card:hover {
+    border-color: var(--border-hover);
+    box-shadow: var(--shadow-base);
+  }
+  .chart-card-head {
+    padding: 0.95rem 1.25rem 0.5rem;
+    background: transparent;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .chart-card-title {
+    font-family: var(--font-body);
+    font-weight: 600; font-size: 0.9375rem;
+    letter-spacing: -0.005em; color: var(--text-primary);
+  }
+  .chart-card-id {
+    font-family: var(--font-mono);
+    font-size: 10.5px; color: var(--text-muted); letter-spacing: 0.04em;
+  }
+  .chart-card-body { flex: 1; min-height: 220px; padding: 0 0.5rem; }
+  .chart-card-foot {
+    border-top: 1px solid var(--border);
+    padding: 0.6rem 1.25rem;
+    font-family: var(--font-mono);
+    font-size: 11px; color: var(--text-muted); letter-spacing: 0.02em;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .chart-card-foot .src { color: var(--text-secondary); }
+  .chart-sql-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .chart-sql-toggle:hover { background: var(--accent-softer); color: var(--primary); border-color: var(--primary); }
+
+  /* ---------- NumberDisplay (single big stat card) ---------- */
+  .number-display--gnosis {
+    padding: 1.4rem 1.4rem 1.5rem;
+    display: flex; flex-direction: column; gap: 0.55rem;
+  }
+  .number-display--gnosis .nd-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .number-display--gnosis .nd-value {
+    font-family: var(--font-display);
+    font-weight: 400; font-size: 3rem; line-height: 1;
+    letter-spacing: -0.02em; color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+  .number-display--gnosis .nd-delta {
+    font-family: var(--font-mono);
+    font-size: 11.5px; color: var(--primary);
+  }
+
+  /* ---------- Tables ---------- */
+  .report-html table {
+    width: 100%; border-collapse: collapse; margin: 1rem 0;
+    font-size: 14px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius-card);
+    overflow: hidden;
+    font-family: var(--font-body);
+  }
+  .report-html th {
+    background: transparent;
+    padding: 12px 16px; text-align: left;
+    font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: 0.02em;
+    color: var(--text-muted); font-weight: 500;
+    border-bottom: 1px solid var(--border);
+  }
+  .report-html td {
+    padding: 12px 16px; color: var(--text-primary);
+    border-top: 1px solid var(--border);
+    font-variant-numeric: tabular-nums;
+  }
+  .report-html td.num { font-family: var(--font-mono); font-size: 13px; }
+
+  /* ---------- Footer ---------- */
+  .report-footer {
+    border-top: 1px solid var(--border);
+    margin-top: 4rem;
+    padding: 18px 32px;
+    font-family: var(--font-mono);
+    font-size: 11px; color: var(--text-muted); letter-spacing: 0.02em;
+    display: flex; gap: 16px; align-items: center;
+    max-width: 1280px; margin-left: auto; margin-right: auto;
+  }
+  .report-footer .spacer { flex: 1; }
+  .report-footer .accent { color: var(--primary); }
+
+  /* ---------- Side-by-side compare frame (preview only) ---------- */
+  .preview-shell { background: var(--bg); padding: 32px 0 60px; transition: background 0.2s; }
+  [data-theme="dark"] .preview-banner h1 { color: var(--text-primary); }
+  [data-theme="dark"] .preview-banner h1 em { color: var(--primary); }
+  [data-theme="dark"] .preview-banner .legend { color: var(--text-muted); }
+  [data-theme="dark"] .preview-window { border-color: var(--border); box-shadow: 0 16px 40px -20px rgba(0,0,0,0.6); }
+  [data-theme="dark"] .annot { background: var(--surface); border-color: var(--border); color: var(--text-primary); }
+  [data-theme="dark"] .annot code { background: var(--surface-2); color: var(--text-primary); }
+  [data-theme="dark"] .annot .pill { border-color: var(--border); color: var(--text-secondary); }
+  .preview-banner {
+    max-width: 1480px; margin: 0 auto 18px; padding: 0 32px;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .preview-banner h1 {
+    font-family: var(--font-display); font-weight: 400; font-size: 28px;
+    letter-spacing: -0.01em; color: #1a1a1a;
+  }
+  .preview-banner h1 em { font-style: italic; color: #5a6b4c; }
+  .preview-banner .legend {
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #6b6258;
+  }
+  .preview-frame {
+    max-width: 1480px; margin: 0 auto; padding: 0 32px;
+  }
+  .preview-window {
+    border: 1px solid rgba(31,29,24,0.18);
+    border-radius: 12px; overflow: hidden;
+    box-shadow: 0 16px 40px -20px rgba(0,0,0,0.25);
+  }
+  .preview-window-head {
+    background: #1f1d18; color: #cdc6b4;
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em;
+    padding: 10px 16px;
+    display: flex; align-items: center; gap: 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .preview-window-head .dots { display:flex; gap: 6px; }
+  .preview-window-head .dots span { width: 10px; height: 10px; border-radius: 50%; background: rgba(216,210,196,0.22); }
+  .preview-window-head .url { color: #8aa37a; }
+
+  /* annotations row */
+  .annot-row {
+    max-width: 1480px; margin: 28px auto 0;
+    padding: 0 32px;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+  }
+  .annot {
+    border: 1px solid rgba(31,29,24,0.18);
+    background: #f9f5ec;
+    padding: 16px 18px;
+    border-radius: 0;
+  }
+  .annot .pill {
+    display: inline-block;
+    font-family: var(--font-mono); font-size: 10px;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    padding: 3px 8px; border: 1px solid rgba(31,29,24,0.25);
+    border-radius: 999px; color: #6b6258; margin-bottom: 8px;
+  }
+  .annot h3 {
+    font-family: var(--font-display); font-weight: 400; font-size: 19px;
+    margin-bottom: 8px; color: #1f1d18;
+  }
+  .annot p, .annot li {
+    font-family: var(--font-body); font-size: 13px; line-height: 1.55; color: #4a443a;
+  }
+  .annot ul { padding-left: 18px; margin: 0; }
+  .annot li { margin-bottom: 4px; }
+  .annot code {
+    font-family: var(--font-mono); font-size: 11.5px;
+    background: #ece6d6; padding: 1px 5px; border-radius: 0;
+    color: #1f1d18;
+  }
+</style>
+</head>
+<body>
+
+<div class="preview-shell">
+
+  <div class="preview-banner">
+    <h1>How the dashboard report <em>looks after PR-1 + PR-2</em></h1>
+    <span class="legend">CEREBRO MCP · DASHBOARD · GNOSIS THEME · LIGHT</span>
+  </div>
+
+  <div class="preview-frame">
+    <div class="preview-window">
+
+      <div class="preview-window-head">
+        <div class="dots"><span></span><span></span><span></span></div>
+        <span class="url">file:///reports/2026-05-09-gnosis-pay-q1-cohort.html</span>
+      </div>
+
+      <!-- =========== Status strip =========== -->
+      <div class="report-cli">
+        <span class="prompt">cerebro</span>
+        <span style="opacity:.5">/</span>
+        <span>dashboard report</span>
+        <span class="spacer"></span>
+        <span class="pill"><span class="dot"></span> 4 charts</span>
+        <span class="pill"><span class="dot"></span> 12 queries</span>
+        <span style="opacity:.6">2026-05-09 · 14:22 UTC</span>
+      </div>
+
+      <div class="dashboard" style="background: var(--bg); color: var(--text-primary);">
+        <div class="dashboard-main">
+
+          <!-- =========== STEP 5: Header =========== -->
+          <header class="report-header">
+            <div class="report-header-inner">
+              <div class="report-header-meta">
+                <span class="tag">Dashboard</span>
+                <span>Cerebro · dbt-cerebro</span>
+                <span class="dot">·</span>
+                <span>Gnosis Pay</span>
+              </div>
+              <h1 class="report-header-title">Q1 cardholder cohort, <em>retained.</em></h1>
+              <p class="report-header-subtitle">Spend retention and merchant mix across the Jan–Mar issuance cohort, with cashback ROI vs. the Q4 baseline.</p>
+            </div>
+            <div class="report-header-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32" fill="none">
+                <circle cx="16" cy="16" r="13" stroke="#1f1d18" stroke-width="1.4"/>
+                <circle cx="11.5" cy="14" r="3" stroke="#1f1d18" stroke-width="1.4"/>
+                <circle cx="20.5" cy="14" r="3" stroke="#1f1d18" stroke-width="1.4"/>
+                <circle cx="11.5" cy="14" r="0.9" fill="#1f1d18"/>
+                <circle cx="20.5" cy="14" r="0.9" fill="#1f1d18"/>
+                <path d="M14 19.2 L16 21 L18 19.2" stroke="#1f1d18" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <button class="theme-toggle" title="Toggle theme">☼</button>
+          </header>
+
+          <!-- =========== Content =========== -->
+          <main class="report-content">
+
+            <div class="report-html">
+              <h2>Summary</h2>
+            </div>
+
+            <!-- =========== STEP 4: KPI strip =========== -->
+            <div class="report-kpi-strip">
+              <div class="kpi-cell">
+                <span class="kpi-label">Active cards · W12</span>
+                <span class="kpi-value">38,412</span>
+                <span class="kpi-delta">↑ 6.4% retention vs Q4</span>
+              </div>
+              <div class="kpi-cell">
+                <span class="kpi-label">Median weekly spend</span>
+                <span class="kpi-value">€87.40</span>
+                <span class="kpi-delta flat" style="color:var(--text-muted)">→ stable</span>
+              </div>
+              <div class="kpi-cell">
+                <span class="kpi-label">Cashback paid · Q1</span>
+                <span class="kpi-value">€412k</span>
+                <span class="kpi-delta" style="color:var(--text-secondary)">2.8% payout ratio</span>
+              </div>
+            </div>
+
+            <div class="report-html">
+              <p>The Jan–Mar Gnosis Pay cohort retained <strong>72% of weekly active cards</strong> through week 12, ~6 pts above the Q4 baseline. Cashback payout stayed within budget at <code>2.8%</code> of gross volume.</p>
+
+              <h2>Cohort retention</h2>
+            </div>
+
+            <!-- =========== STEP 7+8: Chart cards =========== -->
+            <div class="chart-grid chart-grid-2">
+
+              <div class="chart-card">
+                <div class="chart-card-head">
+                  <div class="chart-card-title">Weekly active cards</div>
+                  <div class="chart-card-id">CHART_01</div>
+                </div>
+                <div class="chart-card-body" id="chart-01"></div>
+                <div class="chart-card-foot">
+                  <span class="src">fct_card_activity_daily</span>
+                  <button class="chart-sql-toggle">View SQL</button>
+                </div>
+              </div>
+
+              <div class="chart-card">
+                <div class="chart-card-head">
+                  <div class="chart-card-title">Median weekly spend (€)</div>
+                  <div class="chart-card-id">CHART_02</div>
+                </div>
+                <div class="chart-card-body" id="chart-02"></div>
+                <div class="chart-card-foot">
+                  <span class="src">fct_card_spend_weekly</span>
+                  <button class="chart-sql-toggle">View SQL</button>
+                </div>
+              </div>
+
+            </div>
+
+            <div class="report-html">
+              <h2>Merchant mix</h2>
+            </div>
+
+            <div class="chart-grid chart-grid-2">
+
+              <!-- NumberDisplay variant -->
+              <div class="chart-card">
+                <div class="chart-card-head">
+                  <div class="chart-card-title">Top MCC share</div>
+                  <div class="chart-card-id">KPI_01</div>
+                </div>
+                <div class="number-display--gnosis">
+                  <div class="nd-eyebrow">Grocery & food retail</div>
+                  <div class="nd-value">31.2%</div>
+                  <div class="nd-delta">↑ 4.1 pts vs Q4</div>
+                </div>
+                <div class="chart-card-foot">
+                  <span class="src">dim_merchant_mcc</span>
+                  <button class="chart-sql-toggle">View SQL</button>
+                </div>
+              </div>
+
+              <div class="chart-card">
+                <div class="chart-card-head">
+                  <div class="chart-card-title">Volume by category</div>
+                  <div class="chart-card-id">CHART_03</div>
+                </div>
+                <div class="chart-card-body" id="chart-03"></div>
+                <div class="chart-card-foot">
+                  <span class="src">fct_merchant_volume</span>
+                  <button class="chart-sql-toggle">View SQL</button>
+                </div>
+              </div>
+
+            </div>
+
+            <div class="report-html">
+              <h2>Cohort table</h2>
+              <p>Per-week breakdown across the cohort window. Bold weeks were product-launch milestones: <strong>W04</strong> introduced the cashback boost, <strong>W08</strong> added travel partners.</p>
+              <table>
+                <thead>
+                  <tr><th>Cohort week</th><th>Active</th><th>Spend €</th><th>Cashback €</th><th>Retention</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>W01</td><td class="num">41,802</td><td class="num">74.10</td><td class="num">2.07</td><td class="num">100.0%</td></tr>
+                  <tr><td>W04</td><td class="num">40,116</td><td class="num">81.55</td><td class="num">2.28</td><td class="num">96.0%</td></tr>
+                  <tr><td>W08</td><td class="num">39,204</td><td class="num">85.20</td><td class="num">2.38</td><td class="num">93.8%</td></tr>
+                  <tr><td>W12</td><td class="num">38,412</td><td class="num">87.40</td><td class="num">2.44</td><td class="num">91.9%</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+          </main>
+
+          <!-- =========== STEP 10: Footer =========== -->
+          <footer class="report-footer">
+            <span>Generated by <span class="accent">Cerebro</span></span>
+            <span style="opacity:.4">·</span>
+            <span>2026-05-09 14:22 UTC</span>
+            <span style="opacity:.4">·</span>
+            <span>git 8a1f9c2</span>
+            <span class="spacer"></span>
+            <span>cerebro_mcp v0.5.0</span>
+          </footer>
+
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- annotations -->
+  <div class="annot-row">
+    <div class="annot">
+      <span class="pill">PR-1 · TOKENS + TYPE</span>
+      <h3>What ships first</h3>
+      <ul>
+        <li>Replace <code>[data-theme="light"]</code> in <code>tokens.css</code> with the cream + sage palette.</li>
+        <li>Default <code>index.html</code> to <code>data-theme="light"</code>.</li>
+        <li>Add <code>--font-display</code> / <code>--font-body</code> / <code>--font-mono</code> + fontsource imports.</li>
+        <li>Numbered <code>h2</code> rule via CSS counter — no Python change.</li>
+        <li>New ECharts palette (sage → clay → tan) replaces indigo.</li>
+      </ul>
+    </div>
+    <div class="annot">
+      <span class="pill">PR-2 · CHROME</span>
+      <h3>What ships next</h3>
+      <ul>
+        <li>CLI band component — props: <code>kind</code>, <code>chartCount</code>, <code>queryCount</code>.</li>
+        <li>Owl mark replaces the indigo watermark PNG. <code>WATERMARK_*</code> stays in code for the dark theme until we replace it.</li>
+        <li>Chart cards get titled head + dashed-rule foot with stable mono <code>CHART_NN</code> IDs and dbt source line.</li>
+        <li>Footer mirrors CLI band.</li>
+      </ul>
+    </div>
+    <div class="annot">
+      <span class="pill">PR-3 · SERVER</span>
+      <h3>Last mile</h3>
+      <ul>
+        <li>Convert <code>summary_numbers</code> renderer in Python from <code>&lt;table class="kpi-table"&gt;</code> to <code>&lt;div class="kpi-cell"&gt;</code> triples.</li>
+        <li>Add <code>source_model</code> to <code>QueryInfo</code> so the chart-card foot can show real dbt names.</li>
+        <li>Until then, foot falls back to <code>src · chart_03</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // ====== Theme toggle ======
+  const themeBtn = document.querySelector('.theme-toggle');
+  const root = document.documentElement;
+  function applyTheme(t) {
+    root.setAttribute('data-theme', t);
+    themeBtn.textContent = t === 'dark' ? '☾' : '☼';
+    renderCharts();
+  }
+  themeBtn?.addEventListener('click', () => {
+    applyTheme(root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+  });
+
+  // ====== STEP 8 — echarts (paste-ready, theme-aware) ======
+  const PALETTE = {
+    light: { sage:"#4a5a3c", sageMid:"#7d8a6a", sageSoft:"#9ea88e",
+             tan:"#c0c4a4", sand:"#d6c9a3", clay:"#b59569",
+             ink:"#1a1a1a", muted:"#8a8275", rule:"rgba(31,29,24,0.07)",
+             areaTop:"rgba(74,90,60,0.18)", areaBot:"rgba(74,90,60,0.02)" },
+    dark:  { sage:"#9ec081", sageMid:"#b5d195", sageSoft:"#7d9966",
+             tan:"#c9b487", sand:"#d4b483", clay:"#d4906a",
+             ink:"#f1ece2", muted:"#8a8275", rule:"rgba(241,236,226,0.07)",
+             areaTop:"rgba(158,192,129,0.22)", areaBot:"rgba(158,192,129,0.01)" }
+  };
+  const mono="JetBrains Mono, ui-monospace, monospace";
+  let chartInstances = [];
+  function renderCharts() {
+    chartInstances.forEach(c => c.dispose());
+    chartInstances = [];
+    const t = root.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    const { sage, sageMid, sageSoft, tan, sand, clay, ink, muted, rule, areaTop, areaBot } = PALETTE[t];
+    const surface = getComputedStyle(root).getPropertyValue('--surface').trim();
+
+  const baseAxis = {
+    axisLine:  { show: false },
+    axisTick:  { show: false },
+    axisLabel: { color: muted, fontFamily: mono, fontSize: 10 },
+  };
+
+  // ---- Chart 01: Weekly active cards (line) ----
+  const weeks = ['W1','W2','W3','W4','W5','W6','W7','W8','W9','W10','W11','W12'];
+  const c1 = echarts.init(document.getElementById('chart-01'));
+  chartInstances.push(c1);
+  c1.setOption({
+    grid: { left: 44, right: 14, top: 18, bottom: 26 },
+    textStyle: { fontFamily: mono, color: muted },
+    xAxis: { type:'category', data: weeks, ...baseAxis, splitLine:{show:false} },
+    yAxis: { type:'value', axisLine:{show:false}, axisLabel:{ color:muted, fontFamily:mono, fontSize:10 },
+             splitLine:{ lineStyle:{ color: rule, type:[2,3] } } },
+    series: [{
+      type:'line', smooth:true, showSymbol:false,
+      data:[41802,41210,40805,40116,39780,39550,39320,39204,38980,38760,38560,38412],
+      lineStyle:{ color: sage, width: 2 },
+      itemStyle:{ color: sage },
+      areaStyle:{ color:{ type:'linear', x:0, y:0, x2:0, y2:1,
+        colorStops:[{offset:0, color:areaTop},{offset:1,color:areaBot}] } }
+    }]
+  });
+
+  // ---- Chart 02: Median weekly spend (bar) ----
+  const c2 = echarts.init(document.getElementById('chart-02'));
+  chartInstances.push(c2);
+  c2.setOption({
+    grid: { left: 44, right: 14, top: 18, bottom: 26 },
+    textStyle: { fontFamily: mono, color: muted },
+    xAxis: { type:'category', data: weeks, ...baseAxis, splitLine:{show:false} },
+    yAxis: { type:'value', axisLine:{show:false}, axisLabel:{ color:muted, fontFamily:mono, fontSize:10 },
+             splitLine:{ lineStyle:{ color: rule, type:[2,3] } } },
+    series: [{
+      type:'bar',
+      data: [74.1,76.8,79.4,81.55,82.9,83.8,84.6,85.2,86.1,86.7,87.0,87.4],
+      itemStyle:{ color: sage, borderRadius: [4,4,0,0] }, barWidth: 18
+    }]
+  });
+
+  // ---- Chart 03: Volume by category (donut) ----
+  const c3 = echarts.init(document.getElementById('chart-03'));
+  chartInstances.push(c3);
+  c3.setOption({
+    textStyle: { fontFamily: mono, color: muted, fontSize: 10 },
+    legend: { show: false },
+    series: [{
+      type:'pie', radius:['46%','76%'], center:['50%','54%'],
+      data: [
+        { name:'Grocery & food', value: 31.2 },
+        { name:'Travel',         value: 18.6 },
+        { name:'Subscriptions',  value: 14.3 },
+        { name:'Restaurants',    value: 13.1 },
+        { name:'Retail',         value: 11.9 },
+        { name:'Other',          value: 10.9 }
+      ],
+      itemStyle:{ borderColor: surface, borderWidth: 2 },
+      color:[sage, clay, sageMid, sand, sageSoft, tan],
+      label:{ color: ink, fontFamily: mono, fontSize: 10, formatter: '{b}\n{d}%' },
+      labelLine:{ lineStyle:{ color: rule } }
+    }]
+  });
+  } /* end renderCharts */
+  renderCharts();
+  window.addEventListener('resize', () => chartInstances.forEach(c => c.resize()));
+</script>
+</body>
+</html>

@@ -1,7 +1,5 @@
-import { useState } from "react";
-import { Sun, Moon, ExternalLink, Copy, Check } from "lucide-react";
+import { Sun, Moon } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
-import { WATERMARK_LIGHT, WATERMARK_DARK } from "../assets/watermark";
 
 interface Props {
   title: string;
@@ -10,66 +8,52 @@ interface Props {
   fileUri?: string;
 }
 
-export function ReportHeader({ title, timestamp, subtitle, fileUri }: Props) {
-  const { isDark, toggle } = useTheme();
-  const [copied, setCopied] = useState(false);
+function splitTitle(t: string) {
+  const i = t.indexOf("—");
+  if (i === -1) return <>{t}</>;
+  return (
+    <>
+      {t.slice(0, i)}
+      <em>{t.slice(i)}</em>
+    </>
+  );
+}
 
-  const logoSrc = isDark ? WATERMARK_DARK : WATERMARK_LIGHT;
-  const isFileUri = fileUri?.startsWith("file://");
+export function ReportHeader({ title, subtitle }: Props) {
+  const { isDark, toggle } = useTheme();
 
   return (
     <header className="report-header">
       <div className="report-header-inner">
-        <div className="report-header-titleblock">
-          <img
-            src={logoSrc}
-            alt="Gnosis"
-            className="report-header-logo"
-          />
-          <div className="report-header-text">
-            <h1 className="report-header-title">{title}</h1>
-            {subtitle && (
-              <p className="report-header-subtitle">{subtitle}</p>
-            )}
-            <p className="report-header-meta">
-              {timestamp} &middot; Cerebro / dbt-cerebro
-            </p>
-          </div>
+        <div className="report-header-meta">
+          <span className="tag">Dashboard</span>
+          <span>Cerebro · dbt-cerebro</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
-          {fileUri && isFileUri && (
-            <button
-              onClick={() => {
-                navigator.clipboard.writeText(fileUri);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 2000);
-              }}
-              className="no-print theme-toggle"
-              title="Copy report path"
-            >
-              {copied ? <Check size={16} /> : <Copy size={16} />}
-            </button>
-          )}
-          {fileUri && !isFileUri && (
-            <a
-              href={fileUri}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="no-print theme-toggle"
-              title="Open in browser"
-            >
-              <ExternalLink size={16} />
-            </a>
-          )}
-          <button
-            className="no-print theme-toggle"
-            onClick={toggle}
-            title="Toggle theme"
-          >
-            {isDark ? <Sun size={18} /> : <Moon size={18} />}
-          </button>
-        </div>
+        <h1 className="report-header-title">{splitTitle(title)}</h1>
+        {subtitle && <p className="report-header-subtitle">{subtitle}</p>}
       </div>
+      <div className="report-header-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" fill="none">
+          <circle cx="16" cy="16" r="13" strokeWidth="1.4" />
+          <circle cx="11.5" cy="14" r="3" strokeWidth="1.4" />
+          <circle cx="20.5" cy="14" r="3" strokeWidth="1.4" />
+          <circle cx="11.5" cy="14" r="0.9" fill="currentColor" />
+          <circle cx="20.5" cy="14" r="0.9" fill="currentColor" />
+          <path
+            d="M14 19.2 L16 21 L18 19.2"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </div>
+      <button
+        className="theme-toggle no-print"
+        onClick={toggle}
+        title="Toggle theme"
+      >
+        {isDark ? <Sun size={18} /> : <Moon size={18} />}
+      </button>
     </header>
   );
 }

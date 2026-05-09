@@ -11,20 +11,22 @@ export function NumberDisplay({ spec }: Props) {
     ? formatScalar(spec.change.value, spec.change.format, true)
     : "";
 
+  const deltaClass =
+    changeDirection === "negative"
+      ? "nd-delta neg"
+      : changeDirection === "neutral"
+      ? "nd-delta flat"
+      : "nd-delta";
+
   return (
-    <div className="number-display">
-      {spec.title && <div className="number-display__eyebrow">{spec.title}</div>}
-      <div className="number-display__value">{formattedValue}</div>
+    <div className="number-display number-display--gnosis">
+      {spec.title && <div className="nd-eyebrow">{spec.title}</div>}
+      <div className="nd-value">{formattedValue}</div>
       {spec.change && (
-        <div
-          className={[
-            "number-display__change",
-            `number-display__change--${changeDirection}`,
-          ].join(" ")}
-        >
-          <span className="number-display__change-value">{formattedChange}</span>
+        <div className={deltaClass}>
+          <span className="nd-delta-value">{formattedChange}</span>
           {spec.change.label && (
-            <span className="number-display__change-label">{spec.change.label}</span>
+            <span className="nd-delta-label"> {spec.change.label}</span>
           )}
         </div>
       )}

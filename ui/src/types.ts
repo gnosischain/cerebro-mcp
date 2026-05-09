@@ -22,6 +22,7 @@ export interface QueryInfo {
   database: string;
   title: string;
   source?: "semantic" | "raw";
+  source_model?: string;
 }
 
 export interface ResearchFootnote {

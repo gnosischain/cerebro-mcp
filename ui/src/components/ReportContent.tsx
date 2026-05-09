@@ -46,6 +46,7 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
                 spec={spec}
                 title={chartTitle}
                 sql={queries?.[chartId]?.sql}
+                sourceModel={queries?.[chartId]?.source_model}
               />
             );
           })}
@@ -106,6 +107,7 @@ function SectionContent({ html, charts, queries }: SectionContentProps) {
             spec={spec}
             title={chartTitle}
             sql={queries?.[chartId]?.sql}
+            sourceModel={queries?.[chartId]?.source_model}
           />
         );
       }

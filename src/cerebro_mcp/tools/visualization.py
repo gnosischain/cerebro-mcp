@@ -23,7 +23,16 @@ from cerebro_mcp.observability import (
     observe_semantic_tool_call,
 )
 from cerebro_mcp.tools.query import truncate_response, _truncate_sql
+from cerebro_mcp.tools.reasoning import _extract_models_from_sql
 from cerebro_mcp.tools.session_state import state
+
+
+def _single_source_model(sql: str) -> str | None:
+    """Return the single dbt model referenced in `sql`, or None if 0 or >1."""
+    models = {m for m in _extract_models_from_sql(sql or "") if m}
+    if len(models) == 1:
+        return next(iter(models))
+    return None
 
 
 logger = logging.getLogger(__name__)
@@ -324,35 +333,53 @@ def _get_report_download_url(report_id: str) -> str | None:
 
 
 def _render_summary_numbers_html(summary_numbers: list[dict]) -> str:
-    """Render a leading KPI strip table from a list of {label, value, hint} dicts."""
-    rows = []
+    """Render a leading KPI strip from a list of {label, value, hint} dicts.
+
+    Emits the Gnosis 3-up card layout: groups of three .kpi-cell wrapped in
+    .report-kpi-strip blocks. The .kpi-table fallback CSS keeps any archived
+    reports rendered with the legacy markup readable.
+    """
+    items = []
     for item in summary_numbers[:6]:
         label = str(item.get("label", "")).strip()
         value = str(item.get("value", "")).strip()
         hint = str(item.get("hint", "")).strip()
         if not label and not value:
             continue
-        hint_cell = (
-            f'<td class="kpi-table-hint">{hint}</td>' if hint else '<td class="kpi-table-hint"></td>'
-        )
-        rows.append(
-            f'<tr><th scope="row" class="kpi-table-label">{label}</th>'
-            f'<td class="kpi-table-value">{value}</td>'
-            f"{hint_cell}</tr>"
-        )
-    if not rows:
+        items.append((label, value, hint))
+    if not items:
         return ""
-    body = "".join(rows)
-    return (
-        '<section class="report-kpi-strip">'
-        '<table class="kpi-table">'
-        '<thead><tr><th scope="col">Metric</th>'
-        '<th scope="col">Value</th>'
-        '<th scope="col">Change</th></tr></thead>'
-        f"<tbody>{body}</tbody>"
-        "</table>"
-        "</section>"
-    )
+
+    def _delta_class(text: str) -> str:
+        t = text.strip()
+        if not t:
+            return "nd-delta flat"
+        head = t.lstrip()
+        if head.startswith(("-", "↓", "▼")):
+            return "kpi-delta neg"
+        if head.startswith(("+", "↑", "▲")):
+            return "kpi-delta"
+        if head.startswith(("→", "~", "≈")):
+            return "kpi-delta flat"
+        return "kpi-delta"
+
+    def _render_strip(group: list[tuple[str, str, str]]) -> str:
+        cells = []
+        for label, value, hint in group:
+            delta = (
+                f'<span class="{_delta_class(hint)}">{hint}</span>' if hint else ""
+            )
+            cells.append(
+                '<div class="kpi-cell">'
+                f'<span class="kpi-label">{label}</span>'
+                f'<span class="kpi-value">{value}</span>'
+                f"{delta}"
+                "</div>"
+            )
+        return f'<div class="report-kpi-strip">{"".join(cells)}</div>'
+
+    blocks = [_render_strip(items[i : i + 3]) for i in range(0, len(items), 3)]
+    return "".join(blocks)
 
 
 def create_report_artifact(
@@ -447,6 +474,9 @@ def create_report_artifact(
                 "title": _chart_registry[cid].get("title", ""),
                 "source": _chart_registry[cid].get("source", "raw"),
             }
+            source_model = _chart_registry[cid].get("source_model")
+            if source_model:
+                chart_queries[cid]["source_model"] = source_model
         else:
             missing.append(cid)
 
@@ -2471,6 +2501,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     "change_field": change_field,
                     "input_shape": input_shape,
                     "source": source,
+                    "source_model": _single_source_model(sql),
                 }
 
             # Metadata-only mode: compact single line for batch tool

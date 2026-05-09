@@ -14,11 +14,9 @@ interface Props {
   spec: ChartSpec;
   title?: string;
   sql?: string;
+  sourceModel?: string;
 }
 
-/**
- * Build a styled HTML table from an ECharts option for the dataView feature.
- */
 function buildDataViewTable(opt: EChartsOption): string {
   const xAxisRaw = opt.xAxis;
   const xAxis = (Array.isArray(xAxisRaw) ? xAxisRaw[0] : xAxisRaw) as
@@ -30,7 +28,6 @@ function buildDataViewTable(opt: EChartsOption): string {
   }>;
 
   if (!xAxis?.data || series.length === 0) {
-    // Fallback for pie charts or other formats
     const pieData = series[0]?.data as
       | Array<{ name?: string; value?: number }>
       | undefined;
@@ -55,7 +52,6 @@ function buildDataViewTable(opt: EChartsOption): string {
     return "<p>No tabular data available</p>";
   }
 
-  // Build header row
   let html =
     '<table style="width:100%;border-collapse:collapse;font-size:13px">';
   html += "<thead><tr>";
@@ -65,7 +61,6 @@ function buildDataViewTable(opt: EChartsOption): string {
   }
   html += "</tr></thead><tbody>";
 
-  // Build data rows
   for (let i = 0; i < xAxis.data.length; i++) {
     html += "<tr>";
     html += `<td style="padding:4px 10px;border-bottom:1px solid #eee">${xAxis.data[i]}</td>`;
@@ -79,37 +74,39 @@ function buildDataViewTable(opt: EChartsOption): string {
   return html;
 }
 
-function ChartCardInner({ chartId, spec, title, sql }: Props) {
+function chartLabel(chartId: string): string {
+  const m = chartId.match(/(\d+)$/);
+  if (m) {
+    return `CHART_${m[1].padStart(2, "0")}`;
+  }
+  return chartId.replace(/^chart[_-]?/i, "CHART_").toUpperCase();
+}
+
+function ChartCardInner({ chartId, spec, title, sql, sourceModel }: Props) {
   const { isDark } = useTheme();
   const [showSql, setShowSql] = useState(false);
 
+  const label = chartLabel(chartId);
+  const srcLabel = sourceModel ?? chartId;
+  const showFoot = Boolean(sourceModel || sql);
+
   if (isNumberDisplay(spec)) {
+    // KPI cards: drop the dbt source label — the SQL toggle alone is enough.
     return (
-      <div
-        className="chart-card"
-        style={{
-          background: "var(--surface)",
-          border: "1px solid var(--border)",
-          borderRadius: "var(--radius-card)",
-          boxShadow: "var(--shadow-sm)",
-          overflow: "hidden",
-          margin: "0.75rem 0",
-        }}
-      >
+      <div id={`chart-${chartId}`} className="chart-card">
+        <div className="chart-card-head">
+          <div className="chart-card-title">{title || spec.title || ""}</div>
+          <div className="chart-card-id">{label}</div>
+        </div>
+        <NumberDisplay spec={spec} />
         {sql && (
-          <div
-            style={{
-              padding: "0.5rem 1rem 0",
-              display: "flex",
-              justifyContent: "flex-end",
-            }}
-          >
+          <div className="chart-card-foot chart-card-foot--kpi">
+            <span className="spacer" />
             <button
               className="chart-sql-toggle"
               onClick={() => setShowSql(!showSql)}
-              title="View SQL query"
             >
-              {"</>"}
+              {showSql ? "Hide SQL" : "View SQL"}
             </button>
           </div>
         )}
@@ -120,7 +117,6 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
             </pre>
           </div>
         )}
-        <NumberDisplay spec={spec} />
       </div>
     );
   }
@@ -136,10 +132,7 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
       right: 16,
       top: 8,
       feature: {
-        saveAsImage: {
-          title: "Save as image",
-          pixelRatio: 2,
-        },
+        saveAsImage: { title: "Save as image", pixelRatio: 2 },
         dataView: {
           title: "View data",
           lang: ["Data view", "Close", "Refresh"],
@@ -149,56 +142,38 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
         },
       },
       iconStyle: {
-        borderColor: isDark
-          ? "rgba(255,255,255,0.5)"
-          : "rgba(0,0,0,0.4)",
+        borderColor: isDark ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.4)",
       },
     };
     return opt;
   }, [spec, isDark]);
 
-  const chartHeight = (spec as Record<string, unknown>)?._cerebro_height as string || "350px";
+  const chartHeight =
+    ((spec as Record<string, unknown>)?._cerebro_height as string) || "350px";
 
   return (
-    <div
-      id={`chart-${chartId}`}
-      className="chart-card"
-      style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-card)",
-        boxShadow: "var(--shadow-sm)",
-        overflow: "hidden",
-        margin: "0.75rem 0",
-      }}
-    >
-      {(title || sql) && (
-        <div
-          style={{
-            padding: "0.75rem 1rem 0",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          {title && (
-            <span
-              style={{
-                fontSize: "0.875rem",
-                fontWeight: 600,
-                color: "var(--text-primary)",
-              }}
-            >
-              {title}
-            </span>
-          )}
+    <div id={`chart-${chartId}`} className="chart-card">
+      <div className="chart-card-head">
+        <div className="chart-card-title">{title || ""}</div>
+        <div className="chart-card-id">{label}</div>
+      </div>
+      <div className="chart-card-body">
+        <ReactECharts
+          option={echartsOption}
+          theme={isDark ? "cerebro-dark" : "cerebro-light"}
+          style={{ width: "100%", height: chartHeight }}
+          notMerge
+        />
+      </div>
+      {showFoot && (
+        <div className="chart-card-foot">
+          <span className="src">{srcLabel}</span>
           {sql && (
             <button
               className="chart-sql-toggle"
               onClick={() => setShowSql(!showSql)}
-              title="View SQL query"
             >
-              {"</>"}
+              {showSql ? "Hide SQL" : "View SQL"}
             </button>
           )}
         </div>
@@ -210,12 +185,6 @@ function ChartCardInner({ chartId, spec, title, sql }: Props) {
           </pre>
         </div>
       )}
-      <ReactECharts
-        option={echartsOption}
-        theme={isDark ? "cerebro-dark" : "cerebro-light"}
-        style={{ width: "100%", height: chartHeight }}
-        notMerge
-      />
     </div>
   );
 }

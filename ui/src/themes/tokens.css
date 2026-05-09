@@ -2,61 +2,105 @@
 @import "@fontsource/plus-jakarta-sans/500.css";
 @import "@fontsource/plus-jakarta-sans/600.css";
 @import "@fontsource/plus-jakarta-sans/700.css";
+@import "@fontsource/instrument-serif/400.css";
+@import "@fontsource/instrument-serif/400-italic.css";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/600.css";
 
 :root {
-  --bg: #0f141b;
-  --surface: #151c24;
-  --border: rgba(226, 232, 240, 0.08);
-  --border-hover: rgba(226, 232, 240, 0.16);
-  --primary: #818cf8;
-  --primary-hover: #a5b4fc;
-  --success: #34d399;
-  --warning: #fbbf24;
-  --error: #f87171;
-  --text-primary: #e2e8f0;
-  --text-secondary: #cbd5e1;
-  --text-muted: #94a3b8;
-  --accent-soft: rgba(99, 102, 241, 0.16);
-  --accent-softer: rgba(99, 102, 241, 0.1);
-  --table-header: #151c24;
-  --table-stripe: rgba(255, 255, 255, 0.02);
-  --surface-1: #151c24;
-  --surface-2: #1a2230;
-  --surface-3: #212b3a;
-  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.12);
-  --shadow-base: 0 2px 6px -1px rgba(0, 0, 0, 0.15);
-  --radius-sm: 4px;
-  --radius-base: 8px;
-  --radius-lg: 10px;
-  --radius-xl: 12px;
-  --radius-card: 6px;
-  --section-divider: rgba(226, 232, 240, 0.06);
+  /* Surfaces — deep warm ink, not cold slate */
+  --bg: #14130f;
+  --surface: #1c1a15;
+  --surface-1: #1c1a15;
+  --surface-2: #24221c;
+  --surface-3: #2d2a23;
+  --table-header: #24221c;
+  --table-stripe: rgba(241, 236, 226, 0.02);
+
+  /* Paper-cream text */
+  --text-primary: #f1ece2;
+  --text-secondary: #c9c2b3;
+  --text-muted: #8a8275;
+  --border: rgba(241, 236, 226, 0.07);
+  --border-hover: rgba(241, 236, 226, 0.14);
+  --section-divider: rgba(241, 236, 226, 0.06);
+
+  /* Accent — brighter sage so it lifts off ink */
+  --primary: #9ec081;
+  --primary-hover: #b5d195;
+  --accent-soft: rgba(158, 192, 129, 0.14);
+  --accent-softer: rgba(158, 192, 129, 0.07);
+
+  /* Status */
+  --success: #9ec081;
+  --warning: #d4b483;
+  --error: #d97565;
+
+  /* Geometry */
+  --radius-sm: 6px;
+  --radius-base: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-card: 12px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-base: 0 6px 24px -10px rgba(0, 0, 0, 0.5);
+
+  /* Type — Gnosis system (shared with light) */
+  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-body: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+
+  /* Layout */
   --sidebar-width: 224px;
   --sidebar-collapsed: 56px;
   --header-height: 56px;
 }
 
 [data-theme="light"] {
-  --bg: #f7f5f0;
-  --surface: #fbfaf7;
-  --border: rgba(15, 23, 42, 0.08);
-  --border-hover: rgba(15, 23, 42, 0.14);
-  --primary: #4f46e5;
-  --primary-hover: #4338ca;
-  --success: #10b981;
-  --warning: #f59e0b;
-  --error: #ef4444;
-  --text-primary: #0f172a;
-  --text-secondary: #334155;
-  --text-muted: #94a3b8;
-  --accent-soft: rgba(79, 70, 229, 0.1);
-  --accent-softer: rgba(79, 70, 229, 0.06);
-  --table-header: #f5f4f0;
-  --table-stripe: rgba(0, 0, 0, 0.02);
-  --surface-1: #fbfaf7;
-  --surface-2: #f0ede6;
-  --surface-3: #e5e2db;
-  --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.04);
-  --shadow-base: 0 2px 6px -1px rgba(15, 23, 42, 0.06);
-  --section-divider: rgba(15, 23, 42, 0.06);
+  /* Surfaces — soft warm paper */
+  --bg: #f6f2eb;
+  --surface: #ffffff;
+  --surface-1: #ffffff;
+  --surface-2: #f1ece2;
+  --surface-3: #e8e2d4;
+  --table-header: #f6f2eb;
+  --table-stripe: rgba(31, 29, 24, 0.018);
+
+  /* Ink + rules */
+  --text-primary: #1a1a1a;
+  --text-secondary: #4a463e;
+  --text-muted: #8a8275;
+  --border: rgba(31, 29, 24, 0.07);
+  --border-hover: rgba(31, 29, 24, 0.14);
+  --section-divider: rgba(31, 29, 24, 0.06);
+
+  /* Accent — sage */
+  --primary: #4a5a3c;
+  --primary-hover: #3a4830;
+  --accent-soft: rgba(74, 90, 60, 0.10);
+  --accent-softer: rgba(74, 90, 60, 0.06);
+
+  /* Status */
+  --success: #4a5a3c;
+  --warning: #b59569;
+  --error: #a64a3b;
+
+  /* Geometry */
+  --radius-sm: 6px;
+  --radius-base: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-card: 12px;
+  --shadow-sm: 0 1px 2px rgba(31, 29, 24, 0.04);
+  --shadow-base: 0 4px 16px -8px rgba(31, 29, 24, 0.08);
+
+  /* Type — same system as dark */
+  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-body: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
 }
