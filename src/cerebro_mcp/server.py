@@ -52,11 +52,13 @@ from cerebro_mcp.tools.cross_check import register_cross_check_tools
 from cerebro_mcp.tools.storyteller import register_storyteller_tools
 from cerebro_mcp.tools.mini_apps import register_mini_app_infra
 from cerebro_mcp.tools.token_explorer import register_token_explorer_tools
+from cerebro_mcp.tools.contract_explorer import register_contract_explorer_tools
 from cerebro_mcp.tools.metric_lab import register_metric_lab_tools
 from cerebro_mcp.tools.yield_opportunities import register_yield_opportunities_tools
 from cerebro_mcp.tools.portfolio import register_portfolio_tools
 from cerebro_mcp.tools.graph_explorer import register_graph_explorer_tools
 from cerebro_mcp.tools.quarterly_review import register_quarterly_review_tools
+from cerebro_mcp.tools.rpc import register_rpc_tools
 
 
 runtime_state.ssl_trust_injected = init_ssl_trust()
@@ -306,11 +308,13 @@ if settings.WORKFLOW_RESUME_TOOLS_ENABLED:
     register_workflow_resume_tools(mcp)
 register_cross_check_tools(mcp, ch)
 register_storyteller_tools(mcp, ch)
+register_rpc_tools(mcp, ch)
 
 # Mini-app platform: install the visibility filter first so subsequent
 # app registrations can mark hydration tools as app-only.
 register_mini_app_infra(mcp, ch)
 register_token_explorer_tools(mcp, ch)
+register_contract_explorer_tools(mcp, ch)
 register_metric_lab_tools(mcp, ch)
 register_yield_opportunities_tools(mcp, ch)
 register_portfolio_tools(mcp, ch)

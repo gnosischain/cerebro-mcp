@@ -10,6 +10,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # --- Web3 RPC / ABI resolution ---
+    GNOSIS_RPC_URL: str = "https://rpc.gnosischain.com"
+    GNOSIS_ARCHIVE_RPC_URL: str = ""
+    BLOCKSCOUT_API_BASE_URL: str = "https://gnosis.blockscout.com/api/v2"
+    RPC_TIMEOUT_SECONDS: int = 15
+    RPC_MAX_RETRIES: int = 3
+    ABI_CACHE_TTL_SECONDS: int = 3600
+    ABI_CACHE_MAX_ENTRIES: int = 512
+
     # ClickHouse connection
     CLICKHOUSE_HOST: str = "localhost"
     CLICKHOUSE_PORT: int = 8443

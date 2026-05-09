@@ -24,6 +24,7 @@ const ENTRY_MAP: Record<string, { html: string; out: string }> = {
   portfolio:     { html: "portfolio.html",      out: "portfolio.html" },
   graphExplorer: { html: "graph-explorer.html", out: "graph-explorer.html" },
   quarterlyReview: { html: "quarterly-review.html", out: "quarterly-review.html" },
+  contractExplorer: { html: "contract-explorer.html", out: "contract-explorer.html" },
 };
 
 const entryName = process.env.CEREBRO_UI_ENTRY ?? "report";

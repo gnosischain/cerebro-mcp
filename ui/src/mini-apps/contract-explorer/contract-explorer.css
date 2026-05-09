@@ -1,0 +1,472 @@
+/* Contract Explorer — local component styles, layered on top of the
+   shared mini-app theme in ../shared/mini-apps.css. */
+
+.contract-explorer-app {
+  padding: 1rem 1.25rem;
+  /* Generous bottom padding so the last function card never gets clipped by
+     the host iframe's scroll boundary or by the safe-area inset that
+     useMiniApp() applies via document.body.paddingBottom. */
+  padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0px));
+  max-width: 980px;
+  margin: 0 auto;
+  font-family: var(--mini-app-font, system-ui, sans-serif);
+  color: var(--mini-app-text, #e5e7eb);
+  /* Allow the body to scroll naturally; nothing inside should clip. */
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+.contract-explorer-loading {
+  padding: 3rem;
+  text-align: center;
+  color: var(--mini-app-muted, #9ca3af);
+}
+
+/* Header --------------------------------------------------------------- */
+
+.contract-explorer-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin-bottom: 1.5rem;
+  padding: 1.1rem 1.25rem;
+  border-radius: 12px;
+  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.12));
+  background: linear-gradient(
+    180deg,
+    rgba(99, 102, 241, 0.08) 0%,
+    rgba(99, 102, 241, 0.02) 100%
+  );
+}
+
+.contract-explorer-header h1 {
+  font-size: 1.55rem;
+  margin: 0 0 0.25rem;
+  letter-spacing: -0.01em;
+}
+
+.contract-explorer-subtitle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.85rem;
+  color: var(--mini-app-muted, #9ca3af);
+}
+
+.contract-explorer-subtitle code {
+  font-size: 0.8rem;
+  color: var(--mini-app-text, #e5e7eb);
+}
+
+.contract-explorer-badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  font-size: 0.75rem;
+}
+
+.contract-explorer-source {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+/* Address bar ---------------------------------------------------------- */
+
+.contract-explorer-address-bar {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.contract-explorer-address-field {
+  flex: 1 1 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.contract-explorer-address-field > span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.7rem;
+  color: var(--mini-app-muted, #9ca3af);
+}
+
+.contract-explorer-address-bar input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 0.7rem 0.9rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.95rem;
+  background: var(--mini-app-input-bg, rgba(255, 255, 255, 0.06));
+  color: var(--mini-app-text, #e5e7eb);
+  border: 1.5px solid var(--mini-app-border, rgba(255, 255, 255, 0.18));
+  border-radius: 8px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.contract-explorer-address-bar input[type="text"]:focus {
+  outline: none;
+  border-color: rgba(99, 102, 241, 0.7);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
+}
+
+.contract-explorer-address-bar select {
+  padding: 0.7rem 0.7rem;
+  background: var(--mini-app-input-bg, rgba(255, 255, 255, 0.06));
+  color: var(--mini-app-text, #e5e7eb);
+  border: 1.5px solid var(--mini-app-border, rgba(255, 255, 255, 0.18));
+  border-radius: 8px;
+  font-size: 0.9rem;
+  min-width: 12rem;
+}
+
+.contract-explorer-target-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.7rem;
+  color: var(--mini-app-muted, #9ca3af);
+}
+
+.contract-explorer-target-label > span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.contract-explorer-address-bar button {
+  padding: 0.75rem 1.4rem;
+  background: var(--mini-app-accent, #6366f1);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: opacity 0.15s ease, transform 0.05s ease;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.25);
+}
+
+.contract-explorer-address-bar button:active {
+  transform: translateY(1px);
+}
+
+.contract-explorer-fn-card button {
+  padding: 0.5rem 1rem;
+  background: var(--mini-app-accent, #6366f1);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: opacity 0.15s ease;
+}
+
+.contract-explorer-address-bar button:hover:not(:disabled),
+.contract-explorer-fn-card button:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.contract-explorer-fn-card button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Block bar (global default block) ------------------------------------- */
+
+.contract-explorer-block-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--mini-app-border, rgba(255, 255, 255, 0.12));
+}
+
+.contract-explorer-block-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+}
+
+.contract-explorer-block-label > span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.7rem;
+  color: var(--mini-app-muted, #9ca3af);
+}
+
+.contract-explorer-block-label input {
+  padding: 0.45rem 0.65rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85rem;
+  background: var(--mini-app-input-bg, rgba(255, 255, 255, 0.06));
+  color: var(--mini-app-text, #e5e7eb);
+  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.18));
+  border-radius: 6px;
+  min-width: 9rem;
+}
+
+.contract-explorer-block-presets {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.contract-explorer-preset {
+  padding: 0.4rem 0.7rem;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--mini-app-muted, #9ca3af);
+  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.contract-explorer-preset:hover {
+  background: rgba(99, 102, 241, 0.12);
+  color: var(--mini-app-text, #e5e7eb);
+}
+
+.contract-explorer-preset.active {
+  background: rgba(99, 102, 241, 0.25);
+  color: #c7d2fe;
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.contract-explorer-block-hint {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--mini-app-muted, #9ca3af);
+  opacity: 0.85;
+}
+
+/* Per-card block & call row ------------------------------------------- */
+
+.contract-explorer-call-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.2rem;
+}
+
+.contract-explorer-result-block {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.7rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.18);
+  color: #a5b4fc;
+}
+
+.contract-explorer-history-block {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.7rem;
+  color: #a5b4fc;
+}
+
+/* Empty state ---------------------------------------------------------- */
+
+.contract-explorer-empty {
+  padding: 2rem;
+  text-align: center;
+  color: var(--mini-app-muted, #9ca3af);
+  border: 1px dashed var(--mini-app-border, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+}
+
+.contract-explorer-empty-result {
+  margin: 1rem 0;
+  padding: 1rem 1.25rem;
+  border-radius: 8px;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--mini-app-text, #e5e7eb);
+}
+
+.contract-explorer-empty-result strong {
+  display: block;
+  font-size: 0.95rem;
+  margin-bottom: 0.4rem;
+  color: #fbbf24;
+}
+
+.contract-explorer-empty-result p {
+  margin: 0.3rem 0;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: var(--mini-app-muted, #d1d5db);
+}
+
+.contract-explorer-empty-result code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+}
+
+.contract-explorer-empty-result button {
+  margin-top: 0.6rem;
+  padding: 0.45rem 0.9rem;
+  background: #f59e0b;
+  color: #1f2937;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.contract-explorer-empty-result button:hover {
+  opacity: 0.9;
+}
+
+/* Function cards ------------------------------------------------------- */
+
+/* One function per row, full width, tight vertical rhythm. */
+.contract-explorer-fn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.contract-explorer-fn-card {
+  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  padding: 0.55rem 0.75rem;
+  background: var(--mini-app-card-bg, rgba(255, 255, 255, 0.02));
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.contract-explorer-fn-card.disabled {
+  opacity: 0.5;
+}
+
+.contract-explorer-fn-card header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.contract-explorer-fn-card code {
+  font-size: 0.85rem;
+}
+
+.contract-explorer-mutability {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.contract-explorer-outputs {
+  font-size: 0.75rem;
+  color: var(--mini-app-muted, #9ca3af);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.contract-explorer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.contract-explorer-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.72rem;
+  color: var(--mini-app-muted, #9ca3af);
+}
+
+.contract-explorer-form label em {
+  font-style: normal;
+  opacity: 0.7;
+}
+
+.contract-explorer-form input[type="text"] {
+  padding: 0.4rem 0.6rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.8rem;
+  background: var(--mini-app-input-bg, rgba(255, 255, 255, 0.05));
+  color: var(--mini-app-text, #e5e7eb);
+  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.1));
+  border-radius: 4px;
+}
+
+.contract-explorer-form button {
+  align-self: flex-start;
+}
+
+/* Result + error ------------------------------------------------------- */
+
+.contract-explorer-result {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: rgba(34, 197, 94, 0.1);
+  font-size: 0.8rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.contract-explorer-result.error {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.contract-explorer-result code {
+  word-break: break-all;
+  font-size: 0.8rem;
+}
+
+.contract-explorer-ok {
+  color: #4ade80;
+}
+
+.contract-explorer-err {
+  color: #f87171;
+  font-size: 0.8rem;
+}
+
+/* History list --------------------------------------------------------- */
+
+.contract-explorer-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.8rem;
+}
+
+.contract-explorer-history li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.05));
+}
+
+.contract-explorer-history-args {
+  color: var(--mini-app-muted, #9ca3af);
+}
+
+.contract-explorer-history-meta {
+  margin-left: auto;
+  color: var(--mini-app-muted, #9ca3af);
+  font-size: 0.7rem;
+}

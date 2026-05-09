@@ -72,3 +72,26 @@ class AsyncQueryStatus(BaseModel):
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)
     summary_markdown: str = ""
+
+
+class RpcResult(BaseModel):
+    method: str
+    params: list[Any] = Field(default_factory=list)
+    provider: str
+    result: Any
+    elapsed_seconds: float
+    truncated: bool = False
+    warnings: list[str] = Field(default_factory=list)
+    summary_markdown: str = ""
+
+
+class ContractExploreResult(BaseModel):
+    address: str
+    contract_name: str = ""
+    abi_source: str = ""
+    implementation_address: str = ""
+    functions: list[dict[str, Any]] = Field(default_factory=list)
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    matching_models: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    summary_markdown: str = ""

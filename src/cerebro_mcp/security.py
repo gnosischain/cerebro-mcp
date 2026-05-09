@@ -119,6 +119,9 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "open_token_explorer": _RO,
     "load_token_explorer_token": _RO,
     "update_token_explorer_focus": _RO,
+    "open_contract_explorer": _RO,
+    "load_contract_explorer_address": _RO,
+    "contract_explorer_call_function": _RO,
     "open_graph_explorer": _RO,
     "load_graph_explorer_seed": _RO,
     "expand_graph_explorer_node": _RO,
@@ -184,6 +187,12 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     # ── app_only ─────────────────────────────────────────────────────
     "get_mini_app_rows": _AO,
     "get_mini_app_state": _AO,
+
+    # ── web3 / contract explorer (read-only RPC) ─────────────────────
+    "contract_explore": _RO,
+    "contract_call_function": _RO,
+    "contract_decode_transaction_input": _RO,
+    "contract_decode_receipt_logs": _RO,
 }
 
 

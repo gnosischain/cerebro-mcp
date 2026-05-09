@@ -621,3 +621,49 @@ This is upstream of cerebro (Claude conversation buffer). The cerebro event log 
 - [`observability.md`](observability.md) — Prometheus metrics
 - [`MINI_APPS.md`](MINI_APPS.md) — Mini-app surface reference
 - Project root `CLAUDE.md` — Authoritative agent rules
+
+## Contract Explorer (Web3 RPC)
+
+Read-only tools for one-contract inspection, view/pure calls, and tx decoding. ABIs come from `dbt.contracts_abi` first; missing ones are fetched live from Blockscout (in-memory cache only — no writes back).
+
+```python
+# Inspect a contract: ABI source, function/event list, proxy implementation.
+contract_explore("0xe91d153e0b41518a2ce8dd3d7944fa863463a97d")  # WXDAI
+
+# Call a view function. Returns "Error: only view/pure functions are allowed."
+# for any state-changing function.
+contract_call_function("0xe91d153e0b41518a2ce8dd3d7944fa863463a97d", "symbol")
+contract_call_function(
+    "0xe91d153e0b41518a2ce8dd3d7944fa863463a97d",
+    "balanceOf",
+    args=["0x..."],
+)
+
+# Historical state — requires GNOSIS_ARCHIVE_RPC_URL to be set.
+contract_call_function(
+    "0xe91d153e0b41518a2ce8dd3d7944fa863463a97d",
+    "totalSupply",
+    block_identifier=30000000,
+)
+
+# Use exact signature when overloads exist.
+contract_call_function(
+    "0x...",
+    function_signature="getReserves()",
+)
+
+# Decode a transaction's calldata.
+contract_decode_transaction_input(tx_hash="0x...")
+
+# Decode a transaction receipt's logs (per-emitter ABI resolution).
+contract_decode_receipt_logs(tx_hash="0x...")
+
+# For proxies, default target="auto" returns the implementation ABI.
+# Use target="proxy" to call the proxy's own methods (e.g. admin()).
+contract_explore("0x<proxy>", )
+contract_call_function("0x<proxy>", "implementation", target="proxy")
+```
+
+**When NOT to use these tools:** any time you'd scan more than a handful of
+contracts or want historical trends. Bulk decoded data lives in dbt models —
+use `execute_query` / `start_query` against `fct_*` / `int_*` instead.

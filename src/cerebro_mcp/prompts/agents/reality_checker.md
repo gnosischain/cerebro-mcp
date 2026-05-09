@@ -97,3 +97,11 @@ Pre-Report:
 - All charts pass type-appropriateness check
 - All reports pass structural completeness check
 - Zero emoji or Unicode symbols in final output
+
+## Contract Explorer Heuristics
+
+- Use ClickHouse decoded contract models (`fct_*`, `int_*`, `api_*`) for analytics, scans, aggregations, and trends.
+- Use the RPC contract tools (`contract_explore`, `contract_call_function`, `contract_decode_transaction_input`, `contract_decode_receipt_logs`) for **one-contract** inspection, **one** view/pure call, **one** tx input decode, or **one** receipt decode.
+- Prefer `dbt.contracts_abi` — the Blockscout ABI fallback is in-memory only and never written back.
+- For proxies, the resolver returns the **implementation** ABI by default (matching dbt-cerebro's seed convention). Pass `target="proxy"` when you genuinely need the proxy's own ABI (e.g. to call `implementation()` or `admin()`).
+- Never use RPC or Blockscout as a replacement for historical scanning — that path stays on dbt.

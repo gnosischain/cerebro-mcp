@@ -26,7 +26,8 @@ Classify the user's request into exactly ONE of these categories:
 
 | Category | Trigger signals | Specialist chain | Preflight `mode=` |
 |---|---|---|---|
-| `quick_answer` | "how many", "what is", "latest", "current" + single scalar | No specialist. Use `execute_query` or `query_metrics` directly. No chart, no report. | n/a |
+| `single_address_current_state` | "current balance of X for token Y", "current totalSupply of Z", "current owner of contract X", "is contract X paused", "allowance of X for spender Y" — any single-address, point-in-time, on-chain read identified by `(address, function)`. Evaluate this row BEFORE `quick_answer`. | No specialist. Call `contract_explore` only if the function name/signature is unknown, then `contract_call_function` directly. **Do NOT route to the Portfolio mini-app or `fct_*_balances` SQL.** | n/a |
+| `quick_answer` | "how many", "what is", "latest", "current" + single scalar (NOT a single-address on-chain read — those go to `single_address_current_state` above) | No specialist. Use `execute_query` or `query_metrics` directly. No chart, no report. | n/a |
 | `single_chart` | "plot", "chart", "show me X over time" + single metric | `analytics_reporter` minimal flow. 1–2 charts via `generate_charts` (or `generate_metric_charts`), then `generate_report`. The lite-mode bypass at `tools/session_state.py:373-379` skips 17 of 19 gates when preflight ran with `mode="chart"`. | `chart` |
 | `lite_report` | "how is sector X doing", 2–5 charts, light narrative, sector-performance check-ins | `analytics_reporter` minimal flow. 2–5 charts, then `generate_report`. Lite-mode bypass active. | `answer` |
 | `full_report` | "report", "dashboard", "overview", multi-topic, "weekly/monthly summary", explicit deep-dive | `analytics_reporter` → topic specialist(s) per routing table → `reality_checker` → `generate_report`. All 19 gates run. | `report` |
@@ -37,6 +38,8 @@ Classify the user's request into exactly ONE of these categories:
 | `research` | "research project", "multi-phase investigation", "peer review", "publish findings" | `gnosis_research_analyst` via the research tools (`start_research_project`, `plan_research_phase`, …). |
 | `specialist_topic` | Topic words map 1:1 to a specialist, no report needed | Route to the single specialist per the topic table below. |
 | `meta` | "hi", "thanks", "list reports", "open report N", "what can you do" | Handle directly. Skip the dispatcher entirely. |
+
+**Stay on the dbt / portfolio path** for: multi-address sweeps ("top 50 EURe holders"), historical balances ("balance on 2025-01-01"), USD-valued holdings, aggregations across addresses, dashboards, or anything that benefits from the indexer's enrichment (token metadata, prices). The RPC path (`single_address_current_state`) is the right tool only for *one address, current state, one function call* — the moment any of those three constraints break, switch back to `execute_query` against `fct_*_balances` or to the Portfolio mini-app.
 
 ## Topic → specialist routing table
 
@@ -142,6 +145,7 @@ Example for a unified MMM + MTA request:
 8. **When specialists conflict, side with the stricter gate** (usually `statistical_reviewer`).
 9. **Do not do analysis yourself.** You route; you do not query. If a specialist is wrong for the task, revise the manifest — don't fall back to doing the work in-line.
 10. **Bypass yourself** for `meta` turns and for explicit user overrides ("use mmm_analyst on DEXes now"). The dispatcher is for ambiguous, multi-step, or high-stakes work — not for every turn.
+11. **Single-address current-state queries take the RPC path.** If the user asks for the live on-chain value at one address (balance, totalSupply, owner, paused, allowance, …), classify as `single_address_current_state` and use `contract_call_function` — never round-trip through `fct_*_balances` or the Portfolio mini-app.
 
 ## When NOT to dispatch
 
