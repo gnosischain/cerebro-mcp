@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
-import { SummaryCards } from "../shared/SummaryCards";
 import { DatasetTable } from "../shared/DatasetTable";
 import { TabBar, type TabDef } from "../shared/TabBar";
 import { AsyncButton } from "../shared/AsyncButton";
-import { MiniAppChrome, MaIdentity } from "../shared/MiniAppChrome";
+import { MiniAppChrome, MaIdentity, MaKpiGrid, MaKpi } from "../shared/MiniAppChrome";
 import { shortAddr } from "../../utils/format";
 import type { DatasetDescriptor, MiniAppPayload } from "../shared/miniAppTypes";
 
@@ -381,27 +380,56 @@ export default function PortfolioApp() {
   const hasAddress = Boolean(state.current_address);
   const sectionFilters = state.section_filters?.[activeSection] ?? { start_date: "", token: "", action: "" };
 
+  // Drop the redundant "Address" summary card — MaIdentity already shows it.
+  const otherCards = (view.summary_cards ?? []).filter(
+    (c) => c.label?.toLowerCase() !== "address",
+  );
+
   return (
     <MiniAppChrome activeTabId="portfolio">
     <div className="mini-app-root">
-      <header className="mini-app-header">
-        <div>
-          <h1>{view.title}</h1>
-          <div className="mini-app-subtitle">Address-based views across Yields, Gnosis Pay, Circles, and Safe relationships.</div>
-        </div>
-        {pending ? <span className="mini-app-pill mini-app-pill--warning">Updating…</span> : null}
-      </header>
-
       {hasAddress && state.current_address ? (
         <MaIdentity
           label="Address"
           value={shortAddr(state.current_address, 10, 8)}
           onCopy={() => navigator.clipboard?.writeText(state.current_address)}
+          rightSlot={
+            pending ? (
+              <span
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  color: "var(--warning)",
+                  marginLeft: 8,
+                }}
+              >
+                Updating…
+              </span>
+            ) : null
+          }
         />
       ) : null}
 
       <WarningBanner warnings={view.warnings ?? []} />
-      <SummaryCards cards={view.summary_cards ?? []} />
+
+      {otherCards.length > 0 ? (
+        <MaKpiGrid>
+          {otherCards.map((card, i) => (
+            <MaKpi
+              key={i}
+              label={card.label}
+              value={String(card.value)}
+              deltaTone={
+                card.tone === "positive"
+                  ? "positive"
+                  : card.tone === "negative"
+                    ? "negative"
+                    : "neutral"
+              }
+            />
+          ))}
+        </MaKpiGrid>
+      ) : null}
 
       <section className="mini-app-controls">
         <label className="mini-app-inline-field mini-app-inline-field--wide">

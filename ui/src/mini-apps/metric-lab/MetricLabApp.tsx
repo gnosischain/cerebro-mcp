@@ -3,7 +3,7 @@ import ReactECharts from "echarts-for-react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { CollapsibleSection } from "../shared/CollapsibleSection";
-import { MiniAppChrome, MaIdentity } from "../shared/MiniAppChrome";
+import { MiniAppChrome, MaIdentity, MaKpiGrid, MaKpi, MaSkeletonKpiGrid } from "../shared/MiniAppChrome";
 import { useDebouncedValue } from "../shared/useDebouncedValue";
 import type { DatasetMode, MiniAppPayload } from "../shared/miniAppTypes";
 
@@ -1146,41 +1146,71 @@ function LoadedView({
   // Local chart state for instant responsiveness; syncs from server on prop change.
   const [localChart, setLocalChart] = useState<ChartConfig>(chartConfig);
   const [sortAsc, setSortAsc] = useState(true);
-  useEffect(() => setLocalChart(chartConfig), [chartConfig]);
+  // Structural compare on the sync — prevents a re-render storm when the
+  // `chartConfig` prop is a new ref but structurally identical (which
+  // happens on every PATCH_VIEW_STATE since `state.chart` is a fresh
+  // object literal each payload).
+  useEffect(() => {
+    setLocalChart((cur) => {
+      if (
+        cur.xField === chartConfig.xField &&
+        cur.yField === chartConfig.yField &&
+        cur.chartType === chartConfig.chartType &&
+        cur.aggregation === chartConfig.aggregation &&
+        cur.groupBy === chartConfig.groupBy
+      ) {
+        return cur;
+      }
+      return chartConfig;
+    });
+  }, [chartConfig]);
 
   // Stage-1 retrofit: debounce the server sync so rapid select changes
   // don't spawn competing in-flight requests (race condition per audit).
   const debouncedChart = useDebouncedValue(localChart, 300);
   const lastSyncedRef = useRef<string>("");
+  // `callTool` from `useMiniApp` is defined inline (no useCallback) so its
+  // ref churns each parent render. Capture via ref so we don't make this
+  // effect re-fire on every render.
+  const callToolRef = useRef(callTool);
+  useEffect(() => {
+    callToolRef.current = callTool;
+  }, [callTool]);
   useEffect(() => {
     const key = JSON.stringify(debouncedChart);
     if (key === lastSyncedRef.current) return;
     lastSyncedRef.current = key;
-    callTool("update_metric_lab_chart", {
+    callToolRef.current("update_metric_lab_chart", {
       view_id: view.view_id,
       x_field: debouncedChart.xField,
       y_field: debouncedChart.yField,
       chart_type: debouncedChart.chartType,
       aggregation: debouncedChart.aggregation,
     }).catch(() => {});
-  }, [debouncedChart, view.view_id, callTool]);
+  }, [debouncedChart, view.view_id]);
 
   const updateChart = (patch: Partial<ChartConfig>) => {
     setLocalChart((cur) => ({ ...cur, ...patch }));
   };
 
   const isMultiMetric = selectedMetrics.length > 1;
-  const hasDualDatasets = !!view.datasets?.secondary;
+  const primaryDataset = view.datasets?.primary;
+  const secondaryDataset = view.datasets?.secondary;
+  const hasDualDatasets = !!secondaryDataset;
 
   // For dual-table mode: merge primary + secondary datasets into a combined
   // row set keyed by the shared date column, with numeric columns renamed
   // to include the table name for disambiguation.
+  // Deps reference the *individual* dataset refs, not the parent
+  // `view.datasets` object — that one churns on every PATCH_VIEW_STATE
+  // even when no dataset actually changed, which would invalidate the
+  // chartOption useMemo below and cause continuous chart redraws.
   const { mergedRows, mergedColumns, mergedMetricCols } = useMemo(() => {
-    if (!hasDualDatasets || !view.datasets?.primary || !view.datasets?.secondary) {
+    if (!hasDualDatasets || !primaryDataset || !secondaryDataset) {
       return { mergedRows: rows, mergedColumns: columns, mergedMetricCols: selectedMetrics };
     }
-    const p = view.datasets.primary;
-    const s = view.datasets.secondary;
+    const p = primaryDataset;
+    const s = secondaryDataset;
     const pCols = p.columns.map((c) => c.name);
     const sCols = s.columns.map((c) => c.name);
     // Find shared date column.
@@ -1213,7 +1243,7 @@ function LoadedView({
       mRows.push([d, pv ?? 0, sv ?? 0]);
     }
     return { mergedRows: mRows, mergedColumns: mCols, mergedMetricCols: [pLabel, sLabel] };
-  }, [hasDualDatasets, view.datasets, rows, columns, selectedMetrics]);
+  }, [hasDualDatasets, primaryDataset, secondaryDataset, rows, columns, selectedMetrics]);
 
   const chartOption = useMemo(() => {
     if ((isMultiMetric || hasDualDatasets) && localChart.chartType !== "table") {
@@ -1364,7 +1394,8 @@ function LoadedView({
         ) : (
           <ReactECharts
             option={chartOption}
-            notMerge={true}
+            notMerge={false}
+            lazyUpdate={true}
             style={{ height: 420, width: "100%" }}
             theme={isDark ? "dark" : undefined}
           />
@@ -1413,19 +1444,39 @@ export default function MetricLabApp() {
   }, [view?.view_id, view?.view_state?.selected_metric]);
 
   // Hydrate the rest of the dataset (up to 5,000 rows buffered).
+  //
+  // Deps are intentionally narrow: only re-run when the *dataset itself*
+  // changes — keyed on view_id + the dataset's identity (preview_rows ref +
+  // page_token). PATCH_VIEW_STATE updates that don't touch the dataset
+  // (model-context updates, chart-config syncs, etc.) keep producing new
+  // `view` refs, but those should not retrigger hydration.
+  //
+  // CRITICAL: do NOT include `fetchRows` in deps. `useMiniApp` defines it
+  // inline (no useCallback) so its identity churns on every parent render.
+  // Including it here caused the effect to re-fire every render → set
+  // hydratedRows back to preview_rows → pump → full set → … → loop.
+  // We capture the latest `fetchRows` via a ref so pump always uses the
+  // current closure without making it a dep.
+  const primary = view?.datasets?.primary;
+  const primaryRows = primary?.preview_rows;
+  const primaryToken = primary?.page_token;
+  const viewId = view?.view_id;
+  const fetchRowsRef = useRef(fetchRows);
   useEffect(() => {
-    if (!view) return;
-    const primary = view.datasets?.primary;
-    if (!primary) return;
-    setHydratedRows(primary.preview_rows);
+    fetchRowsRef.current = fetchRows;
+  }, [fetchRows]);
+
+  useEffect(() => {
+    if (!view || !primary || !primaryRows || !viewId) return;
+    setHydratedRows(primaryRows);
 
     let cancelled = false;
-    const buffered: unknown[][] = [...primary.preview_rows];
+    const buffered: unknown[][] = [...primaryRows];
     const cap = 5000;
 
     const pump = async (token: string) => {
       while (token && buffered.length < cap && !cancelled) {
-        const page = await fetchRows(view.view_id, "primary", token);
+        const page = await fetchRowsRef.current(viewId, "primary", token);
         if (!page) break;
         for (const row of page.rows) buffered.push(row);
         token = page.next_page_token;
@@ -1434,30 +1485,41 @@ export default function MetricLabApp() {
       if (!cancelled) setHydratedRows([...buffered]);
     };
 
-    if (primary.page_token) {
-      void pump(primary.page_token);
+    if (primaryToken) {
+      void pump(primaryToken);
     }
 
     return () => {
       cancelled = true;
     };
-  }, [view, fetchRows]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewId, primaryRows, primaryToken]);
 
+  // Only fire when the actual values being sent to the model change.
+  // Depending on `view` ref directly caused this to fire on every
+  // PATCH_VIEW_STATE — even ones that didn't touch any of these fields —
+  // which fed back into the host and contributed to the chart-reload loop.
+  const ctxMode = view?.view_state?.mode;
+  const ctxMetric = view?.view_state?.selected_metric;
+  const ctxDatasetMode = view?.view_state?.dataset_mode;
+  const ctxSampleRows = view?.view_state?.sample_source_rows;
+  const ctxChartType = view?.view_state?.chart?.chartType;
+  const ctxX = view?.view_state?.chart?.xField;
+  const ctxY = view?.view_state?.chart?.yField;
   useEffect(() => {
-    if (!view) return;
-    const state = view.view_state;
-    if (!state) return;
+    if (!viewId) return;
     updateModelContext({
-      view_id: view.view_id,
-      mode: state.mode,
-      selected_metric: state.selected_metric || "n/a",
-      dataset_mode: state.dataset_mode ?? "n/a",
-      sample_source_rows: state.sample_source_rows ?? "n/a",
-      chart: state.chart?.chartType ?? "n/a",
-      x: state.chart?.xField ?? "n/a",
-      y: state.chart?.yField ?? "n/a",
+      view_id: viewId,
+      mode: ctxMode,
+      selected_metric: ctxMetric || "n/a",
+      dataset_mode: ctxDatasetMode ?? "n/a",
+      sample_source_rows: ctxSampleRows ?? "n/a",
+      chart: ctxChartType ?? "n/a",
+      x: ctxX ?? "n/a",
+      y: ctxY ?? "n/a",
     });
-  }, [view, updateModelContext]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewId, ctxMode, ctxMetric, ctxDatasetMode, ctxSampleRows, ctxChartType, ctxX, ctxY]);
 
   // Stage-1 retrofit: request-id fence so rapid metric switches don't
   // race — only the newest in-flight request can clear `loading` or set
@@ -1493,6 +1555,45 @@ export default function MetricLabApp() {
     void handleLoadMetric(config);
   }, [handleLoadMetric]);
 
+  // Memoize the rows + columns arrays passed to <LoadedView>. Without this,
+  // every parent render produces fresh array literals (`hydratedRows ?? []`,
+  // `cols.map(...)`) which invalidate LoadedView's chartOption useMemo and
+  // force ECharts to setOption on every render — observable as the chart
+  // "constantly reloading" while the dataset is unchanged.
+  const previewRows = view?.datasets?.primary?.preview_rows;
+  const datasetColumns = view?.datasets?.primary?.columns;
+  const chartRows = useMemo(
+    () => hydratedRows ?? previewRows ?? [],
+    [hydratedRows, previewRows],
+  );
+  const chartColumns = useMemo(
+    () => datasetColumns?.map((c) => c.name) ?? [],
+    [datasetColumns],
+  );
+  const stateMetric = view?.view_state?.selected_metric;
+  const stateMetrics = view?.view_state?.selected_metrics;
+  const chartSelectedMetrics = useMemo(
+    () => stateMetrics ?? (stateMetric ? [stateMetric] : []),
+    [stateMetrics, stateMetric],
+  );
+
+  // Stabilize chartConfig identity: even though `state.chart` is a fresh
+  // object on every PATCH_VIEW_STATE, callers only care about its 4 leaf
+  // fields. Memo on those so LoadedView's `setLocalChart(chartConfig)` sync
+  // doesn't fire on every view churn — that was the residual reload loop.
+  const stateChart = view?.view_state?.chart;
+  const stableChart = useMemo(
+    () => stateChart,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      stateChart?.xField,
+      stateChart?.yField,
+      stateChart?.chartType,
+      stateChart?.aggregation,
+      stateChart?.groupBy,
+    ],
+  );
+
   if (!view) {
     return <MiniAppChrome activeTabId="metric"><div className="ma-empty">Loading Metric Lab…</div></MiniAppChrome>;
   }
@@ -1503,6 +1604,12 @@ export default function MetricLabApp() {
     state?.selected_metric ||
     (state?.selected_metrics && state.selected_metrics[0]) ||
     "";
+  const rowCount =
+    (hydratedRows ?? view.datasets?.primary?.preview_rows)?.length ?? 0;
+  const colCount = view.datasets?.primary?.columns?.length ?? 0;
+  const metricCount =
+    (state?.selected_metrics?.length ??
+      (state?.selected_metric ? 1 : 0));
 
   return (
     <MiniAppChrome activeTabId="metric">
@@ -1512,6 +1619,21 @@ export default function MetricLabApp() {
           label="Metric"
           value={selectedMetricName}
         />
+      ) : null}
+
+      {hasData ? (
+        <MaKpiGrid>
+          <MaKpi label="Rows" value={rowCount.toLocaleString()} />
+          <MaKpi label="Columns" value={String(colCount)} />
+          <MaKpi label="Metrics" value={String(metricCount)} />
+          <MaKpi
+            label="Mode"
+            value={state?.estimates ? "estimates" : "loaded"}
+            deltaTone={state?.estimates ? "neutral" : "positive"}
+          />
+        </MaKpiGrid>
+      ) : loading ? (
+        <MaSkeletonKpiGrid />
       ) : null}
 
       <WarningBanner warnings={view.warnings ?? []} />
@@ -1528,10 +1650,10 @@ export default function MetricLabApp() {
       {hasData && (
         <LoadedView
           view={view}
-          rows={hydratedRows ?? view.datasets?.primary?.preview_rows ?? []}
-          columns={view.datasets?.primary?.columns.map((c) => c.name) ?? []}
-          chartConfig={state!.chart}
-          selectedMetrics={state!.selected_metrics ?? (state!.selected_metric ? [state!.selected_metric] : [])}
+          rows={chartRows}
+          columns={chartColumns}
+          chartConfig={stableChart!}
+          selectedMetrics={chartSelectedMetrics}
           previewOnly={state!.analytics_disabled === true}
           estimates={state!.estimates === true}
           isDark={isDark}

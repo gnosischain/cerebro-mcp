@@ -294,13 +294,33 @@
   border-radius: 4px;
   background: linear-gradient(
     90deg,
-    transparent 0%,
+    var(--surface) 0%,
     var(--accent-softer) 50%,
-    transparent 100%
+    var(--surface) 100%
   );
   background-size: 200% 100%;
   animation: ma-shimmer 1.4s ease-in-out infinite;
   height: 56px;
+}
+
+.ma-skeleton-row {
+  height: 28px;
+  margin-bottom: 6px;
+}
+
+.ma-skeleton-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 720px) {
+  .ma-skeleton-kpi-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.ma-skeleton-kpi {
+  height: 64px;
 }
 
 .ma-empty {

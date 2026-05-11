@@ -163,4 +163,31 @@ export function MaSection({ index, title, meta, children }: MaSectionProps) {
   );
 }
 
+/** Single shimmering skeleton block. Defaults to a KPI-sized box; override via className. */
+export function MaSkeleton({ className = "" }: { className?: string }) {
+  return <div className={`ma-skeleton ${className}`} />;
+}
+
+/** A 4-up KPI grid skeleton — drop in while waiting for KPI data. */
+export function MaSkeletonKpiGrid({ count = 4 }: { count?: number }) {
+  return (
+    <div className="ma-skeleton-kpi-grid">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="ma-skeleton ma-skeleton-kpi" />
+      ))}
+    </div>
+  );
+}
+
+/** Stacked rows for a table-shaped loading state. */
+export function MaSkeletonRows({ count = 5 }: { count?: number }) {
+  return (
+    <div>
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="ma-skeleton ma-skeleton-row" />
+      ))}
+    </div>
+  );
+}
+
 export { MaThemeToggle };

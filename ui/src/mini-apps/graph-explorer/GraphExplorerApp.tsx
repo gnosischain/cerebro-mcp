@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MiniAppPayload } from "../shared/miniAppTypes";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
-import { MiniAppChrome } from "../shared/MiniAppChrome";
+import { MiniAppChrome, MaIdentity, MaKpiGrid, MaKpi } from "../shared/MiniAppChrome";
+import { shortAddr } from "../../utils/format";
 import { CatalogScreen } from "./CatalogScreen";
 import { DetailsPanel } from "./DetailsPanel";
 import { FilterBar } from "./FilterBar";
@@ -417,6 +418,11 @@ export default function GraphExplorerApp() {
         });
   const trimmedCount = state.relation_types.length - effectiveRelationTypes.length;
 
+  const nodeCount = view.datasets?.nodes?.preview_rows?.length ?? 0;
+  const edgeCount = view.datasets?.edges?.preview_rows?.length ?? 0;
+  const seedId = state.seed_node?.id ?? "";
+  const seedKind = state.seed_node?.kind ?? "";
+
   return (
     <MiniAppChrome activeTabId="graph">
     <div className="ge-shell">
@@ -425,6 +431,24 @@ export default function GraphExplorerApp() {
         <CatalogScreen catalog={state.catalog || []} onSeed={onSeed} />
       ) : (
         <>
+          {seedId ? (
+            <div style={{ padding: "12px 14px 0" }}>
+              <MaIdentity
+                label={`Seed${seedKind ? " · " + seedKind : ""}`}
+                value={seedId.startsWith("0x") ? shortAddr(seedId, 10, 8) : seedId}
+                onCopy={() => navigator.clipboard?.writeText(seedId)}
+              />
+              <MaKpiGrid>
+                <MaKpi label="Nodes" value={String(nodeCount)} />
+                <MaKpi label="Edges" value={String(edgeCount)} />
+                <MaKpi label="Hops" value={`${state.hops}/2`} />
+                <MaKpi
+                  label="Profiles"
+                  value={`${state.relation_types.length}/${state.catalog?.length ?? 0}`}
+                />
+              </MaKpiGrid>
+            </div>
+          ) : null}
           <FilterBar
             view={state}
             onFocus={onFocus}
