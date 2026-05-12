@@ -1,6 +1,6 @@
 # Cerebro Mini-Apps
 
-Cerebro ships six interactive mini-apps that run inside any MCP-aware host
+Cerebro ships five interactive mini-apps that run inside any MCP-aware host
 (Claude Desktop, Claude Code, custom hosts). Each is a React + ECharts UI
 built by Vite into a single-file HTML bundle, served by the cerebro-mcp server
 over an `ui://cerebro/<app>` resource URI, and driven by MCP tools.
@@ -15,11 +15,10 @@ it, how to develop it, and how it talks to the backend.
 | App                | Resource URI                       | What it shows                                                | Entry tool                    |
 |--------------------|------------------------------------|--------------------------------------------------------------|-------------------------------|
 | Report Renderer    | `ui://cerebro/report`              | Interactive analytics reports from `generate_report`         | `generate_report`             |
-| Token Explorer     | `ui://cerebro/token_explorer`      | Per-token profile: holders, bridges, liquidity, trades       | `open_token_explorer`         |
 | Metric Lab         | `ui://cerebro/metric_lab`          | Build a metric from SQL or from the semantic registry        | `open_metric_lab*`            |
 | Portfolio          | `ui://cerebro/portfolio`           | Address-centric portfolio across Circles / GPay / yields     | `open_portfolio`              |
-| Yield Opportunities| `ui://cerebro/yield_opportunities` | Live yield markets with history + simulation                 | `open_yield_opportunities`    |
 | Graph Explorer     | `ui://cerebro/graph_explorer`      | Cross-sector semantic graph (Circles trust, Safe, pools, …)  | `open_graph_explorer`         |
+| Contract Explorer  | `ui://cerebro/contract_explorer`   | Per-contract: ABI, callable functions, view-call, tx decode  | `open_contract_explorer`      |
 
 All apps share the same plumbing:
 
@@ -47,7 +46,7 @@ make install        # builds ALL UI bundles then pip install -e .
 Or step-by-step:
 
 ```bash
-make build-ui       # builds all 6 bundles + copies into src/cerebro_mcp/static/
+make build-ui       # builds all 5 bundles + copies into src/cerebro_mcp/static/
 pip install -e .
 ```
 
@@ -69,25 +68,30 @@ pip install -e .
 
 2. Restart Claude Desktop. Type any of the app entry phrases (e.g. “open portfolio for 0x…”, “show me the graph explorer”). The model calls the corresponding `open_*` tool and the mini-app renders inline.
 
-### Pure-UI dev loop (no MCP host)
+### Pure-UI dev loop (no MCP host, no ClickHouse)
 
-Each mini-app can be iterated on in isolation with Vite's HMR:
+Each mini-app can be iterated on in isolation with Vite's HMR. The dev server hosts every entry HTML simultaneously — `CEREBRO_UI_ENTRY` only matters at **build** time (it selects which single-file bundle `vite build` emits), not for `npm run dev`.
 
 ```bash
-cd ui && CEREBRO_UI_ENTRY=graphExplorer npm run dev
-# then open http://localhost:5173/graph-explorer.html
+cd ui && npm install   # first time only
+npm run dev            # Vite on http://localhost:5173/
 ```
 
-Valid `CEREBRO_UI_ENTRY` values:
+Open any of:
 
-- `report`
-- `tokenExplorer`
-- `metricLab`
-- `portfolio`
-- `yieldOpportunities`
-- `graphExplorer`
+- `http://localhost:5173/`                          — Report Renderer (`index.html`)
+- `http://localhost:5173/metric-lab.html`           — Metric Lab
+- `http://localhost:5173/portfolio.html`            — Portfolio
+- `http://localhost:5173/graph-explorer.html`       — Graph Explorer
+- `http://localhost:5173/contract-explorer.html`    — Contract Explorer
 
-Every mini-app component defines a `MOCK_PAYLOAD` fixture so the dev page shows realistic data when no MCP host is present. For Graph Explorer, set `sessionStorage.ge_force_empty = '1'` in the browser console to see the catalog/empty state.
+Or from the repo root: `make dev`.
+
+**What you get:** every app boots into its `MOCK_PAYLOAD` fixture (defined at the top of each `*App.tsx` — e.g. `ContractExplorerApp.tsx` carries a hardcoded `GnosisControllerToken` view). The layout, styling, navigation, and all client-side view-state work fully.
+
+**What you don't get:** live data. With no MCP host attached, `useMiniApp`'s `callServerTool` is unavailable, so clicking "Call" / "Expand" / "Load address" is a no-op (you'll see `[useMiniApp] callServerTool(...) unavailable (no ext-apps host)` in the browser devtools console). Use this loop for UI work; switch to the Claude Desktop flow above for end-to-end testing against real ClickHouse + RPC.
+
+For Graph Explorer, set `sessionStorage.ge_force_empty = '1'` in the browser console to see the catalog/empty state instead of the seeded mock.
 
 ### Rebuilding a single app
 
@@ -125,23 +129,6 @@ Related tools: `list_reports`, `open_report`, `export_report`, `generate_chart`,
 
 ---
 
-## Token Explorer
-
-**Resource**: `ui://cerebro/token_explorer`  
-**Source**: [`ui/src/mini-apps/token-explorer/`](../ui/src/mini-apps/token-explorer/)  
-**Tools**: `open_token_explorer`, `load_token_explorer_token`, `update_token_explorer_focus`
-
-A single-token profile page. Tabs expose:
-- **Bridges**: cross-chain flows in/out for the token by bridge contract
-- **Holders**: top holders and historical distribution
-- **Liquidity**: pool positions holding this token
-- **Trades**: DEX trades over time
-
-Seeded from a token address or symbol. The `load_*` tool swaps in per-tab
-datasets via `PATCH_VIEW_STATE`.
-
----
-
 ## Metric Lab
 
 **Resource**: `ui://cerebro/metric_lab`  
@@ -173,15 +160,21 @@ Internally uses the same address-roles resolver that Graph Explorer does (see `i
 
 ---
 
-## Yield Opportunities
+## Contract Explorer
 
-**Resource**: `ui://cerebro/yield_opportunities`  
-**Source**: [`ui/src/mini-apps/yield-opportunities/`](../ui/src/mini-apps/yield-opportunities/)  
-**Tools**: `open_yield_opportunities`, `load_yield_opportunity`, `update_yield_opportunities_focus`, `run_yield_simulation`
+**Resource**: `ui://cerebro/contract_explorer`  
+**Source**: [`ui/src/mini-apps/contract-explorer/`](../ui/src/mini-apps/contract-explorer/)  
+**Tools**: `open_contract_explorer`, `load_contract_explorer_address`, `contract_explorer_call_function`
 
-Live matrix of yield-bearing positions (Aave V3, SparkLend, Balancer, Uniswap V3, Swapr V3). Click an opportunity to see its history, compare against a second opportunity, and run a parameter simulation.
+Per-contract inspection backed by direct JSON-RPC reads (not dbt). Workflow:
 
-Backed by `fct_execution_yields_opportunities_latest` + per-opportunity history models.
+1. Resolve ABI for the address via the local catalog → Sourcify → 4byte selector fallback. Proxies (EIP-1967, transparent, minimal) are followed automatically to the implementation.
+2. Render the callable function list (view/pure only — state-changing functions are rejected at the tool layer).
+3. Click a function, fill its args, fire `contract_explorer_call_function`. Result is the decoded return value(s) at `block_identifier="latest"` by default.
+
+Use this for **single-address current state**: `balanceOf`, `totalSupply`, `owner`, `paused`, `allowance`, etc. For multi-address sweeps, historical balances, USD valuation, or aggregations, use the dbt path (`execute_query` over `fct_*_balances` etc.).
+
+Standalone (non-mini-app) RPC tools — `contract_explore`, `contract_call_function`, `contract_decode_transaction_input`, `contract_decode_receipt_logs` — live in [`tools/rpc.py`](../src/cerebro_mcp/tools/rpc.py) and use the same `call_view_function` engine. Archive reads (non-`latest` block) require `GNOSIS_ARCHIVE_RPC_URL` in `.env`.
 
 ---
 

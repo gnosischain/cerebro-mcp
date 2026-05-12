@@ -28,8 +28,8 @@ Cerebro MCP is a FastMCP server with:
 - number verification tool that checks arithmetic and cross-references before reporting
 - MCP prompts and resources that guide clients, but do not run automatically on their own
 - security audit layer with tool risk classification, suspicious-call detection, and append-only JSONL logging
-- six React + ECharts **mini-apps** (Report, Token Explorer, Metric Lab, Portfolio, Yield Opportunities, Graph Explorer) served as single-file HTML via `ui://cerebro/<app>` resources — see [`docs/MINI_APPS.md`](docs/MINI_APPS.md) for the full tour
-- mini-app infrastructure for interactive in-chat views (Metric Lab, Token Explorer)
+- five React + ECharts **mini-apps** (Report, Metric Lab, Portfolio, Graph Explorer, Contract Explorer) served as single-file HTML via `ui://cerebro/<app>` resources — see [`docs/MINI_APPS.md`](docs/MINI_APPS.md) for the full tour
+- direct JSON-RPC reads against EVM contracts (`contract_explore`, `contract_call_function`, `contract_decode_transaction_input`, `contract_decode_receipt_logs`) — backs the Contract Explorer mini-app and is the preferred path for *single-address current state* (vs. dbt for sweeps / historical / USD)
 
 Important distinction:
 
@@ -44,7 +44,7 @@ If a client wants to use personas or peer review, it must explicitly call the pr
 
 ## Agent Fleet
 
-Cerebro ships with **23 agent personas** loadable via `get_agent_persona(role)`. They are prompt-layer guidance — the LLM adopts a persona's rules for the duration of a task, then can switch. Personas organize into three tiers:
+Cerebro ships with **27 agent personas** loadable via `get_agent_persona(role)`. They are prompt-layer guidance — the LLM adopts a persona's rules for the duration of a task, then can switch. Personas organize into three tiers:
 
 ### Tier 1 — Top-level orchestrator
 
@@ -108,7 +108,8 @@ Core runtime components:
 - `tools/research.py`: durable research projects, evidence, verification, peer review, publication
 - `tools/mini_apps.py`: mini-app view infrastructure, app-only tool visibility filter
 - `tools/metric_lab.py`: interactive Metric Lab views
-- `tools/token_explorer.py`: interactive Token Explorer views
+- `tools/contract_explorer.py`: interactive Contract Explorer views (ABI resolve, view-call, decode)
+- `tools/rpc.py`: standalone RPC tools (`contract_explore`, `contract_call_function`, `contract_decode_*`)
 - `security.py`: tool risk classification, suspicious-call flagging, append-only JSONL security audit log
 - `observability.py`: Prometheus metrics, structured JSON logging, security counters
 
@@ -1600,7 +1601,8 @@ cerebro-mcp/
 │   │   ├── semantic.py
 │   │   ├── mini_apps.py
 │   │   ├── metric_lab.py
-│   │   └── token_explorer.py
+│   │   ├── contract_explorer.py
+│   │   └── rpc.py
 │   ├── security.py
 │   ├── mini_app_cache.py
 │   ├── mini_app_models.py
