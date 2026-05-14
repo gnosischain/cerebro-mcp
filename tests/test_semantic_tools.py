@@ -437,6 +437,193 @@ def test_query_metrics_returns_semantic_coverage_gap_for_candidate_metric(semant
     result = fn(metrics=["candidate_wallet_metric"])
 
     assert "Semantic coverage gap" in result
+    # The improved error message also nudges the caller toward the
+    # `allow_candidate` opt-in (PR 3) so authoring loops can iterate
+    # without promoting to approved.
+    assert "allow_candidate" in result
+
+
+# ─── PR 3: allow_candidate + scalar-KPI dedicated error ──────────────
+
+
+class _PR3Snapshot(SimpleNamespace):
+    """Minimal snapshot for _resolve_executable_metrics unit tests."""
+
+
+def _pr3_snapshot(metrics: dict, models: dict | None = None) -> _PR3Snapshot:
+    """Build a tiny snapshot exposing the three things
+    _resolve_executable_metrics looks up: metrics, models,
+    synonym_index."""
+    default_models = {
+        "approved_model": {"name": "approved_model", "semantic_status": "approved"},
+        "candidate_model": {"name": "candidate_model", "semantic_status": "candidate"},
+    }
+    return _PR3Snapshot(
+        metrics=metrics,
+        models=models or default_models,
+        synonym_index={name: name for name in metrics},
+    )
+
+
+def _pr3_metric(
+    name: str,
+    *,
+    quality_tier: str,
+    root_model: str = "approved_model",
+    allowed_dimensions: list[str] | None = None,
+) -> dict:
+    return {
+        "name": name,
+        "quality_tier": quality_tier,
+        "semantic_status": "approved" if quality_tier == "approved" else "candidate",
+        "root_model": root_model,
+        "allowed_dimensions": allowed_dimensions if allowed_dimensions is not None else ["day"],
+        "measure": f"{name}_value",
+    }
+
+
+def test_resolve_executable_metrics_approved_passes():
+    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+
+    snapshot = _pr3_snapshot({"good": _pr3_metric("good", quality_tier="approved")})
+    names, defs, err = _resolve_executable_metrics(snapshot, ["good"])
+
+    assert err == ""
+    assert names == ["good"]
+    assert defs[0]["name"] == "good"
+
+
+def test_resolve_executable_metrics_candidate_default_rejects_with_opt_in_hint():
+    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+
+    snapshot = _pr3_snapshot({"cand": _pr3_metric("cand", quality_tier="candidate")})
+    _, _, err = _resolve_executable_metrics(snapshot, ["cand"])
+
+    assert "Semantic coverage gap" in err
+    # The new hint that didn't exist before this PR.
+    assert "allow_candidate=true" in err
+    assert "execute_query" in err
+
+
+def test_resolve_executable_metrics_candidate_with_allow_candidate_passes():
+    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+
+    snapshot = _pr3_snapshot({"cand": _pr3_metric("cand", quality_tier="candidate")})
+    names, _, err = _resolve_executable_metrics(
+        snapshot, ["cand"], allow_candidate=True
+    )
+
+    assert err == ""
+    assert names == ["cand"]
+
+
+def test_resolve_executable_metrics_allow_candidate_does_not_bypass_unapproved_root():
+    """The opt-in is for QUALITY review escape, not authorization escape.
+    A candidate metric whose root model is itself not approved must still
+    be rejected even with allow_candidate=True."""
+    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+
+    snapshot = _pr3_snapshot(
+        {"cand": _pr3_metric("cand", quality_tier="candidate", root_model="candidate_model")}
+    )
+    _, _, err = _resolve_executable_metrics(
+        snapshot, ["cand"], allow_candidate=True
+    )
+
+    # Falls through to the generic "not approved" error because the
+    # candidate path requires an approved root model.
+    assert "Semantic coverage gap" in err
+
+
+def test_resolve_executable_metrics_scalar_kpi_gets_dedicated_error():
+    """A metric with no dimensions can't be semantically planned —
+    show a specific message pointing at execute_query rather than
+    the generic 'not approved' fallback."""
+    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+
+    snapshot = _pr3_snapshot(
+        {"kpi": _pr3_metric("kpi", quality_tier="candidate", allowed_dimensions=[])}
+    )
+    _, _, err = _resolve_executable_metrics(snapshot, ["kpi"])
+
+    assert "scalar / single-row KPI" in err
+    assert "execute_query" in err
+    assert "approved_model" in err  # surfaces the root for the caller
+    # The generic 'allow_candidate' hint should NOT appear here — the
+    # problem isn't quality tier, it's structural.
+    assert "allow_candidate" not in err
+
+
+def test_resolve_executable_metrics_scalar_kpi_takes_precedence_over_candidate():
+    """A metric that's BOTH candidate AND scalar should get the scalar
+    error (more actionable). allow_candidate=True doesn't help — the
+    metric is unrunnable regardless of quality tier."""
+    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+
+    snapshot = _pr3_snapshot(
+        {"kpi": _pr3_metric("kpi", quality_tier="candidate", allowed_dimensions=[])}
+    )
+    _, _, err = _resolve_executable_metrics(
+        snapshot, ["kpi"], allow_candidate=True
+    )
+
+    assert "scalar / single-row KPI" in err
+
+
+# ─── PR 4: reload_semantic_registry admin tool ──────────────────────
+
+
+def test_reload_semantic_registry_returns_hash_and_counts(
+    semantic_runtime_ready, monkeypatch
+):
+    """The admin tool surfaces enough metadata for the caller to
+    verify a forced refresh picked up new content."""
+    semantic_tools, snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-reload-test")
+
+    # Pretend a fresh registry came in: stub force_reload() to return
+    # (changed=True, error=None) so the tool follows the success path.
+    monkeypatch.setattr(
+        semantic_tools.semantic_runtime,
+        "force_reload",
+        lambda: (True, None),
+    )
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["reload_semantic_registry"].fn
+    result = fn()
+
+    # The shape the tool returns for downstream verification.
+    assert result["changed"] is True
+    assert "before_hash" in result
+    assert "after_hash" in result
+    assert result["metric_count"] == len(snapshot.metrics)
+    assert result["model_count"] == len(snapshot.models)
+    assert result["approved_metric_count"] == sum(
+        1 for m in snapshot.metrics.values() if m.get("quality_tier") == "approved"
+    )
+    assert result.get("error", "") == ""
+
+
+def test_reload_semantic_registry_reports_error_from_force_reload(
+    semantic_runtime_ready, monkeypatch
+):
+    """When the registry source is unavailable, error is surfaced verbatim."""
+    semantic_tools, _ = semantic_runtime_ready
+    mcp = FastMCP("semantic-reload-err-test")
+
+    monkeypatch.setattr(
+        semantic_tools.semantic_runtime,
+        "force_reload",
+        lambda: (False, "semantic registry unavailable"),
+    )
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["reload_semantic_registry"].fn
+    result = fn()
+
+    assert result["changed"] is False
+    assert "unavailable" in result["error"]
 
 
 def test_semantic_model_resource_prefers_generated_docs_page(

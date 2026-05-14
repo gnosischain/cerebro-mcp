@@ -9,6 +9,101 @@ from cerebro_mcp.semantic_graph import MAX_JOIN_HOPS, PlanningError, find_safest
 from cerebro_mcp.semantic_index import normalize
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Time-spine grain upcasts
+# ──────────────────────────────────────────────────────────────────────
+# When a metric is defined at a finer grain (e.g. `day`) than the
+# dimension a caller asks for (e.g. `week`), the planner can synthesise
+# a derived `GROUP BY` if a time-spine model declares the coarser grain
+# AND we know how to derive it from the finer one.
+#
+# Templates are ClickHouse expression strings parameterised on `{col}`
+# (the qualified source column reference). Add more pairs here if you
+# extend the spine vocabulary (e.g. hour → day, day → quarter).
+#
+# Downcast (week → day, month → week, ...) is intentionally not
+# supported: you can't synthesise daily values from weekly aggregates.
+_TIME_UPCAST_TEMPLATES: dict[tuple[str, str], str] = {
+    ("week",  "day"):    "toMonday({col})",
+    ("month", "day"):    "toStartOfMonth({col})",
+    ("month", "week"):   "toStartOfMonth({col})",
+}
+
+
+def _is_time_spine_model(model_name: str) -> bool:
+    return model_name.startswith("dim_time_spine_")
+
+
+def _find_time_spine_grain(snapshot, dimension_name: str) -> str | None:
+    """Return the granularity (`day` / `week` / `month`) of `dimension_name`
+    iff it's the primary time column on some `dim_time_spine_*` model.
+
+    This is how the planner knows "the user said `week` and means the
+    weekly spine" without requiring an explicit relationship traversal —
+    we treat the spine vocabulary as a globally-resolvable grain.
+    """
+    for model_name, model in snapshot.models.items():
+        if not _is_time_spine_model(model_name):
+            continue
+        for dim in model.get("dimensions", []):
+            if dim.get("name") != dimension_name:
+                continue
+            return (dim.get("type_params") or {}).get("time_granularity")
+    return None
+
+
+def _try_time_spine_upcast(
+    snapshot,
+    root_model_name: str,
+    dimension_name: str,
+) -> dict[str, Any] | None:
+    """Synthesise a derived dimension binding when ``dimension_name`` is a
+    time-spine grain that's coarser than a time column on the root model.
+
+    Returns a ``local=True`` binding with ``_upcast_template`` /
+    ``_upcast_from_col`` fields the SQL compiler reads to emit a
+    ``<template>(<root_alias>.<col>) AS <dimension>`` projection. Returns
+    ``None`` when no upcast pair applies — caller falls back to the
+    existing dimension-index resolution.
+    """
+    target_grain = _find_time_spine_grain(snapshot, dimension_name)
+    if target_grain is None:
+        return None
+    root = snapshot.models.get(root_model_name, {})
+    for dim in root.get("dimensions", []):
+        if dim.get("type") != "time":
+            continue
+        source_grain = (dim.get("type_params") or {}).get("time_granularity")
+        if not source_grain:
+            continue
+        template = _TIME_UPCAST_TEMPLATES.get((target_grain, source_grain))
+        if template is None:
+            continue
+        source_col = dim.get("expr") or dim["name"]
+        return {
+            "name": dimension_name,
+            "provider_model": root_model_name,
+            "local": True,
+            "path": [root_model_name],
+            "edges": [],
+            # Derived dimension carries the metadata the compiler needs to
+            # render `template(b<i>_root.<source_col>)` under the right
+            # branch alias. expr is informational; the compiler reads
+            # _upcast_template / _upcast_from_col directly.
+            "dimension": {
+                "name": dimension_name,
+                "type": "time",
+                "expr": template.format(col=source_col),
+                "type_params": {"time_granularity": target_grain},
+                "_upcast_template": template,
+                "_upcast_from_col": source_col,
+                "_upcast_source_grain": source_grain,
+            },
+            "_synthesised": "time_spine_upcast",
+        }
+    return None
+
+
 def _metric_is_executable(snapshot, metric: dict[str, Any]) -> bool:
     root_model = snapshot.models.get(metric.get("root_model", ""), {})
     return (
@@ -87,6 +182,13 @@ def _resolve_dimension_binding(snapshot, root_model: str, dimension_name: str) -
         )
 
     if not candidates:
+        # Last-chance: time-spine grain upcast. Lets the planner answer
+        # "I want `week` from a metric with only a `date` column" by
+        # synthesising `toMonday(date)` rather than failing.
+        upcast_binding = _try_time_spine_upcast(snapshot, root_model, dimension_name)
+        if upcast_binding is not None:
+            return upcast_binding, None
+
         local_dims = sorted(d["name"] for d in root.get("dimensions", []))
         hints: list[str] = [f"Dimension '{dimension_name}' is not reachable from '{root_model}'."]
 

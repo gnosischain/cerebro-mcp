@@ -29,7 +29,12 @@ from cerebro_mcp.observability import (
     observe_semantic_tool_call,
 )
 from cerebro_mcp.research_store import ResearchStore
-from cerebro_mcp.semantic_index import normalize, score_metric, token_overlap
+from cerebro_mcp.semantic_index import (
+    build_token_idf,
+    normalize,
+    score_metric,
+    token_overlap,
+)
 from cerebro_mcp.semantic_loader import semantic_runtime
 from cerebro_mcp.semantic_models import (
     AnalyticsPreflightResult,
@@ -111,6 +116,34 @@ def _resolve_agent_role(explicit_role: str = "") -> str:
     return explicit_role or runtime_state.current_agent_role or "unknown"
 
 
+# Cache the per-snapshot idf table so we don't recompute it on every
+# `discover_metrics` call. Keyed on the snapshot's registry hash so a
+# semantic reload (PR 4) invalidates automatically.
+_TOKEN_IDF_CACHE: dict[str, dict[str, float]] = {}
+
+
+def _token_idf_for_snapshot(snapshot) -> dict[str, float]:
+    """Return (and cache) the idf weight table for the snapshot's metrics.
+
+    Computing idf is O(N_metrics × |blob|) — cheap (a few hundred
+    metrics) but not free per-call. The cache is keyed on
+    ``registry_hash`` so:
+      * Same snapshot, multiple discover calls -> shared computation.
+      * Registry reload (PR 4 force_reload) -> fresh hash, fresh table.
+    """
+    key = getattr(snapshot, "registry_hash", "") or ""
+    cached = _TOKEN_IDF_CACHE.get(key)
+    if cached is not None:
+        return cached
+    table = build_token_idf(snapshot.metrics.values())
+    # Bound the cache to a few entries so stale snapshots don't leak
+    # memory on long-running servers that survive many reloads.
+    if len(_TOKEN_IDF_CACHE) > 4:
+        _TOKEN_IDF_CACHE.clear()
+    _TOKEN_IDF_CACHE[key] = table
+    return table
+
+
 def _metric_is_executable(snapshot, metric: dict[str, Any] | None) -> bool:
     if not metric:
         return False
@@ -120,6 +153,35 @@ def _metric_is_executable(snapshot, metric: dict[str, Any] | None) -> bool:
         and metric.get("semantic_status") == "approved"
         and root_model.get("semantic_status") == "approved"
     )
+
+
+def _metric_is_candidate(snapshot, metric: dict[str, Any] | None) -> bool:
+    """Metric is structurally executable but not yet promoted to approved.
+
+    Used to gate the `allow_candidate=True` opt-in path: a candidate metric
+    can be force-run for authoring/testing iff its root model is itself
+    approved AND it has at least one allowed_dimension (so the planner has
+    something to group by — see `_metric_is_scalar_kpi` for the no-dim case).
+    """
+    if not metric:
+        return False
+    if metric.get("quality_tier") == "approved":
+        return False  # already executable via the normal path
+    root_model = snapshot.models.get(metric.get("root_model", ""), {})
+    if root_model.get("semantic_status") != "approved":
+        return False  # root not even queryable — can't bypass that
+    return bool(metric.get("allowed_dimensions"))
+
+
+def _metric_is_scalar_kpi(metric: dict[str, Any] | None) -> bool:
+    """Metric has no dimensions to group by — typically a single-row KPI
+    view backing a dashboard card. The semantic planner can't aggregate
+    these, so we surface a dedicated error directing the caller at
+    execute_query rather than the generic "not approved" message.
+    """
+    if not metric:
+        return False
+    return not metric.get("allowed_dimensions")
 
 
 def _lookup_metric(snapshot, metric_name: str) -> tuple[str, dict[str, Any] | None]:
@@ -343,6 +405,53 @@ def _normalize_dimension_name(name: str) -> str:
     return _DIMENSION_ALIASES.get(normalized_name, normalized_name)
 
 
+def _time_spine_upcast_targets(snapshot, metric: dict[str, Any]) -> list[str]:
+    """Return the time-spine grain names this metric's root can be upcast
+    to (e.g. a metric with a daily `date` column can be grouped to
+    `week` / `month`).
+
+    Mirrors `cerebro_mcp.semantic_planner._try_time_spine_upcast` so the
+    tool-layer dimension check doesn't reject upcasts the planner WOULD
+    successfully synthesise. Kept as a separate helper to avoid an
+    import cycle.
+    """
+    from cerebro_mcp.semantic_planner import (  # local import: avoids cycle
+        _TIME_UPCAST_TEMPLATES,
+        _is_time_spine_model,
+    )
+
+    root_model = snapshot.models.get(metric.get("root_model", ""), {})
+    source_grains = {
+        (dim.get("type_params") or {}).get("time_granularity")
+        for dim in root_model.get("dimensions", [])
+        if dim.get("type") == "time"
+    }
+    source_grains.discard(None)
+    if not source_grains:
+        return []
+
+    reachable_target_grains = {
+        target
+        for (target, source) in _TIME_UPCAST_TEMPLATES
+        if source in source_grains
+    }
+    if not reachable_target_grains:
+        return []
+
+    # Map target grains back to the spine dimension names exposed in the
+    # registry (e.g. `week` from `dim_time_spine_weekly`). A grain might
+    # be advertised by multiple spine models; collect all matching names.
+    targets: set[str] = set()
+    for model_name, model in snapshot.models.items():
+        if not _is_time_spine_model(model_name):
+            continue
+        for dim in model.get("dimensions", []):
+            grain = (dim.get("type_params") or {}).get("time_granularity")
+            if grain in reachable_target_grains and dim.get("name"):
+                targets.add(dim["name"])
+    return sorted(targets)
+
+
 def _metric_supported_dimensions(
     snapshot,
     metric: dict[str, Any],
@@ -352,30 +461,72 @@ def _metric_supported_dimensions(
         for value in metric.get("allowed_dimensions", [])
         if value
     ]
-    if allowed:
-        return allowed
-    root_model = snapshot.models.get(metric.get("root_model", ""), {})
-    return [
-        normalize(dimension.get("name", "")).replace(" ", "_")
-        for dimension in root_model.get("dimensions", [])
-        if dimension.get("name")
-    ]
+    if not allowed:
+        root_model = snapshot.models.get(metric.get("root_model", ""), {})
+        allowed = [
+            normalize(dimension.get("name", "")).replace(" ", "_")
+            for dimension in root_model.get("dimensions", [])
+            if dimension.get("name")
+        ]
+
+    # Extend with time-spine upcast targets so cross-grain queries (e.g.
+    # asking for `week` from a daily metric) survive the pre-planner
+    # dimension gate. The planner synthesises the actual `toMonday(...)`
+    # projection downstream.
+    for upcast_target in _time_spine_upcast_targets(snapshot, metric):
+        normalised = normalize(upcast_target).replace(" ", "_")
+        if normalised and normalised not in allowed:
+            allowed.append(normalised)
+
+    return allowed
 
 
 def _resolve_executable_metrics(
     snapshot,
     requested_metrics: list[str],
+    *,
+    allow_candidate: bool = False,
 ) -> tuple[list[str], list[dict[str, Any]], str]:
+    """Resolve metric names to their definitions, enforcing the
+    quality-tier gate.
+
+    By default rejects non-approved metrics with a generic error. Two
+    refinements:
+
+    * If the metric has no `allowed_dimensions` (a scalar / single-row
+      KPI view), surface a dedicated message pointing at execute_query —
+      these can't be semantically planned regardless of quality tier.
+    * If `allow_candidate=True`, accept structurally-valid candidate
+      metrics (their root model is itself approved AND they declare at
+      least one dimension). This is the authoring/testing opt-in path;
+      never use in production dashboards.
+    """
     resolved_metric_names: list[str] = []
     metrics: list[dict[str, Any]] = []
     for requested_name in requested_metrics:
         resolved_name, metric = _lookup_metric(snapshot, requested_name)
         if not metric:
             return [], [], f"Error: Metric '{requested_name}' not found."
-        if not _metric_is_executable(snapshot, metric):
+        if _metric_is_executable(snapshot, metric):
+            pass  # ok
+        elif _metric_is_scalar_kpi(metric):
+            root = metric.get("root_model", "<unknown>")
+            return [], [], (
+                f"Error: Metric '{resolved_name}' is a scalar / single-row KPI "
+                f"(no `allowed_dimensions` declared). The semantic planner has "
+                f"nothing to group by. Query the underlying view directly with "
+                f"`execute_query` on `{root}`."
+            )
+        elif allow_candidate and _metric_is_candidate(snapshot, metric):
+            # NB: explicit opt-in for authoring / testing only. Quality is
+            # not vetted — never use in dashboards.
+            pass
+        else:
             return [], [], (
                 "Error: Semantic coverage gap. "
-                f"Metric '{resolved_name}' exists, but it is not approved for semantic execution yet."
+                f"Metric '{resolved_name}' exists, but it is not approved for "
+                f"semantic execution yet. Pass `allow_candidate=true` to run "
+                f"it anyway for authoring/testing, or use `execute_query`."
             )
         resolved_metric_names.append(resolved_name)
         metrics.append(metric)
@@ -485,10 +636,11 @@ def get_semantic_preflight(
         )
 
     scored: list[tuple[int, str, dict[str, Any]]] = []
+    token_idf = _token_idf_for_snapshot(snapshot)
     for metric_name, metric in snapshot.metrics.items():
         if not _metric_is_executable(snapshot, metric):
             continue
-        score = score_metric(query, metric)
+        score = score_metric(query, metric, token_idf=token_idf)
         if score > 0:
             scored.append((score, metric_name, metric))
     scored.sort(key=lambda item: (-item[0], item[1]))
@@ -566,6 +718,7 @@ def execute_metric_query(
     persist_result: bool = False,
     evidence_title: str = "",
     agent_role: str = "",
+    allow_candidate: bool = False,
 ) -> SemanticQueryResult | str:
     role = _resolve_agent_role(agent_role)
     started = time.perf_counter()
@@ -580,6 +733,7 @@ def execute_metric_query(
         resolved_metric_names, metric_definitions, metric_error = _resolve_executable_metrics(
             snapshot,
             metrics,
+            allow_candidate=allow_candidate,
         )
         if metric_error:
             return metric_error
@@ -1054,10 +1208,11 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
             if snapshot is None:
                 return error or "Semantic snapshot unavailable."
             scored = []
+            token_idf = _token_idf_for_snapshot(snapshot)
             for metric_name, metric in snapshot.metrics.items():
                 if not _metric_is_executable(snapshot, metric):
                     continue
-                score = score_metric(query, metric)
+                score = score_metric(query, metric, token_idf=token_idf)
                 if score > 0:
                     scored.append((score, metric_name, metric))
             scored.sort(key=lambda item: (-item[0], item[1]))
@@ -1140,7 +1295,9 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         limit: int = 100,
         order_by: list[str] | None = None,
         agent_role: str = "",
+        allow_candidate: bool = False,
     ) -> MetricQueryExplanation | str:
+        # See `query_metrics` for the `allow_candidate` semantics.
         role = _resolve_agent_role(agent_role)
         try:
             state.record_semantic_tool_call("explain_metric_query", execution=True)
@@ -1151,6 +1308,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
             resolved_metric_names, metric_definitions, metric_error = _resolve_executable_metrics(
                 snapshot,
                 metrics,
+                allow_candidate=allow_candidate,
             )
             if metric_error:
                 return metric_error
@@ -1252,7 +1410,13 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         persist_result: bool = False,
         evidence_title: str = "",
         agent_role: str = "",
+        allow_candidate: bool = False,
     ) -> SemanticQueryResult | str:
+        # `allow_candidate=True` is an authoring/testing escape hatch that
+        # lets you run a metric whose quality_tier is still "candidate" so
+        # long as its root model is approved and at least one dimension is
+        # declared. NEVER use in production dashboards — candidate metrics
+        # haven't passed analyst review.
         role = _resolve_agent_role(agent_role)
         try:
             state.record_semantic_tool_call("query_metrics", execution=True)
@@ -1268,6 +1432,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 persist_result=persist_result,
                 evidence_title=evidence_title,
                 agent_role=role,
+                allow_candidate=allow_candidate,
             )
             observe_semantic_tool_call(
                 tool_name="query_metrics",
@@ -1284,6 +1449,63 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 entrypoint="semantic",
             )
             return f"Error: {exc}"
+
+    @mcp.tool()
+    def reload_semantic_registry(agent_role: str = "") -> dict[str, Any]:
+        """Force an immediate refresh of the semantic registry, bypassing
+        the ETag-based polling and the SEMANTIC_REFRESH_INTERVAL_SECONDS
+        TTL (default 300s).
+
+        Useful during semantic-layer authoring loops where you've just
+        rebuilt the registry locally (or just redeployed to GitHub Pages)
+        and need to see changes — particularly metric **promotions**
+        (candidate → approved) and **agg-type changes** — propagate
+        without waiting for the next poll cycle.
+
+        Returns counts and content-hash before / after so callers can
+        confirm the refresh actually picked up new content.
+        """
+        role = _resolve_agent_role(agent_role)
+        try:
+            before_snapshot = semantic_runtime.snapshot
+            before_hash = before_snapshot.registry_hash if before_snapshot else ""
+            changed, error = semantic_runtime.force_reload()
+            after_snapshot = semantic_runtime.snapshot
+            after_hash = after_snapshot.registry_hash if after_snapshot else ""
+            metric_count = len(after_snapshot.metrics) if after_snapshot else 0
+            model_count = len(after_snapshot.models) if after_snapshot else 0
+            approved_metrics = (
+                sum(
+                    1
+                    for m in after_snapshot.metrics.values()
+                    if m.get("quality_tier") == "approved"
+                )
+                if after_snapshot
+                else 0
+            )
+            observe_semantic_tool_call(
+                tool_name="reload_semantic_registry",
+                status="error" if error else "success",
+                agent_role=role,
+                entrypoint="semantic",
+            )
+            return {
+                "changed": bool(changed),
+                "before_hash": before_hash,
+                "after_hash": after_hash,
+                "metric_count": metric_count,
+                "model_count": model_count,
+                "approved_metric_count": approved_metrics,
+                "error": error or "",
+            }
+        except Exception as exc:
+            observe_semantic_tool_call(
+                tool_name="reload_semantic_registry",
+                status="error",
+                agent_role=role,
+                entrypoint="semantic",
+            )
+            return {"changed": False, "error": f"{exc}"}
 
     if _clickhouse_bundle_is_valid():
         @mcp.tool()

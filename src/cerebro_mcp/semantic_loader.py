@@ -96,9 +96,30 @@ class SemanticRuntime:
     def refresh_if_changed(self) -> tuple[bool, str | None]:
         if not settings.SEMANTIC_ENABLED:
             return False, None
+        return self._refresh(force=False)
+
+    def force_reload(self) -> tuple[bool, str | None]:
+        """Unconditional refresh — bypasses the ETag-based polling.
+
+        Backs the ``reload_semantic_registry`` admin tool. Useful during
+        semantic-layer authoring loops when you've just rebuilt the
+        registry and don't want to wait for the 5-minute TTL or fight
+        a stale upstream ETag. Returns ``(changed, error)`` where
+        ``changed`` reports whether the new payload actually differed
+        from the cached one.
+        """
+        if not settings.SEMANTIC_ENABLED:
+            return False, None
+        return self._refresh(force=True)
+
+    def _refresh(self, *, force: bool) -> tuple[bool, str | None]:
         started = time.perf_counter()
-        changed_registry, registry_error = semantic_registry.reload_if_changed()
-        changed_docs, docs_error = semantic_docs.reload_if_changed()
+        if force:
+            changed_registry, registry_error = semantic_registry.force_reload()
+            changed_docs, docs_error = semantic_docs.force_reload()
+        else:
+            changed_registry, registry_error = semantic_registry.reload_if_changed()
+            changed_docs, docs_error = semantic_docs.reload_if_changed()
         if not changed_registry and not changed_docs:
             return False, registry_error or docs_error
         registry_payload = semantic_registry.payload

@@ -119,6 +119,44 @@ class ArtifactLoader:
         )
         return True, None
 
+    def force_reload(self) -> tuple[bool, str | None]:
+        """Unconditional reload — bypasses the ETag / Last-Modified check.
+
+        Use sparingly: it defeats the ``If-None-Match`` polling
+        optimisation, so we re-parse the payload even when the upstream
+        artifact hasn't changed. Intended for the
+        ``reload_semantic_registry`` admin tool used during semantic-
+        layer authoring loops, where the 5-minute TTL or a stale-ETag
+        upstream would otherwise leave the runtime out-of-sync with a
+        just-published registry. Behaves like ``reload_if_changed`` when
+        the local path is available (no HTTP at all).
+        """
+        payload = self._load_local_payload()
+        if payload is None:
+            if not self._url:
+                return False, None
+            payload = self._fetch_remote_json(conditional=False)
+            if payload is None:
+                return False, self._last_refresh_error
+
+        changed = payload.content_hash != self._content_hash
+        self._payload = payload
+        self._content_hash = payload.content_hash
+        self._last_load_time = time.time()
+        self._last_refresh_error = None
+        self._loaded = True
+        log_event(
+            logger,
+            "artifact_force_reload",
+            label=self._label,
+            source="local" if not payload.source.startswith("http") else "remote",
+            content_hash=payload.content_hash,
+            etag=payload.etag or "",
+            last_modified=payload.last_modified or "",
+            changed=changed,
+        )
+        return changed, None
+
     def _candidate_paths(self) -> list[str]:
         if self._path_resolver is not None:
             paths = self._path_resolver()

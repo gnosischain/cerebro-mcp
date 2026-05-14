@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 import re
 from collections import defaultdict
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 
 def normalize(text: str) -> str:
@@ -13,6 +14,66 @@ def token_overlap(query: str, blob: str) -> int:
     query_tokens = set(normalize(query).split())
     blob_tokens = set(normalize(blob).split())
     return len(query_tokens & blob_tokens)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Token IDF weighting (used by score_metric)
+# ──────────────────────────────────────────────────────────────────────
+# Without weighting, score_metric treats every matched token as +5
+# regardless of how informative it is — so a generic query like "weekly"
+# scores all weekly-grain metrics the same, and a rare-token match (e.g.
+# "passkey") scores no higher than a common one (e.g. "users"). We fix
+# this with an idf-style weight: rarer tokens contribute more.
+#
+# Cap is per-token: even a singleton-token bump can't outscore the
+# exact-name (100) or exact-synonym (90) shortcut paths.
+_TOKEN_BONUS_CAP = 15
+# Floor: a token that appears in every metric still gives a small bump
+# (so "weekly" matched against a weekly-tagged blob still beats no
+# match at all). The min floor here matches the previous flat +5 weight.
+_TOKEN_BONUS_FLOOR = 5
+
+_TOKEN_RE = re.compile(r"\w+")
+
+
+def _tokens(text: str) -> set[str]:
+    return set(_TOKEN_RE.findall(normalize(text)))
+
+
+def build_token_idf(
+    metrics: Iterable[Mapping[str, Any]],
+) -> dict[str, float]:
+    """Compute a document-frequency-based idf weight per token across all
+    metric `search_blob` fields.
+
+    Returns ``{token: weight}`` where ``weight`` is bounded by
+    ``_TOKEN_BONUS_FLOOR`` and ``_TOKEN_BONUS_CAP``. Tokens absent from
+    the table fall back to the floor — the cost of not seeing them is
+    just that they can't earn the cap.
+
+    Callers should compute this once per snapshot and pass it to
+    ``score_metric`` for every candidate metric. Computing per-call is
+    O(N_metrics × |blob|) — fine for snapshots of a few hundred metrics
+    but worth caching for larger projects.
+    """
+    df: dict[str, int] = defaultdict(int)
+    total = 0
+    for metric in metrics:
+        total += 1
+        for token in _tokens(metric.get("search_blob", "") or ""):
+            df[token] += 1
+    if total == 0:
+        return {}
+    # idf = log(N / df). Multiply by floor so the smallest non-zero
+    # weight matches the legacy flat-5 score (preserves existing
+    # rankings for tokens that appear everywhere) and the rarest tokens
+    # approach the cap.
+    weights: dict[str, float] = {}
+    for token, freq in df.items():
+        idf = math.log((total + 1) / (freq + 1)) + 1.0
+        weight = _TOKEN_BONUS_FLOOR * idf
+        weights[token] = max(_TOKEN_BONUS_FLOOR, min(_TOKEN_BONUS_CAP, weight))
+    return weights
 
 
 def infer_module_from_query(query: str) -> str:
@@ -73,9 +134,35 @@ def build_indexes(registry: dict[str, Any]) -> tuple[dict[str, str], dict[str, l
     return synonym_index, dict(dimension_index), metrics
 
 
-def score_metric(query: str, metric: dict[str, Any]) -> int:
+def score_metric(
+    query: str,
+    metric: dict[str, Any],
+    token_idf: Mapping[str, float] | None = None,
+) -> int:
+    """Rank `metric` for an analyst free-text `query`.
+
+    Scoring stack:
+        100  Query equals the metric `name`.
+         90  Query equals one of the metric's normalized synonyms.
+         50  Metric name starts with the query.
+         25  Query is a substring of the metric's search blob.
+          0  None of the above (still eligible for the token bonus).
+
+    Plus, additively:
+        token bonus           Per-token idf weight from `token_idf` (or a
+                              flat +5 each if no idf table is provided,
+                              matching legacy behaviour).
+        +20 approved          Promotes vetted metrics over candidates.
+        +15 module match      When the query mentions an inferred module
+                              and the metric belongs to it.
+
+    Passing a `token_idf` produced by `build_token_idf(snapshot.metrics)`
+    differentiates rare-token matches (e.g. "passkey") from common ones
+    (e.g. "weekly"). When omitted, scoring is exactly the same as the
+    pre-PR-6 implementation — safe to call from legacy paths that
+    haven't been updated to pass the idf table.
+    """
     q = normalize(query)
-    overlap = token_overlap(q, metric["search_blob"])
     if q == metric["name"]:
         score = 100
     elif q in metric["all_synonyms"]:
@@ -86,9 +173,17 @@ def score_metric(query: str, metric: dict[str, Any]) -> int:
         score = 25
     else:
         score = 0
-    if score == 0 and overlap == 0:
+
+    matched_tokens = _tokens(q) & _tokens(metric.get("search_blob", "") or "")
+    if score == 0 and not matched_tokens:
         return 0
-    score += 5 * overlap
+
+    if token_idf is not None:
+        for token in matched_tokens:
+            score += int(token_idf.get(token, _TOKEN_BONUS_FLOOR))
+    else:
+        score += _TOKEN_BONUS_FLOOR * len(matched_tokens)
+
     if metric.get("quality_tier") == "approved":
         score += 20
     if metric.get("module") == infer_module_from_query(q):

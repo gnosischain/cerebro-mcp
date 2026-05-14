@@ -7,6 +7,45 @@ from typing import Any
 from cerebro_mcp.observability import observe_semantic_sql_compile_latency
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Aggregation function translation
+# ──────────────────────────────────────────────────────────────────────
+# dbt MetricFlow agg names → ClickHouse function names. The semantic
+# layer authoring spec accepts a small set of agg types; ClickHouse
+# names some of them differently (notably `uniqExact` for
+# `count_distinct` and `avg` for `average`). We translate here so
+# authors can keep using the standard MetricFlow vocabulary in
+# semantic_models.yml without hitting opaque
+# `Function with name 'count_distinct' does not exist` errors at
+# query time.
+_AGG_TO_CLICKHOUSE: dict[str, str] = {
+    "sum":            "sum",
+    "min":            "min",
+    "max":            "max",
+    "count":          "count",
+    "count_distinct": "uniqExact",
+    "average":        "avg",
+    "avg":            "avg",
+    "median":         "median",
+}
+
+
+def _agg_call(agg: str, expr: str) -> str:
+    """Render `<agg>(<expr>)` translated to the ClickHouse function name.
+
+    Raises ValueError for unknown agg types so authoring mistakes surface at
+    compile time with a clear error rather than as opaque ClickHouse syntax
+    errors at query time. Add new aggs to ``_AGG_TO_CLICKHOUSE``.
+    """
+    fn = _AGG_TO_CLICKHOUSE.get(agg)
+    if fn is None:
+        raise ValueError(
+            f"Unsupported aggregation type: '{agg}'. "
+            f"Supported: {sorted(_AGG_TO_CLICKHOUSE)}"
+        )
+    return f"{fn}({expr})"
+
+
 def _sql_literal(value: Any) -> str:
     if value is None:
         return "NULL"
@@ -72,18 +111,42 @@ def _compile_filters(
     branch_dimensions: dict[str, str],
     metric_aliases: dict[str, str],
 ) -> tuple[list[str], list[str]]:
+    """Split a filter list into WHERE (dimension filters) and HAVING
+    (metric filters) clauses for the current branch.
+
+    A filter ``field`` MUST match either a metric output alias or a
+    dimension registered on this branch. The previous implementation
+    silently fell through to emitting ``f"{field} {op} {value}"`` when
+    the field name didn't match anything — producing malformed SQL such
+    as ``WHERE = 'DEX'`` when the field key was missing from both
+    lookups. Now an unknown field raises a clear ValueError listing the
+    valid options.
+
+    Also accepts the public-API key names (``column`` / ``operator``)
+    in addition to the internal short names (``field`` / ``op``) so the
+    same filter shape works whether the caller comes through the MCP
+    tool layer or constructs filters in-process.
+    """
     where_clauses: list[str] = []
     having_clauses: list[str] = []
+    valid_fields = sorted(set(branch_dimensions) | set(metric_aliases))
     for filter_item in filters:
-        field = filter_item.get("field", "")
-        op = filter_item.get("op", "=")
+        field = filter_item.get("field") or filter_item.get("column")
+        if not field:
+            raise ValueError(
+                f"Filter is missing 'field' / 'column' key: {filter_item}"
+            )
+        op = filter_item.get("op") or filter_item.get("operator") or "="
         value = _sql_literal(filter_item.get("value"))
         if field in metric_aliases:
             having_clauses.append(f"{metric_aliases[field]} {op} {value}")
         elif field in branch_dimensions:
             where_clauses.append(f"{branch_dimensions[field]} {op} {value}")
         else:
-            where_clauses.append(f"{field} {op} {value}")
+            raise ValueError(
+                f"Filter field '{field}' is not a dimension or metric on this branch. "
+                f"Valid fields: {valid_fields}"
+            )
     return where_clauses, having_clauses
 
 
@@ -105,8 +168,20 @@ def _compile_branch_cte(
 
     for dimension_name, binding in branch["dimension_bindings"].items():
         if binding["local"]:
-            dimension = _find_dimension(root_model, dimension_name)
-            expr = _qualify(dimension.get("expr", dimension_name), root_alias, force_qualified)
+            # Prefer the dimension carried on the binding (so synthesised
+            # bindings — e.g. time-spine upcasts emitted by the planner —
+            # don't need an entry in the root model's `dimensions` list).
+            dimension = binding.get("dimension") or _find_dimension(root_model, dimension_name)
+            upcast_template = dimension.get("_upcast_template")
+            if upcast_template:
+                # Render the planner's upcast directive under this branch's
+                # alias. e.g. `toMonday(b1_root.date) AS week`. The source
+                # column comes from `_upcast_from_col` rather than `expr`
+                # so we don't have to parse the template back out.
+                source_col = dimension["_upcast_from_col"]
+                expr = upcast_template.format(col=f"{root_alias}.{source_col}")
+            else:
+                expr = _qualify(dimension.get("expr", dimension_name), root_alias, force_qualified)
         else:
             join_sql, expr = _compile_join_chain(snapshot, binding, root_alias, warnings)
             joins.extend(join_sql)
@@ -123,7 +198,7 @@ def _compile_branch_cte(
         measure = _find_measure(root_model, metric["measure"])
         measure_expr = _qualify(measure.get("expr", metric["measure"]), root_alias, force_qualified)
         agg = measure.get("agg", "sum")
-        metric_selects.append(f"{agg}({measure_expr}) AS {metric_name}")
+        metric_selects.append(f"{_agg_call(agg, measure_expr)} AS {metric_name}")
         metric_alias_map[metric_name] = metric_name
         default_filters.extend(metric.get("default_filters", []))
 
@@ -170,12 +245,20 @@ def _compile_single_branch_select(
     for dimension_name, binding in branch["dimension_bindings"].items():
         if not binding["local"]:
             raise ValueError("Direct branch SQL only supports local dimensions")
-        dimension = _find_dimension(root_model, dimension_name)
-        expr = _qualify(
-            dimension.get("expr", dimension_name),
-            root_alias,
-            force_qualified,
-        )
+        # See `_compile_branch_cte` for the upcast-template path. Same
+        # logic in the single-branch optimisation; do not let the two
+        # diverge.
+        dimension = binding.get("dimension") or _find_dimension(root_model, dimension_name)
+        upcast_template = dimension.get("_upcast_template")
+        if upcast_template:
+            source_col = dimension["_upcast_from_col"]
+            expr = upcast_template.format(col=f"{root_alias}.{source_col}")
+        else:
+            expr = _qualify(
+                dimension.get("expr", dimension_name),
+                root_alias,
+                force_qualified,
+            )
         select_dimensions.append(f"{expr} AS {dimension_name}")
         group_dimensions.append(dimension_name if force_qualified else expr)
         branch_dimension_map[dimension_name] = dimension_name if force_qualified else expr
@@ -192,7 +275,7 @@ def _compile_single_branch_select(
             force_qualified,
         )
         agg = measure.get("agg", "sum")
-        metric_selects.append(f"{agg}({measure_expr}) AS {metric_name}")
+        metric_selects.append(f"{_agg_call(agg, measure_expr)} AS {metric_name}")
         metric_alias_map[metric_name] = metric_name
         default_filters.extend(metric.get("default_filters", []))
 
