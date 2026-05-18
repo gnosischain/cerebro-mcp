@@ -58,6 +58,17 @@ class Settings(BaseSettings):
     )
     SEMANTIC_DOCS_INDEX_PATH: str = ""
     SEMANTIC_REFRESH_INTERVAL_SECONDS: int = 300
+    # When True, every semantic call also stats the local manifest /
+    # catalog files and triggers an immediate force_reload if either
+    # is newer than the in-memory snapshot's load timestamp. Closes
+    # the `manifest_hash_mismatch` window after a local `dbt build`
+    # during semantic-layer authoring loops, without waiting for the
+    # 300-second TTL. No-op for deployed instances that load the
+    # registry over HTTPS (the helper short-circuits when no local
+    # candidate is on disk). Flip to False to disable if a regression
+    # surfaces in production. See `_local_artifacts_advanced` in
+    # `tools/semantic.py`.
+    SEMANTIC_AUTOLOAD_ON_LOCAL_MTIME: bool = True
 
     # Dashboard builder
     DASHBOARD_BUILDER_ENABLED: bool = False

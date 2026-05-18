@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from urllib.parse import urljoin
 
 import requests
 from cerebro_mcp import runtime_state
+from cerebro_mcp.artifact_loader import local_artifact_candidates
 from cerebro_mcp.catalog_loader import catalog
 from cerebro_mcp.clickhouse_client import ClickHouseManager
 from cerebro_mcp.config import settings
@@ -53,6 +55,12 @@ from cerebro_mcp.tools.session_state import state
 
 logger = logging.getLogger(__name__)
 _last_semantic_refresh = 0.0
+# Per-file highest mtime we've already evaluated in _local_artifacts_advanced.
+# Once we've seen mtime T for a path and decided whether to reload, we don't
+# need to re-check the same mtime on every subsequent semantic call — the
+# underlying artifact didn't change, so a fresh `force_reload` would be a
+# no-op. We only re-evaluate when mtime advances past what's recorded here.
+_seen_artifact_mtime: dict[str, float] = {}
 BUNDLE_MANIFEST_FILENAME = "bundle_manifest.json"
 _TIME_DIMENSION_HINTS = (
     (("over time", "trend", "daily", "by day"), "day"),
@@ -200,8 +208,209 @@ def _snapshot_or_error(require_execution: bool = False):
     return snapshot, None
 
 
+_HASH_MISMATCH_REASONS = ("manifest_hash_mismatch", "catalog_hash_mismatch")
+
+
+def _retry_execution_state_if_hash_mismatch() -> tuple[bool, str | None]:
+    """Shared retry primitive used by both `_snapshot_or_error_with_retry`
+    and the preflight tool. When ``semantic_runtime.is_execution_available``
+    is False due to a ``manifest_hash_mismatch`` / ``catalog_hash_mismatch``
+    reason, run ONE ``force_reload`` and re-check. Emits a
+    ``semantic_autoreload`` event with ``reason: hash_mismatch_retry``.
+
+    Returns ``(is_available, stale_reason)`` reflecting the runtime state
+    AFTER the retry. On persistent mismatch, returns ``(False, original
+    reason)`` so callers can propagate the error unchanged.
+    """
+    reason = (semantic_runtime.stale_reason or "").strip()
+    if reason not in _HASH_MISMATCH_REASONS:
+        return semantic_runtime.is_execution_available, semantic_runtime.stale_reason
+    started = time.perf_counter()
+    old_hash = (semantic_runtime.snapshot.manifest_hash
+                if semantic_runtime.snapshot is not None
+                else "")
+    semantic_runtime.force_reload()
+    new_hash = (semantic_runtime.snapshot.manifest_hash
+                if semantic_runtime.snapshot is not None
+                else "")
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    changed = old_hash != new_hash
+    log_event(
+        logger,
+        "semantic_autoreload",
+        reason="hash_mismatch_retry",
+        trigger=reason,
+        old_hash=old_hash,
+        new_hash=new_hash,
+        changed=str(changed).lower(),
+        duration_ms=duration_ms,
+    )
+    _trace_semantic_event(
+        "semantic_autoreload",
+        f"force_reload retry after {reason}",
+        {
+            "reason": "hash_mismatch_retry",
+            "trigger": reason,
+            "old_hash": old_hash,
+            "new_hash": new_hash,
+            "changed": changed,
+            "duration_ms": duration_ms,
+        },
+        event_kind="semantic_autoreload",
+    )
+    return semantic_runtime.is_execution_available, semantic_runtime.stale_reason
+
+
+def _snapshot_or_error_with_retry(require_execution: bool = False):
+    """Like ``_snapshot_or_error`` but with a one-shot ``force_reload``
+    retry when the snapshot is stale due to a manifest / catalog hash
+    mismatch.
+
+    Closes the race window where a local ``dbt build`` writes a newer
+    manifest *between* the pre-query mtime check in
+    ``_maybe_refresh_semantic`` and the planner's ``_execution_state``
+    check inside ``SemanticRuntime``. On the second mismatch (i.e. the
+    reload didn't actually clear it) the original error propagates
+    unchanged, preserving the existing contract for genuinely broken
+    deployments.
+    """
+    snapshot, error = _snapshot_or_error(require_execution=require_execution)
+    if snapshot is not None or not require_execution:
+        return snapshot, error
+    _retry_execution_state_if_hash_mismatch()
+    return _snapshot_or_error(require_execution=require_execution)
+
+
+def _local_artifact_paths() -> list[str]:
+    """Return concrete on-disk candidates for manifest.json and
+    catalog.json, or [] when no local source is configured."""
+    if not settings.SEMANTIC_AUTOLOAD_ON_LOCAL_MTIME:
+        return []
+    paths: list[str] = []
+    paths.extend(local_artifact_candidates(
+        "manifest.json",
+        settings.DBT_MANIFEST_PATH,
+        settings.SEMANTIC_REGISTRY_PATH,
+    ))
+    paths.extend(local_artifact_candidates(
+        "catalog.json",
+        settings.DBT_CATALOG_PATH,
+        settings.SEMANTIC_REGISTRY_PATH,
+    ))
+    # Deduplicate, keep order.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            deduped.append(p)
+    return deduped
+
+
+def _local_artifacts_advanced() -> tuple[bool, str]:
+    """Return ``(advanced, reason)`` where ``advanced`` is True if a
+    local manifest.json or catalog.json on disk has been modified
+    after the snapshot was loaded.
+
+    Short-circuits to False in any of:
+      * SEMANTIC_AUTOLOAD_ON_LOCAL_MTIME disabled.
+      * No local file candidates resolved (deployed / HTTPS-only mode).
+      * Snapshot not loaded yet (the TTL path will load it).
+      * Stat fails (file disappeared / permission denied).
+
+    Compares against ``snapshot.loaded_at`` captured by
+    ``SemanticRuntime._build_snapshot`` (semantic_loader.py:155-169).
+    """
+    snapshot = semantic_runtime.snapshot
+    if snapshot is None:
+        return False, ""
+    loaded_at = getattr(snapshot, "loaded_at", 0.0) or 0.0
+    if loaded_at <= 0.0:
+        return False, ""
+    for path in _local_artifact_paths():
+        try:
+            mtime = os.stat(path).st_mtime
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        # Already evaluated this exact mtime in a prior call this session.
+        # If `force_reload` had been going to change the registry, it would
+        # have already done so when we processed this mtime the first time;
+        # re-statting now would just burn ~500ms per request.
+        if mtime <= _seen_artifact_mtime.get(path, 0.0):
+            continue
+        if mtime > loaded_at:
+            reason = (
+                "manifest_mtime_advanced"
+                if os.path.basename(path) == "manifest.json"
+                else "catalog_mtime_advanced"
+            )
+            return True, reason
+        # mtime is older than the in-memory snapshot — remember so we don't
+        # re-stat repeatedly during the rest of the session.
+        _seen_artifact_mtime[path] = mtime
+    return False, ""
+
+
+def _record_artifact_evaluation() -> None:
+    """Record the mtime we just stat'd so subsequent calls skip the
+    re-check until the file is touched again. Called from the fast-path
+    AFTER a force_reload (whether it actually changed anything or not).
+    """
+    for path in _local_artifact_paths():
+        try:
+            mtime = os.stat(path).st_mtime
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        prev = _seen_artifact_mtime.get(path, 0.0)
+        if mtime > prev:
+            _seen_artifact_mtime[path] = mtime
+
+
 def _maybe_refresh_semantic() -> None:
+    """Pre-query semantic refresh.
+
+    Two paths: a fast mtime-aware reload for local-authoring loops
+    (no TTL gating) and the original TTL-gated reload for the
+    deployed HTTPS source.
+    """
     global _last_semantic_refresh
+    advanced, advance_reason = _local_artifacts_advanced()
+    if advanced:
+        started = time.perf_counter()
+        old_hash = (semantic_runtime.snapshot.registry_hash
+                    if semantic_runtime.snapshot is not None
+                    else "")
+        manifest.reload_if_changed()
+        catalog.reload_if_changed()
+        changed, _ = semantic_runtime.force_reload()
+        _last_semantic_refresh = time.time()
+        new_hash = (semantic_runtime.snapshot.registry_hash
+                    if semantic_runtime.snapshot is not None
+                    else "")
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        log_event(
+            logger,
+            "semantic_autoreload",
+            reason=advance_reason,
+            old_hash=old_hash,
+            new_hash=new_hash,
+            changed=str(bool(changed)).lower(),
+            duration_ms=duration_ms,
+        )
+        _trace_semantic_event(
+            "semantic_autoreload",
+            f"local artifact advanced ({advance_reason})",
+            {
+                "reason": advance_reason,
+                "old_hash": old_hash,
+                "new_hash": new_hash,
+                "changed": bool(changed),
+                "duration_ms": duration_ms,
+            },
+            event_kind="semantic_autoreload",
+        )
+        _record_artifact_evaluation()
+        return
     now = time.time()
     if now - _last_semantic_refresh < settings.SEMANTIC_REFRESH_INTERVAL_SECONDS:
         return
@@ -270,6 +479,76 @@ def _recommended_semantic_next_tool(route: str, mode: str, hit_count: int) -> st
             return "discover_metrics"
         return "generate_metric_charts" if hit_count <= 1 else "discover_metrics"
     return "query_metrics" if hit_count <= 1 else "discover_metrics"
+
+
+def _preflight_next_action_instructions(
+    *,
+    route: str,
+    mode: str,
+    recommended_metrics: list[str],
+    recommended_dimensions: list[str],
+    covered_topics: list[str],
+    uncovered_topics: list[str],
+) -> list[str]:
+    """Build a short, imperative checklist that goes into the preflight
+    response so the calling agent has a concrete next action — not just
+    a `recommended_metrics: [...]` hint it can ignore.
+
+    Empirical motivation: even with `recommended_metrics=[X]` returned,
+    agents tend to drop into raw `discover_models` / `execute_query`
+    discovery anyway. Putting the action verb + tool name + argument
+    shape directly into the markdown summary closes that gap.
+    """
+    is_answer_mode = mode == "answer"
+    quick_q = " Answer in prose; no chart, no report." if is_answer_mode else ""
+
+    if route == "semantic_ready" and recommended_metrics:
+        metrics_repr = ", ".join(f"`{m}`" for m in recommended_metrics[:3])
+        dims_arg = (
+            f", dimensions={[d for d in recommended_dimensions[:3]]}"
+            if recommended_dimensions
+            else ""
+        )
+        metric_arg = list(recommended_metrics[:3])
+        return [
+            f"- Call `query_metrics(metrics={metric_arg}{dims_arg})` "
+            f"FIRST. Do not run `discover_models`, `discover_dashboard_metrics`, "
+            f"`describe_table`, or `execute_query` before that — those are "
+            f"raw-discovery tools and the semantic layer already has the "
+            f"answer for {metrics_repr}.{quick_q}",
+            "- If `query_metrics` returns an error, then fall back to "
+            "raw SQL discovery for that specific failure — not as the "
+            "default path.",
+        ]
+
+    if route == "hybrid_ready" and recommended_metrics:
+        metric_arg = list(recommended_metrics[:3])
+        covered_repr = ", ".join(f"`{t}`" for t in covered_topics[:3]) or "(none)"
+        uncovered_repr = ", ".join(f"`{t}`" for t in uncovered_topics[:3]) or "(none)"
+        return [
+            f"- Call `query_metrics(metrics={metric_arg})` FIRST for the "
+            f"covered topics ({covered_repr}). The semantic layer answers "
+            f"those in one SQL round-trip with consistent definitions.",
+            f"- THEN, only for the uncovered topics ({uncovered_repr}), "
+            f"use raw discovery (`discover_models` → `describe_table` → "
+            f"`execute_query`).",
+            f"- Combine both results in the final response. Do not skip "
+            f"`query_metrics` for the covered side just because raw works "
+            f"too — the semantic answer is the source of truth for "
+            f"approved metrics.{quick_q}",
+        ]
+
+    if route == "semantic_coverage_gap":
+        return [
+            "- No approved metric covers this question. Proceed with raw "
+            "discovery: `discover_models` → `describe_table` → "
+            f"`execute_query`.{quick_q}",
+            "- If you find that a stable, reusable metric falls out of "
+            "this work, consider proposing a semantic_model addition "
+            "(see `semantic/authoring/` in the dbt-cerebro repo).",
+        ]
+
+    return []
 
 
 def _extract_topic_labels(
@@ -623,17 +902,38 @@ def get_semantic_preflight(
         )
 
     if not semantic_runtime.is_execution_available:
-        reason = semantic_runtime.stale_reason or "semantic execution unavailable"
-        return AnalyticsPreflightResult(
-            query=query,
-            mode=normalized_mode,
-            route="semantic_unavailable",
-            recommended_next_tool="discover_models",
-            fallback_reason=reason,
-            summary_markdown=truncate_response(
-                f"Semantic execution unavailable: {reason}. Continue with raw discovery."
-            ),
-        )
+        # One-shot retry on hash mismatch — same retry the execution-bound
+        # tools (query_metrics, explain_metric_query) get via
+        # `_snapshot_or_error_with_retry`. Closes the gap where a fresh
+        # `dbt build` + `build_registry.py` cycle leaves the runtime
+        # holding a stale snapshot until the next 5-minute TTL tick.
+        is_available, stale_reason = _retry_execution_state_if_hash_mismatch()
+        if not is_available:
+            reason = stale_reason or "semantic execution unavailable"
+            return AnalyticsPreflightResult(
+                query=query,
+                mode=normalized_mode,
+                route="semantic_unavailable",
+                recommended_next_tool="discover_models",
+                fallback_reason=reason,
+                summary_markdown=truncate_response(
+                    f"Semantic execution unavailable: {reason}. Continue with raw discovery."
+                ),
+            )
+        # Retry cleared the mismatch — refresh the local snapshot reference
+        # so downstream scoring uses the newly-loaded registry.
+        snapshot = semantic_runtime.snapshot
+        if snapshot is None:
+            return AnalyticsPreflightResult(
+                query=query,
+                mode=normalized_mode,
+                route="semantic_unavailable",
+                recommended_next_tool="discover_models",
+                fallback_reason="snapshot unavailable after retry",
+                summary_markdown=truncate_response(
+                    "Semantic snapshot unavailable after retry. Continue with raw discovery."
+                ),
+            )
 
     scored: list[tuple[int, str, dict[str, Any]]] = []
     token_idf = _token_idf_for_snapshot(snapshot)
@@ -690,6 +990,25 @@ def get_semantic_preflight(
     if fallback_reason:
         lines.append(f"Fallback reason: `{fallback_reason}`")
 
+    # Output discipline — bake the call-action into the response so the
+    # caller agent can't miss it. Without this, agents tend to ignore
+    # `recommended_metrics` and run raw `discover_models` / `execute_query`
+    # discovery anyway. See cerebro-mcp/.cerebro/logs/session_20260514_
+    # 193924_eba99a.json: 71-step session, 0 `query_metrics` calls, route
+    # was `hybrid_ready` with `recommended_metrics=[transaction_count]`.
+    instruction_lines = _preflight_next_action_instructions(
+        route=route,
+        mode=normalized_mode,
+        recommended_metrics=recommended_metrics,
+        recommended_dimensions=recommended_dimensions,
+        covered_topics=covered_topics,
+        uncovered_topics=uncovered_topics,
+    )
+    if instruction_lines:
+        lines.append("")
+        lines.append("**Next action (do this first):**")
+        lines.extend(instruction_lines)
+
     return AnalyticsPreflightResult(
         query=query,
         mode=normalized_mode,
@@ -727,7 +1046,7 @@ def execute_metric_query(
         _maybe_refresh_semantic()
         if persist_result and not research_project_id:
             return "Error: `persist_result=True` requires `research_project_id`."
-        snapshot, error = _snapshot_or_error(require_execution=True)
+        snapshot, error = _snapshot_or_error_with_retry(require_execution=True)
         if snapshot is None:
             return error or "Semantic execution unavailable."
         resolved_metric_names, metric_definitions, metric_error = _resolve_executable_metrics(
@@ -1302,7 +1621,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         try:
             state.record_semantic_tool_call("explain_metric_query", execution=True)
             _maybe_refresh_semantic()
-            snapshot, error = _snapshot_or_error(require_execution=True)
+            snapshot, error = _snapshot_or_error_with_retry(require_execution=True)
             if snapshot is None:
                 return error or "Semantic execution unavailable."
             resolved_metric_names, metric_definitions, metric_error = _resolve_executable_metrics(

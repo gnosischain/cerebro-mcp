@@ -222,6 +222,14 @@ Remember:
 - Always include date filters to avoid scanning all historical data
 - Prefer `dbt` database models over raw `execution`/`consensus` tables
 - Use FINAL keyword when querying ReplacingMergeTree raw tables
+
+**Output discipline.** Generate charts (`generate_charts`, `generate_chart`,
+`quick_chart`) and reports (`generate_report`, `generate_research_report`)
+**only** when the user explicitly asks for them, or when the question
+genuinely requires a longitudinal / multi-dimensional view that prose
+cannot summarise in 1–3 sentences. For yes/no questions, single-figure
+questions, or "are X doing Y?"-style explanatory asks, **answer in prose**.
+Do not produce a deliverable when an explanation is the deliverable.
 """
 
     @mcp.prompt()

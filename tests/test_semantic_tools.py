@@ -282,6 +282,65 @@ def test_preflight_routes_active_validators_question_to_semantic_ready(semantic_
     assert result.recommended_next_tool == "query_metrics"
 
 
+def test_preflight_semantic_ready_emits_explicit_query_metrics_directive(semantic_runtime_ready):
+    """`semantic_ready` route must bake an explicit "call query_metrics
+    FIRST" directive into the summary_markdown so agents can't ignore
+    `recommended_metrics` and drop into raw discovery anyway."""
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-preflight-directive-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["preflight_analytics_request"].fn
+    result = fn(query="How many active validators are there over time?", mode="answer")
+
+    md = result.summary_markdown
+    assert "Next action" in md
+    assert "query_metrics" in md
+    assert "validators_active" in md
+    # Discourage parallel raw-discovery path on the semantic_ready route.
+    assert "Do not run" in md or "do not run" in md.lower()
+    # answer-mode directive carries the no-chart/no-report constraint.
+    assert "no chart" in md.lower() or "no report" in md.lower()
+
+
+def test_preflight_hybrid_ready_emits_split_directive(semantic_runtime_ready):
+    """`hybrid_ready` must instruct: call `query_metrics` for the covered
+    side FIRST, then raw discovery only for the uncovered side."""
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-preflight-hybrid-directive-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["preflight_analytics_request"].fn
+    result = fn(query="transaction count and bridge volume weekly report", mode="report")
+
+    assert result.route == "hybrid_ready"
+    md = result.summary_markdown
+    assert "Next action" in md
+    assert "query_metrics" in md
+    # The directive must mention the covered metric and tell the agent
+    # to NOT skip the semantic call just because raw SQL also works.
+    assert "transaction_count" in md
+    assert "covered" in md.lower()
+    assert "uncovered" in md.lower()
+
+
+def test_preflight_coverage_gap_emits_raw_discovery_directive(semantic_runtime_ready):
+    """`semantic_coverage_gap` should explicitly route to raw discovery
+    without leaving the agent guessing."""
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-preflight-gap-directive-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["preflight_analytics_request"].fn
+    result = fn(query="validators owning gnosis pay wallets", mode="report")
+
+    assert result.route == "semantic_coverage_gap"
+    md = result.summary_markdown
+    assert "Next action" in md
+    assert "discover_models" in md
+    assert "execute_query" in md
+
+
 def test_preflight_reuses_cached_result_without_growing_cache(semantic_runtime_ready):
     semantic_tools, _snapshot = semantic_runtime_ready
     mcp = FastMCP("semantic-preflight-cache-test")
