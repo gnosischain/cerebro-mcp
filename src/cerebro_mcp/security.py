@@ -230,7 +230,7 @@ def detect_suspicious_flags(
 
 def _canonical_hash(payload: Any) -> str:
     """SHA-256 of canonical JSON of a redacted payload."""
-    from cerebro_mcp.tools.reasoning import _redact_sensitive
+    from cerebro_mcp.tools.governance.reasoning import _redact_sensitive
 
     redacted = _redact_sensitive(payload)
     canonical = json.dumps(
@@ -296,13 +296,13 @@ def assess_tool_call(
     Called from the tracing wrapper after the tool has executed.
     This is log_only mode — never blocks execution.
     """
-    from cerebro_mcp.observability import (
+    from cerebro_mcp.runtime.observability import (
         log_event as _log_event,
         observe_security_app_only_call,
         observe_security_high_risk_call,
         observe_security_suspicious_call,
     )
-    from cerebro_mcp.tools.reasoning import _redact_sensitive
+    from cerebro_mcp.tools.governance.reasoning import _redact_sensitive
 
     transport = os.environ.get("CEREBRO_TRANSPORT", "stdio")
     risk_classes = get_risk_classes(tool_name)

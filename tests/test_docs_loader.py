@@ -1,7 +1,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from cerebro_mcp.docs_loader import (
+from cerebro_mcp.loaders.docs import (
     DocsLoader,
     gnosis_chain_path_to_page_path,
     location_to_markdown_path,
@@ -14,7 +14,7 @@ from cerebro_mcp.docs_loader import (
 def test_missing_docs_index_logs_without_stdout(caplog, capsys):
     loader = DocsLoader()
 
-    with patch("cerebro_mcp.docs_loader.settings") as mock_settings:
+    with patch("cerebro_mcp.loaders.docs.settings") as mock_settings:
         mock_settings.DOCS_BASE_URL = ""
         mock_settings.DOCS_SEARCH_INDEX_URL = None
         mock_settings.DOCS_SEARCH_INDEX_PATH = ""
@@ -37,10 +37,10 @@ def test_docs_index_load_success_uses_logging_not_stdout(caplog, capsys):
     mock_resp.headers = {}
 
     with patch(
-        "cerebro_mcp.docs_loader.requests.get",
+        "cerebro_mcp.loaders.docs.requests.get",
         return_value=mock_resp,
     ):
-        with patch("cerebro_mcp.docs_loader.settings") as mock_settings:
+        with patch("cerebro_mcp.loaders.docs.settings") as mock_settings:
             mock_settings.DOCS_BASE_URL = ""
             mock_settings.DOCS_SEARCH_INDEX_URL = "http://test.com/search_index.json"
             mock_settings.DOCS_SEARCH_INDEX_PATH = ""
@@ -88,8 +88,8 @@ def test_get_chunk_prefers_markdown_mirror_over_search_index_text():
     mock_resp.status_code = 200
     mock_resp.text = "# Dispatcher\n\nMirror copy"
 
-    with patch("cerebro_mcp.docs_loader.requests.get", return_value=mock_resp):
-        with patch("cerebro_mcp.docs_loader.settings") as mock_settings:
+    with patch("cerebro_mcp.loaders.docs.requests.get", return_value=mock_resp):
+        with patch("cerebro_mcp.loaders.docs.settings") as mock_settings:
             mock_settings.DOCS_BASE_URL = "https://docs.analytics.gnosis.io/"
             result = loader.get_chunk("mcp/dispatcher/")
 
@@ -111,8 +111,8 @@ def test_get_chunk_falls_back_to_search_index_when_mirror_unavailable():
     mock_resp = MagicMock()
     mock_resp.status_code = 404
 
-    with patch("cerebro_mcp.docs_loader.requests.get", return_value=mock_resp):
-        with patch("cerebro_mcp.docs_loader.settings") as mock_settings:
+    with patch("cerebro_mcp.loaders.docs.requests.get", return_value=mock_resp):
+        with patch("cerebro_mcp.loaders.docs.settings") as mock_settings:
             mock_settings.DOCS_BASE_URL = "https://docs.analytics.gnosis.io/"
             result = loader.get_chunk("mcp/dispatcher/")
 
@@ -125,8 +125,8 @@ def test_get_docs_context_uses_full_artifact_when_requested():
     mock_resp.status_code = 200
     mock_resp.text = "full context"
 
-    with patch("cerebro_mcp.docs_loader.requests.get", return_value=mock_resp) as mock_get:
-        with patch("cerebro_mcp.docs_loader.settings") as mock_settings:
+    with patch("cerebro_mcp.loaders.docs.requests.get", return_value=mock_resp) as mock_get:
+        with patch("cerebro_mcp.loaders.docs.settings") as mock_settings:
             mock_settings.DOCS_BASE_URL = "https://docs.analytics.gnosis.io/"
             result = loader.get_context(full=True)
 

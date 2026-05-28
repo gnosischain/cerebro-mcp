@@ -35,8 +35,8 @@ from pathlib import Path
 # Make `cerebro_mcp` importable when run from repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cerebro_mcp.manifest_loader import ManifestLoader, manifest  # noqa: E402
-from cerebro_mcp.schema_context import build_scoped_schema_block  # noqa: E402
+from cerebro_mcp.loaders.manifest import ManifestLoader, manifest  # noqa: E402
+from cerebro_mcp.runtime.schema_context import build_scoped_schema_block  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

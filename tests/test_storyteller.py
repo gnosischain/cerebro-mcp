@@ -20,7 +20,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
-from cerebro_mcp.storyteller_models import (
+from cerebro_mcp.models.storyteller import (
     BigIdea,
     ClarityCheck,
     ContextBrief,
@@ -29,9 +29,9 @@ from cerebro_mcp.storyteller_models import (
     StoryboardScene,
     VisualSpec,
 )
-from cerebro_mcp.storyteller_state import StorytellerState, storyteller_state
-from cerebro_mcp.tools.agents import _VALID_ROLES, register_agent_tools
-from cerebro_mcp.tools.storyteller import register_storyteller_tools
+from cerebro_mcp.storyteller.state import StorytellerState, storyteller_state
+from cerebro_mcp.tools.governance.agents import _VALID_ROLES, register_agent_tools
+from cerebro_mcp.tools.storyteller.storyteller import register_storyteller_tools
 
 
 # ── fixtures ──────────────────────────────────────────────────────
@@ -530,7 +530,7 @@ def _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard):
 def test_research_metadata_from_snapshot_maps_fields(
     valid_brief, valid_big_idea, valid_storyboard
 ):
-    from cerebro_mcp.tools.storyteller import _research_metadata_from_snapshot
+    from cerebro_mcp.tools.storyteller.storyteller import _research_metadata_from_snapshot
 
     _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard)
     snap = storyteller_state.snapshot()
@@ -550,7 +550,7 @@ def test_research_metadata_takeaways_capped_at_six(
     valid_brief, valid_big_idea
 ):
     """A storyboard with >6 scene intents is capped at 6 takeaways."""
-    from cerebro_mcp.tools.storyteller import _research_metadata_from_snapshot
+    from cerebro_mcp.tools.storyteller.storyteller import _research_metadata_from_snapshot
 
     big_storyboard = Storyboard(
         scenes=[
@@ -624,7 +624,7 @@ def test_storyteller_generate_story_report_scrollytelling_style(
 def test_case_study_metadata_from_snapshot_maps_fields(
     valid_brief, valid_big_idea, valid_storyboard
 ):
-    from cerebro_mcp.tools.storyteller import _case_study_metadata_from_snapshot
+    from cerebro_mcp.tools.storyteller.storyteller import _case_study_metadata_from_snapshot
 
     _drive_to_handoff(valid_brief, valid_big_idea, valid_storyboard)
     snap = storyteller_state.snapshot()
@@ -672,7 +672,7 @@ def test_storyteller_generate_story_report_dashboard_opt_out(
 
 def test_standard_mode_untouched_by_storyteller():
     """Starting a storyteller session must not touch the standard SessionState."""
-    from cerebro_mcp.tools.session_state import state
+    from cerebro_mcp.tools.governance.session_state import state
 
     state.reset()
     state.record_search_models("test", 5)

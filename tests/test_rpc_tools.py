@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cerebro_mcp import abi_resolver
-from cerebro_mcp.abi_resolver import resolve_abi
+from cerebro_mcp.clients import abi_resolver
+from cerebro_mcp.clients.abi_resolver import resolve_abi
 
 
 # ---------------------------------------------------------------------------
@@ -158,20 +158,20 @@ def test_resolver_proxy_falls_back_to_blockscout_when_no_impl_row(fake_ch):
 # ---------------------------------------------------------------------------
 
 def test_chain_id_validation_rejects_non_gnosis(monkeypatch):
-    from cerebro_mcp.web3_client import GnosisRpcManager
+    from cerebro_mcp.clients.web3 import GnosisRpcManager
 
     fake_w3 = SimpleNamespace(eth=SimpleNamespace(chain_id=1))
     fake_web3_cls = MagicMock(return_value=fake_w3)
     fake_web3_cls.HTTPProvider = MagicMock(return_value=None)
 
-    monkeypatch.setattr("cerebro_mcp.web3_client.Web3", fake_web3_cls)
+    monkeypatch.setattr("cerebro_mcp.clients.web3.Web3", fake_web3_cls)
     mgr = GnosisRpcManager()
     with pytest.raises(ValueError, match="not Gnosis Chain"):
         mgr._make("http://example/rpc")
 
 
 def test_for_block_routes_latest_to_standard(monkeypatch):
-    from cerebro_mcp.web3_client import GnosisRpcManager
+    from cerebro_mcp.clients.web3 import GnosisRpcManager
     mgr = GnosisRpcManager()
     mgr._standard = "STD"  # type: ignore[assignment]
     mgr._archive = "ARCH"  # type: ignore[assignment]
@@ -181,9 +181,9 @@ def test_for_block_routes_latest_to_standard(monkeypatch):
 
 
 def test_archive_requires_url(monkeypatch):
-    from cerebro_mcp.web3_client import GnosisRpcManager
+    from cerebro_mcp.clients.web3 import GnosisRpcManager
     monkeypatch.setattr(
-        "cerebro_mcp.web3_client.settings.GNOSIS_ARCHIVE_RPC_URL", "",
+        "cerebro_mcp.clients.web3.settings.GNOSIS_ARCHIVE_RPC_URL", "",
         raising=False,
     )
     mgr = GnosisRpcManager()
@@ -194,7 +194,7 @@ def test_archive_requires_url(monkeypatch):
 def test_module_import_does_not_create_rpc():
     """Importing the web3_client module must not instantiate any Web3 client."""
     import importlib
-    import cerebro_mcp.web3_client as wc
+    import cerebro_mcp.clients.web3 as wc
     importlib.reload(wc)
     assert wc.rpc_manager._standard is None
     assert wc.rpc_manager._archive is None
@@ -206,7 +206,7 @@ def test_module_import_does_not_create_rpc():
 
 def _capture_tools():
     """Register the RPC tools onto a stub MCP and return the captured callables."""
-    from cerebro_mcp.tools.rpc import register_rpc_tools
+    from cerebro_mcp.tools.web3.rpc import register_rpc_tools
 
     captured: dict[str, Any] = {}
 
@@ -248,7 +248,7 @@ def test_contract_call_rejects_non_view_function(fake_ch, monkeypatch):
     ]]}
 
     # Patch the tool-side ch reference: re-register tools with our fake_ch.
-    from cerebro_mcp.tools.rpc import register_rpc_tools
+    from cerebro_mcp.tools.web3.rpc import register_rpc_tools
     captured: dict = {}
 
     class StubMCP:
@@ -268,7 +268,7 @@ def test_contract_call_rejects_non_view_function(fake_ch, monkeypatch):
     fake_w3 = MagicMock()
     fake_w3.eth.contract.return_value = fake_contract
     monkeypatch.setattr(
-        "cerebro_mcp.tools.rpc.rpc_manager.for_block",
+        "cerebro_mcp.tools.web3.rpc.rpc_manager.for_block",
         lambda _b: fake_w3,
     )
 
@@ -325,7 +325,7 @@ def test_resolver_cache_includes_target_no_cross_pollution(fake_ch):
 
 def test_block_identifier_coercion():
     """UI sends every block as a string; coercer turns numerics into ints."""
-    from cerebro_mcp.tools.rpc import _coerce_block_identifier
+    from cerebro_mcp.tools.web3.rpc import _coerce_block_identifier
     assert _coerce_block_identifier("latest") == "latest"
     assert _coerce_block_identifier("LATEST") == "latest"
     assert _coerce_block_identifier(" finalized ") == "finalized"

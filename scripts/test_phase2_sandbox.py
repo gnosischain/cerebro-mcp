@@ -38,12 +38,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 
-from cerebro_mcp.clickhouse_client import (  # noqa: E402
+from cerebro_mcp.clients.clickhouse import (  # noqa: E402
     _datetime64_precision,
     _decimal_precision,
     _sanitize_column_for_parquet,
 )
-from cerebro_mcp.sandbox_manager import SandboxManager  # noqa: E402
+from cerebro_mcp.runtime.sandbox_manager import SandboxManager  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +395,7 @@ def section_live(r: Reporter, root: Path, ch_table: str) -> None:
     r.section(f"8. LIVE ClickHouse roundtrip (table={ch_table})")
 
     try:
-        from cerebro_mcp.clickhouse_client import ClickHouseManager
+        from cerebro_mcp.clients.clickhouse import ClickHouseManager
     except Exception as e:
         r.check("import ClickHouseManager", False, f"{e}")
         return

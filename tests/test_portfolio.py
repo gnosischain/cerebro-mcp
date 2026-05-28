@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from cerebro_mcp.clickhouse_client import ExecutedQuery
-from cerebro_mcp.mini_app_cache import reset_cache_for_tests
-from cerebro_mcp.tools import mini_apps
-from cerebro_mcp.tools.portfolio import register_portfolio_tools
+from cerebro_mcp.clients.clickhouse import ExecutedQuery
+from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
+from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.visualization.portfolio import register_portfolio_tools
 
 
 SAFE = "0x1111111111111111111111111111111111111111"

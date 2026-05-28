@@ -10,9 +10,9 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from starlette.testclient import TestClient
 
-import cerebro_mcp.tools.reasoning as reasoning
-from cerebro_mcp.clickhouse_client import ClickHouseManager
-from cerebro_mcp.observability import (
+import cerebro_mcp.tools.governance.reasoning as reasoning
+from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.runtime.observability import (
     JsonFormatter,
     cerebro_clickhouse_query_duration_seconds,
     cerebro_clickhouse_query_errors_total,

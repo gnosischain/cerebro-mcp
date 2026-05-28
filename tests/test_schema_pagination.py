@@ -2,8 +2,8 @@ from unittest.mock import MagicMock
 
 from mcp.server.fastmcp import FastMCP
 
-from cerebro_mcp.tool_models import TableListPage
-from cerebro_mcp.tools.schema import register_schema_tools
+from cerebro_mcp.models.tool import TableListPage
+from cerebro_mcp.tools.analytics.schema import register_schema_tools
 
 
 def test_list_tables_returns_paginated_structured_page():

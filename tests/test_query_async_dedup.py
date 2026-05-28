@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from cerebro_mcp.tools.query_async import (
+from cerebro_mcp.tools.analytics.query_async import (
     QueryJob,
     _pending_queries,
     _query_dedup_key,

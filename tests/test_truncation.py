@@ -1,5 +1,5 @@
 import pytest
-from cerebro_mcp.tools.query import format_results_table, truncate_response
+from cerebro_mcp.tools.analytics.query import format_results_table, truncate_response
 
 
 class TestFormatResultsTableTruncation:

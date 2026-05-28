@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from cerebro_mcp.event_store import EventStore
-from cerebro_mcp.workflow_payloads import (
+from cerebro_mcp.workflow.event_store import EventStore
+from cerebro_mcp.workflow.payloads import (
     EVENT_LLM_CALL_COMPLETED,
     EVENT_LLM_CALL_FAILED,
     EVENT_LLM_CALL_STARTED,
@@ -34,7 +34,7 @@ from cerebro_mcp.workflow_payloads import (
     WORKFLOW_RUNNING,
     find_unfinished_llm_calls,
 )
-from cerebro_mcp.workflow_runner import (
+from cerebro_mcp.workflow.runner import (
     SubTask,
     begin_workflow,
     new_workflow_id,

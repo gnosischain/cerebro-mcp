@@ -40,9 +40,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cerebro_mcp.event_store import EventStore  # noqa: E402
-from cerebro_mcp.research_resume import install_research_resume_handler  # noqa: E402
-from cerebro_mcp.workflow_payloads import (  # noqa: E402
+from cerebro_mcp.workflow.event_store import EventStore  # noqa: E402
+from cerebro_mcp.research.resume import install_research_resume_handler  # noqa: E402
+from cerebro_mcp.workflow.payloads import (  # noqa: E402
     EVENT_LLM_CALL_STARTED,
     LLMCallEvent,
     LLMTurn,
@@ -51,7 +51,7 @@ from cerebro_mcp.workflow_payloads import (  # noqa: E402
     WORKFLOW_ORPHANED,
     WORKFLOW_RUNNING,
 )
-from cerebro_mcp.workflow_registry import (  # noqa: E402
+from cerebro_mcp.workflow.registry import (  # noqa: E402
     ACTION_COMPLETE,
     ACTION_FAILED,
     ACTION_NO_HANDLER,
@@ -103,7 +103,7 @@ async def _fresh_store(db_path: Path) -> EventStore:
     from cerebro_mcp import config as cerebro_config
     cerebro_config.settings.EVENT_STORE_PATH = str(db_path)
 
-    from cerebro_mcp import event_store as event_store_mod
+    from cerebro_mcp.workflow import event_store as event_store_mod
     s = EventStore(db_path=db_path)
     await s.init()
     event_store_mod._default_store = s
@@ -308,7 +308,7 @@ async def section_list_recent_hints(r: Reporter, db_path: Path) -> None:
     store = await _fresh_store(db_path)
     # Force the helpers to read from the same store our test sections wrote to
     # by making sure default_event_store() points at this file.
-    from cerebro_mcp import event_store as event_store_mod
+    from cerebro_mcp.workflow import event_store as event_store_mod
     event_store_mod._default_store = store
 
     entries = await list_recent_resume_hints(store=store)

@@ -10,7 +10,7 @@ from datetime import datetime
 
 import pytest
 
-import cerebro_mcp.tools.visualization as viz
+import cerebro_mcp.tools.visualization.charts as viz
 
 
 @pytest.fixture(autouse=True)

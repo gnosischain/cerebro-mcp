@@ -6,12 +6,12 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
-from cerebro_mcp.tools.cross_check import (
+from cerebro_mcp.tools.governance.cross_check import (
     _eval_formula,
     _verify_one_claim,
     _first_numeric,
 )
-from cerebro_mcp.custom_tool_models import VerificationClaim
+from cerebro_mcp.models.custom_tool import VerificationClaim
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ class TestVerifyOneClaim:
             check_query="SELECT balance FROM ...",
         )
 
-        with patch("cerebro_mcp.tools.cross_check.format_results_table", return_value="| balance |\n| 349.6 |"):
+        with patch("cerebro_mcp.tools.governance.cross_check.format_results_table", return_value="| balance |\n| 349.6 |"):
             output, passed = _verify_one_claim(claim, ch)
 
         assert passed
@@ -144,7 +144,7 @@ class TestVerifyOneClaim:
             check_query="SELECT balance FROM ...",
         )
 
-        with patch("cerebro_mcp.tools.cross_check.format_results_table", return_value="| balance |\n| 349.6 |"):
+        with patch("cerebro_mcp.tools.governance.cross_check.format_results_table", return_value="| balance |\n| 349.6 |"):
             output, passed = _verify_one_claim(claim, ch)
 
         assert not passed

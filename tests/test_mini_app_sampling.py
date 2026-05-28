@@ -1,4 +1,4 @@
-"""Tests for the bounded-dataset sampler in cerebro_mcp.tools.mini_apps."""
+"""Tests for the bounded-dataset sampler in cerebro_mcp.tools.visualization.mini_apps."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import re
 
 import pytest
 
-from cerebro_mcp.clickhouse_client import ExecutedQuery
-from cerebro_mcp.mini_app_cache import reset_cache_for_tests
-from cerebro_mcp.tools import mini_apps
-from cerebro_mcp.tools.mini_apps import (
+from cerebro_mcp.clients.clickhouse import ExecutedQuery
+from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
+from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.visualization.mini_apps import (
     HARD_TOTAL_LIMIT,
     MiniAppQueryError,
     PREVIEW_ROW_CAP,

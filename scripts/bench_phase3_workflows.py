@@ -42,8 +42,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cerebro_mcp.event_store import EventStore  # noqa: E402
-from cerebro_mcp.workflow_payloads import (  # noqa: E402
+from cerebro_mcp.workflow.event_store import EventStore  # noqa: E402
+from cerebro_mcp.workflow.payloads import (  # noqa: E402
     EVENT_LLM_CALL_COMPLETED,
     EVENT_LLM_CALL_FAILED,
     EVENT_LLM_CALL_STARTED,
@@ -57,7 +57,7 @@ from cerebro_mcp.workflow_payloads import (  # noqa: E402
     WORKFLOW_RUNNING,
     find_unfinished_llm_calls,
 )
-from cerebro_mcp.workflow_runner import (  # noqa: E402
+from cerebro_mcp.workflow.runner import (  # noqa: E402
     SubTask,
     begin_workflow,
     new_workflow_id,
@@ -230,7 +230,7 @@ async def section_realistic_workflow(r: Reporter, db_path: Path) -> dict:
             seq_out["analytics_reporter"]["charts"] == 9)
 
     # Mark workflow done.
-    from cerebro_mcp.workflow_payloads import WORKFLOW_COMPLETED as _DONE
+    from cerebro_mcp.workflow.payloads import WORKFLOW_COMPLETED as _DONE
     await s.mark_workflow_status(wid, _DONE)
 
     # Audit trail

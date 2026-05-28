@@ -7,8 +7,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from cerebro_mcp import abi_resolver
-from cerebro_mcp.tools import contract_explorer, mini_apps
+from cerebro_mcp.clients import abi_resolver
+from cerebro_mcp.tools.web3 import contract_explorer
+from cerebro_mcp.tools.visualization import mini_apps
 
 
 # ---------------------------------------------------------------------------

@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from cerebro_mcp.semantic_models import SemanticSnapshot
-from cerebro_mcp.tools.semantic import register_semantic_tools
+from cerebro_mcp.models.semantic import SemanticSnapshot
+from cerebro_mcp.tools.semantic.semantic import register_semantic_tools
 
 
 def _make_snapshot() -> SemanticSnapshot:
@@ -142,7 +142,7 @@ def _make_snapshot() -> SemanticSnapshot:
 
 @pytest.fixture()
 def semantic_runtime_ready(monkeypatch):
-    from cerebro_mcp.tools import semantic as semantic_tools
+    from cerebro_mcp.tools.semantic import semantic as semantic_tools
 
     snapshot = _make_snapshot()
     semantic_tools.state.reset()
@@ -358,7 +358,7 @@ def test_preflight_reuses_cached_result_without_growing_cache(semantic_runtime_r
 
 
 def test_semantic_tools_not_registered_when_disabled(monkeypatch):
-    from cerebro_mcp.tools import semantic as semantic_tools
+    from cerebro_mcp.tools.semantic import semantic as semantic_tools
 
     monkeypatch.setattr(semantic_tools.settings, "SEMANTIC_ENABLED", False)
     mcp = FastMCP("semantic-disabled-test")
@@ -456,7 +456,7 @@ def test_query_metrics_normalizes_date_dimension_alias(semantic_runtime_ready):
 
 
 def test_semantic_execution_unavailable_returns_graceful_error(monkeypatch):
-    from cerebro_mcp.tools import semantic as semantic_tools
+    from cerebro_mcp.tools.semantic import semantic as semantic_tools
 
     monkeypatch.setattr(semantic_tools.settings, "SEMANTIC_ENABLED", True)
     monkeypatch.setattr(
@@ -542,7 +542,7 @@ def _pr3_metric(
 
 
 def test_resolve_executable_metrics_approved_passes():
-    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+    from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
 
     snapshot = _pr3_snapshot({"good": _pr3_metric("good", quality_tier="approved")})
     names, defs, err = _resolve_executable_metrics(snapshot, ["good"])
@@ -553,7 +553,7 @@ def test_resolve_executable_metrics_approved_passes():
 
 
 def test_resolve_executable_metrics_candidate_default_rejects_with_opt_in_hint():
-    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+    from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
 
     snapshot = _pr3_snapshot({"cand": _pr3_metric("cand", quality_tier="candidate")})
     _, _, err = _resolve_executable_metrics(snapshot, ["cand"])
@@ -565,7 +565,7 @@ def test_resolve_executable_metrics_candidate_default_rejects_with_opt_in_hint()
 
 
 def test_resolve_executable_metrics_candidate_with_allow_candidate_passes():
-    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+    from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
 
     snapshot = _pr3_snapshot({"cand": _pr3_metric("cand", quality_tier="candidate")})
     names, _, err = _resolve_executable_metrics(
@@ -580,7 +580,7 @@ def test_resolve_executable_metrics_allow_candidate_does_not_bypass_unapproved_r
     """The opt-in is for QUALITY review escape, not authorization escape.
     A candidate metric whose root model is itself not approved must still
     be rejected even with allow_candidate=True."""
-    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+    from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
 
     snapshot = _pr3_snapshot(
         {"cand": _pr3_metric("cand", quality_tier="candidate", root_model="candidate_model")}
@@ -598,7 +598,7 @@ def test_resolve_executable_metrics_scalar_kpi_gets_dedicated_error():
     """A metric with no dimensions can't be semantically planned —
     show a specific message pointing at execute_query rather than
     the generic 'not approved' fallback."""
-    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+    from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
 
     snapshot = _pr3_snapshot(
         {"kpi": _pr3_metric("kpi", quality_tier="candidate", allowed_dimensions=[])}
@@ -617,7 +617,7 @@ def test_resolve_executable_metrics_scalar_kpi_takes_precedence_over_candidate()
     """A metric that's BOTH candidate AND scalar should get the scalar
     error (more actionable). allow_candidate=True doesn't help — the
     metric is unrunnable regardless of quality tier."""
-    from cerebro_mcp.tools.semantic import _resolve_executable_metrics
+    from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
 
     snapshot = _pr3_snapshot(
         {"kpi": _pr3_metric("kpi", quality_tier="candidate", allowed_dimensions=[])}
@@ -715,7 +715,7 @@ def test_clickhouse_query_rules_registers_only_with_valid_bundle(
     monkeypatch,
     tmp_path,
 ):
-    from cerebro_mcp.tools import semantic as semantic_tools
+    from cerebro_mcp.tools.semantic import semantic as semantic_tools
 
     bundle_dir = tmp_path / "clickhouse_agent_skills"
     skill_dir = bundle_dir / "skills" / "clickhouse-best-practices"

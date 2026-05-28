@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from cerebro_mcp.clickhouse_client import ExecutedQuery
-from cerebro_mcp.tools import query_async
+from cerebro_mcp.clients.clickhouse import ExecutedQuery
+from cerebro_mcp.tools.analytics import query_async
 
 
 def test_store_async_result_keeps_small_payload_in_memory(monkeypatch, tmp_path):

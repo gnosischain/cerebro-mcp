@@ -3,19 +3,19 @@ from unittest.mock import MagicMock
 
 from mcp.server.fastmcp import FastMCP
 
-from cerebro_mcp.clickhouse_client import ExecutedQuery
+from cerebro_mcp.clients.clickhouse import ExecutedQuery
 from cerebro_mcp.prompts.templates import register_prompts
-from cerebro_mcp.research_models import (
+from cerebro_mcp.models.research import (
     EvidenceRef,
     PeerReviewResult,
     ResearchMemoryEntry,
 )
-from cerebro_mcp.research_store import ResearchStore
-from cerebro_mcp.tool_models import QueryResult
-from cerebro_mcp.tools import research as research_mod
-from cerebro_mcp.tools.query import register_query_tools
-from cerebro_mcp.tools.research import register_research_tools
-from cerebro_mcp.tools.session_state import state
+from cerebro_mcp.research.store import ResearchStore
+from cerebro_mcp.models.tool import QueryResult
+from cerebro_mcp.tools.research import research as research_mod
+from cerebro_mcp.tools.analytics.query import register_query_tools
+from cerebro_mcp.tools.research.research import register_research_tools
+from cerebro_mcp.tools.governance.session_state import state
 
 
 def _fake_query_result() -> QueryResult:

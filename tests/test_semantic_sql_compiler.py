@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from cerebro_mcp.semantic_sql_compiler import (
+from cerebro_mcp.semantic.sql_compiler import (
     _AGG_TO_CLICKHOUSE,
     _agg_call,
     _compile_filters,
@@ -230,7 +230,7 @@ class TestTimeSpineUpcastCompiler:
         )
 
     def test_upcast_renders_template_with_root_alias(self):
-        from cerebro_mcp.semantic_sql_compiler import _compile_branch_cte
+        from cerebro_mcp.semantic.sql_compiler import _compile_branch_cte
         snapshot = self._build_snapshot()
         branch = self._build_branch_with_upcast()
 
@@ -247,7 +247,7 @@ class TestTimeSpineUpcastCompiler:
     def test_upcast_branch_index_propagates(self):
         # When the planner emits multiple branches, each gets its own
         # alias and the upcast template must use it.
-        from cerebro_mcp.semantic_sql_compiler import _compile_branch_cte
+        from cerebro_mcp.semantic.sql_compiler import _compile_branch_cte
         snapshot = self._build_snapshot()
         branch = self._build_branch_with_upcast()
 

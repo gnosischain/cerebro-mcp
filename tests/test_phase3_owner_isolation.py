@@ -23,8 +23,8 @@ import pytest
 import pytest_asyncio
 
 from cerebro_mcp import config as cerebro_config
-from cerebro_mcp.event_store import EventStore
-from cerebro_mcp.workflow_payloads import (
+from cerebro_mcp.workflow.event_store import EventStore
+from cerebro_mcp.workflow.payloads import (
     WORKFLOW_RUNNING,
 )
 
@@ -39,7 +39,7 @@ pytestmark = pytest.mark.asyncio
 
 class TestIdentityHashing:
     async def test_set_returns_hash_not_plaintext(self):
-        from cerebro_mcp.identity import (
+        from cerebro_mcp.runtime.identity import (
             get_current_owner,
             reset_current_owner,
             set_current_owner,
@@ -55,7 +55,7 @@ class TestIdentityHashing:
             reset_current_owner(tok)
 
     async def test_reset_restores_previous_state(self):
-        from cerebro_mcp.identity import (
+        from cerebro_mcp.runtime.identity import (
             get_current_owner,
             reset_current_owner,
             set_current_owner,
@@ -67,7 +67,7 @@ class TestIdentityHashing:
         assert get_current_owner() is None
 
     async def test_empty_inputs_clear_owner(self):
-        from cerebro_mcp.identity import (
+        from cerebro_mcp.runtime.identity import (
             get_current_owner,
             reset_current_owner,
             set_current_owner,
@@ -80,15 +80,15 @@ class TestIdentityHashing:
                 reset_current_owner(tok)
 
     async def test_same_input_produces_stable_hash(self):
-        from cerebro_mcp.identity import _hash_owner
+        from cerebro_mcp.runtime.identity import _hash_owner
         assert _hash_owner("alice@gnosis.io") == _hash_owner("alice@gnosis.io")
 
     async def test_different_inputs_distinct_hashes(self):
-        from cerebro_mcp.identity import _hash_owner
+        from cerebro_mcp.runtime.identity import _hash_owner
         assert _hash_owner("alice@gnosis.io") != _hash_owner("bob@gnosis.io")
 
     async def test_salt_changes_hash(self, monkeypatch):
-        from cerebro_mcp.identity import _hash_owner
+        from cerebro_mcp.runtime.identity import _hash_owner
         monkeypatch.delenv("CEREBRO_OWNER_HASH_SALT", raising=False)
         unsalted = _hash_owner("alice@gnosis.io")
         monkeypatch.setenv("CEREBRO_OWNER_HASH_SALT", "deployment-prod")
@@ -96,17 +96,17 @@ class TestIdentityHashing:
         assert unsalted != salted
 
     async def test_initial_stdio_owner_reads_env(self, monkeypatch):
-        from cerebro_mcp.identity import initial_stdio_owner
+        from cerebro_mcp.runtime.identity import initial_stdio_owner
         monkeypatch.setenv("CEREBRO_OWNER", "hugo@gnosis.io")
         assert initial_stdio_owner() == "hugo@gnosis.io"
 
     async def test_initial_stdio_owner_unset_returns_none(self, monkeypatch):
-        from cerebro_mcp.identity import initial_stdio_owner
+        from cerebro_mcp.runtime.identity import initial_stdio_owner
         monkeypatch.delenv("CEREBRO_OWNER", raising=False)
         assert initial_stdio_owner() is None
 
     async def test_initial_stdio_owner_empty_returns_none(self, monkeypatch):
-        from cerebro_mcp.identity import initial_stdio_owner
+        from cerebro_mcp.runtime.identity import initial_stdio_owner
         monkeypatch.setenv("CEREBRO_OWNER", "   ")
         assert initial_stdio_owner() is None
 
@@ -127,7 +127,7 @@ async def store(tmp_path: Path) -> EventStore:
 def _hash(s: str) -> str:
     """Local helper so tests can compare DB rows to expected hashes
     without importing the private function from identity."""
-    from cerebro_mcp.identity import _hash_owner
+    from cerebro_mcp.runtime.identity import _hash_owner
     return _hash_owner(s)
 
 
@@ -146,7 +146,7 @@ class TestOwnerStamping:
         """The DB must not contain `alice@gnosis.io` as plaintext."""
         s = EventStore(db_path=tmp_path / "leak_test.db")
         await s.init()
-        from cerebro_mcp.identity import (
+        from cerebro_mcp.runtime.identity import (
             get_current_owner,
             reset_current_owner,
             set_current_owner,
@@ -243,10 +243,10 @@ class TestSyncHelperReadsContextvar:
             raising=True,
         )
         # Reset the bootstrap cache so the new path triggers DDL.
-        from cerebro_mcp import event_store_sync as evs
+        from cerebro_mcp.workflow import event_store_sync as evs
         evs._reset_bootstrap_cache()
 
-        from cerebro_mcp.identity import (
+        from cerebro_mcp.runtime.identity import (
             reset_current_owner,
             set_current_owner,
         )
@@ -268,9 +268,9 @@ class TestSyncHelperReadsContextvar:
             str(tmp_path / "sync_explicit.db"),
             raising=True,
         )
-        from cerebro_mcp import event_store_sync as evs
+        from cerebro_mcp.workflow import event_store_sync as evs
         evs._reset_bootstrap_cache()
-        from cerebro_mcp.identity import (
+        from cerebro_mcp.runtime.identity import (
             reset_current_owner,
             set_current_owner,
         )
