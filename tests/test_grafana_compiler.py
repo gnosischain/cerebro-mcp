@@ -1,0 +1,226 @@
+"""Compiler tests for the Grafana dashboard publisher."""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from cerebro_mcp.config import settings
+from cerebro_mcp.grafana.compiler import compile_grafana_dashboard, sql_for_validation
+from cerebro_mcp.grafana.models import GrafanaDashboardDef, GrafanaVariableDef
+
+
+@pytest.fixture(autouse=True)
+def _ds(monkeypatch):
+    monkeypatch.setattr(settings, "GRAFANA_CLICKHOUSE_DATASOURCE_UID", "ch-uid-123")
+    monkeypatch.setattr(settings, "GRAFANA_CLICKHOUSE_DATASOURCE_TYPE", "grafana-clickhouse-datasource")
+    monkeypatch.setattr(settings, "GRAFANA_SCHEMA_VERSION", 41)
+
+
+def _full_dashboard():
+    return GrafanaDashboardDef(
+        uid="growth_x_daily",
+        title="Growth",
+        tags=["growth", "cerebro-mcp", "growth"],  # dup + already-present
+        variables=[
+            GrafanaVariableDef(name="chain", type="custom", options="gnosis,ethereum", default="gnosis"),
+            GrafanaVariableDef(name="interval", type="interval", options="1m,5m,1h", default="5m"),
+        ],
+        panels=[
+            {"title": "Users", "role": "kpi", "data_shape": "single_value",
+             "sql_query": "SELECT count() FROM u", "unit": "short"},
+            {"title": "Target", "role": "kpi", "viz": "gauge",
+             "data_shape": "single_value_bounded", "sql_query": "SELECT v FROM t", "unit": "percent"},
+            {"title": "DAU", "role": "trend", "viz": "timeseries_area",
+             "data_shape": "time_series_multi",
+             "sql_query": "SELECT toStartOfDay(ts) AS time, chain, count() FROM e WHERE $__timeFilter(ts) GROUP BY time, chain",
+             "unit": "short"},
+            {"title": "Heat", "role": "breakdown", "viz": "heatmap",
+             "data_shape": "distribution_2d",
+             "sql_query": "SELECT x, y, count() FROM d GROUP BY x, y", "unit": "short"},
+            {"title": "Top users", "role": "detail", "data_shape": "tabular",
+             "sql_query": "SELECT user, n FROM top LIMIT 50"},
+        ],
+    )
+
+
+def test_deterministic_byte_identical():
+    d = _full_dashboard()
+    a = json.dumps(compile_grafana_dashboard(d), sort_keys=True)
+    b = json.dumps(compile_grafana_dashboard(d), sort_keys=True)
+    assert a == b
+
+
+def test_no_id_key_in_output():
+    out = compile_grafana_dashboard(_full_dashboard())
+    assert "id" not in out
+
+
+def _data_panels(out):
+    return [p for p in out["panels"] if p.get("type") != "row"]
+
+
+def test_datasource_from_settings_not_llm():
+    out = compile_grafana_dashboard(_full_dashboard())
+    for p in _data_panels(out):
+        assert p["datasource"]["uid"] == "ch-uid-123"
+        assert p["targets"][0]["datasource"]["uid"] == "ch-uid-123"
+
+
+def test_target_format_is_numeric_enum():
+    # Grafana ClickHouse plugin: format is numeric (TimeSeries=0, Table=1).
+    # Emitting the string "time_series" => "invalid format value" at query time.
+    out = compile_grafana_dashboard(_full_dashboard())
+    by_title = {p["title"]: p for p in out["panels"]}
+    assert by_title["DAU"]["targets"][0]["format"] == 0
+    assert by_title["DAU"]["targets"][0]["queryType"] == "timeseries"
+    assert by_title["Users"]["targets"][0]["format"] == 1
+    assert by_title["Top users"]["targets"][0]["format"] == 1
+    for p in _data_panels(out):
+        assert isinstance(p["targets"][0]["format"], int)
+
+
+def test_stat_textmode_value_only():
+    # KPI stat cards must show just the value ("$177M"), not "value $177M".
+    out = compile_grafana_dashboard(_full_dashboard())
+    by_title = {p["title"]: p for p in out["panels"]}
+    assert by_title["Users"]["options"]["textMode"] == "value"
+
+
+def test_layout_kpis_first_detail_last():
+    out = compile_grafana_dashboard(_full_dashboard())
+    data = _data_panels(out)
+    # KPI section header row is first, KPI panels sit just below at y=1
+    assert out["panels"][0]["type"] == "row"
+    assert out["panels"][0]["title"] == "Key Metrics"
+    assert data[0]["gridPos"]["y"] == 1
+    # detail table is the last data panel and lands lowest
+    assert data[-1]["type"] == "table"
+    assert data[-1]["gridPos"]["y"] == max(p["gridPos"]["y"] for p in data)
+
+
+def test_section_headers_present():
+    out = compile_grafana_dashboard(_full_dashboard())
+    rows = [p for p in out["panels"] if p.get("type") == "row"]
+    assert [r["title"] for r in rows] == ["Key Metrics", "Trends", "Breakdowns", "Detail"]
+
+
+def test_no_section_headers_for_single_role():
+    d = GrafanaDashboardDef(uid="u", title="t", panels=[
+        {"title": "A", "role": "kpi", "data_shape": "single_value",
+         "sql_query": "SELECT 1 AS value", "unit": "short"},
+        {"title": "B", "role": "kpi", "data_shape": "single_value",
+         "sql_query": "SELECT 2 AS value", "unit": "short"},
+    ])
+    out = compile_grafana_dashboard(d)
+    assert all(p.get("type") != "row" for p in out["panels"])
+
+
+def test_rows_fill_24_columns_no_horizontal_gap():
+    out = compile_grafana_dashboard(_full_dashboard())
+    by_y: dict[int, int] = {}
+    for p in _data_panels(out):
+        g = p["gridPos"]
+        by_y[g["y"]] = by_y.get(g["y"], 0) + g["w"]
+    for y, total in by_y.items():
+        assert total == 24, f"row y={y} sums to {total}, not 24"
+
+
+def test_uniform_height_per_row_no_vertical_gap():
+    out = compile_grafana_dashboard(_full_dashboard())
+    heights_by_y: dict[int, set] = {}
+    for p in _data_panels(out):
+        g = p["gridPos"]
+        heights_by_y.setdefault(g["y"], set()).add(g["h"])
+    for y, heights in heights_by_y.items():
+        assert len(heights) == 1, f"row y={y} has mixed heights {heights}"
+
+
+def test_tags_dedup_and_prepend():
+    out = compile_grafana_dashboard(_full_dashboard())
+    assert out["tags"][:2] == ["cerebro-mcp", "ai-generated"]
+    assert out["tags"].count("cerebro-mcp") == 1
+    assert out["tags"].count("growth") == 1
+
+
+def test_macro_substitution_resolves():
+    cleaned = sql_for_validation("SELECT * FROM t WHERE $__timeFilter(block_time)")
+    assert "$__timeFilter" not in cleaned
+    assert "block_time >=" in cleaned
+
+
+def test_unknown_macro_raises():
+    with pytest.raises(ValueError):
+        sql_for_validation("SELECT $__weirdMacro(x) FROM t")
+
+
+def test_template_var_neutralized_and_interval_allowed():
+    cleaned = sql_for_validation(
+        "SELECT toStartOfInterval(ts, INTERVAL $__interval) FROM t WHERE chain = '$chain'"
+    )
+    assert "$chain" not in cleaned
+    assert "'__var__'" in cleaned
+
+
+def test_variables_compiled_into_templating_list():
+    out = compile_grafana_dashboard(_full_dashboard())
+    names = [v["name"] for v in out["templating"]["list"]]
+    assert names == ["chain", "interval"]
+    interval = out["templating"]["list"][1]
+    assert interval["type"] == "interval"
+    assert interval["refresh"] == 2
+
+
+def test_per_viz_option_builders():
+    out = compile_grafana_dashboard(_full_dashboard())
+    by_title = {p["title"]: p for p in out["panels"]}
+    # stat has reduceOptions
+    assert "reduceOptions" in by_title["Users"]["options"]
+    # gauge has min/max in fieldConfig defaults (from percent unit)
+    gdefs = by_title["Target"]["fieldConfig"]["defaults"]
+    assert gdefs["min"] == 0.0 and gdefs["max"] == 100.0
+    # area-multi has stacking normal
+    area_custom = by_title["DAU"]["fieldConfig"]["defaults"]["custom"]
+    assert area_custom["stacking"]["mode"] == "normal"
+    # heatmap with distribution_2d => calculate False
+    assert by_title["Heat"]["options"]["calculate"] is False
+    # table has cellOptions
+    assert "cellOptions" in by_title["Top users"]["fieldConfig"]["defaults"]["custom"]
+
+
+def test_heatmap_timeseries_multi_calculates_true():
+    d = GrafanaDashboardDef(uid="u", title="t", panels=[
+        {"title": "H", "role": "breakdown", "viz": "heatmap",
+         "data_shape": "time_series_multi",
+         "sql_query": "SELECT time, s, v FROM x", "unit": "short"},
+    ])
+    out = compile_grafana_dashboard(d)
+    assert out["panels"][0]["options"]["calculate"] is True
+
+
+def test_five_kpis_balance_across_rows_filling_24():
+    # 5 KPIs -> two grid-rows, each summing to 24 (3 then 2), no gaps.
+    panels = [
+        {"title": f"K{i}", "role": "kpi", "data_shape": "single_value",
+         "sql_query": f"SELECT {i} AS value", "unit": "short"}
+        for i in range(5)
+    ]
+    out = compile_grafana_dashboard(GrafanaDashboardDef(uid="u", title="t", panels=panels))
+    data = [p for p in out["panels"] if p.get("type") != "row"]
+    widths_by_y: dict[int, list] = {}
+    for p in data:
+        g = p["gridPos"]
+        widths_by_y.setdefault(g["y"], []).append(g["w"])
+    sums = {y: sum(ws) for y, ws in widths_by_y.items()}
+    assert all(s == 24 for s in sums.values())
+    assert sorted(len(ws) for ws in widths_by_y.values()) == [2, 3]
+
+
+def test_layout_sketch_lists_sections_and_metrics():
+    from cerebro_mcp.grafana.compiler import build_layout_sketch
+    sketch = build_layout_sketch(_full_dashboard())
+    assert "Dashboard: Growth" in sketch
+    assert "Key Metrics" in sketch and "Trends" in sketch
+    assert "Metrics:" in sketch
+    assert "Users" in sketch and "DAU" in sketch
+    assert "Approve to publish" in sketch

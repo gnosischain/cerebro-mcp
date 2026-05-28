@@ -36,10 +36,15 @@ class RiskClass(str, Enum):
     WORKSPACE_WRITE = "workspace_write"
     SUBPROCESS = "subprocess"
     APP_ONLY = "app_only"
+    # Writes that escape the server boundary to an external system (e.g.
+    # publishing a Grafana dashboard via its HTTP API). Distinct from
+    # SERVER_STATE_WRITE because the side effect lands outside this process.
+    EXTERNAL_WRITE = "external_write"
 
 
 _RISK_PRIORITY: list[RiskClass] = [
     RiskClass.SUBPROCESS,
+    RiskClass.EXTERNAL_WRITE,
     RiskClass.WORKSPACE_WRITE,
     RiskClass.APP_ONLY,
     RiskClass.SERVER_STATE_WRITE,
@@ -54,6 +59,7 @@ _RO = frozenset({RiskClass.READ_ONLY})
 _SW = frozenset({RiskClass.SERVER_STATE_WRITE})
 _WS = frozenset({RiskClass.WORKSPACE_WRITE, RiskClass.SUBPROCESS})
 _AO = frozenset({RiskClass.APP_ONLY})
+_EW = frozenset({RiskClass.EXTERNAL_WRITE})
 
 TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     # ── read_only tools ──────────────────────────────────────────────
@@ -184,6 +190,13 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "contract_call_function": _RO,
     "contract_decode_transaction_input": _RO,
     "contract_decode_receipt_logs": _RO,
+
+    # ── Grafana dashboard publishing ─────────────────────────────────
+    "preview_grafana_dashboard": _RO,
+    "validate_grafana_dashboard": _RO,
+    "verify_grafana_dashboard": _RO,
+    "get_grafana_dashboard": _RO,
+    "publish_grafana_dashboard": _EW,
 }
 
 

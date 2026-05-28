@@ -186,6 +186,20 @@ class Settings(BaseSettings):
     REPORT_SERVER_PORT: int = 0  # 0 = disabled; set to e.g. 8765 for HTTP serving
     REPORT_BASE_URL: str = ""   # Override full URL prefix for deployed setups
 
+    # Grafana dashboard publishing. Off by default — opt-in feature that
+    # writes to an external Grafana instance via its HTTP API. When
+    # GRAFANA_TOOLS_ENABLED is False the tools are not registered at all.
+    GRAFANA_TOOLS_ENABLED: bool = False
+    GRAFANA_URL: str = ""
+    GRAFANA_API_TOKEN: str = ""
+    GRAFANA_CLICKHOUSE_DATASOURCE_UID: str = ""
+    GRAFANA_CLICKHOUSE_DATASOURCE_TYPE: str = "grafana-clickhouse-datasource"
+    GRAFANA_FOLDER_UID: str = ""             # empty == omit folderUid from payload
+    GRAFANA_REQUEST_TIMEOUT_SECONDS: float = 20.0
+    GRAFANA_SCHEMA_VERSION: int = 41
+    GRAFANA_MIN_REFRESH_SECONDS: int = 60
+    GRAFANA_MAX_PANELS: int = 30
+
     # Thinking / performance tracing
     THINKING_MODE_ENABLED: bool = True
     THINKING_ALWAYS_ON: bool = True

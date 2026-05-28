@@ -112,6 +112,24 @@ class TestPrimaryRiskClass:
     def test_unknown_returns_read_only(self):
         assert primary_risk_class("unknown_tool_abc") == RiskClass.READ_ONLY
 
+    def test_grafana_publish_is_external_write(self):
+        assert primary_risk_class("publish_grafana_dashboard") == RiskClass.EXTERNAL_WRITE
+
+    def test_external_write_outranks_server_state_write(self):
+        # EXTERNAL_WRITE must sit above SERVER_STATE_WRITE in priority.
+        assert RiskClass.EXTERNAL_WRITE in get_risk_classes("publish_grafana_dashboard")
+
+
+class TestGrafanaToolRiskClasses:
+    def test_publish_is_external_write(self):
+        assert RiskClass.EXTERNAL_WRITE in get_risk_classes("publish_grafana_dashboard")
+
+    def test_validate_and_get_are_read_only(self):
+        assert get_risk_classes("preview_grafana_dashboard") == frozenset({RiskClass.READ_ONLY})
+        assert get_risk_classes("validate_grafana_dashboard") == frozenset({RiskClass.READ_ONLY})
+        assert get_risk_classes("verify_grafana_dashboard") == frozenset({RiskClass.READ_ONLY})
+        assert get_risk_classes("get_grafana_dashboard") == frozenset({RiskClass.READ_ONLY})
+
 
 # ---------------------------------------------------------------------------
 # Suspicious flag tests
@@ -335,9 +353,9 @@ class TestAssessToolCall:
         assert parsed["error"] == "Feature disabled"
         assert "workspace_write_via_sse" in parsed["suspicious_flags"]
 
-    @patch("cerebro_mcp.observability.observe_security_high_risk_call")
-    @patch("cerebro_mcp.observability.observe_security_suspicious_call")
-    @patch("cerebro_mcp.observability.observe_security_app_only_call")
+    @patch("cerebro_mcp.runtime.observability.observe_security_high_risk_call")
+    @patch("cerebro_mcp.runtime.observability.observe_security_suspicious_call")
+    @patch("cerebro_mcp.runtime.observability.observe_security_app_only_call")
     def test_increments_prometheus_counters(
         self,
         mock_app_only,

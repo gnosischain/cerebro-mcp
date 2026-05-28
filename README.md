@@ -844,6 +844,29 @@ See [docs/measurement/](docs/measurement/) for concept docs (MMM overview, MTA o
 | `list_reports` | browse disk reports | persistent across sessions if the directory persists |
 | `export_report` | get a shareable file path or URL | SSE deployments can return HTTP download URLs |
 
+### Grafana Dashboard Tools
+
+Opt-in (set `GRAFANA_TOOLS_ENABLED=True` plus connection settings). The LLM
+never emits raw Grafana JSON — it declares intent with a small schema (panel
+`role` + `viz` + `data_shape` + SQL) and a server-side compiler produces the
+styled dashboard. Publishing is idempotent by UID and tag-guarded.
+
+| Tool | Use when | Notes |
+|---|---|---|
+| `validate_grafana_dashboard` | before publishing | runs the same read-only SQL guards as `execute_query` on every panel; checks role/viz/shape |
+| `publish_grafana_dashboard` | ship a dashboard to Grafana | idempotent by UID; refuses to overwrite a non-`cerebro-mcp`-tagged dashboard unless `force_overwrite=true` |
+| `get_grafana_dashboard` | inspect a published dashboard | returns title, tags, version, folder by UID |
+
+#### Dashboard composition for mixed audiences
+
+Dashboards are built for two audiences at once — engineers and growth/marketing
+teams. The `grafana_architect` persona (`get_agent_persona("grafana_architect")`)
+enforces a KPI-first narrative: **Row 1** KPI summary (`stat`/`gauge`/`bargauge`),
+**Row 2** trends (timeseries), **Row 3** breakdowns (bar/pie/heatmap/histogram),
+**Row 4** detail tables. The panel `role` drives the layout slot; the optional
+`viz` plus the required `data_shape` drive the geometry, and the compiler rejects
+incompatible combinations at parse time.
+
 ### Research Tools
 
 | Tool | Use when | Notes |
