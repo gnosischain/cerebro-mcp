@@ -16,12 +16,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from cerebro_mcp.clickhouse_client import (
+from cerebro_mcp.clients.clickhouse import (
     _datetime64_precision,
     _decimal_precision,
     _sanitize_column_for_parquet,
 )
-from cerebro_mcp.sandbox_manager import SandboxManager
+from cerebro_mcp.runtime.sandbox_manager import SandboxManager
 
 
 # ---------------------------------------------------------------------------

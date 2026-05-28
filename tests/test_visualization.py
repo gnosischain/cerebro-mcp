@@ -8,12 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import cerebro_mcp.tools.visualization as viz
-import cerebro_mcp.tools.query as query_mod
-import cerebro_mcp.tools.dbt as dbt_mod
-import cerebro_mcp.tools.session_state as session_state_mod
-from cerebro_mcp.tools.session_state import state
-from cerebro_mcp.tool_models import QueryResult
+import cerebro_mcp.tools.visualization.charts as viz
+import cerebro_mcp.tools.analytics.query as query_mod
+import cerebro_mcp.tools.analytics.dbt as dbt_mod
+import cerebro_mcp.tools.governance.session_state as session_state_mod
+from cerebro_mcp.tools.governance.session_state import state
+from cerebro_mcp.models.tool import QueryResult
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +771,7 @@ class TestSemanticChartRouting:
 
     def test_quick_metric_chart_uses_semantic_result(self, monkeypatch):
         from mcp.server.fastmcp import FastMCP
-        import cerebro_mcp.tools.semantic as semantic_tools
+        import cerebro_mcp.tools.semantic.semantic as semantic_tools
 
         monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
         state.record_semantic_preflight(route="semantic_ready", mode="chart")
@@ -801,7 +801,7 @@ class TestSemanticChartRouting:
 
     def test_quick_metric_chart_requires_dimension_for_line_chart(self, monkeypatch):
         from mcp.server.fastmcp import FastMCP
-        import cerebro_mcp.tools.semantic as semantic_tools
+        import cerebro_mcp.tools.semantic.semantic as semantic_tools
 
         monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
         state.record_semantic_preflight(route="semantic_ready", mode="chart")
@@ -827,7 +827,7 @@ class TestSemanticChartRouting:
 
     def test_generate_metric_charts_requires_common_depth(self, monkeypatch):
         from mcp.server.fastmcp import FastMCP
-        import cerebro_mcp.tools.semantic as semantic_tools
+        import cerebro_mcp.tools.semantic.semantic as semantic_tools
 
         monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
         state.record_semantic_preflight(route="semantic_ready", mode="report")
@@ -894,7 +894,7 @@ class TestSemanticChartRouting:
 
     def test_generate_metric_charts_normalizes_date_alias(self, monkeypatch):
         from mcp.server.fastmcp import FastMCP
-        import cerebro_mcp.tools.semantic as semantic_tools
+        import cerebro_mcp.tools.semantic.semantic as semantic_tools
 
         monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
         state.record_semantic_preflight(route="semantic_ready", mode="report")
@@ -1304,7 +1304,7 @@ class TestSearchModelsHint:
     def test_search_models_requires_preflight_before_raw_discovery(self, monkeypatch):
         """search_models is blocked until semantic preflight runs."""
         from mcp.server.fastmcp import FastMCP
-        from cerebro_mcp.manifest_loader import ManifestLoader, manifest
+        from cerebro_mcp.loaders.manifest import ManifestLoader, manifest
 
         monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
         monkeypatch.setattr(dbt_mod.settings, "SEMANTIC_ENABLED", True)
@@ -1335,7 +1335,7 @@ class TestSearchModelsHint:
     def test_report_keyword_appends_workflow_hint(self, monkeypatch):
         """search_models adds workflow hint for report-related queries."""
         from mcp.server.fastmcp import FastMCP
-        from cerebro_mcp.manifest_loader import ManifestLoader, manifest
+        from cerebro_mcp.loaders.manifest import ManifestLoader, manifest
 
         mcp = FastMCP("test-hint")
 
@@ -1361,7 +1361,7 @@ class TestSearchModelsHint:
     def test_non_report_query_no_hint(self, monkeypatch):
         """search_models does NOT add workflow hint for non-report queries."""
         from mcp.server.fastmcp import FastMCP
-        from cerebro_mcp.manifest_loader import ManifestLoader, manifest
+        from cerebro_mcp.loaders.manifest import ManifestLoader, manifest
 
         mcp = FastMCP("test-no-hint")
 

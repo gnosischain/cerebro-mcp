@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from cerebro_mcp.semantic_index import (
+from cerebro_mcp.semantic.index import (
     build_token_idf,
     score_metric,
 )

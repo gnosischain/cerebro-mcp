@@ -9,11 +9,11 @@ from unittest.mock import patch
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from cerebro_mcp import graph_profiles
-from cerebro_mcp.clickhouse_client import ExecutedQuery
-from cerebro_mcp.mini_app_cache import reset_cache_for_tests
-from cerebro_mcp.tools import mini_apps
-from cerebro_mcp.tools.graph_explorer import register_graph_explorer_tools
+from cerebro_mcp.semantic import graph_profiles
+from cerebro_mcp.clients.clickhouse import ExecutedQuery
+from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
+from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_tools
 
 
 AVATAR = "0xaaaa000000000000000000000000000000000001"
@@ -314,7 +314,7 @@ def test_expand_node_caps_at_max_hops(fake_snapshot, monkeypatch):
     """Expand calls beyond MAX_HOPS are rejected with a "Max X hops reached"
     error. Patches MAX_HOPS to 2 so the test stays cheap; the production
     default is higher (currently 20)."""
-    import cerebro_mcp.tools.graph_explorer as ge
+    import cerebro_mcp.tools.semantic.graph_explorer as ge
     monkeypatch.setattr(ge, "MAX_HOPS", 2)
 
     ch = StubCH(edge_rows={

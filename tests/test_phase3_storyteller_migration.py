@@ -13,17 +13,17 @@ import pytest
 import pytest_asyncio
 
 from cerebro_mcp import config as cerebro_config
-from cerebro_mcp import event_store_sync as ev
-from cerebro_mcp.event_store import EventStore
-from cerebro_mcp.storyteller_resume import (
+from cerebro_mcp.workflow import event_store_sync as ev
+from cerebro_mcp.workflow.event_store import EventStore
+from cerebro_mcp.storyteller.resume import (
     install_storyteller_resume_handler,
     resume_storyteller_session,
 )
-from cerebro_mcp.workflow_payloads import (
+from cerebro_mcp.workflow.payloads import (
     WORKFLOW_COMPLETED,
     WORKFLOW_RUNNING,
 )
-from cerebro_mcp.workflow_registry import (
+from cerebro_mcp.workflow.registry import (
     ACTION_COMPLETE,
     ACTION_FAILED,
     ACTION_READY_TO_RESUME,

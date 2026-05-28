@@ -3,7 +3,7 @@ import json
 
 from mcp.server.fastmcp.prompts import base as prompt_base
 
-from cerebro_mcp.research_models import PeerReviewResult
+from cerebro_mcp.models.research import PeerReviewResult
 
 
 def load_reality_checker_markdown() -> str:

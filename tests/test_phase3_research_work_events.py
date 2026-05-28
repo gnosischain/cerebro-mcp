@@ -19,13 +19,13 @@ import pytest
 import pytest_asyncio
 
 from cerebro_mcp import config as cerebro_config
-from cerebro_mcp import event_store_sync as ev
-from cerebro_mcp.event_store import EventStore
-from cerebro_mcp.research_resume import (
+from cerebro_mcp.workflow import event_store_sync as ev
+from cerebro_mcp.workflow.event_store import EventStore
+from cerebro_mcp.research.resume import (
     _scan_work,
     resume_research_project,
 )
-from cerebro_mcp.workflow_registry import (
+from cerebro_mcp.workflow.registry import (
     ACTION_READY_TO_RESUME,
 )
 

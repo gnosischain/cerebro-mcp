@@ -1,7 +1,7 @@
 import time
 import pytest
 from unittest.mock import MagicMock, patch
-from cerebro_mcp.clickhouse_client import ClickHouseManager
+from cerebro_mcp.clients.clickhouse import ClickHouseManager
 
 
 class TestSchemaCache:

@@ -1,10 +1,10 @@
-"""Unit tests for cerebro_mcp.tools.sql_heuristics."""
+"""Unit tests for cerebro_mcp.tools.analytics.sql_heuristics."""
 
 from __future__ import annotations
 
 import pytest
 
-from cerebro_mcp.tools.sql_heuristics import (
+from cerebro_mcp.tools.analytics.sql_heuristics import (
     DEFAULT_STOCK_COLUMNS,
     aggregates_stock_measure_over_time,
     aggregator_volume_double_count_risk,

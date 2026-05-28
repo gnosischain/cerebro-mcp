@@ -39,11 +39,11 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from cerebro_mcp import config as cerebro_config  # noqa: E402
-from cerebro_mcp.event_store import EventStore  # noqa: E402
-from cerebro_mcp.research_models import EvidenceRef, PeerReviewResult  # noqa: E402
-from cerebro_mcp.research_store import ResearchStore  # noqa: E402
-from cerebro_mcp.tools.research import register_research_tools  # noqa: E402
-from cerebro_mcp.workflow_payloads import (  # noqa: E402
+from cerebro_mcp.workflow.event_store import EventStore  # noqa: E402
+from cerebro_mcp.models.research import EvidenceRef, PeerReviewResult  # noqa: E402
+from cerebro_mcp.research.store import ResearchStore  # noqa: E402
+from cerebro_mcp.tools.research.research import register_research_tools  # noqa: E402
+from cerebro_mcp.workflow.payloads import (  # noqa: E402
     GATE_FAILED,
     GATE_PASSED,
     WORKFLOW_COMPLETED,
@@ -445,7 +445,7 @@ def section_failure_tolerance(r: Reporter, workdir: Path) -> dict:
     # actual failures. The `*_safe` helpers catch and log; we just
     # don't want the log spam in the smoke output.
     import logging
-    ev_logger = logging.getLogger("cerebro_mcp.event_store_sync")
+    ev_logger = logging.getLogger("cerebro_mcp.workflow.event_store_sync")
     prior_level = ev_logger.level
     ev_logger.setLevel(logging.CRITICAL)
     try:

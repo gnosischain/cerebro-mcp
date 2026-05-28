@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from cerebro_mcp.dashboard_models import (
+from cerebro_mcp.models.dashboard import (
     DashboardBlueprint,
     MetricPlacement,
     QuerySpec,

@@ -7,8 +7,8 @@ import os
 import pytest
 import yaml
 
-from cerebro_mcp.dashboard_models import MetricPlacement, QuerySpec, TabSpec
-from cerebro_mcp.tools.dashboard_builder import (
+from cerebro_mcp.models.dashboard import MetricPlacement, QuerySpec, TabSpec
+from cerebro_mcp.tools.visualization.dashboard_builder import (
     _js_value,
     _render_query_js,
     _suggest_chart_type,

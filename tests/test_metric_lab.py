@@ -7,11 +7,11 @@ from unittest.mock import patch
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from cerebro_mcp.clickhouse_client import ExecutedQuery
-from cerebro_mcp.mini_app_cache import reset_cache_for_tests
-from cerebro_mcp.tools import metric_lab as metric_lab_module
-from cerebro_mcp.tools import mini_apps
-from cerebro_mcp.tools.metric_lab import (
+from cerebro_mcp.clients.clickhouse import ExecutedQuery
+from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
+from cerebro_mcp.tools.visualization import metric_lab as metric_lab_module
+from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.visualization.metric_lab import (
     ALLOWED_AGGREGATIONS,
     ALLOWED_CHART_TYPES,
     register_metric_lab_tools,
@@ -83,7 +83,7 @@ def test_open_metric_lab_from_sql_small_dataset_is_exact_bounded():
 def test_open_metric_lab_from_sql_large_dataset_is_random_sample():
     # SAMPLE_TARGET (10_000) is the inclusive ceiling for exact_bounded;
     # need total > SAMPLE_TARGET to take the random_sample path.
-    from cerebro_mcp.tools.mini_apps import SAMPLE_TARGET
+    from cerebro_mcp.tools.visualization.mini_apps import SAMPLE_TARGET
     server = _build_server(total=SAMPLE_TARGET + 1)
     fn = _get_tool(server, "open_metric_lab_from_sql")
     result = fn(sql="SELECT * FROM big")

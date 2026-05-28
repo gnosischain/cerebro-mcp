@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import pytest
 
-from cerebro_mcp.manifest_loader import ManifestLoader
-from cerebro_mcp.schema_context import build_scoped_schema_block
-from cerebro_mcp.semantic_bm25 import BM25Index, BM25Doc, ColumnBM25Index, ColumnDoc
-from cerebro_mcp.semantic_index import rrf_fuse
+from cerebro_mcp.loaders.manifest import ManifestLoader
+from cerebro_mcp.runtime.schema_context import build_scoped_schema_block
+from cerebro_mcp.semantic.bm25 import BM25Index, BM25Doc, ColumnBM25Index, ColumnDoc
+from cerebro_mcp.semantic.index import rrf_fuse
 
 
 # ---------------------------------------------------------------------------

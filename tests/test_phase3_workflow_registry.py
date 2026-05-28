@@ -18,14 +18,14 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from cerebro_mcp import event_store_sync as ev
+from cerebro_mcp.workflow import event_store_sync as ev
 from cerebro_mcp import config as cerebro_config
-from cerebro_mcp.event_store import EventStore
-from cerebro_mcp.research_resume import (
+from cerebro_mcp.workflow.event_store import EventStore
+from cerebro_mcp.research.resume import (
     install_research_resume_handler,
     resume_research_project,
 )
-from cerebro_mcp.workflow_payloads import (
+from cerebro_mcp.workflow.payloads import (
     EVENT_LLM_CALL_STARTED,
     LLMCallEvent,
     LLMTurn,
@@ -34,7 +34,7 @@ from cerebro_mcp.workflow_payloads import (
     WORKFLOW_ORPHANED,
     WORKFLOW_RUNNING,
 )
-from cerebro_mcp.workflow_registry import (
+from cerebro_mcp.workflow.registry import (
     ACTION_COMPLETE,
     ACTION_FAILED,
     ACTION_NO_HANDLER,
@@ -193,7 +193,7 @@ class TestRegistryMechanics:
         await store.create_workflow("a", "k_a")
         await store.create_workflow("b", "k_b")
         await store.create_workflow("c", "k_a")
-        from cerebro_mcp.workflow_payloads import WORKFLOW_COMPLETED as DONE
+        from cerebro_mcp.workflow.payloads import WORKFLOW_COMPLETED as DONE
         await store.mark_workflow_status("c", DONE)
 
         async def k_a_fn(workflow_id, wf, events):
@@ -351,7 +351,7 @@ class TestMCPToolHandlersAreAsync:
         Live regression observed 2026-04-27.
         """
         import inspect
-        from cerebro_mcp.tools.workflow_resume import register_workflow_resume_tools
+        from cerebro_mcp.tools.workflow.resume import register_workflow_resume_tools
 
         captured = {}
 
@@ -378,7 +378,7 @@ class TestMCPToolHandlersAreAsync:
 
     async def test_register_uses_async_handlers(self):
         import inspect
-        from cerebro_mcp.tools.workflow_resume import register_workflow_resume_tools
+        from cerebro_mcp.tools.workflow.resume import register_workflow_resume_tools
 
         captured: dict[str, object] = {}
 
@@ -406,7 +406,7 @@ class TestMCPToolHandlersAreAsync:
 
 class TestRegistration:
     async def test_install_research_handler_idempotent(self):
-        from cerebro_mcp.workflow_registry import (
+        from cerebro_mcp.workflow.registry import (
             default_workflow_registry,
             reset_default_workflow_registry,
         )

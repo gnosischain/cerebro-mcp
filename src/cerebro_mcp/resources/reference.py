@@ -1,5 +1,5 @@
-from cerebro_mcp.clickhouse_client import ClickHouseManager
-from cerebro_mcp.tools.query import truncate_response
+from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.tools.analytics.query import truncate_response
 
 
 # --- Static Resource Content ---

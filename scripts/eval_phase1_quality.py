@@ -32,7 +32,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cerebro_mcp.manifest_loader import ManifestLoader, manifest  # noqa: E402
+from cerebro_mcp.loaders.manifest import ManifestLoader, manifest  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

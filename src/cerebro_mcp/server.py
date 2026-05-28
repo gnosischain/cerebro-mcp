@@ -7,55 +7,55 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from cerebro_mcp import runtime_state
-from cerebro_mcp.bootstrap import (
+from cerebro_mcp.runtime import runtime_state
+from cerebro_mcp.runtime.bootstrap import (
     ensure_writable_dir,
     init_ssl_trust,
     validate_remote_transport_auth,
 )
-from cerebro_mcp.clickhouse_client import ClickHouseManager
-from cerebro_mcp.catalog_loader import catalog
+from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.loaders.catalog import catalog
 from cerebro_mcp.config import settings
-from cerebro_mcp.docs_loader import docs_index
-from cerebro_mcp.manifest_loader import manifest
-from cerebro_mcp.observability import (
+from cerebro_mcp.loaders.docs import docs_index
+from cerebro_mcp.loaders.manifest import manifest
+from cerebro_mcp.runtime.observability import (
     PrometheusMiddleware,
     log_event,
     metrics_response,
     observe_report_token_auth,
     setup_logging,
 )
-from cerebro_mcp.research_store import ResearchStore
-from cerebro_mcp.semantic_loader import semantic_runtime
-from cerebro_mcp.tools.query import register_query_tools
-from cerebro_mcp.tools.schema import register_schema_tools
-from cerebro_mcp.tools.dbt import register_dbt_tools
-from cerebro_mcp.tools.metadata import register_metadata_tools
+from cerebro_mcp.research.store import ResearchStore
+from cerebro_mcp.loaders.semantic import semantic_runtime
+from cerebro_mcp.tools.analytics.query import register_query_tools
+from cerebro_mcp.tools.analytics.schema import register_schema_tools
+from cerebro_mcp.tools.analytics.dbt import register_dbt_tools
+from cerebro_mcp.tools.analytics.metadata import register_metadata_tools
 from cerebro_mcp.resources.context import register_resources
 from cerebro_mcp.resources.reference import register_reference_resources
 from cerebro_mcp.prompts.templates import register_prompts
-from cerebro_mcp.tools.query_async import register_async_query_tools
-from cerebro_mcp.tools.saved_queries import register_saved_query_tools
-from cerebro_mcp.tools.visualization import register_visualization_tools
-from cerebro_mcp.tools.research import register_research_tools
-from cerebro_mcp.tools.semantic import register_semantic_tools
-from cerebro_mcp.tools.reasoning import (
+from cerebro_mcp.tools.analytics.query_async import register_async_query_tools
+from cerebro_mcp.tools.analytics.saved_queries import register_saved_query_tools
+from cerebro_mcp.tools.visualization.charts import register_visualization_tools
+from cerebro_mcp.tools.research.research import register_research_tools
+from cerebro_mcp.tools.semantic.semantic import register_semantic_tools
+from cerebro_mcp.tools.governance.reasoning import (
     install_auto_tool_tracing,
     register_reasoning_tools,
 )
-from cerebro_mcp.tools.agents import register_agent_tools
-from cerebro_mcp.tools.dashboard_builder import register_dashboard_tools
-from cerebro_mcp.tools.custom_queries import register_custom_query_tools
-from cerebro_mcp.tools.sandbox import register_sandbox_tools
-from cerebro_mcp.tools.workflow_resume import register_workflow_resume_tools
-from cerebro_mcp.tools.cross_check import register_cross_check_tools
-from cerebro_mcp.tools.storyteller import register_storyteller_tools
-from cerebro_mcp.tools.mini_apps import register_mini_app_infra
-from cerebro_mcp.tools.contract_explorer import register_contract_explorer_tools
-from cerebro_mcp.tools.metric_lab import register_metric_lab_tools
-from cerebro_mcp.tools.portfolio import register_portfolio_tools
-from cerebro_mcp.tools.graph_explorer import register_graph_explorer_tools
-from cerebro_mcp.tools.rpc import register_rpc_tools
+from cerebro_mcp.tools.governance.agents import register_agent_tools
+from cerebro_mcp.tools.visualization.dashboard_builder import register_dashboard_tools
+from cerebro_mcp.tools.analytics.custom_queries import register_custom_query_tools
+from cerebro_mcp.tools.analytics.sandbox import register_sandbox_tools
+from cerebro_mcp.tools.workflow.resume import register_workflow_resume_tools
+from cerebro_mcp.tools.governance.cross_check import register_cross_check_tools
+from cerebro_mcp.tools.storyteller.storyteller import register_storyteller_tools
+from cerebro_mcp.tools.visualization.mini_apps import register_mini_app_infra
+from cerebro_mcp.tools.web3.contract_explorer import register_contract_explorer_tools
+from cerebro_mcp.tools.visualization.metric_lab import register_metric_lab_tools
+from cerebro_mcp.tools.visualization.portfolio import register_portfolio_tools
+from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_tools
+from cerebro_mcp.tools.web3.rpc import register_rpc_tools
 
 
 runtime_state.ssl_trust_injected = init_ssl_trust()
@@ -351,7 +351,7 @@ async def metrics(request: Request) -> Response:
 @mcp.custom_route("/reports/{report_id}", methods=["GET"])
 async def download_report(request: Request) -> JSONResponse | HTMLResponse:
     """Serve a report HTML file by ID (full UUID or 8-char prefix)."""
-    from cerebro_mcp.tools.visualization import _resolve_report
+    from cerebro_mcp.tools.visualization.charts import _resolve_report
 
     report_id = request.path_params["report_id"]
 
@@ -412,7 +412,7 @@ def main():
     # Phase 2: ensure simulation sandboxes are torn down on exit. The
     # periodic sweeper is installed lazily by the first sandbox tool call
     # (so it can grab the running event loop), not here at process boot.
-    from cerebro_mcp.bootstrap import install_sandbox_atexit, init_event_store_sync
+    from cerebro_mcp.runtime.bootstrap import install_sandbox_atexit, init_event_store_sync
     if settings.SANDBOX_ENABLED:
         install_sandbox_atexit()
 
@@ -442,7 +442,7 @@ def main():
         # written from this stdio session is stamped with this owner.
         # Unset env var → contextvar stays None → workflows go in with
         # owner=NULL (single-tenant fallback, backward compatible).
-        from cerebro_mcp.identity import (
+        from cerebro_mcp.runtime.identity import (
             get_current_owner,
             initial_stdio_owner,
             set_current_owner,
@@ -519,7 +519,7 @@ class BearerAuthMiddleware:
                     owner_plain = None
                 break
 
-        from cerebro_mcp.identity import (
+        from cerebro_mcp.runtime.identity import (
             reset_current_owner,
             set_current_owner,
         )

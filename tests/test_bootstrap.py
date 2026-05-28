@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from cerebro_mcp import bootstrap
+from cerebro_mcp.runtime import bootstrap
 
 
 def test_validate_remote_transport_auth_requires_token_when_secure(monkeypatch):

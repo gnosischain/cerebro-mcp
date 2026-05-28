@@ -17,7 +17,7 @@ import importlib.resources
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from cerebro_mcp.tools.agents import _VALID_ROLES, register_agent_tools
+from cerebro_mcp.tools.governance.agents import _VALID_ROLES, register_agent_tools
 
 
 MMM_ROLES = [

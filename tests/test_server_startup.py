@@ -6,10 +6,10 @@ from pathlib import Path
 def test_server_import_does_not_load_manifest_or_docs(monkeypatch):
     sys.modules.pop("cerebro_mcp.server", None)
 
-    from cerebro_mcp.catalog_loader import catalog
-    from cerebro_mcp.docs_loader import docs_index
-    from cerebro_mcp.manifest_loader import manifest
-    from cerebro_mcp.semantic_loader import semantic_runtime
+    from cerebro_mcp.loaders.catalog import catalog
+    from cerebro_mcp.loaders.docs import docs_index
+    from cerebro_mcp.loaders.manifest import manifest
+    from cerebro_mcp.loaders.semantic import semantic_runtime
 
     calls = {"manifest": 0, "catalog": 0, "docs": 0, "semantic": 0}
 

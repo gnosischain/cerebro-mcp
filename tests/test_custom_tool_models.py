@@ -7,7 +7,7 @@ import warnings
 import pytest
 from pydantic import ValidationError
 
-from cerebro_mcp.custom_tool_models import (
+from cerebro_mcp.models.custom_tool import (
     CH_TYPE_TO_PYTHON,
     CustomToolDefinition,
     CustomToolParameter,

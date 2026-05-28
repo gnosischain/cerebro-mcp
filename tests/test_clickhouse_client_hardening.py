@@ -1,13 +1,13 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from cerebro_mcp.clickhouse_client import ClickHouseManager, ExecutedQuery
+from cerebro_mcp.clients.clickhouse import ClickHouseManager, ExecutedQuery
 
 
 def test_get_client_uses_tls_and_timeout_settings():
     manager = ClickHouseManager()
 
-    with patch("cerebro_mcp.clickhouse_client.clickhouse_connect.get_client") as mock_get_client:
+    with patch("cerebro_mcp.clients.clickhouse.clickhouse_connect.get_client") as mock_get_client:
         mock_get_client.return_value = object()
         manager.get_client("dbt")
 

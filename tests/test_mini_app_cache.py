@@ -6,17 +6,17 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from cerebro_mcp.clickhouse_client import ExecutedQuery
-from cerebro_mcp.mini_app_cache import (
+from cerebro_mcp.clients.clickhouse import ExecutedQuery
+from cerebro_mcp.runtime.mini_app_cache import (
     CachedDataset,
     MiniAppCache,
     get_cache,
     make_cache_key,
     reset_cache_for_tests,
 )
-from cerebro_mcp.mini_app_models import DatasetStats
-from cerebro_mcp.tools import mini_apps
-from cerebro_mcp.tools.mini_apps import load_bounded_dataset
+from cerebro_mcp.models.mini_app import DatasetStats
+from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.visualization.mini_apps import load_bounded_dataset
 
 
 @pytest.fixture(autouse=True)

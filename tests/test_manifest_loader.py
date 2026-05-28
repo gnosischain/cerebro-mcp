@@ -2,7 +2,7 @@ import json
 import os
 from unittest.mock import patch, MagicMock
 import pytest
-from cerebro_mcp.manifest_loader import ManifestLoader
+from cerebro_mcp.loaders.manifest import ManifestLoader
 
 
 # Try to load real manifest for integration tests
@@ -361,7 +361,7 @@ class TestConditionalGET:
     def test_reload_no_url_returns_false(self):
         """With no URL configured, reload should do nothing."""
         loader = ManifestLoader()
-        with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+        with patch("cerebro_mcp.loaders.manifest.settings") as mock_settings:
             mock_settings.DBT_MANIFEST_URL = None
             changed, error = loader.reload_if_changed()
             assert changed is False
@@ -377,8 +377,8 @@ class TestConditionalGET:
         mock_resp = MagicMock()
         mock_resp.status_code = 304
 
-        with patch("cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp):
-            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+        with patch("cerebro_mcp.loaders.manifest.requests.get", return_value=mock_resp):
+            with patch("cerebro_mcp.loaders.manifest.settings") as mock_settings:
                 mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
                 changed, error = loader.reload_if_changed()
 
@@ -420,8 +420,8 @@ class TestConditionalGET:
         mock_resp.content = raw_bytes
         mock_resp.headers = {"ETag": '"new_etag"', "Last-Modified": "Thu, 01 Jan 2026"}
 
-        with patch("cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp):
-            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+        with patch("cerebro_mcp.loaders.manifest.requests.get", return_value=mock_resp):
+            with patch("cerebro_mcp.loaders.manifest.settings") as mock_settings:
                 mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
                 changed, error = loader.reload_if_changed()
 
@@ -463,10 +463,10 @@ class TestConditionalGET:
         loader._apply_indexes(indexes)
 
         with patch(
-            "cerebro_mcp.manifest_loader.requests.get",
+            "cerebro_mcp.loaders.manifest.requests.get",
             side_effect=Exception("Connection timeout"),
         ):
-            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+            with patch("cerebro_mcp.loaders.manifest.settings") as mock_settings:
                 mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
                 changed, error = loader.reload_if_changed()
 
@@ -484,9 +484,9 @@ class TestConditionalGET:
         mock_resp.status_code = 304
 
         with patch(
-            "cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp
+            "cerebro_mcp.loaders.manifest.requests.get", return_value=mock_resp
         ) as mock_get:
-            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+            with patch("cerebro_mcp.loaders.manifest.settings") as mock_settings:
                 mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
                 loader.reload_if_changed()
 
@@ -515,8 +515,8 @@ class TestConditionalGET:
         mock_resp.content = raw_bytes
         mock_resp.headers = {}
 
-        with patch("cerebro_mcp.manifest_loader.requests.get", return_value=mock_resp):
-            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+        with patch("cerebro_mcp.loaders.manifest.requests.get", return_value=mock_resp):
+            with patch("cerebro_mcp.loaders.manifest.settings") as mock_settings:
                 mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
                 changed, error = loader.reload_if_changed()
 
@@ -534,7 +534,7 @@ class TestStartupLogging:
     def test_missing_manifest_logs_without_stdout(self, caplog, capsys):
         loader = ManifestLoader()
 
-        with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+        with patch("cerebro_mcp.loaders.manifest.settings") as mock_settings:
             mock_settings.DBT_MANIFEST_URL = None
             mock_settings.DBT_MANIFEST_PATH = ""
             with caplog.at_level("WARNING"):
@@ -561,10 +561,10 @@ class TestStartupLogging:
         mock_resp.headers = {}
 
         with patch(
-            "cerebro_mcp.manifest_loader.requests.get",
+            "cerebro_mcp.loaders.manifest.requests.get",
             return_value=mock_resp,
         ):
-            with patch("cerebro_mcp.manifest_loader.settings") as mock_settings:
+            with patch("cerebro_mcp.loaders.manifest.settings") as mock_settings:
                 mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
                 mock_settings.DBT_MANIFEST_PATH = ""
                 with caplog.at_level("INFO"):
@@ -577,7 +577,7 @@ class TestStartupLogging:
 
 class TestLocalArtifactPreference:
     def test_load_prefers_local_manifest_over_remote_url(self, monkeypatch, tmp_path):
-        import cerebro_mcp.manifest_loader as manifest_mod
+        import cerebro_mcp.loaders.manifest as manifest_mod
 
         loader = ManifestLoader()
         manifest_path = tmp_path / "manifest.json"
@@ -618,14 +618,14 @@ class TestLocalArtifactPreference:
             "http://test.com/manifest.json",
         )
 
-        with patch("cerebro_mcp.manifest_loader.requests.get") as mock_get:
+        with patch("cerebro_mcp.loaders.manifest.requests.get") as mock_get:
             loader.load()
 
         assert loader.get_model("local_model") is not None
         mock_get.assert_not_called()
 
     def test_load_recovers_when_manifest_path_points_to_catalog(self, monkeypatch, tmp_path):
-        import cerebro_mcp.manifest_loader as manifest_mod
+        import cerebro_mcp.loaders.manifest as manifest_mod
 
         loader = ManifestLoader()
         manifest_path = tmp_path / "manifest.json"

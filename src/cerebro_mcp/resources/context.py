@@ -1,4 +1,4 @@
-from cerebro_mcp.manifest_loader import manifest
+from cerebro_mcp.loaders.manifest import manifest
 
 
 PLATFORM_OVERVIEW = """\

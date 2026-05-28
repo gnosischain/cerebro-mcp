@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
-from cerebro_mcp.tool_output import fit_rows_to_budget, normalize_value
+from cerebro_mcp.runtime.tool_output import fit_rows_to_budget, normalize_value
 
 
 def test_normalize_value_handles_strict_json_edge_cases():

@@ -8,7 +8,7 @@ import pytest
 import mcp.types as types
 from mcp.server.fastmcp import FastMCP
 
-import cerebro_mcp.tools.reasoning as reasoning
+import cerebro_mcp.tools.governance.reasoning as reasoning
 
 
 @pytest.fixture(autouse=True)

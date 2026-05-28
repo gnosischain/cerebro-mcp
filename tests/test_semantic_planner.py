@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cerebro_mcp.semantic_planner import (
+from cerebro_mcp.semantic.planner import (
     PlanningError,
     _find_time_spine_grain,
     _resolve_dimension_binding,
