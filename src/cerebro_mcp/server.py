@@ -56,6 +56,7 @@ from cerebro_mcp.tools.visualization.metric_lab import register_metric_lab_tools
 from cerebro_mcp.tools.visualization.portfolio import register_portfolio_tools
 from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_tools
 from cerebro_mcp.tools.web3.rpc import register_rpc_tools
+from cerebro_mcp.tools.visualization.grafana import register_grafana_tools
 
 
 runtime_state.ssl_trust_injected = init_ssl_trust()
@@ -314,6 +315,9 @@ register_contract_explorer_tools(mcp, ch)
 register_metric_lab_tools(mcp, ch)
 register_portfolio_tools(mcp, ch)
 register_graph_explorer_tools(mcp, ch)
+
+# Grafana dashboard publishing (no-op unless GRAFANA_TOOLS_ENABLED).
+register_grafana_tools(mcp, ch)
 
 install_auto_tool_tracing(mcp)
 

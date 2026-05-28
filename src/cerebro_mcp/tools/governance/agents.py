@@ -35,6 +35,8 @@ _VALID_ROLES = {
     "unified_allocator",
     # Cerebro Dispatcher — top-level intent triage + gated routing
     "cerebro_dispatcher",
+    # Grafana dashboard architect (mixed-audience dashboard composition)
+    "grafana_architect",
 }
 
 
