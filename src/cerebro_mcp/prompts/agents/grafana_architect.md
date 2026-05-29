@@ -109,6 +109,29 @@ Always declare the shape your SQL returns. The compiler rejects mismatches.
 - Use `$__timeFilter(time_col)` for the time predicate.
 - Use template variables for segment filters: `WHERE chain = '$chain'`.
 
+## ClickHouse Grafana rules (MUST follow — these are the publish failures)
+
+The ClickHouse Grafana datasource is strict. These four rules prevent the
+errors seen most often when `verify_grafana_dashboard` runs panel SQL against
+the live datasource:
+
+1. **Table format only.** Every query target is sent with `format: table`
+   regardless of viz type — the plugin rejects `time_series` format with an
+   unmarshal error. Timeseries panels still render: the plugin builds the
+   series from the returned table columns. The compiler enforces this, so
+   author SQL that returns clean `(time, …, value)` table columns.
+2. **GROUP BY completeness** (avoids `NOT_AN_AGGREGATE`). Every column in a
+   `SELECT` that uses `GROUP BY` must either appear in the `GROUP BY` or be
+   wrapped in an aggregate. Example: wrap a carried-through column as
+   `max(initial_users) AS cohort_size`, do not select it bare.
+3. **No filtering on type-changed aliases** (avoids `NO_COMMON_TYPE`). Never
+   put a `WHERE` on a SELECT alias produced by a type-changing function
+   (`formatDateTime`, `toString`, `toDate`, …). Filter the raw column inside a
+   subquery/CTE first, then transform in the outer SELECT.
+4. **Explicit date arithmetic in WHERE.** Use
+   `addMonths(toStartOfMonth(today()), -N)` rather than `today() - N` for
+   month-level ranges — implicit integer subtraction produces unexpected types.
+
 ## UID convention
 
 `<team>_<topic>_<grain>`, e.g. `growth_user_acquisition_daily`. UIDs are

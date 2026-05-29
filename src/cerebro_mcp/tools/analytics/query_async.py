@@ -39,6 +39,7 @@ class QueryJob:
     database: str
     max_rows: int
     dedup_key: str = ""
+    explain_context: bool = False
     status: str = "pending"  # pending, running, completed, failed
     stored_result: StoredAsyncResult | None = None
     error: str | None = None
@@ -289,6 +290,7 @@ def _build_async_status(
         sql=query_result.sql,
         warnings=query_result.warnings,
         extra_notes=summary_notes,
+        explain_context=job.explain_context,
     )
     query_result = query_result.model_copy(update={"summary_markdown": summary})
 
@@ -311,8 +313,13 @@ def register_async_query_tools(mcp, ch: ClickHouseManager):
         sql: str,
         database: str = "dbt",
         max_rows: int = 100,
+        explain_context: bool = False,
     ) -> str:
-        """Submit a long-running query for async execution. Returns a query ID to poll."""
+        """Submit a long-running query for async execution. Returns a query ID to poll.
+
+        Set `explain_context=True` to have the eventual result include a
+        "What this shows" section explaining the dbt models and key columns.
+        """
         try:
             _cleanup_old_jobs()
 
@@ -353,6 +360,7 @@ def register_async_query_tools(mcp, ch: ClickHouseManager):
                 database=database,
                 max_rows=capped_max,
                 dedup_key=dedup_key,
+                explain_context=explain_context,
             )
             _pending_queries[query_id] = job
 

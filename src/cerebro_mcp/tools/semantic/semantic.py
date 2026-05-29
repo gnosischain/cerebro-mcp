@@ -446,7 +446,7 @@ def _apply_repair(plan: dict[str, Any], repair: dict[str, str]) -> dict[str, Any
     return updated
 
 
-def _build_explanation(plan: dict[str, Any], sql: str, warnings: list[str], repair_traces: list[SemanticRetryTrace]) -> MetricQueryExplanation:
+def _build_explanation(plan: dict[str, Any], sql: str, warnings: list[str], repair_traces: list[SemanticRetryTrace], explain_context: bool = False) -> MetricQueryExplanation:
     summary = [
         f"Planner mode: `{plan['planner_mode']}`",
         f"Resolved metrics: {', '.join(plan['resolved_metrics']) or 'none'}",
@@ -454,6 +454,12 @@ def _build_explanation(plan: dict[str, Any], sql: str, warnings: list[str], repa
     ]
     if warnings:
         summary.append("Warnings: " + "; ".join(warnings))
+    if explain_context:
+        from cerebro_mcp.runtime.context_enrichment import build_metric_context_block
+
+        metric_block = build_metric_context_block(plan["resolved_metrics"])
+        if metric_block:
+            summary.append(metric_block)
     return MetricQueryExplanation(
         requested_metrics=plan["requested_metrics"],
         resolved_metrics=plan["resolved_metrics"],
@@ -1039,6 +1045,7 @@ def execute_metric_query(
     evidence_title: str = "",
     agent_role: str = "",
     allow_candidate: bool = False,
+    explain_context: bool = False,
 ) -> SemanticQueryResult | str:
     role = _resolve_agent_role(agent_role)
     started = time.perf_counter()
@@ -1230,6 +1237,19 @@ def execute_metric_query(
             },
             event_kind="semantic_routing",
         )
+        extra_notes = [
+            f"Planner mode: `{plan['planner_mode']}`",
+            f"Resolved metrics: {', '.join(plan['resolved_metrics'])}",
+            f"Resolved dimensions: {', '.join(plan['resolved_dimensions']) or 'none'}",
+        ]
+        if explain_context:
+            from cerebro_mcp.runtime.context_enrichment import (
+                build_metric_context_block,
+            )
+
+            metric_block = build_metric_context_block(plan["resolved_metrics"])
+            if metric_block:
+                extra_notes.append(metric_block)
         summary = build_query_summary(
             columns=result.columns,
             rows=result.rows,
@@ -1239,11 +1259,8 @@ def execute_metric_query(
             database=result.database,
             sql=result.sql,
             warnings=[*result.warnings, *warnings],
-            extra_notes=[
-                f"Planner mode: `{plan['planner_mode']}`",
-                f"Resolved metrics: {', '.join(plan['resolved_metrics'])}",
-                f"Resolved dimensions: {', '.join(plan['resolved_dimensions']) or 'none'}",
-            ],
+            extra_notes=extra_notes,
+            explain_context=explain_context,
         )
         return SemanticQueryResult(
             sql=result.sql,
@@ -1616,6 +1633,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         order_by: list[str] | None = None,
         agent_role: str = "",
         allow_candidate: bool = False,
+        explain_context: bool = False,
     ) -> MetricQueryExplanation | str:
         # See `query_metrics` for the `allow_candidate` semantics.
         role = _resolve_agent_role(agent_role)
@@ -1673,7 +1691,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 },
                 event_kind="semantic_routing",
             )
-            return _build_explanation(plan, sql, warnings, [])
+            return _build_explanation(plan, sql, warnings, [], explain_context=explain_context)
         except PlanningError as exc:
             state.record_semantic_fallback("semantic_coverage_gap")
             observe_semantic_fallback(
@@ -1731,6 +1749,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         evidence_title: str = "",
         agent_role: str = "",
         allow_candidate: bool = False,
+        explain_context: bool = False,
     ) -> SemanticQueryResult | str:
         # `allow_candidate=True` is an authoring/testing escape hatch that
         # lets you run a metric whose quality_tier is still "candidate" so
@@ -1753,6 +1772,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 evidence_title=evidence_title,
                 agent_role=role,
                 allow_candidate=allow_candidate,
+                explain_context=explain_context,
             )
             observe_semantic_tool_call(
                 tool_name="query_metrics",

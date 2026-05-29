@@ -52,6 +52,10 @@ class ManifestLoader:
         self._bm25_columns: ColumnBM25Index = ColumnBM25Index([])
         self._lineage_graph: nx.DiGraph = nx.DiGraph()
         self._unique_id_by_name: dict[str, str] = {}
+        # Lazily-built reverse index: table relation (schema.alias / alias)
+        # -> model name. Rebuilt when the manifest content hash changes.
+        self._table_to_model: dict[str, str] = {}
+        self._table_index_hash: str | None = None
         self._loaded = False
 
         # Conditional GET state
@@ -587,6 +591,40 @@ class ManifestLoader:
             "upstream": parents,
             "downstream": children,
         }
+
+    def _ensure_table_index(self) -> None:
+        """(Re)build the table-relation -> model-name reverse index if stale."""
+        if self._table_index_hash == self._content_hash and self._table_to_model:
+            return
+        index: dict[str, str] = {}
+        for name, node in self._models.items():
+            schema = node.get("schema", "dbt")
+            alias = node.get("alias", name)
+            # Most specific keys win; insert bare forms first so qualified
+            # forms (schema.alias) take precedence on collision.
+            for key in (name, alias, f"{schema}.{alias}"):
+                if key:
+                    index[key.lower()] = name
+        self._table_to_model = index
+        self._table_index_hash = self._content_hash
+
+    def get_model_by_table(self, table_ref: str) -> Optional[str]:
+        """Map a SQL table relation back to its dbt model name.
+
+        Accepts a bare alias, `schema.alias`, or the model name, with optional
+        surrounding quotes/backticks. Returns None if no model matches.
+        """
+        if not table_ref:
+            return None
+        self._ensure_table_index()
+        cleaned = table_ref.strip().strip('`"').lower()
+        if cleaned in self._table_to_model:
+            return self._table_to_model[cleaned]
+        # Fall back to the bare relation when a schema-qualified ref misses.
+        if "." in cleaned:
+            tail = cleaned.rsplit(".", 1)[-1]
+            return self._table_to_model.get(tail)
+        return None
 
     def get_lineage(
         self,

@@ -34,6 +34,7 @@ def register_query_tools(
         persist_result: bool = False,
         evidence_title: str = "",
         persist_max_rows: int | None = None,
+        explain_context: bool = False,
     ) -> QueryResult | str:
         """Execute a read-only SQL query against a Gnosis Chain ClickHouse database.
 
@@ -41,6 +42,10 @@ def register_query_tools(
         or `get_model_details` to verify exact column names. Column names are
         non-obvious (e.g., `value` not `staked_gno`, `cnt` not `count`,
         `txs` not `transactions`). Never guess column names.
+
+        Set `explain_context=True` to append a "What this shows" section that
+        explains the dbt models and key columns behind the result, sourced from
+        the dbt documentation.
         """
         try:
             in_research = bool(research_project_id)
@@ -143,6 +148,7 @@ def register_query_tools(
                 sql=result.sql,
                 warnings=result.warnings,
                 extra_notes=extra_notes,
+                explain_context=explain_context,
             )
             # Step 1 expansion — record the query in the workflow event
             # log. Only fires when the agent passed `research_project_id`,
@@ -219,8 +225,13 @@ def register_query_tools(
     def explain_query(
         sql: str,
         database: str = "dbt",
+        explain_context: bool = False,
     ) -> ExplainResult | str:
-        """Show the execution plan for a SQL query without running it."""
+        """Show the execution plan for a SQL query without running it.
+
+        Set `explain_context=True` to append a "What this shows" section
+        describing the dbt models referenced by the query.
+        """
         try:
             is_valid, error = validate_query(sql)
             if not is_valid:
@@ -230,7 +241,9 @@ def register_query_tools(
             result = ch.execute_raw(explain_sql, database)
             lines = [str(row[0]) if row else "" for row in result["rows"]]
             raw_body = "\n".join(lines)
-            summary = build_explain_summary(sql=sql, lines=lines)
+            summary = build_explain_summary(
+                sql=sql, lines=lines, explain_context=explain_context
+            )
             return ExplainResult(
                 sql=sql,
                 database=database,

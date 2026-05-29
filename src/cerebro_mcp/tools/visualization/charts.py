@@ -393,6 +393,7 @@ def create_report_artifact(
     case_study_metadata: dict | None = None,
     subtitle: str | None = None,
     summary_numbers: list[dict] | None = None,
+    explain_context: bool = False,
 ) -> dict:
     from cerebro_mcp.tools.governance.session_state import state
 
@@ -477,6 +478,17 @@ def create_report_artifact(
             source_model = _chart_registry[cid].get("source_model")
             if source_model:
                 chart_queries[cid]["source_model"] = source_model
+            rationale = _chart_registry[cid].get("rationale")
+            if not rationale and explain_context:
+                from cerebro_mcp.runtime.context_enrichment import (
+                    build_sql_context_block,
+                )
+
+                chart_sql = _chart_registry[cid].get("sql", "")
+                if chart_sql:
+                    rationale = build_sql_context_block(chart_sql)
+            if rationale:
+                chart_queries[cid]["rationale"] = rationale
         else:
             missing.append(cid)
 
@@ -2395,12 +2407,16 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         elapsed_seconds: float,
         source: str,
         return_metadata_only: bool = False,
+        explain_context: bool = False,
     ) -> str:
         """Build ECharts spec from tabular data and register the chart.
 
         When return_metadata_only=True, returns only a compact metadata line
         (chart ID, type, title, data points, query time) without the full
         ECharts JSON or SQL echo. Used by batch chart tools.
+
+        When explain_context=True, a "What this shows" rationale derived from
+        the dbt model/column docs is stored on the chart and shown on the card.
         """
         from cerebro_mcp.tools.governance.session_state import state
 
@@ -2485,6 +2501,14 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 option = builder(rows, col_index, x_field, y_field, series_field, title)
             state.record_generate_chart(chart_type, sql, series_field, source=source)
 
+            rationale = ""
+            if explain_context:
+                from cerebro_mcp.runtime.context_enrichment import (
+                    build_sql_context_block,
+                )
+
+                rationale = build_sql_context_block(sql, columns)
+
             # Register chart in registry (with TTL tracking)
             chart_id = _next_chart_id()
             with _chart_lock:
@@ -2502,6 +2526,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     "input_shape": input_shape,
                     "source": source,
                     "source_model": _single_source_model(sql),
+                    "rationale": rationale,
                 }
 
             # Metadata-only mode: compact single line for batch tool
@@ -2521,6 +2546,9 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 f"Data points: {len(rows)} | "
                 f"Query time: {elapsed_seconds}s"
             )
+
+            if rationale:
+                metadata += f"\n\n{rationale}"
 
             metadata += f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
 
@@ -2568,6 +2596,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         title: str,
         max_rows: int,
         return_metadata_only: bool = False,
+        explain_context: bool = False,
     ) -> str:
         """Internal helper: execute SQL, build ECharts spec, register chart."""
         try:
@@ -2591,6 +2620,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 elapsed_seconds=executed.elapsed_seconds,
                 source="raw",
                 return_metadata_only=return_metadata_only,
+                explain_context=explain_context,
             )
         except Exception as e:
             error_msg = str(e)
@@ -2773,6 +2803,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         series_field: str = "",
         title: str = "",
         max_rows: int = 500,
+        explain_context: bool = False,
     ) -> str:
         """Generate a single ad-hoc chart. For reports, use `generate_charts` instead.
 
@@ -2808,6 +2839,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             series_field: Optional column name to split data into multiple series.
             title: Chart title.
             max_rows: Maximum data points. Default: 500.
+            explain_context: When True, append a "What this shows" rationale
+                derived from the dbt model/column docs. Default: False.
 
         Returns:
             ECharts option JSON string. Render with: echarts.setOption(JSON.parse(result))
@@ -2821,7 +2854,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
 
         result = _build_and_register_chart(
             sql, database, chart_type, x_field, y_field, change_field,
-            series_field, title, max_rows,
+            series_field, title, max_rows, explain_context=explain_context,
         )
 
         # Nudge LLM toward batch tool if calling repeatedly
@@ -2850,6 +2883,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         series_field: str = "",
         title: str = "",
         max_rows: int = 500,
+        explain_context: bool = False,
     ) -> str:
         """Generate a quick ad-hoc chart without workflow gates.
 
@@ -2889,13 +2923,13 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             return _format_raw_chart_gate_failure(reason)
         return _build_and_register_chart(
             sql, database, chart_type, x_field, y_field, change_field,
-            series_field, title, max_rows,
+            series_field, title, max_rows, explain_context=explain_context,
         )
 
     # ── Batch chart tool (for reports) ──────────────────────────────
 
     @mcp.tool()
-    def generate_charts(charts: list[ChartSpec]) -> str:
+    def generate_charts(charts: list[ChartSpec], explain_context: bool = False) -> str:
         """Create multiple charts in ONE tool call. Use this for reports.
 
         PREFERRED over generate_chart for reports. Creates all charts in a
@@ -2929,6 +2963,9 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 sql (required), database (default "dbt"),
                 chart_type (default "line"), x_field, y_field, change_field,
                 series_field, title, max_rows (default 500).
+            explain_context: When True, store a "What this shows" rationale
+                (from dbt docs) on each chart so reports can display it.
+                Default: False.
 
         Returns:
             Summary table mapping input index to chart IDs for report placement.
@@ -2963,6 +3000,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 title=spec.get("title", ""),
                 max_rows=spec.get("max_rows", 500),
                 return_metadata_only=True,
+                explain_context=explain_context,
             )
 
             if result.startswith("OK|"):
@@ -3254,6 +3292,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         content_markdown: str,
         subtitle: str | None = None,
         summary_numbers: list[dict] | None = None,
+        explain_context: bool = False,
     ) -> CallToolResult:
         """Create an interactive report rendered as a native UI in the chat client.
 
@@ -3301,6 +3340,9 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             summary_numbers: Optional list of up to 6 leading KPIs. Each entry is
                 {"label": "...", "value": "...", "hint": "..."}. Rendered as a
                 table at the top of the report body (Metric | Value | Change).
+            explain_context: When True, each chart card carries a "What this shows"
+                block (dbt model rationale + key column meanings) backfilled from
+                the chart's SQL for any chart that lacks one.
 
         Returns:
             Interactive UI resource rendered natively in the chat client.
@@ -3313,6 +3355,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 reset_session_state=True,
                 subtitle=subtitle,
                 summary_numbers=summary_numbers,
+                explain_context=explain_context,
             )
 
             return CallToolResult(

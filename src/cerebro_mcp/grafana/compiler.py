@@ -31,7 +31,6 @@ from cerebro_mcp.grafana.styles import (
     bounds_for_unit,
     default_size,
     grafana_type,
-    target_format,
 )
 
 # --- SQL macro handling --------------------------------------------------
@@ -290,21 +289,21 @@ def _field_config(panel: GrafanaPanelDef) -> dict:
 # Grafana ClickHouse plugin `format` is a NUMERIC enum (see
 # mapQueryTypeToGrafanaFormat in grafana/clickhouse-datasource src/data/utils.ts):
 #   TimeSeries = 0, Table = 1, Logs = 2, Traces = 3.
-# Sending the string "time_series" makes the backend reject the query with
-# "invalid format value: time_series".
-_FORMAT_TIME_SERIES = 0
+# The plugin rejects the `time_series` format (0) with an unmarshal error on
+# every panel — only `table` (1) is accepted regardless of viz type. Timeseries
+# panels still render correctly: the plugin builds the series from the returned
+# table columns. So every target is emitted as table/`queryType: "table"`.
 _FORMAT_TABLE = 1
 
 
 def _build_target(panel: GrafanaPanelDef) -> dict:
-    is_ts = target_format(panel.effective_viz) == "time_series"
     return {
         "refId": "A",
         "datasource": _datasource(),
         "rawSql": panel.sql_query,
-        "format": _FORMAT_TIME_SERIES if is_ts else _FORMAT_TABLE,
+        "format": _FORMAT_TABLE,
         "editorType": "sql",
-        "queryType": "timeseries" if is_ts else "table",
+        "queryType": "table",
     }
 
 

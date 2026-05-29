@@ -148,6 +148,7 @@ def build_query_summary(
     sql: str,
     warnings: list[str] | None = None,
     extra_notes: list[str] | None = None,
+    explain_context: bool = False,
 ) -> str:
     table = format_results_table(columns, rows)
     meta = (
@@ -162,6 +163,12 @@ def build_query_summary(
         sections.append(warning_text)
     if extra_notes:
         sections.extend(extra_notes)
+    if explain_context:
+        from cerebro_mcp.runtime.context_enrichment import build_sql_context_block
+
+        context = build_sql_context_block(sql, columns)
+        if context:
+            sections.append(context)
     sections.append(f"### SQL\n```sql\n{truncate_sql(sql)}\n```")
     return truncate_response("\n\n".join(sections))
 
@@ -171,11 +178,18 @@ def build_explain_summary(
     sql: str,
     lines: list[str],
     warnings: list[str] | None = None,
+    explain_context: bool = False,
 ) -> str:
     body = "\n".join(lines) if lines else "No explain output returned."
     sections = [truncate_response(body)]
     warning_text = format_warnings(warnings or [])
     if warning_text:
         sections.append(warning_text)
+    if explain_context:
+        from cerebro_mcp.runtime.context_enrichment import build_sql_context_block
+
+        context = build_sql_context_block(sql, [])
+        if context:
+            sections.append(context)
     sections.append(f"### SQL\n```sql\n{truncate_sql(sql)}\n```")
     return truncate_response("\n\n".join(sections))
