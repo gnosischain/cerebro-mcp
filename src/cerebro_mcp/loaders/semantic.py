@@ -114,13 +114,30 @@ class SemanticRuntime:
 
     def _refresh(self, *, force: bool) -> tuple[bool, str | None]:
         started = time.perf_counter()
+        # Reload the dbt manifest + catalog alongside the registry so the
+        # execution-availability check (`_execution_state`) sees a consistent
+        # set: the registry embeds the manifest/catalog hashes it was built
+        # against, and those must be compared against freshly-loaded manifest
+        # /catalog bytes. Refreshing only the registry on a force pulls the
+        # NEW registry (new embedded manifest_hash) while leaving the stale
+        # startup manifest in memory — which re-asserts `manifest_hash_mismatch`
+        # instead of clearing it. Move all four together.
+        # NOTE: manifest/catalog are reloaded via `reload_if_changed()` on both
+        # paths. ManifestLoader has no `force_reload` (it is not an
+        # ArtifactLoader), and it doesn't need one here: it re-reads local
+        # files unconditionally and uses a conditional GET for the remote, and
+        # a real gh-pages deploy always bumps the ETag — so a changed manifest
+        # is always picked up. Only the registry/docs use `force_reload` to
+        # defeat a stale-ETag re-parse during local authoring loops.
+        changed_manifest, _ = manifest.reload_if_changed()
+        changed_catalog, _ = catalog.reload_if_changed()
         if force:
             changed_registry, registry_error = semantic_registry.force_reload()
             changed_docs, docs_error = semantic_docs.force_reload()
         else:
             changed_registry, registry_error = semantic_registry.reload_if_changed()
             changed_docs, docs_error = semantic_docs.reload_if_changed()
-        if not changed_registry and not changed_docs:
+        if not (changed_registry or changed_docs or changed_manifest or changed_catalog):
             return False, registry_error or docs_error
         registry_payload = semantic_registry.payload
         docs_payload = semantic_docs.payload

@@ -415,8 +415,9 @@ def _maybe_refresh_semantic() -> None:
     if now - _last_semantic_refresh < settings.SEMANTIC_REFRESH_INTERVAL_SECONDS:
         return
     _last_semantic_refresh = now
-    manifest.reload_if_changed()
-    catalog.reload_if_changed()
+    # refresh_if_changed() -> SemanticRuntime._refresh(force=False) now reloads
+    # the manifest + catalog alongside the registry, so we no longer need to
+    # poke them explicitly here.
     semantic_runtime.refresh_if_changed()
 
 
@@ -1781,13 +1782,22 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         (candidate → approved) and **agg-type changes** — propagate
         without waiting for the next poll cycle.
 
-        Returns counts and content-hash before / after so callers can
-        confirm the refresh actually picked up new content.
+        Reloads the registry **and** the dbt manifest + catalog together, so
+        a post-deploy `manifest_hash_mismatch` is fully resolved in one call
+        (the registry embeds the manifest/catalog hashes it was built against;
+        reloading the registry alone would leave the stale in-memory manifest
+        and re-assert the mismatch).
+
+        Returns counts and content-hash before / after — including the
+        manifest/catalog hashes and whether metric execution is now available
+        — so callers can confirm the refresh actually picked up new content.
         """
         role = _resolve_agent_role(agent_role)
         try:
             before_snapshot = semantic_runtime.snapshot
             before_hash = before_snapshot.registry_hash if before_snapshot else ""
+            before_manifest_hash = manifest.content_hash or ""
+            before_catalog_hash = catalog.content_hash or ""
             changed, error = semantic_runtime.force_reload()
             after_snapshot = semantic_runtime.snapshot
             after_hash = after_snapshot.registry_hash if after_snapshot else ""
@@ -1812,6 +1822,12 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 "changed": bool(changed),
                 "before_hash": before_hash,
                 "after_hash": after_hash,
+                "manifest_hash_before": before_manifest_hash,
+                "manifest_hash_after": manifest.content_hash or "",
+                "catalog_hash_before": before_catalog_hash,
+                "catalog_hash_after": catalog.content_hash or "",
+                "execution_available": semantic_runtime.is_execution_available,
+                "stale_reason": semantic_runtime.stale_reason or "",
                 "metric_count": metric_count,
                 "model_count": model_count,
                 "approved_metric_count": approved_metrics,
