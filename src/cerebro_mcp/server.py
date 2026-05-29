@@ -30,6 +30,7 @@ from cerebro_mcp.loaders.semantic import semantic_runtime
 from cerebro_mcp.tools.analytics.query import register_query_tools
 from cerebro_mcp.tools.analytics.schema import register_schema_tools
 from cerebro_mcp.tools.analytics.dbt import register_dbt_tools
+from cerebro_mcp.tools.analytics.lineage_graph import register_lineage_graph_tools
 from cerebro_mcp.tools.analytics.metadata import register_metadata_tools
 from cerebro_mcp.resources.context import register_resources
 from cerebro_mcp.resources.reference import register_reference_resources
@@ -55,6 +56,7 @@ from cerebro_mcp.tools.web3.contract_explorer import register_contract_explorer_
 from cerebro_mcp.tools.visualization.metric_lab import register_metric_lab_tools
 from cerebro_mcp.tools.visualization.portfolio import register_portfolio_tools
 from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_tools
+from cerebro_mcp.tools.analytics.model_lineage_app import register_model_lineage_tools
 from cerebro_mcp.tools.web3.rpc import register_rpc_tools
 from cerebro_mcp.tools.visualization.grafana import register_grafana_tools
 
@@ -283,6 +285,7 @@ research_store = ResearchStore(str(RESEARCH_DIR))
 register_query_tools(mcp, ch, research_store)
 register_schema_tools(mcp, ch)
 register_dbt_tools(mcp)
+register_lineage_graph_tools(mcp)
 register_metadata_tools(mcp, ch)
 
 # Register resources and prompts
@@ -315,6 +318,7 @@ register_contract_explorer_tools(mcp, ch)
 register_metric_lab_tools(mcp, ch)
 register_portfolio_tools(mcp, ch)
 register_graph_explorer_tools(mcp, ch)
+register_model_lineage_tools(mcp, ch)
 
 # Grafana dashboard publishing (no-op unless GRAFANA_TOOLS_ENABLED).
 register_grafana_tools(mcp, ch)

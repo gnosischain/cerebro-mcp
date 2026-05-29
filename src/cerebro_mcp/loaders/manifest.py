@@ -716,6 +716,157 @@ class ManifestLoader:
             model_name, query, top_k=top_k
         )
 
+    # ------------------------------------------------------------------
+    # Model-lineage explorer: structured {nodes, edges} subgraph
+    #
+    # Backs the `get_model_subgraph` MCP tool and the model-lineage mini
+    # app. Unlike `get_lineage` (which returns nested upstream/downstream
+    # lists for agent text), this returns a flat node/edge set ready for a
+    # graph renderer, built on a bounded BFS over the networkx DAG so a
+    # seed in a ~1000-model project never expands to the full graph.
+    # ------------------------------------------------------------------
+
+    def _subgraph_node(self, node_id: str) -> dict[str, Any]:
+        """Build a renderer-friendly node descriptor for a lineage node id."""
+        data = self._lineage_graph.nodes.get(node_id, {})
+        kind = data.get("kind", "unknown")
+        model_name = data.get("model_name", "")
+        if model_name:
+            name = model_name
+        elif data.get("source_key"):
+            name = data["source_key"]
+        else:
+            parts = node_id.split(".")
+            name = parts[-1] if parts else node_id
+
+        node: dict[str, Any] = {
+            "id": node_id,
+            "name": name,
+            "kind": kind,
+            "materialized": "",
+            "schema": "",
+            "tags": [],
+            "description": "",
+            "column_count": 0,
+            "test_count": 0,
+            # Run status/timing are not present in manifest.json (they live
+            # in run_results.json, which the MCP server does not load).
+            # Surfaced as None so the UI can render an "unknown" state.
+            "last_run_status": None,
+            "last_run_elapsed": None,
+        }
+
+        model = self._models.get(model_name) if model_name else None
+        if model is not None:
+            node["materialized"] = model.get("config", {}).get("materialized", "")
+            node["schema"] = model.get("schema", "")
+            node["tags"] = list(model.get("tags", []) or [])
+            node["description"] = model.get("description", "")
+            node["column_count"] = len(model.get("columns", {}) or {})
+            node["test_count"] = len(self._tests_by_model.get(model_name, []))
+        return node
+
+    def get_subgraph(
+        self,
+        seed: str,
+        direction: str = "both",
+        depth: int = 1,
+        include_kinds: Optional[list[str]] = None,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Return a bounded ``{nodes, edges}`` subgraph around ``seed``.
+
+        Args:
+            seed: dbt model short name to center the traversal on.
+            direction: "upstream", "downstream", or "both".
+            depth: Max hops from the seed (>= 0). Bounds the BFS frontier.
+            include_kinds: Optional whitelist of node kinds
+                ("model", "source", "unknown"). The seed is always kept.
+            tags: Optional tag whitelist; non-seed model nodes are dropped
+                unless they carry at least one of these tags. Source/unknown
+                nodes are unaffected (they have no dbt tags).
+
+        Returns:
+            ``{"seed", "direction", "depth", "nodes": [...], "edges": [...]}``
+            or ``{"error": ...}`` (with empty nodes/edges) when seed unknown.
+        """
+        uid = self._resolve_unique_id(seed)
+        if uid is None or uid not in self._lineage_graph:
+            return {
+                "error": f"Model '{seed}' not found",
+                "seed": seed,
+                "nodes": [],
+                "edges": [],
+            }
+
+        depth = max(0, int(depth))
+        direction = direction if direction in ("upstream", "downstream", "both") else "both"
+
+        # Bounded BFS over the directed lineage DAG honoring `direction`.
+        visited: set[str] = set()
+        collected: set[str] = {uid}
+        frontier: list[tuple[str, int]] = [(uid, 0)]
+        while frontier:
+            node_id, d = frontier.pop(0)
+            if node_id in visited:
+                continue
+            visited.add(node_id)
+            if d >= depth:
+                continue
+            neighbors: list[str] = []
+            if direction in ("upstream", "both"):
+                neighbors.extend(self._lineage_graph.predecessors(node_id))
+            if direction in ("downstream", "both"):
+                neighbors.extend(self._lineage_graph.successors(node_id))
+            for nb in neighbors:
+                collected.add(nb)
+                if nb not in visited:
+                    frontier.append((nb, d + 1))
+
+        # Apply node filters (the seed is always retained).
+        #
+        # Default whitelist is {model, source}: the lineage DAG also carries
+        # `kind="unknown"` nodes for non-model artifacts (elementary tests,
+        # disabled nodes) whose names are opaque hashes like "b6fd52855f".
+        # Those are noise in a model-lineage view, so drop them unless the
+        # caller explicitly asks for them via include_kinds.
+        kind_filter = set(include_kinds) if include_kinds else {"model", "source"}
+        tag_filter = set(tags) if tags else None
+
+        def _keep(node_id: str) -> bool:
+            if node_id == uid:
+                return True
+            data = self._lineage_graph.nodes.get(node_id, {})
+            if kind_filter is not None and data.get("kind") not in kind_filter:
+                return False
+            if tag_filter is not None and data.get("kind") == "model":
+                model_name = data.get("model_name", "")
+                model = self._models.get(model_name, {})
+                if not (tag_filter & set(model.get("tags", []) or [])):
+                    return False
+            return True
+
+        kept = {nid for nid in collected if _keep(nid)}
+        nodes = [self._subgraph_node(nid) for nid in sorted(kept)]
+
+        # Edges: every DAG edge between two kept nodes.
+        edges: list[dict[str, Any]] = []
+        for src in kept:
+            for dst in self._lineage_graph.successors(src):
+                if dst in kept:
+                    edges.append(
+                        {"id": f"{src}->{dst}", "source": src, "target": dst}
+                    )
+
+        return {
+            "seed": seed,
+            "seed_id": uid,
+            "direction": direction,
+            "depth": depth,
+            "nodes": nodes,
+            "edges": edges,
+        }
+
     def _traverse(
         self, start_id: str, graph: dict[str, list[str]], max_depth: int
     ) -> list[dict]:

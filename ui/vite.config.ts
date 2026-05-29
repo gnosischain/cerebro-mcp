@@ -15,6 +15,7 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 //   portfolio
 //   graphExplorer
 //   contractExplorer
+//   modelLineage
 
 const ENTRY_MAP: Record<string, { html: string; out: string }> = {
   report:           { html: "index.html",            out: "index.html" },
@@ -22,6 +23,7 @@ const ENTRY_MAP: Record<string, { html: string; out: string }> = {
   portfolio:        { html: "portfolio.html",        out: "portfolio.html" },
   graphExplorer:    { html: "graph-explorer.html",   out: "graph-explorer.html" },
   contractExplorer: { html: "contract-explorer.html", out: "contract-explorer.html" },
+  modelLineage:     { html: "model-lineage.html",    out: "model-lineage.html" },
 };
 
 const entryName = process.env.CEREBRO_UI_ENTRY ?? "report";

@@ -11,8 +11,9 @@
   margin: 0 auto;
   font-family: var(--mini-app-font, system-ui, sans-serif);
   color: var(--mini-app-text, #e5e7eb);
-  /* Allow the body to scroll naturally; nothing inside should clip. */
-  min-height: 100vh;
+  /* Allow the body to scroll naturally; nothing inside should clip. The body
+   * (.ma-body) is the scroll container, so fill it rather than the viewport. */
+  min-height: 100%;
   box-sizing: border-box;
 }
 

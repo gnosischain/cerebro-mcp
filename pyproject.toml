@@ -19,6 +19,7 @@ dependencies = [
     "duckdb>=1.0",
     "aiosqlite>=0.20",
     "web3>=7.0,<8",
+    "sqlglot>=24.0",
 ]
 
 [project.optional-dependencies]

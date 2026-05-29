@@ -424,7 +424,7 @@ export default function GraphExplorerApp() {
   const seedKind = state.seed_node?.kind ?? "";
 
   return (
-    <MiniAppChrome activeTabId="graph">
+    <MiniAppChrome activeTabId="graph" bodyClassName="ma-body--flush">
     <div className="ge-shell">
       <WarningBanner warnings={view.warnings ?? []} />
       {isEmpty ? (

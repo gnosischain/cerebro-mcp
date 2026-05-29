@@ -14,6 +14,7 @@ export const DEFAULT_APP_TABS: MiniAppTab[] = [
   { id: "portfolio", label: "Portfolio", href: "/portfolio.html" },
   { id: "contract", label: "Contract", href: "/contract-explorer.html" },
   { id: "graph", label: "Graph", href: "/graph-explorer.html" },
+  { id: "lineage", label: "Lineage", href: "/model-lineage.html" },
   { id: "metric", label: "Metric Lab", href: "/metric-lab.html" },
 ];
 
@@ -23,6 +24,7 @@ interface MiniAppChromeProps {
   activeTabId?: string;
   onTabClick?: (id: string) => void;
   rightSlot?: ReactNode;
+  bodyClassName?: string;
   children: ReactNode;
 }
 
@@ -49,6 +51,7 @@ export function MiniAppChrome({
   activeTabId,
   onTabClick,
   rightSlot,
+  bodyClassName,
   children,
 }: MiniAppChromeProps) {
   // If caller passes explicit tabs, honor them. Otherwise default to the
@@ -84,7 +87,9 @@ export function MiniAppChrome({
           <MaThemeToggle />
         </span>
       </nav>
-      <div className="ma-body">{children}</div>
+      <div className={`ma-body${bodyClassName ? ` ${bodyClassName}` : ""}`}>
+        {children}
+      </div>
     </div>
   );
 }
