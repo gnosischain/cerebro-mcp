@@ -181,6 +181,11 @@ CORE_INFRASTRUCTURE_CONTRACTS = {
         "name": "Circles Hub V2",
         "type": "social",
     },
+    "multicall3": {
+        "address": "0xca11bde05977b3631167028862be2a173976ca11",
+        "name": "Multicall3 (canonical, aggregate3 batch reads)",
+        "type": "infrastructure",
+    },
 }
 
 TABLE_PARTITION_KEYS = {
@@ -1080,6 +1085,27 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 | `get_gnosis_chain_doc_chunk` | Read a single chunk from Gnosis Chain docs `llms.txt` |
 | `get_platform_constants` | Chain params, event signatures, contracts, partition keys |
 
+### Contract Inspection (single-call RPC)
+| Tool | Description |
+|------|-------------|
+| `contract_explore` | Inspect one contract: functions, events, proxy implementation, ABI source |
+| `contract_call_function` | One view/pure call at one address (current or pinned block) |
+| `contract_decode_transaction_input` | Decode one transaction's calldata |
+| `contract_decode_receipt_logs` | Decode one receipt's event logs |
+
+### RPC Scans (bulk on-chain forensics; needs RPC_SCAN_ENABLED)
+Results land in `scratch.rpc_*` ClickHouse tables — analyze with `execute_query`, join dbt models freely. Long scans run as resumable jobs.
+| Tool | Description |
+|------|-------------|
+| `rpc_scan_logs` | eth_getLogs over any block window, auto-chunked; event decoding into typed columns; address-set filters at any size |
+| `rpc_batch_call` | Multicall3 view-function sweeps across thousands of addresses at a pinned block (wide one-row-per-address output) |
+| `rpc_read_storage` | Raw storage slots across an address set (value as hex/uint/address) |
+| `rpc_get_code` | Bytecode classification: EOA/contract, code_hash clustering, EIP-1167 + EIP-1967 proxy detection |
+| `rpc_scan_traces` | trace_filter sweep for native xDAI value flows (the Transfer-log blind spot) |
+| `rpc_trace_transaction` | One transaction's full call tree with net native flows |
+| `rpc_find_block` | Binary-search block finders: timestamp anchor, deployment block, storage-change block |
+| `rpc_scan_status` / `rpc_scan_cancel` / `rpc_scan_resume` / `rpc_list_scans` | Job control; partial tables stay queryable; resume continues from the saved cursor |
+
 ### Saved Queries
 | Tool | Description |
 |------|-------------|
@@ -1286,5 +1312,15 @@ Try asking:
         lines.append("- MEDIUM caution: partition key filter required, additional filters recommended")
         lines.append("- Always prefer dbt api_*/fct_* models over raw tables when available")
         lines.append("- Use FINAL on execution/consensus raw tables (ReplacingMergeTree)")
+
+        # 6. RPC node limits (relevant to the rpc_scan_* tools)
+        lines.append("\n## RPC Node Limits (handled automatically by rpc_scan_* tools)\n")
+        lines.append("| Method | Limit | Engine behavior |")
+        lines.append("|--------|-------|-----------------|")
+        lines.append("| `eth_getLogs` | provider-dependent block range / result size | auto-halves the window on errors, grows back after success — never pre-chunk |")
+        lines.append("| `eth_getLogs` address/topic filter | ~1k entries per filter array | address sets are split into ~600-entry topic chunks per pass |")
+        lines.append("| `trace_filter` | ~100 blocks per call | windows chunked and fanned over a worker pool |")
+        lines.append("| Multicall3 `aggregate3` | ~600 calls per eth_call | batches sized automatically; allowFailure per call |")
+        lines.append("| native xDAI transfers | emit NO log | only visible via `rpc_scan_traces` / `rpc_trace_transaction` |")
 
         return truncate_response("\n".join(lines))

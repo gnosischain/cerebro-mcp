@@ -1,6 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import type { MiniAppPayload, PageRowsResponse } from "./miniAppTypes";
 
+declare global {
+  interface Window {
+    /**
+     * Standalone web-app mode only. Injected by the server's
+     * `GET /app/{app_id}` route as the base path for HTTP tool dispatch
+     * (e.g. "/app/model_lineage/api/tool"). Absent inside an MCP host.
+     */
+    __MINI_APP_API__?: string;
+    /**
+     * Standalone web-app mode only. The auth token the client presented on the
+     * initial page load, echoed back so HTTP tool calls and cross-app nav links
+     * can re-authenticate. Absent when the server runs without auth.
+     */
+    __MINI_APP_TOKEN__?: string;
+  }
+}
+
 /**
  * Generic mini-app data hook. Mirrors useReportData() but typed against
  * MiniAppPayload<TState> and routing by payload `type`:
@@ -62,12 +79,23 @@ function applyPatch<TState>(
   patch: Record<string, unknown> | undefined,
 ): MiniAppPayload<TState> {
   if (!patch) return prev;
+  // A patch may carry a nested `datasets` map (descriptors keyed by name) that
+  // should replace the matching entries while leaving the rest intact.
+  const patchedDatasets =
+    patch.datasets && typeof patch.datasets === "object"
+      ? {
+          ...(prev.datasets ?? {}),
+          ...(patch.datasets as NonNullable<MiniAppPayload<TState>["datasets"]>),
+        }
+      : prev.datasets;
+  // view_state may be carried either nested under `view_state` or flat.
+  const statePatch =
+    (patch.view_state as Partial<TState> | undefined) ??
+    (patch as Partial<TState>);
   return {
     ...prev,
-    view_state: deepMerge(
-      (prev.view_state ?? {}) as TState,
-      patch as Partial<TState>,
-    ),
+    datasets: patchedDatasets,
+    view_state: deepMerge((prev.view_state ?? {}) as TState, statePatch),
   };
 }
 
@@ -190,19 +218,47 @@ export function useMiniApp<TState = Record<string, unknown>>(
     args: Record<string, unknown>,
   ): Promise<T | null> => {
     const app = appRef.current;
-    if (!app?.callServerTool) {
+    const apiBase =
+      typeof window !== "undefined" ? window.__MINI_APP_API__ : undefined;
+    let result:
+      | { structuredContent?: unknown; isError?: boolean; content?: unknown[] }
+      | undefined;
+    if (app?.callServerTool) {
+      try {
+        result = await app.callServerTool({ name, arguments: args });
+      } catch (err) {
+        console.error(`[useMiniApp] callServerTool('${name}') threw`, err);
+        throw new Error(
+          err instanceof Error ? err.message : `Tool '${name}' failed`,
+        );
+      }
+    } else if (apiBase) {
+      // Standalone web-app mode: no ext-apps bridge, but the server injected a
+      // `window.__MINI_APP_API__` base pointing at the HTTP dispatch route.
+      // Forward the injected auth token (if any) as a Bearer header so the
+      // POST passes the same auth gate the initial page load did.
+      try {
+        const token = window.__MINI_APP_TOKEN__;
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const resp = await fetch(`${apiBase}/${encodeURIComponent(name)}`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ arguments: args }),
+        });
+        result = (await resp.json()) as typeof result;
+      } catch (err) {
+        console.error(`[useMiniApp] HTTP tool '${name}' failed`, err);
+        throw new Error(
+          err instanceof Error ? err.message : `Tool '${name}' failed`,
+        );
+      }
+    } else {
       console.warn(`[useMiniApp] callServerTool('${name}') unavailable (no ext-apps host)`);
       throw new Error(
         "Unable to reach the host. Is the app running inside an MCP-aware client?",
-      );
-    }
-    let result;
-    try {
-      result = await app.callServerTool({ name, arguments: args });
-    } catch (err) {
-      console.error(`[useMiniApp] callServerTool('${name}') threw`, err);
-      throw new Error(
-        err instanceof Error ? err.message : `Tool '${name}' failed`,
       );
     }
     if (result?.isError) {

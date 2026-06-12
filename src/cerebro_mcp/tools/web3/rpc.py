@@ -1,7 +1,12 @@
 """Read-only Web3 RPC + contract decoding tools.
 
-These tools are intentionally narrow: one contract, one call, one tx at a time.
-Bulk/historical scans must continue to use dbt-decoded ClickHouse models.
+These tools are intentionally narrow: one contract, one call, one tx at a
+time. For bulk on-chain work — log sweeps over block windows, multicall
+view-function sweeps across address sets, storage/bytecode scans, native
+value traces — use the rpc_scan_* family in tools/web3/rpc_scan.py
+(registered when RPC_SCAN_ENABLED), which lands results in ClickHouse
+scratch tables. Historical aggregates that dbt already models stay on the
+dbt/execute_query path.
 """
 from __future__ import annotations
 

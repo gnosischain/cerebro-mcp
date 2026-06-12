@@ -74,6 +74,20 @@ class AsyncQueryStatus(BaseModel):
     summary_markdown: str = ""
 
 
+class RpcScanStatus(BaseModel):
+    job_id: str
+    kind: str                      # logs|calls|storage|code|traces|blocks
+    status: str                    # pending|running|partial|completed|failed|cancelled
+    label: str = ""
+    scratch_table: str = ""
+    elapsed_seconds: float = 0.0
+    rows_written: int = 0
+    resumable: bool = False
+    progress: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    summary_markdown: str = ""
+
+
 class RpcResult(BaseModel):
     method: str
     params: list[Any] = Field(default_factory=list)

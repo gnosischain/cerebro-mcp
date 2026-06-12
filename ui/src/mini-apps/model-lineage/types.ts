@@ -28,9 +28,15 @@ export interface ModelLineageState {
 }
 
 // Dataset row column orders (must match the Python NODES_COLUMNS / EDGES_COLUMNS).
-// nodes:  [id, name, kind, materialized, schema, tags, description, column_count, test_count]
+// nodes:  [id, name, kind, materialized, schema, tags, description, column_count, test_count, columns, raw_sql, compiled_sql]
 // edges:  [id, source, target, layer]
 // column_edges: [id, source_model, source_column, target_model, target_column, level]
+
+export interface ColumnSchema {
+  name: string;
+  data_type: string;
+  description: string;
+}
 
 export interface ModelNodeData {
   id: string;
@@ -42,6 +48,9 @@ export interface ModelNodeData {
   description: string;
   columnCount: number;
   testCount: number;
+  columns: ColumnSchema[];
+  rawSql: string;
+  compiledSql: string;
   [key: string]: unknown;
 }
 
@@ -72,6 +81,9 @@ export function parseNodeRow(row: unknown[]): ModelNodeData {
     description: String(row[6] ?? ""),
     columnCount: Number(row[7] ?? 0),
     testCount: Number(row[8] ?? 0),
+    columns: Array.isArray(row[9]) ? (row[9] as ColumnSchema[]) : [],
+    rawSql: String(row[10] ?? ""),
+    compiledSql: String(row[11] ?? ""),
   };
 }
 

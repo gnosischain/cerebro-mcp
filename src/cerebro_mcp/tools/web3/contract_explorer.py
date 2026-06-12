@@ -59,7 +59,7 @@ from mcp.types import CallToolResult
 from cerebro_mcp.clients.abi_resolver import resolve_abi
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
 from cerebro_mcp.models.mini_app import MiniAppPayload, SummaryCard
-from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.visualization import mini_apps, web_apps
 from cerebro_mcp.tools.web3.rpc import call_view_function
 
 logger = logging.getLogger(__name__)
@@ -518,6 +518,17 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         else:
             summary = f"Call to {entry['function']} failed: {entry['error']}"
         return mini_apps.payload_to_call_tool_result(payload, summary_text=summary)
+
+    web_apps.register_web_app(
+        app_id=APP_ID,
+        open_tool="open_contract_explorer",
+        html_loader=get_contract_explorer_html,
+        tools={
+            "open_contract_explorer": open_contract_explorer,
+            "load_contract_explorer_address": load_contract_explorer_address,
+            "contract_explorer_call_function": contract_explorer_call_function,
+        },
+    )
 
 
 __all__ = [

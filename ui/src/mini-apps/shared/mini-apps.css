@@ -41,8 +41,8 @@
 }
 
 .mini-app-warning-banner {
-  background: rgba(251, 191, 36, 0.12);
-  border: 1px solid rgba(251, 191, 36, 0.4);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning);
   border-radius: 8px;
   padding: 12px 16px;
   font-size: 0.9rem;
@@ -79,15 +79,15 @@
 }
 
 .mini-app-summary-card.tone-positive {
-  border-color: rgba(52, 211, 153, 0.45);
+  border-color: var(--success);
 }
 
 .mini-app-summary-card.tone-warning {
-  border-color: rgba(251, 191, 36, 0.45);
+  border-color: var(--warning);
 }
 
 .mini-app-summary-card.tone-negative {
-  border-color: rgba(248, 113, 113, 0.45);
+  border-color: var(--error);
 }
 
 .mini-app-summary-label {
@@ -230,13 +230,13 @@
 }
 
 .mini-app-pill--estimate {
-  background: rgba(96, 165, 250, 0.18);
-  color: #93c5fd;
+  background: var(--accent-bg);
+  color: var(--accent-text);
 }
 
 .mini-app-pill--warning {
-  background: rgba(251, 191, 36, 0.18);
-  color: #fcd34d;
+  background: var(--warning-bg);
+  color: var(--warning);
 }
 
 /* --- Chart area ---------------------------------------------------------- */
@@ -251,6 +251,9 @@
 .mini-app-table-wrap {
   max-height: 480px;
   overflow: auto;
+  /* Contain horizontal scroll to the table itself so long cell values never
+     push the surrounding layout past the 1280px root. */
+  max-width: 100%;
 }
 
 .mini-app-table-wrap table {
@@ -264,6 +267,12 @@
   text-align: left;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border, rgba(226, 232, 240, 0.08));
+  /* Keep cells on one line and cap their width; long addresses/hashes get a
+     trailing ellipsis rather than wrapping or stretching the table. */
+  white-space: nowrap;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .mini-app-table-wrap th {
@@ -318,10 +327,10 @@
 
 .mini-app-picker__error {
   padding: 10px 14px;
-  background: rgba(248, 113, 113, 0.12);
-  border: 1px solid rgba(248, 113, 113, 0.4);
+  background: var(--error-bg);
+  border: 1px solid var(--error);
   border-radius: 8px;
-  color: #fca5a5;
+  color: var(--error);
   font-size: 0.88rem;
 }
 
@@ -442,6 +451,72 @@
   gap: 12px;
   font-size: 0.82rem;
   color: var(--text-muted, #94a3b8);
+}
+
+/* Anchor meta: runnable indicator + column schema */
+.mini-app-picker__anchor-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ml-exec-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--tone-positive-border, rgba(52, 211, 153, 0.4));
+}
+.ml-exec-pill.is-runnable {
+  color: var(--tone-positive-fg, #6ee7b7);
+  background: var(--tone-positive-bg, rgba(52, 211, 153, 0.14));
+}
+.ml-exec-pill.is-blocked {
+  color: var(--tone-negative-fg, #fca5a5);
+  background: var(--tone-negative-bg, rgba(248, 113, 113, 0.14));
+  border-color: var(--tone-negative-border, rgba(248, 113, 113, 0.4));
+}
+
+.mini-app-picker__columns {
+  margin-top: 6px;
+  font-size: 0.82rem;
+  color: var(--text-secondary, #cbd5e1);
+}
+.mini-app-picker__columns > summary {
+  cursor: pointer;
+  color: var(--text-muted, #94a3b8);
+  user-select: none;
+}
+.ml-column-schema {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.ml-column-schema li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.ml-column-schema li:nth-child(odd) {
+  background: var(--table-stripe, rgba(148, 163, 184, 0.06));
+}
+.ml-column-schema code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-primary, #e5e7eb);
+}
+.ml-column-type {
+  color: var(--text-muted, #94a3b8);
+  font-family: var(--font-mono, ui-monospace, monospace);
 }
 
 .mini-app-picker__meta strong {
@@ -990,7 +1065,10 @@
 
 .mini-app-comparison-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* minmax(0, …) lets children shrink below their content's min-width so a
+     wide table scrolls inside its own wrapper instead of blowing out the grid
+     and forcing the whole page to overflow horizontally. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -1087,6 +1165,7 @@
 .mini-app-ranking-item,
 .mini-app-relation-card {
   width: 100%;
+  min-width: 0;
   text-align: left;
   display: flex;
   flex-direction: column;
@@ -1129,6 +1208,15 @@
 .mini-app-relation-card span {
   color: var(--text-muted, #94a3b8);
   font-size: 0.78rem;
+}
+
+.mini-app-relation-card strong,
+.mini-app-relation-card span,
+.mini-app-relation-card small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mini-app-detail-stack {
@@ -1713,6 +1801,91 @@ button.data-card:hover { border-color: var(--border-hover); transform: translate
   border: 2px solid currentColor;
   border-right-color: transparent;
   animation: btn-spin 0.7s linear infinite;
+}
+
+/* ===== Shared toolbar / field / search primitives (Ma*) ===== */
+.ma-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.ma-toolbar--between {
+  justify-content: space-between;
+}
+.ma-toolbar--start {
+  justify-content: flex-start;
+}
+
+.ma-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 8px;
+  background: var(--surface-translucent);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.ma-field:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.ma-field-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+  flex: none;
+}
+.ma-field-trailing {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+.ma-field input,
+.ma-field select {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 7px 2px;
+}
+.ma-field input::placeholder {
+  color: var(--text-secondary);
+}
+
+/* Search input variant (MaSearchInput) */
+.ma-search {
+  flex: 1 1 240px;
+  padding-right: 3px;
+}
+.ma-search-input {
+  width: 100%;
+}
+.ma-search-action {
+  flex: none;
+  padding: 6px 12px;
+  background: var(--primary);
+  color: var(--bg);
+  border: none;
+  border-radius: 2px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.ma-search-action:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.ma-search-action:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* Screen-reader only utility */

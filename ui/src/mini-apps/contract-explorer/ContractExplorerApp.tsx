@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { MiniAppChrome, MaIdentity, MaSection } from "../shared/MiniAppChrome";
+import { MaHelpButton } from "../shared/HelpDialog";
+import { CONTRACT_EXPLORER_HELP } from "../shared/helpContent";
 import { shortAddr } from "../../utils/format";
 
 // ---------------------------------------------------------------------------
@@ -178,7 +180,7 @@ export default function ContractExplorerApp() {
 
   if (!view) {
     return (
-      <MiniAppChrome activeTabId="contract">
+      <MiniAppChrome activeTabId="contract" rightSlot={<MaHelpButton content={CONTRACT_EXPLORER_HELP} />}>
         <div className="ma-empty">Loading Contract Explorer…</div>
       </MiniAppChrome>
     );
@@ -209,7 +211,7 @@ export default function ContractExplorerApp() {
   const visibleEvents: AbiEvent[] = subTab === "events" ? state?.events ?? [] : [];
 
   return (
-    <MiniAppChrome activeTabId="contract">
+    <MiniAppChrome activeTabId="contract" rightSlot={<MaHelpButton content={CONTRACT_EXPLORER_HELP} />}>
       <div className="contract-explorer-app">
         {/* Load form — always visible, compact */}
         <form

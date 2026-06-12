@@ -749,6 +749,11 @@ class ManifestLoader:
             "description": "",
             "column_count": 0,
             "test_count": 0,
+            # Schema (column list) and SQL for the details panel. Empty for
+            # source/unknown nodes (no compiled SQL in the manifest).
+            "columns": [],
+            "raw_sql": "",
+            "compiled_sql": "",
             # Run status/timing are not present in manifest.json (they live
             # in run_results.json, which the MCP server does not load).
             # Surfaced as None so the UI can render an "unknown" state.
@@ -764,6 +769,30 @@ class ManifestLoader:
             node["description"] = model.get("description", "")
             node["column_count"] = len(model.get("columns", {}) or {})
             node["test_count"] = len(self._tests_by_model.get(model_name, []))
+            node["raw_sql"] = model.get("raw_code", "") or ""
+            node["compiled_sql"] = model.get("compiled_code", "") or ""
+            node["columns"] = [
+                {
+                    "name": col_name,
+                    "data_type": col_meta.get("data_type", ""),
+                    "description": col_meta.get("description", ""),
+                }
+                for col_name, col_meta in (model.get("columns", {}) or {}).items()
+            ]
+        elif kind == "source" and data.get("source_key"):
+            src = self._sources.get(data["source_key"], {})
+            if src:
+                node["schema"] = src.get("schema", "")
+                node["description"] = src.get("description", "") or ""
+                node["columns"] = [
+                    {
+                        "name": col_name,
+                        "data_type": col_meta.get("data_type", ""),
+                        "description": col_meta.get("description", ""),
+                    }
+                    for col_name, col_meta in (src.get("columns", {}) or {}).items()
+                ]
+                node["column_count"] = len(node["columns"])
         return node
 
     def get_subgraph(

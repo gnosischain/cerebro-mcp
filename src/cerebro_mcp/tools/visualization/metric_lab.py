@@ -23,7 +23,7 @@ from mcp.types import CallToolResult, TextContent
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset
 from cerebro_mcp.models.mini_app import MiniAppPayload, SummaryCard
-from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.visualization import mini_apps, web_apps
 from cerebro_mcp.tools.visualization.mini_apps import MiniAppQueryError
 
 logger = logging.getLogger(__name__)
@@ -989,6 +989,19 @@ def register_metric_lab_tools(mcp, ch: ClickHouseManager) -> None:
             payload,
             summary_text=f"Metric Lab chart updated → {chart_type} ({x_field}, {y_field})",
         )
+
+    web_apps.register_web_app(
+        app_id=METRIC_LAB_APP_ID,
+        open_tool="open_metric_lab",
+        html_loader=get_metric_lab_html,
+        tools={
+            "open_metric_lab": open_metric_lab,
+            "load_metric_lab_metric": load_metric_lab_metric,
+            "open_metric_lab_from_sql": open_metric_lab_from_sql,
+            "open_metric_lab_from_metrics": open_metric_lab_from_metrics,
+            "update_metric_lab_chart": update_metric_lab_chart,
+        },
+    )
 
 
 __all__ = [

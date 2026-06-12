@@ -6,17 +6,34 @@ import "./mini-app-chrome.css";
 export interface MiniAppTab {
   id: string;
   label: string;
+  /** Dev / vite build target (one `.html` per app). */
   href?: string;
+  /** Server-side app id for standalone web delivery (`/app/<appId>`). */
+  appId?: string;
 }
 
 /** Cross-app navigation. Each mini-app passes `activeTabId` to highlight its slot. */
 export const DEFAULT_APP_TABS: MiniAppTab[] = [
-  { id: "portfolio", label: "Portfolio", href: "/portfolio.html" },
-  { id: "contract", label: "Contract", href: "/contract-explorer.html" },
-  { id: "graph", label: "Graph", href: "/graph-explorer.html" },
-  { id: "lineage", label: "Lineage", href: "/model-lineage.html" },
-  { id: "metric", label: "Metric Lab", href: "/metric-lab.html" },
+  { id: "portfolio", label: "Portfolio", href: "/portfolio.html", appId: "portfolio" },
+  { id: "contract", label: "Contract", href: "/contract-explorer.html", appId: "contract_explorer" },
+  { id: "graph", label: "Graph", href: "/graph-explorer.html", appId: "graph_explorer" },
+  { id: "lineage", label: "Lineage", href: "/model-lineage.html", appId: "model_lineage" },
+  { id: "metric", label: "Metric Lab", href: "/metric-lab.html", appId: "metric_lab" },
 ];
+
+/** Resolve a tab's link. When the bundle is served standalone by our own
+ * server (`window.__MINI_APP_API__` is set), cross-app nav must target the
+ * `/app/<appId>` route and carry the injected auth token — the dev `.html`
+ * filenames only exist under `npm run dev`. */
+function tabHref(tab: MiniAppTab): string {
+  const api = typeof window !== "undefined" ? window.__MINI_APP_API__ : undefined;
+  if (api && tab.appId) {
+    const token = window.__MINI_APP_TOKEN__;
+    const suffix = token ? `?token=${encodeURIComponent(token)}` : "";
+    return `/app/${tab.appId}${suffix}`;
+  }
+  return tab.href ?? "#";
+}
 
 interface MiniAppChromeProps {
   brand?: string;
@@ -70,7 +87,7 @@ export function MiniAppChrome({
         {effectiveTabs.map((t) => (
           <a
             key={t.id}
-            href={t.href ?? "#"}
+            href={tabHref(t)}
             className={`ma-tab${t.id === activeTabId ? " is-active" : ""}`}
             onClick={(e) => {
               if (onTabClick) {

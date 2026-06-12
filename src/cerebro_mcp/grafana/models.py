@@ -57,6 +57,10 @@ class GrafanaPanelDef(BaseModel):
     decimals: int | None = Field(default=None, ge=0, le=6)
     thresholds: list[ThresholdStep] | None = None
     transformations: list[dict] = Field(default_factory=list)  # passthrough
+    # table columns that must render as verbatim text (addresses, hashes, ids).
+    # Without this Grafana applies the panel's numeric unit to every column and
+    # mangles hex strings into numbers.
+    text_columns: list[str] = Field(default_factory=list)
     # Optional layout overrides; defaults come from the panel catalog.
     width: Literal[6, 8, 12, 24] | None = None
     height: int | None = Field(default=None, ge=3, le=24)

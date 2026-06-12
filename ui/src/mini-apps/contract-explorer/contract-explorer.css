@@ -2,15 +2,19 @@
    shared mini-app theme in ../shared/mini-apps.css. */
 
 .contract-explorer-app {
-  padding: 1rem 1.25rem;
+  /* Match the canonical .mini-app-root gutter (24px 32px) used by portfolio
+     and metric-lab so all mini-apps share the same content column (WS6). */
+  padding: 24px 32px;
   /* Generous bottom padding so the last function card never gets clipped by
      the host iframe's scroll boundary or by the safe-area inset that
      useMiniApp() applies via document.body.paddingBottom. */
   padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0px));
-  max-width: 980px;
+  /* Unified root width — match metric-lab / graph / lineage (1280px) so all
+     mini-apps share the same content column and gutter (WS6 consistency). */
+  max-width: 1280px;
   margin: 0 auto;
-  font-family: var(--mini-app-font, system-ui, sans-serif);
-  color: var(--mini-app-text, #e5e7eb);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  color: var(--text-primary, #e5e7eb);
   /* Allow the body to scroll naturally; nothing inside should clip. The body
    * (.ma-body) is the scroll container, so fill it rather than the viewport. */
   min-height: 100%;
@@ -20,7 +24,7 @@
 .contract-explorer-loading {
   padding: 3rem;
   text-align: center;
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
 }
 
 /* Header --------------------------------------------------------------- */
@@ -32,7 +36,7 @@
   margin-bottom: 1.5rem;
   padding: 1.1rem 1.25rem;
   border-radius: 12px;
-  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.12));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
   background: linear-gradient(
     180deg,
     var(--accent-soft) 0%,
@@ -52,20 +56,20 @@
   gap: 0.5rem;
   align-items: center;
   font-size: 0.85rem;
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
 }
 
 .contract-explorer-subtitle code {
   font-size: 0.8rem;
-  color: var(--mini-app-text, #e5e7eb);
+  color: var(--text-primary, #e5e7eb);
 }
 
 .contract-explorer-badge {
   display: inline-block;
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
-  background: rgba(34, 197, 94, 0.15);
-  color: #4ade80;
+  background: var(--success-bg);
+  color: var(--success);
   font-size: 0.75rem;
 }
 
@@ -94,7 +98,7 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-size: 0.7rem;
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
 }
 
 .contract-explorer-address-bar input[type="text"] {
@@ -103,9 +107,9 @@
   padding: 0.7rem 0.9rem;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 0.95rem;
-  background: var(--mini-app-input-bg, rgba(255, 255, 255, 0.06));
-  color: var(--mini-app-text, #e5e7eb);
-  border: 1.5px solid var(--mini-app-border, rgba(255, 255, 255, 0.18));
+  background: var(--surface-2, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #e5e7eb);
+  border: 1.5px solid var(--border, rgba(255, 255, 255, 0.18));
   border-radius: 8px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
@@ -118,9 +122,9 @@
 
 .contract-explorer-address-bar select {
   padding: 0.7rem 0.7rem;
-  background: var(--mini-app-input-bg, rgba(255, 255, 255, 0.06));
-  color: var(--mini-app-text, #e5e7eb);
-  border: 1.5px solid var(--mini-app-border, rgba(255, 255, 255, 0.18));
+  background: var(--surface-2, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #e5e7eb);
+  border: 1.5px solid var(--border, rgba(255, 255, 255, 0.18));
   border-radius: 8px;
   font-size: 0.9rem;
   min-width: 12rem;
@@ -131,7 +135,7 @@
   flex-direction: column;
   gap: 0.15rem;
   font-size: 0.7rem;
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
 }
 
 .contract-explorer-target-label > span:first-child {
@@ -186,7 +190,7 @@
   gap: 0.5rem;
   align-items: flex-end;
   padding-top: 0.6rem;
-  border-top: 1px dashed var(--mini-app-border, rgba(255, 255, 255, 0.12));
+  border-top: 1px dashed var(--border, rgba(255, 255, 255, 0.12));
 }
 
 .contract-explorer-block-label {
@@ -200,16 +204,16 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-size: 0.7rem;
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
 }
 
 .contract-explorer-block-label input {
   padding: 0.45rem 0.65rem;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 0.85rem;
-  background: var(--mini-app-input-bg, rgba(255, 255, 255, 0.06));
-  color: var(--mini-app-text, #e5e7eb);
-  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.18));
+  background: var(--surface-2, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, #e5e7eb);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.18));
   border-radius: 6px;
   min-width: 9rem;
 }
@@ -222,9 +226,9 @@
 
 .contract-explorer-preset {
   padding: 0.4rem 0.7rem;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--mini-app-muted, #9ca3af);
-  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.12));
+  background: var(--surface-translucent);
+  color: var(--text-muted, #9ca3af);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
   border-radius: 6px;
   font-size: 0.8rem;
   cursor: pointer;
@@ -233,7 +237,7 @@
 
 .contract-explorer-preset:hover {
   background: var(--accent-softer);
-  color: var(--mini-app-text, #e5e7eb);
+  color: var(--text-primary, #e5e7eb);
 }
 
 .contract-explorer-preset.active {
@@ -246,7 +250,7 @@
   flex: 1 1 100%;
   margin: 0;
   font-size: 0.72rem;
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
   opacity: 0.85;
 }
 
@@ -279,8 +283,8 @@
 .contract-explorer-empty {
   padding: 2rem;
   text-align: center;
-  color: var(--mini-app-muted, #9ca3af);
-  border: 1px dashed var(--mini-app-border, rgba(255, 255, 255, 0.1));
+  color: var(--text-muted, #9ca3af);
+  border: 1px dashed var(--border, rgba(255, 255, 255, 0.1));
   border-radius: 8px;
 }
 
@@ -288,27 +292,27 @@
   margin: 1rem 0;
   padding: 1rem 1.25rem;
   border-radius: 8px;
-  border: 1px solid rgba(245, 158, 11, 0.4);
-  background: rgba(245, 158, 11, 0.08);
-  color: var(--mini-app-text, #e5e7eb);
+  border: 1px solid var(--warning);
+  background: var(--warning-bg);
+  color: var(--text-primary, #e5e7eb);
 }
 
 .contract-explorer-empty-result strong {
   display: block;
   font-size: 0.95rem;
   margin-bottom: 0.4rem;
-  color: #fbbf24;
+  color: var(--warning);
 }
 
 .contract-explorer-empty-result p {
   margin: 0.3rem 0;
   font-size: 0.85rem;
   line-height: 1.4;
-  color: var(--mini-app-muted, #d1d5db);
+  color: var(--text-secondary, #d1d5db);
 }
 
 .contract-explorer-empty-result code {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--code-bg);
   padding: 0.05rem 0.3rem;
   border-radius: 3px;
   font-size: 0.8rem;
@@ -317,8 +321,8 @@
 .contract-explorer-empty-result button {
   margin-top: 0.6rem;
   padding: 0.45rem 0.9rem;
-  background: #f59e0b;
-  color: #1f2937;
+  background: var(--warning);
+  color: var(--bg);
   border: none;
   border-radius: 6px;
   font-weight: 600;
@@ -340,10 +344,10 @@
 }
 
 .contract-explorer-fn-card {
-  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.1));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
   border-radius: 8px;
   padding: 0.55rem 0.75rem;
-  background: var(--mini-app-card-bg, rgba(255, 255, 255, 0.02));
+  background: var(--surface-1, rgba(255, 255, 255, 0.02));
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
@@ -376,7 +380,7 @@
 
 .contract-explorer-outputs {
   font-size: 0.75rem;
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
@@ -391,7 +395,7 @@
   flex-direction: column;
   gap: 0.15rem;
   font-size: 0.72rem;
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
 }
 
 .contract-explorer-form label em {
@@ -403,9 +407,9 @@
   padding: 0.4rem 0.6rem;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 0.8rem;
-  background: var(--mini-app-input-bg, rgba(255, 255, 255, 0.05));
-  color: var(--mini-app-text, #e5e7eb);
-  border: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.1));
+  background: var(--surface-2, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, #e5e7eb);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
   border-radius: 4px;
 }
 
@@ -418,7 +422,7 @@
 .contract-explorer-result {
   padding: 0.5rem 0.75rem;
   border-radius: 6px;
-  background: rgba(34, 197, 94, 0.1);
+  background: var(--success-bg);
   font-size: 0.8rem;
   display: flex;
   flex-wrap: wrap;
@@ -427,7 +431,7 @@
 }
 
 .contract-explorer-result.error {
-  background: rgba(239, 68, 68, 0.1);
+  background: var(--error-bg);
 }
 
 .contract-explorer-result code {
@@ -436,11 +440,11 @@
 }
 
 .contract-explorer-ok {
-  color: #4ade80;
+  color: var(--success);
 }
 
 .contract-explorer-err {
-  color: #f87171;
+  color: var(--error);
   font-size: 0.8rem;
 }
 
@@ -459,15 +463,15 @@
   flex-wrap: wrap;
   gap: 0.5rem;
   padding: 0.4rem 0;
-  border-bottom: 1px solid var(--mini-app-border, rgba(255, 255, 255, 0.05));
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.05));
 }
 
 .contract-explorer-history-args {
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
 }
 
 .contract-explorer-history-meta {
   margin-left: auto;
-  color: var(--mini-app-muted, #9ca3af);
+  color: var(--text-muted, #9ca3af);
   font-size: 0.7rem;
 }

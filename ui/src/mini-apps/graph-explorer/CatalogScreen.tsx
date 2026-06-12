@@ -83,6 +83,14 @@ export function CatalogScreen({ catalog, onSeed }: Props) {
     onSeed(null, trimmed);
   };
 
+  // Seeding a profile: if an address is typed, seed (profile, address);
+  // otherwise seed the profile in sample mode (empty address) — the backend
+  // renders a representative sample of that graph the user can promote to a
+  // real seed by clicking any node.
+  const seedProfile = (profileId: string) => {
+    onSeed(profileId, seedInput.trim());
+  };
+
   const isAddress = /^0x[a-fA-F0-9]{40}$/.test(seedInput.trim());
 
   return (
@@ -119,9 +127,9 @@ export function CatalogScreen({ catalog, onSeed }: Props) {
         <p className="ge-catalog-seed-hint">
           {seedInput.trim()
             ? isAddress
-              ? "Auto-detects which graph profiles apply for this address."
+              ? "Auto-detects applicable profiles — or pick one below to force that graph."
               : "Looks like a non-address seed — will try as-is."
-            : "Or pick a profile from the list below."}
+            : "Pick a profile below to see a sample of that graph — click any node to seed from it."}
         </p>
       </div>
 
@@ -168,7 +176,7 @@ export function CatalogScreen({ catalog, onSeed }: Props) {
               <button
                 type="button"
                 className="ge-catalog-row"
-                onClick={() => onSeed(profile.profile, "")}
+                onClick={() => seedProfile(profile.profile)}
                 title={profile.description || profile.profile}
               >
                 <span

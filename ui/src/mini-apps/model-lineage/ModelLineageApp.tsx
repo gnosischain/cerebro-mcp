@@ -3,6 +3,8 @@ import type { MiniAppPayload } from "../shared/miniAppTypes";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { MiniAppChrome } from "../shared/MiniAppChrome";
+import { MaHelpButton } from "../shared/HelpDialog";
+import { MODEL_LINEAGE_HELP } from "../shared/helpContent";
 import { FilterBar } from "./FilterBar";
 import { LineageGraph } from "./LineageGraph";
 import { DetailsPanel } from "./DetailsPanel";
@@ -217,7 +219,7 @@ export default function ModelLineageApp() {
 
   if (!view) {
     return (
-      <MiniAppChrome activeTabId="lineage">
+      <MiniAppChrome activeTabId="lineage" rightSlot={<MaHelpButton content={MODEL_LINEAGE_HELP} />}>
         <div className="ma-empty">Loading Model Lineage Explorer…</div>
       </MiniAppChrome>
     );
@@ -227,7 +229,7 @@ export default function ModelLineageApp() {
   // discover a seed model without knowing its exact name.
   if (!state.seed && nodeCount === 0) {
     return (
-      <MiniAppChrome activeTabId="lineage" bodyClassName="ma-body--flush">
+      <MiniAppChrome activeTabId="lineage" bodyClassName="ma-body--flush" rightSlot={<MaHelpButton content={MODEL_LINEAGE_HELP} />}>
         <div className="ml-shell">
           <WarningBanner warnings={view.warnings ?? []} />
           <CatalogScreen catalog={state.catalog ?? []} onSeed={onSeed} />
@@ -237,7 +239,7 @@ export default function ModelLineageApp() {
   }
 
   return (
-    <MiniAppChrome activeTabId="lineage" bodyClassName="ma-body--flush">
+    <MiniAppChrome activeTabId="lineage" bodyClassName="ma-body--flush" rightSlot={<MaHelpButton content={MODEL_LINEAGE_HELP} />}>
       <div className="ml-shell">
         <WarningBanner warnings={view.warnings ?? []} />
         <FilterBar

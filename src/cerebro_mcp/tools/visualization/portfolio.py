@@ -12,7 +12,7 @@ from mcp.types import CallToolResult
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset
 from cerebro_mcp.models.mini_app import DatasetStats, MiniAppPayload, SummaryCard
-from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.visualization import mini_apps, web_apps
 from cerebro_mcp.tools.visualization.mini_apps import MiniAppQueryError
 
 logger = logging.getLogger(__name__)
@@ -383,7 +383,7 @@ SELECT
     ELSE 'changed_threshold'
   END AS event_kind,
   lower(concat('0x', substring(data, 25, 40))) AS owner,
-  toUInt32OrZero(reinterpretAsUInt256(reverse(unhex(data)))) AS threshold
+  toUInt32(reinterpretAsUInt256(reverse(unhex(data)))) AS threshold
 FROM execution.logs
 WHERE lower(address) = replaceAll({{address:String}}, '0x', '')
   AND topic0 IN (
@@ -796,7 +796,7 @@ def _build_relationship_dataset(
             parameters={"address": address},
             label="Live Safe owner overlay",
             warnings=overlay_warnings,
-            database="default",
+            database="dbt",
             limit=200,
         )
         if live_events:
@@ -924,7 +924,7 @@ def _merge_gpay_activity_overlay(
         parameters={"address": address},
         label="Live Gnosis Pay activity overlay",
         warnings=warnings,
-        database="default",
+        database="dbt",
         limit=500,
     )
     if not live_rows:
@@ -1491,6 +1491,19 @@ def register_portfolio_tools(mcp, ch: ClickHouseManager) -> None:
             payload,
             summary_text=f"Portfolio focus updated for section '{section_key}'.",
         )
+
+    web_apps.register_web_app(
+        app_id=PORTFOLIO_APP_ID,
+        open_tool="open_portfolio",
+        html_loader=get_portfolio_html,
+        tools={
+            "open_portfolio": open_portfolio,
+            "load_portfolio_address": load_portfolio_address,
+            "navigate_portfolio_relation": navigate_portfolio_relation,
+            "load_portfolio_section": load_portfolio_section,
+            "update_portfolio_focus": update_portfolio_focus,
+        },
+    )
 
 
 __all__ = [

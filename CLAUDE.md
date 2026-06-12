@@ -123,6 +123,17 @@ Do NOT use bullet lists for key takeaways. Always use the table format above.
 
 ## Data Query SOP
 
+0. PLANE CHECK — pick the data plane before discovering anything:
+
+| Question shape | Plane |
+|---|---|
+| Historical aggregate / trend / USD-valued | dbt models via `execute_query` (steps 1-7 below) |
+| Current or pinned-block state, ONE address | `contract_call_function` (one RPC round-trip) |
+| Current or pinned-block state across MANY addresses; storage slots; bytecode/proxy identity; native-value traces; events no dbt model decodes; windows too recent for dbt | `rpc_scan_*` tools (needs `RPC_SCAN_ENABLED`) → results land in a `scratch.rpc_*` ClickHouse table → continue with `execute_query` joins against dbt models. Pin anchor blocks first via `rpc_find_block(kind="timestamp")`. Address sets ≤500 inline, else `address_sql` (a dbt model or a previous scan's scratch table works). Count scratch tables with `uniqExact`/`FINAL`. |
+| "What did tx X do" | `contract_decode_transaction_input` / `contract_decode_receipt_logs` / `rpc_trace_transaction` |
+
+Never re-scan the chain to re-aggregate — scan once, then aggregate in SQL. See [docs/rpc/rpc_scan_overview.md](docs/rpc/rpc_scan_overview.md).
+
 1. DISCOVER: `search_models` — find models across ALL tiers (api_*, fct_*, int_*), not just the first match. **Pass `module=` and a tight `query=`; the default `limit=50` is a ceiling, not a target — drop to 10–15 for focused tasks.** Every model returned counts toward the discovered-model coverage gate.
 2. EXPLORE: `get_model_details` for top 3-5 models — map lineage, identify all dimensions (token, action, segment)
 3. VERIFY: `describe_table` for exact column names

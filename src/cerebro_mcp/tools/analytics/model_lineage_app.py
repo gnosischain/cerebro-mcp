@@ -24,7 +24,7 @@ from cerebro_mcp.loaders.manifest import manifest
 from cerebro_mcp.loaders.semantic import semantic_runtime
 from cerebro_mcp.models.mini_app import DatasetStats, MiniAppPayload
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset
-from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.visualization import mini_apps, web_apps
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,9 @@ NODES_COLUMNS = [
     "description",
     "column_count",
     "test_count",
+    "columns",
+    "raw_sql",
+    "compiled_sql",
 ]
 EDGES_COLUMNS = ["id", "source", "target", "layer"]
 COLUMN_EDGES_COLUMNS = [
@@ -119,6 +122,9 @@ def _node_to_row(node: dict[str, Any]) -> list[Any]:
         node.get("description", ""),
         node.get("column_count", 0),
         node.get("test_count", 0),
+        node.get("columns", []),
+        node.get("raw_sql", ""),
+        node.get("compiled_sql", ""),
     ]
 
 
@@ -186,6 +192,16 @@ def _semantic_node(model_name: str) -> dict[str, Any]:
         "description": model.get("description", ""),
         "column_count": len(model.get("columns", {}) or {}),
         "test_count": 0,
+        "columns": [
+            {
+                "name": col_name,
+                "data_type": col_meta.get("data_type", ""),
+                "description": col_meta.get("description", ""),
+            }
+            for col_name, col_meta in (model.get("columns", {}) or {}).items()
+        ],
+        "raw_sql": model.get("raw_code", "") or "",
+        "compiled_sql": model.get("compiled_code", "") or "",
     }
 
 
@@ -498,6 +514,25 @@ def register_model_lineage_tools(mcp, ch: ClickHouseManager) -> None:
 
         layer = record.view_state.get("layer", "model")
         capped_depth = min(max(int(depth), 1), MAX_DEPTH)
+
+        # Source nodes are leaf inputs (raw external tables) — they have no
+        # upstream lineage to expand. dbt source unique_ids are
+        # "source.<proj>.<source>.<table>", never resolvable through the
+        # model-name index, so attempting to expand them used to surface a
+        # spurious "Model '…' not found" error. Treat a source double-click as
+        # a pure selection: keep the graph as-is, just focus the node.
+        if node_id.startswith("source."):
+            mini_apps.patch_view_state(
+                view_id, {"selected_node_id": node_id, "warnings": []}
+            )
+            record = mini_apps.get_view(view_id)
+            assert record is not None
+            payload = _build_payload(record)
+            return mini_apps.payload_to_call_tool_result(
+                payload,
+                summary_text=f"Selected source {node_id} (no expansion)",
+            )
+
         # For the model layer node ids are unique_ids ("model.<proj>.<name>");
         # the seed argument expects the short model name.
         seed_name = node_id.split(".")[-1] if layer == "model" else node_id
@@ -633,3 +668,15 @@ def register_model_lineage_tools(mcp, ch: ClickHouseManager) -> None:
                 f"(level={result.get('level')}, view_id={view_id[:8]})"
             ),
         )
+
+    web_apps.register_web_app(
+        app_id=MODEL_LINEAGE_APP_ID,
+        open_tool="open_model_lineage",
+        html_loader=get_model_lineage_html,
+        tools={
+            "open_model_lineage": open_model_lineage,
+            "expand_model_lineage_node": expand_model_lineage_node,
+            "set_model_lineage_filters": set_model_lineage_filters,
+            "load_column_lineage": load_column_lineage,
+        },
+    )

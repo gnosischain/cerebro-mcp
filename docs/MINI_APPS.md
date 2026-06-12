@@ -28,6 +28,98 @@ All apps share the same plumbing:
 
 ---
 
+## Delivery modes & transports
+
+The cerebro-mcp **server only exposes tools** — it never talks to a model
+directly. A *host* (Claude Desktop, Claude Code, a custom app) owns an *MCP
+client*, and that client speaks the MCP protocol to the server over a
+**transport**. The model decides *which* tool to call; the client issues the
+call. Mini-apps reach the same tool registry through one of three paths.
+
+### The general picture
+
+```mermaid
+flowchart LR
+    User([You]) <--> Host[Claude host<br/>e.g. Desktop]
+    Host <--> Client[MCP client]
+    Client <-->|transport| Server[cerebro-mcp server<br/>tool registry]
+    Server <--> CH[(ClickHouse / RPC)]
+```
+
+The transport is the only thing that changes between modes — the tool registry
+underneath is identical.
+
+### Mode 1 — stdio (Claude Desktop / Claude Code)
+
+Claude Desktop launches the server as a subprocess and talks to it over
+stdin/stdout pipes (no `--sse` flag). All MCP tools work, and mini-apps render
+**inline inside the host** via the ext-apps bridge. There is **no HTTP
+listener**, so the standalone `/app/{id}` browser URLs are *not* served here.
+
+```mermaid
+flowchart LR
+    subgraph Desktop[Claude Desktop process]
+        Model[Model] --> C1[MCP client]
+        Webview[Mini-app webview<br/>ext-apps bridge]
+    end
+    C1 <-->|stdio pipe<br/>MCP JSON-RPC| S1[cerebro-mcp<br/>subprocess]
+    Webview <-->|callServerTool<br/>over the bridge| C1
+    S1 --> Tools1[(tools)]
+```
+
+The mini-app's `useMiniApp.callTool` uses the **ext-apps bridge** (the host
+relays the call to its client). No HTTP, no token.
+
+### Mode 2 — standalone web app (`--sse`, plain browser)
+
+Run the server with `--sse` and it starts a real HTTP server (uvicorn +
+Starlette). Now `GET /app/{app_id}` serves the single-file bundle with the
+initial payload injected, and the frontend POSTs tool calls back to
+`/app/{app_id}/api/tool/{tool}`. This path **bypasses the model and the MCP
+client entirely** — it's a separate HTTP door into the same tool registry.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant R as Starlette routes<br/>(web_apps.py)
+    participant T as tool registry
+    B->>R: GET /app/portfolio?token=…
+    Note over B,R: token in URL — a top-level<br/>navigation can't set headers
+    R->>R: _check_auth (Bearer header OR ?token=)
+    R->>T: open_portfolio(**query)
+    T-->>R: CallToolResult (structuredContent)
+    R-->>B: HTML + injected payload<br/>+ window.__MINI_APP_TOKEN__
+    B->>R: POST /app/portfolio/api/tool/load_portfolio_address<br/>Authorization: Bearer <token>
+    Note over B,R: JS can set headers now —<br/>token no longer in the URL
+    R->>T: load_portfolio_address(**args)
+    T-->>R: CallToolResult
+    R-->>B: { structuredContent, isError, content }
+```
+
+**Why the token is in the URL on the first request:** a browser doing a
+top-level navigation (address bar or `<a href>` cross-app nav) cannot attach an
+`Authorization` header, so `?token=` is the only channel. The server re-injects
+it as `window.__MINI_APP_TOKEN__`; every subsequent JS-initiated `POST` sends it
+as a `Bearer` header instead, so the token stays out of later URLs. It's the
+client echoing a credential it already had — never an escalation. (Serialization
+of `structuredContent` mirrors the MCP bridge — Pydantic `mode="json"` — so
+`date`/`datetime` values become ISO strings instead of crashing `json.dumps`.)
+
+### Mode 3 — pure-UI dev (Vite, no backend)
+
+`npm run dev` serves every entry HTML with HMR and boots each app into its
+`MOCK_PAYLOAD` fixture. No client, no transport, no ClickHouse — `callServerTool`
+is unavailable, so "Call"/"Expand"/"Load address" are no-ops. Use it for layout
+and styling work only (see [Pure-UI dev loop](#pure-ui-dev-loop-no-mcp-host-no-clickhouse)).
+
+| Mode | Transport | Mini-app delivery | Tool calls | Auth |
+|------|-----------|-------------------|------------|------|
+| Desktop / Code | stdio pipe | inline webview (ext-apps bridge) | via host's MCP client | none (local subprocess) |
+| Standalone web | HTTP/SSE (`--sse`) | `GET /app/{id}` in a browser | `POST /app/{id}/api/tool/{tool}` | `?token=` then `Bearer` header |
+| Pure-UI dev | none | Vite dev server | none (mock fixtures) | none |
+
+---
+
 ## Running the apps
 
 ### Requirements

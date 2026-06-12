@@ -1,5 +1,6 @@
+import re
 from typing import Optional
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -18,6 +19,38 @@ class Settings(BaseSettings):
     RPC_MAX_RETRIES: int = 3
     ABI_CACHE_TTL_SECONDS: int = 3600
     ABI_CACHE_MAX_ENTRIES: int = 512
+
+    # --- RPC scan engine (bulk log/call/storage/code/trace scans) ---
+    # Off by default: the scan engine writes results into ClickHouse scratch
+    # tables, which needs grants the read-only deployment user may not have:
+    #   GRANT CREATE DATABASE, CREATE TABLE, INSERT, DROP TABLE, SELECT
+    #   ON scratch.* TO <cerebro user>
+    RPC_SCAN_ENABLED: bool = False
+    RPC_SCAN_SCRATCH_DATABASE: str = "scratch"
+    RPC_SCAN_SCRATCH_TTL_DAYS: int = 7           # registry-driven DROP policy
+    RPC_SCAN_JOB_TTL_SECONDS: int = 3600         # terminal jobs evicted from memory
+    RPC_SCAN_MAX_CONCURRENT_JOBS: int = 2
+    RPC_SCAN_RPC_TIMEOUT_SECONDS: int = 60
+    RPC_SCAN_LOG_INIT_CHUNK_BLOCKS: int = 10_000
+    RPC_SCAN_ADDRESS_BATCH: int = 600            # addresses per indexed-topic chunk
+    RPC_SCAN_MULTICALL_BATCH: int = 600
+    RPC_SCAN_MULTICALL_ADDRESS: str = "0xcA11bde05977b3631167028862bE2a173976CA11"
+    RPC_SCAN_STORAGE_WORKERS: int = 30
+    RPC_SCAN_CODE_WORKERS: int = 30
+    RPC_SCAN_TRACE_WORKERS: int = 8
+    RPC_SCAN_TRACE_BLOCKS_PER_CALL: int = 100    # node cap on trace_filter
+    RPC_SCAN_TRACE_MAX_RANGE_BLOCKS: int = 200_000
+    RPC_SCAN_PREFER_ARCHIVE_FOR_LOGS: bool = True
+    RPC_SCAN_INSERT_BATCH_ROWS: int = 5_000
+    RPC_SCAN_INSERT_FLUSH_SECONDS: float = 5.0
+    RPC_SCAN_INSERT_MAX_RETRIES: int = 3
+    RPC_SCAN_MAX_ROWS_PER_JOB: int = 5_000_000
+    RPC_SCAN_MAX_ADDRESSES: int = 500_000        # cap on a resolved address set
+    RPC_SCAN_SYNC_WAIT_MAX_SECONDS: int = 25
+    RPC_SCAN_MAX_INLINE_ADDRESSES: int = 500
+    # Engine-side (non-indexed arg) log filtering guardrail: a post-filtered
+    # scan must be tight (contracts/topic0 + bounded window) to be allowed.
+    RPC_SCAN_UNINDEXED_FILTER_MAX_BLOCKS: int = 250_000
 
     # ClickHouse connection
     CLICKHOUSE_HOST: str = "localhost"
@@ -106,6 +139,16 @@ class Settings(BaseSettings):
 
     # Manifest refresh
     MANIFEST_REFRESH_INTERVAL_SECONDS: int = 300
+
+    # Graph Explorer BFS expansion limits. The renderer (Cosmos GL / WebGL)
+    # comfortably handles tens of thousands of nodes, so the cap mostly guards
+    # query cost, not the UI. SEED cap bounds the initial multi-profile load;
+    # EXPANSION cap bounds cumulative BFS growth; PER_HOP_BUDGET bounds how many
+    # new nodes a single hop round may add so one dense frontier can't consume
+    # the whole budget in one step.
+    GRAPH_EXPLORER_SEED_NODE_CAP: int = 3000
+    GRAPH_EXPLORER_BFS_NODE_CAP: int = 15000
+    GRAPH_EXPLORER_BFS_PER_HOP_BUDGET: int = 3000
 
     # Phase 1: column-scoped schema injection. Tables narrower than the
     # threshold are injected verbatim into LLM prompts; wider tables are
@@ -209,12 +252,34 @@ class Settings(BaseSettings):
     # Databases accessible via the MCP server
     ALLOWED_DATABASES: list[str] = [
         "execution",
+        "execution_live",
         "consensus",
         "crawlers_data",
         "nebula",
         "nebula_discv4",
         "dbt",
     ]
+
+    @model_validator(mode="after")
+    def _allow_scratch_database(self) -> "Settings":
+        """Expose the RPC-scan scratch DB to the read-only query tools.
+
+        The scan engine writes into RPC_SCAN_SCRATCH_DATABASE; analysis then
+        continues through the normal execute_query path, which validates
+        against ALLOWED_DATABASES (clients/clickhouse.py:_validate_database).
+        """
+        if self.RPC_SCAN_ENABLED:
+            if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,62}", self.RPC_SCAN_SCRATCH_DATABASE):
+                raise ValueError(
+                    "RPC_SCAN_SCRATCH_DATABASE must be a plain identifier "
+                    "(letters, digits, underscores)"
+                )
+            if self.RPC_SCAN_SCRATCH_DATABASE not in self.ALLOWED_DATABASES:
+                self.ALLOWED_DATABASES = [
+                    *self.ALLOWED_DATABASES,
+                    self.RPC_SCAN_SCRATCH_DATABASE,
+                ]
+        return self
 
     @property
     def effective_query_timeout_seconds(self) -> int:

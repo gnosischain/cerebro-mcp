@@ -30,6 +30,7 @@ Cerebro MCP is a FastMCP server with:
 - security audit layer with tool risk classification, suspicious-call detection, and append-only JSONL logging
 - five React + ECharts **mini-apps** (Report, Metric Lab, Portfolio, Graph Explorer, Contract Explorer) served as single-file HTML via `ui://cerebro/<app>` resources — see [`docs/MINI_APPS.md`](docs/MINI_APPS.md) for the full tour
 - direct JSON-RPC reads against EVM contracts (`contract_explore`, `contract_call_function`, `contract_decode_transaction_input`, `contract_decode_receipt_logs`) — backs the Contract Explorer mini-app and is the preferred path for *single-address current state* (vs. dbt for sweeps / historical / USD)
+- bulk RPC scans for on-chain forensics (`rpc_scan_logs`, `rpc_batch_call`, `rpc_read_storage`, `rpc_get_code`, `rpc_scan_traces`, `rpc_trace_transaction`, `rpc_find_block` — opt-in via `RPC_SCAN_ENABLED`): adaptive-chunked log sweeps, Multicall3 view-function sweeps across thousands of addresses at a pinned block, storage/bytecode classification, and native-value traces, all streaming into ClickHouse `scratch.rpc_*` tables for SQL analysis with resumable jobs — see [`docs/rpc/rpc_scan_overview.md`](docs/rpc/rpc_scan_overview.md)
 
 Important distinction:
 

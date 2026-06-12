@@ -22,6 +22,9 @@ export function DetailsPanel({
   onTraceColumn,
 }: DetailsPanelProps) {
   const [column, setColumn] = useState("");
+  const [showSchema, setShowSchema] = useState(false);
+  const [showSql, setShowSql] = useState(false);
+  const [sqlMode, setSqlMode] = useState<"raw" | "compiled">("raw");
 
   // Collapsed → render a thin rail with a reopen toggle, freeing the canvas.
   if (collapsed) {
@@ -68,6 +71,10 @@ export function DetailsPanel({
   }
 
   const isModel = selected.kind === "model";
+  const isSource = selected.kind === "source";
+  const cols = selected.columns ?? [];
+  const sqlText = sqlMode === "raw" ? selected.rawSql : selected.compiledSql;
+  const hasSql = Boolean(selected.rawSql || selected.compiledSql);
 
   return (
     <aside className="ml-details">
@@ -117,15 +124,93 @@ export function DetailsPanel({
       ) : null}
 
       <div className="ml-details-actions">
-        <button type="button" onClick={() => onExpand(selected.id)}>
-          Expand neighbours
-        </button>
+        {/* Sources are leaf inputs with no upstream lineage — no expand. */}
+        {!isSource ? (
+          <button type="button" onClick={() => onExpand(selected.id)}>
+            Expand neighbours
+          </button>
+        ) : null}
         {isModel ? (
           <button type="button" onClick={() => onRecenter(selected.name)}>
             Recenter here
           </button>
         ) : null}
       </div>
+
+      {cols.length ? (
+        <div className="ml-details-section">
+          <button
+            type="button"
+            className="ml-section-toggle"
+            aria-expanded={showSchema}
+            onClick={() => setShowSchema((v) => !v)}
+          >
+            <span className="ml-section-caret">{showSchema ? "▾" : "▸"}</span>
+            Schema <span className="ml-section-count">{cols.length}</span>
+          </button>
+          {showSchema ? (
+            <div className="ml-schema-table-wrap">
+              <table className="ml-schema-table">
+                <thead>
+                  <tr>
+                    <th>Column</th>
+                    <th>Type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cols.map((c) => (
+                    <tr key={c.name} title={c.description || undefined}>
+                      <td className="ml-schema-col">{c.name}</td>
+                      <td className="ml-schema-type">{c.data_type || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {hasSql ? (
+        <div className="ml-details-section">
+          <button
+            type="button"
+            className="ml-section-toggle"
+            aria-expanded={showSql}
+            onClick={() => setShowSql((v) => !v)}
+          >
+            <span className="ml-section-caret">{showSql ? "▾" : "▸"}</span>
+            SQL
+          </button>
+          {showSql ? (
+            <div className="ml-sql-block">
+              <div className="ml-segment ml-sql-modes" role="tablist">
+                <button
+                  type="button"
+                  className={sqlMode === "raw" ? "active" : ""}
+                  onClick={() => setSqlMode("raw")}
+                  disabled={!selected.rawSql}
+                >
+                  Raw
+                </button>
+                <button
+                  type="button"
+                  className={sqlMode === "compiled" ? "active" : ""}
+                  onClick={() => setSqlMode("compiled")}
+                  disabled={!selected.compiledSql}
+                >
+                  Compiled
+                </button>
+              </div>
+              <pre className="ml-sql-pre">
+                <code>{sqlText || "— not available —"}</code>
+              </pre>
+            </div>
+          ) : null}
+        </div>
+      ) : isSource ? (
+        <p className="ml-details-note">No SQL — source table.</p>
+      ) : null}
 
       {isModel ? (
         <div className="ml-column-trace">

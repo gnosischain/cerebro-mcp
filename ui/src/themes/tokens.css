@@ -24,10 +24,10 @@
 
   /* Paper-cream text */
   --text-primary: #f1ece2;
-  --text-secondary: #c9c2b3;
-  --text-muted: #8a8275;
-  --border: rgba(241, 236, 226, 0.07);
-  --border-hover: rgba(241, 236, 226, 0.14);
+  --text-secondary: #d2ccbe;
+  --text-muted: #a39a8a;
+  --border: rgba(241, 236, 226, 0.12);
+  --border-hover: rgba(241, 236, 226, 0.20);
   --section-divider: rgba(241, 236, 226, 0.06);
 
   /* Accent — brighter sage so it lifts off ink */
@@ -40,6 +40,17 @@
   --success: #9ec081;
   --warning: #d4b483;
   --error: #d97565;
+
+  /* Semantic surface/state tokens (warm dark fallback) */
+  --surface-translucent: rgba(241, 236, 226, 0.05);
+  --surface-translucent-strong: rgba(241, 236, 226, 0.09);
+  --accent-bg: rgba(158, 192, 129, 0.14);
+  --accent-border: rgba(158, 192, 129, 0.35);
+  --accent-text: #b5d195;
+  --success-bg: rgba(158, 192, 129, 0.14);
+  --warning-bg: rgba(212, 180, 131, 0.14);
+  --error-bg: rgba(217, 117, 101, 0.14);
+  --code-bg: rgba(241, 236, 226, 0.06);
 
   /* Geometry */
   --radius-sm: 6px;
@@ -74,11 +85,11 @@
 
   /* Ink + rules */
   --text-primary: #1a1a1a;
-  --text-secondary: #4a463e;
-  --text-muted: #8a8275;
-  --border: rgba(31, 29, 24, 0.07);
-  --border-hover: rgba(31, 29, 24, 0.14);
-  --section-divider: rgba(31, 29, 24, 0.06);
+  --text-secondary: #44413a;
+  --text-muted: #635c4f;
+  --border: rgba(31, 29, 24, 0.16);
+  --border-hover: rgba(31, 29, 24, 0.26);
+  --section-divider: rgba(31, 29, 24, 0.10);
 
   /* Accent — sage */
   --primary: #4a5a3c;
@@ -90,6 +101,17 @@
   --success: #4a5a3c;
   --warning: #b59569;
   --error: #a64a3b;
+
+  /* Semantic surface/state tokens (warm paper fallback) */
+  --surface-translucent: rgba(31, 29, 24, 0.04);
+  --surface-translucent-strong: rgba(31, 29, 24, 0.07);
+  --accent-bg: rgba(74, 90, 60, 0.10);
+  --accent-border: rgba(74, 90, 60, 0.32);
+  --accent-text: #3a4830;
+  --success-bg: rgba(74, 90, 60, 0.12);
+  --warning-bg: rgba(181, 149, 105, 0.16);
+  --error-bg: rgba(166, 74, 59, 0.10);
+  --code-bg: rgba(31, 29, 24, 0.06);
 
   /* Geometry */
   --radius-sm: 6px;
@@ -124,11 +146,11 @@
 
   /* Cool grayscale text */
   --text-primary: #e6e9ee;
-  --text-secondary: #9aa3ae;
-  --text-muted: #6b7280;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-hover: rgba(255, 255, 255, 0.16);
-  --section-divider: rgba(255, 255, 255, 0.06);
+  --text-secondary: #aab3be;
+  --text-muted: #868e9b;
+  --border: rgba(255, 255, 255, 0.12);
+  --border-hover: rgba(255, 255, 255, 0.22);
+  --section-divider: rgba(255, 255, 255, 0.10);
 
   /* Sky-cyan accent (brighter than the planned #4dd0e1 to match the mock) */
   --primary: #67e8f9;
@@ -140,6 +162,18 @@
   --success: #34d399;
   --warning: #fbbf24;
   --error: #f87171;
+
+  /* Semantic surface/state tokens (cool dark) — see light overrides below.
+   * These replace per-app hardcoded translucent darks so apps theme correctly. */
+  --surface-translucent: rgba(255, 255, 255, 0.045);
+  --surface-translucent-strong: rgba(255, 255, 255, 0.08);
+  --accent-bg: rgba(103, 232, 249, 0.14);
+  --accent-border: rgba(103, 232, 249, 0.35);
+  --accent-text: #a5e8f5;
+  --success-bg: rgba(52, 211, 153, 0.14);
+  --warning-bg: rgba(251, 191, 36, 0.14);
+  --error-bg: rgba(248, 113, 113, 0.14);
+  --code-bg: rgba(255, 255, 255, 0.06);
 }
 
 [data-theme="light"] .mini-app-scope {
@@ -154,11 +188,11 @@
 
   /* Cool ink */
   --text-primary: #111418;
-  --text-secondary: #4b5563;
-  --text-muted: #9ca3af;
-  --border: rgba(15, 23, 42, 0.10);
-  --border-hover: rgba(15, 23, 42, 0.20);
-  --section-divider: rgba(15, 23, 42, 0.06);
+  --text-secondary: #404a59;
+  --text-muted: #5b6473;
+  --border: rgba(15, 23, 42, 0.18);
+  --border-hover: rgba(15, 23, 42, 0.30);
+  --section-divider: rgba(15, 23, 42, 0.10);
 
   /* Deeper cyan for contrast on white */
   --primary: #0891b2;
@@ -170,4 +204,16 @@
   --success: #059669;
   --warning: #b45309;
   --error: #dc2626;
+
+  /* Semantic surface/state tokens (white paper) — dark-enough text + subtle
+   * fills so contrast holds (≥4.5:1) without relying on a dark backdrop. */
+  --surface-translucent: rgba(15, 23, 42, 0.04);
+  --surface-translucent-strong: rgba(15, 23, 42, 0.07);
+  --accent-bg: rgba(8, 145, 178, 0.10);
+  --accent-border: rgba(8, 145, 178, 0.32);
+  --accent-text: #0e7490;
+  --success-bg: rgba(5, 150, 105, 0.12);
+  --warning-bg: rgba(180, 83, 9, 0.12);
+  --error-bg: rgba(220, 38, 38, 0.10);
+  --code-bg: rgba(15, 23, 42, 0.06);
 }

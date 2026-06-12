@@ -5,6 +5,10 @@ import { DatasetTable } from "../shared/DatasetTable";
 import { TabBar, type TabDef } from "../shared/TabBar";
 import { AsyncButton } from "../shared/AsyncButton";
 import { MiniAppChrome, MaIdentity, MaKpiGrid, MaKpi } from "../shared/MiniAppChrome";
+import { MaHelpButton } from "../shared/HelpDialog";
+import { MaToolbar } from "../shared/MaToolbar";
+import { MaSearchInput } from "../shared/MaSearchInput";
+import { PORTFOLIO_HELP } from "../shared/helpContent";
 import { shortAddr } from "../../utils/format";
 import type { DatasetDescriptor, MiniAppPayload } from "../shared/miniAppTypes";
 
@@ -378,7 +382,25 @@ export default function PortfolioApp() {
   };
 
   const hasAddress = Boolean(state.current_address);
-  const sectionFilters = state.section_filters?.[activeSection] ?? { start_date: "", token: "", action: "" };
+
+  // Domain-aware sections: hide Yields / Gnosis Pay / Circles when the address
+  // has no presence there, instead of rendering empty $0.00 cards and dead
+  // tabs. Overview and Relationships always show.
+  const presence = state.presence ?? {};
+  const visibleSections: PortfolioSection[] = [
+    "overview",
+    "relationships",
+    ...(presence.has_yields ? (["yields"] as const) : []),
+    ...(presence.has_gpay ? (["gpay"] as const) : []),
+    ...(presence.is_circles_avatar ? (["circles"] as const) : []),
+  ];
+  // If the active section is no longer available (new address with different
+  // presence), fall back to overview so the body never renders a hidden tab.
+  const effectiveSection: PortfolioSection = visibleSections.includes(activeSection)
+    ? activeSection
+    : "overview";
+
+  const sectionFilters = state.section_filters?.[effectiveSection] ?? { start_date: "", token: "", action: "" };
 
   // Drop the redundant "Address" summary card — MaIdentity already shows it.
   const otherCards = (view.summary_cards ?? []).filter(
@@ -386,7 +408,7 @@ export default function PortfolioApp() {
   );
 
   return (
-    <MiniAppChrome activeTabId="portfolio">
+    <MiniAppChrome activeTabId="portfolio" rightSlot={<MaHelpButton content={PORTFOLIO_HELP} />}>
     <div className="mini-app-root">
       {hasAddress && state.current_address ? (
         <MaIdentity
@@ -431,20 +453,20 @@ export default function PortfolioApp() {
         </MaKpiGrid>
       ) : null}
 
-      <section className="mini-app-controls">
-        <label className="mini-app-inline-field mini-app-inline-field--wide">
-          <span>Address</span>
-          <input value={addressInput} onChange={(event) => setAddressInput(event.target.value)} placeholder="0x…" />
-        </label>
-        <button
-          type="button"
-          className="mini-app-picker__load-btn mini-app-picker__load-btn--sm"
-          disabled={!isAddress(addressInput)}
-          onClick={() => void loadAddress(addressInput)}
-        >
-          Load portfolio
-        </button>
-      </section>
+      <MaToolbar className="mini-app-controls">
+        <MaSearchInput
+          value={addressInput}
+          onChange={setAddressInput}
+          onSubmit={() => {
+            if (isAddress(addressInput)) void loadAddress(addressInput);
+          }}
+          placeholder="0x… paste a Gnosis Chain address"
+          actionLabel="Load portfolio"
+          ariaLabel="Portfolio address"
+          actionDisabled={!isAddress(addressInput)}
+          busy={pending}
+        />
+      </MaToolbar>
 
       {!hasAddress ? (
         <section className="mini-app-picker mini-app-picker--compact">
@@ -478,22 +500,22 @@ export default function PortfolioApp() {
 
           <TabBar<PortfolioSection>
             ariaLabel="Portfolio section"
-            active={activeSection}
+            active={effectiveSection}
             onChange={(section) => void openSection(section)}
-            tabs={(["overview", "relationships", "yields", "gpay", "circles"] as PortfolioSection[]).map((id) => ({
+            tabs={visibleSections.map((id) => ({
               id,
               label: id === "gpay" ? "Gnosis Pay" : id.charAt(0).toUpperCase() + id.slice(1),
               badge: loadingSection === id ? "…" : undefined,
             }) satisfies TabDef<PortfolioSection>)}
           />
 
-          {activeSection !== "overview" && activeSection !== "relationships" ? (
-            <SectionFilters section={activeSection} filters={sectionFilters} onPatch={patchSectionFilters} />
+          {effectiveSection !== "overview" && effectiveSection !== "relationships" ? (
+            <SectionFilters section={effectiveSection} filters={sectionFilters} onPatch={patchSectionFilters} />
           ) : null}
 
-          {activeSection === "overview" ? <OverviewPanel state={state} /> : null}
+          {effectiveSection === "overview" ? <OverviewPanel state={state} /> : null}
 
-          {activeSection === "relationships" ? (
+          {effectiveSection === "relationships" ? (
             <RelationshipsPanel
               dataset={datasets.relationships}
               onNavigate={async (address) => {
@@ -510,7 +532,7 @@ export default function PortfolioApp() {
             />
           ) : null}
 
-          {activeSection === "yields" ? (
+          {effectiveSection === "yields" ? (
             <div className="mini-app-detail-stack">
               <div className="mini-app-analysis__tabs">
                 {(["positions", "cashflow", "activity"] as YieldsTab[]).map((tab) => (
@@ -560,7 +582,7 @@ export default function PortfolioApp() {
             </div>
           ) : null}
 
-          {activeSection === "gpay" ? (
+          {effectiveSection === "gpay" ? (
             <div className="mini-app-detail-stack">
               <div className="mini-app-analysis__tabs">
                 {(["balances", "payments", "cashback", "activity"] as GPayTab[]).map((tab) => (
@@ -599,7 +621,7 @@ export default function PortfolioApp() {
             </div>
           ) : null}
 
-          {activeSection === "circles" ? (
+          {effectiveSection === "circles" ? (
             <div className="mini-app-detail-stack">
               {/* Stage-1 retrofit: always render the override input; disable
                   (rather than unmount) when the address is already a Circles

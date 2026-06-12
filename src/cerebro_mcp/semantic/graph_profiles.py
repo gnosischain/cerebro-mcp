@@ -13,6 +13,27 @@ from typing import Any
 
 from cerebro_mcp.loaders.semantic import semantic_runtime
 
+# Control / pagination parameters that may appear in a profile's
+# `default_filters` authoring block but are NOT column filters. The Graph
+# Explorer applies these as query controls (SQL LIMIT, hop depth, time window,
+# etc.) — never as `toString(col) = 'val'` WHERE predicates. Leaking one of
+# these into the WHERE clause crashes ClickHouse with
+# `Code: 47 Unknown identifier '<key>'` (e.g. a published registry that carries
+# `token_transfers -> default_filters={"limit": 500}`).
+_CONTROL_KEYS = frozenset(
+    {
+        "limit",
+        "max_neighbors",
+        "hops",
+        "window_days",
+        "transfer_window_days",
+        "direction",
+        "relation_types",
+        "offset",
+        "seed_ids",
+    }
+)
+
 
 @dataclass(frozen=True)
 class GraphProfile:
@@ -95,7 +116,11 @@ def discover_profiles() -> list[GraphProfile]:
                 or target_column,
                 node_enrichment_model=_coerce_str(graph.get("node_enrichment_model")),
                 node_enrichment_key=_coerce_str(graph.get("node_enrichment_key")),
-                default_filters=dict(graph.get("default_filters") or {}),
+                default_filters={
+                    k: v
+                    for k, v in (graph.get("default_filters") or {}).items()
+                    if k not in _CONTROL_KEYS
+                },
                 module=model.get("module", "") or "",
                 description=model.get("description", "") or "",
                 semantic_status=model.get("semantic_status", "docs_only") or "docs_only",
@@ -126,6 +151,46 @@ def profiles_for_kind(node_kind: str) -> list[GraphProfile]:
 # ---------------------------------------------------------------------------
 # SQL assembly
 # ---------------------------------------------------------------------------
+
+
+def _default_filter_clauses(profile: GraphProfile) -> list[str]:
+    """Translate a profile's `default_filters` meta into SQL WHERE conditions.
+
+    Authored in dbt-cerebro under `cerebro.graph.default_filters` as a mapping
+    of `column -> predicate`. Supported predicate forms:
+
+      * ``"not_null_or_empty"`` -> ``col IS NOT NULL AND toString(col) != ''``
+        (drops synthetic/empty endpoints, e.g. a Circles avatar with no inviter
+        where ``invited_by`` is NULL/empty for Groups & Orgs).
+      * ``"valid_address"`` -> the above PLUS excluding the zero address
+        ``0x0000…0000``. Use for address-graph endpoints where the zero
+        address is a genesis/migration sentinel that would otherwise collapse
+        into one giant artificial hub (e.g. Circles invitation roots).
+      * any other scalar -> ``toString(col) = '<value>'`` equality.
+
+    Unknown shapes are skipped rather than raising, so a malformed authoring
+    block degrades gracefully instead of breaking the whole graph.
+    """
+    zero_addr = "0x0000000000000000000000000000000000000000"
+    clauses: list[str] = []
+    for col, predicate in (profile.default_filters or {}).items():
+        if not isinstance(col, str) or not col:
+            continue
+        # Control/pagination params are never column filters — emitting them as
+        # `toString(col) = 'val'` crashes ClickHouse (unknown identifier).
+        if col in _CONTROL_KEYS:
+            continue
+        if predicate == "not_null_or_empty":
+            clauses.append(f"({col} IS NOT NULL AND toString({col}) != '')")
+        elif predicate == "valid_address":
+            clauses.append(
+                f"({col} IS NOT NULL AND toString({col}) != '' "
+                f"AND lower(toString({col})) != '{zero_addr}')"
+            )
+        elif isinstance(predicate, (str, int, float)) and predicate != "":
+            literal = str(predicate).replace("'", "''")
+            clauses.append(f"toString({col}) = '{literal}'")
+    return clauses
 
 
 def build_neighbors_sql(
@@ -161,6 +226,9 @@ def build_neighbors_sql(
 
     weight_expr = f"sum({profile.weight_column})" if profile.weight_column else "toFloat64(count())"
 
+    # Profile-authored guards (e.g. drop NULL/empty inviter endpoints).
+    filter_clause = "".join(f" AND {c}" for c in _default_filter_clauses(profile))
+
     # Project endpoints as String too — keeps downstream node-id assembly uniform
     # across profiles with mixed scalar/string endpoint types.
     sql = f"""
@@ -170,7 +238,7 @@ def build_neighbors_sql(
             {weight_expr} AS weight,
             count() AS edge_count
         FROM {rel}
-        WHERE ({where_clause}){time_clause}
+        WHERE ({where_clause}){time_clause}{filter_clause}
         GROUP BY source_id, target_id
         ORDER BY weight DESC
         LIMIT {{lim:UInt32}}
@@ -195,10 +263,12 @@ def build_sample_sql(
     rel = profile.relation_name or profile.model_name
 
     params: dict[str, Any] = {"lim": int(limit)}
-    time_clause = ""
+    where_bits: list[str] = []
     if profile.time_column:
-        time_clause = f" WHERE {profile.time_column} >= now() - INTERVAL {{win:UInt32}} DAY"
+        where_bits.append(f"{profile.time_column} >= now() - INTERVAL {{win:UInt32}} DAY")
         params["win"] = int(max(1, window_days))
+    where_bits.extend(_default_filter_clauses(profile))
+    where_clause = f" WHERE {' AND '.join(where_bits)}" if where_bits else ""
 
     weight_expr = f"sum({profile.weight_column})" if profile.weight_column else "toFloat64(count())"
     sql = f"""
@@ -207,7 +277,7 @@ def build_sample_sql(
             toString({tgt}) AS target_id,
             {weight_expr} AS weight,
             count() AS edge_count
-        FROM {rel}{time_clause}
+        FROM {rel}{where_clause}
         GROUP BY source_id, target_id
         ORDER BY weight DESC
         LIMIT {{lim:UInt32}}
@@ -243,6 +313,7 @@ def build_evidence_sql(
 _ROLE_TO_PROFILES: dict[str, tuple[str, ...]] = {
     "is_circles_avatar": (
         "circles_trust",
+        "circles_invitation",
         "circles_avatar_balances",
         "circles_trust_history",
     ),

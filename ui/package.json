@@ -9,11 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@cosmos.gl/graph": "^2.6.4",
+    "@dagrejs/dagre": "^1.1.4",
     "@fontsource/instrument-serif": "^5.1.0",
     "@fontsource/inter": "^5.1.0",
     "@fontsource/jetbrains-mono": "^5.1.0",
     "@fontsource/plus-jakarta-sans": "^5.0.0",
-    "@dagrejs/dagre": "^1.1.4",
     "@modelcontextprotocol/ext-apps": "^1.1.2",
     "@xyflow/react": "^12.3.0",
     "echarts": "^5.6.0",

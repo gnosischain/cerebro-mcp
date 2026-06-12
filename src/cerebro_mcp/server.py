@@ -52,12 +52,14 @@ from cerebro_mcp.tools.workflow.resume import register_workflow_resume_tools
 from cerebro_mcp.tools.governance.cross_check import register_cross_check_tools
 from cerebro_mcp.tools.storyteller.storyteller import register_storyteller_tools
 from cerebro_mcp.tools.visualization.mini_apps import register_mini_app_infra
+from cerebro_mcp.tools.visualization.web_apps import register_web_app_routes
 from cerebro_mcp.tools.web3.contract_explorer import register_contract_explorer_tools
 from cerebro_mcp.tools.visualization.metric_lab import register_metric_lab_tools
 from cerebro_mcp.tools.visualization.portfolio import register_portfolio_tools
 from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_tools
 from cerebro_mcp.tools.analytics.model_lineage_app import register_model_lineage_tools
 from cerebro_mcp.tools.web3.rpc import register_rpc_tools
+from cerebro_mcp.tools.web3.rpc_scan import register_rpc_scan_tools
 from cerebro_mcp.tools.visualization.grafana import register_grafana_tools
 
 
@@ -105,6 +107,27 @@ mcp = FastMCP(
         "- Use `list_custom_tools` to see available parameterized tools.\n"
         "- Raw `execute_query` is reserved for exploratory analysis, complex joins, and "
         "novel research questions where no custom tool exists.\n\n"
+
+        "RPC SCAN ROUTING (on-chain forensics; tools present when RPC_SCAN_ENABLED):\n"
+        "- Two data planes exist. ClickHouse dbt models = indexed history (aggregates, "
+        "USD, trends). rpc_scan_* tools = the chain itself (pinned-block state, traces, "
+        "storage, bytecode, data not yet indexed).\n"
+        "- Use rpc_scan_logs / rpc_batch_call / rpc_read_storage / rpc_get_code / "
+        "rpc_scan_traces / rpc_find_block when ANY of: (1) you need state AT a pinned "
+        "block across many addresses, (2) the events/contracts are not decoded by any "
+        "dbt model, (3) the window is too recent for dbt, (4) you need storage slots, "
+        "bytecode/proxy identity, or native-value traces (dbt does not cover these), "
+        "(5) independent verification of a pipeline number.\n"
+        "- Results land in scratch.rpc_* ClickHouse tables — ALWAYS continue analysis "
+        "by joining them to dbt models via `execute_query`; never re-scan to "
+        "re-aggregate. Count scratch tables with uniqExact/FINAL (ReplacingMergeTree).\n"
+        "- Address sets: <=500 inline; otherwise pass address_sql (any dbt model or a "
+        "previous scan's scratch table works as the source).\n"
+        "- Single-address current reads stay on `contract_call_function`; single-tx "
+        "decoding stays on `contract_decode_transaction_input` / "
+        "`contract_decode_receipt_logs` / `rpc_trace_transaction`.\n"
+        "- Pin anchor blocks FIRST (`rpc_find_block` kind=timestamp), then sweep, then "
+        "classify in SQL.\n\n"
 
         "QUERY EFFICIENCY:\n"
         "- Prefer pre-aggregated dbt models (int_*, fct_*, api_*) over raw source tables. "
@@ -310,6 +333,10 @@ if settings.WORKFLOW_RESUME_TOOLS_ENABLED:
 register_cross_check_tools(mcp, ch)
 register_storyteller_tools(mcp, ch)
 register_rpc_tools(mcp, ch)
+# Bulk RPC scans write into the ClickHouse scratch DB — opt-in because the
+# deployment user needs CREATE/INSERT/DROP grants there (see config.py).
+if settings.RPC_SCAN_ENABLED:
+    register_rpc_scan_tools(mcp, ch)
 
 # Mini-app platform: install the visibility filter first so subsequent
 # app registrations can mark hydration tools as app-only.
@@ -319,6 +346,11 @@ register_metric_lab_tools(mcp, ch)
 register_portfolio_tools(mcp, ch)
 register_graph_explorer_tools(mcp, ch)
 register_model_lineage_tools(mcp, ch)
+
+# Standalone web-app delivery: serve the mini-apps as plain browser URLs
+# (GET /app/{id}) with HTTP tool dispatch (POST /app/{id}/api/tool/{tool}).
+# Must run after the mini-app registrations above so the tool registry is full.
+register_web_app_routes(mcp)
 
 # Grafana dashboard publishing (no-op unless GRAFANA_TOOLS_ENABLED).
 register_grafana_tools(mcp, ch)
@@ -492,8 +524,14 @@ class BearerAuthMiddleware:
         if (
             path == "/health"
             or path == "/metrics"
+            or path == "/favicon.ico"
             or path.startswith("/reports/")
+            or path.startswith("/app/")
         ):
+            # These routes either need no auth or do their own (the
+            # /reports/ and /app/ handlers accept a ?token= query param,
+            # which a browser navigation can supply where an Authorization
+            # header cannot).
             await self.app(scope, receive, send)
             return
 

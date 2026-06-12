@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useEffect } from "react";
 import {
   ReactFlow,
   Background,
   Controls,
-  MiniMap,
+  useNodesState,
+  useEdgesState,
   type Node,
   type Edge,
   type NodeTypes,
@@ -105,7 +106,7 @@ export function LineageGraph({
         animated: onPath && Boolean(highlightId),
         markerEnd: { type: MarkerType.ArrowClosed },
         style: {
-          stroke: onPath ? "var(--ml-edge-active, #6366f1)" : "var(--ml-edge, #475569)",
+          stroke: onPath ? "var(--primary, #6366f1)" : "var(--border, #475569)",
           strokeWidth: onPath ? 2 : 1,
           opacity: onPath ? 1 : 0.35,
         },
@@ -114,6 +115,20 @@ export function LineageGraph({
 
     return { rfNodes: layout(builtNodes, builtEdges), rfEdges: builtEdges };
   }, [nodes, edges, seedId, selectedNodeId]);
+
+  // React Flow state so cards are draggable. The server-driven layout above
+  // (new seed / expand / filter) replaces the graph via the effect below, while
+  // user drags persist between those recomputes.
+  const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(rfNodes);
+  const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState(rfEdges);
+
+  useEffect(() => {
+    setFlowNodes(rfNodes);
+  }, [rfNodes, setFlowNodes]);
+
+  useEffect(() => {
+    setFlowEdges(rfEdges);
+  }, [rfEdges, setFlowEdges]);
 
   if (rfNodes.length === 0) {
     return (
@@ -125,28 +140,28 @@ export function LineageGraph({
 
   return (
     <ReactFlow
-      nodes={rfNodes}
-      edges={rfEdges}
+      nodes={flowNodes}
+      edges={flowEdges}
+      onNodesChange={onNodesChange}
+      onEdgesChange={onEdgesChange}
       nodeTypes={nodeTypes}
       fitView
       minZoom={0.1}
       maxZoom={1.75}
       proOptions={{ hideAttribution: true }}
       onNodeClick={(_, node) => onSelectNode(node.id)}
-      onNodeDoubleClick={(_, node) => onExpandNode(node.id)}
+      onNodeDoubleClick={(_, node) => {
+        // Sources are leaf inputs with no upstream lineage to expand —
+        // double-click selects them (shows details) instead of expanding.
+        if ((node.data as ModelNodeData | undefined)?.kind === "source") {
+          onSelectNode(node.id);
+        } else {
+          onExpandNode(node.id);
+        }
+      }}
     >
       <Background gap={20} />
       <Controls showInteractive={false} />
-      <MiniMap
-        className="ml-minimap"
-        pannable
-        zoomable
-        nodeStrokeWidth={2}
-        bgColor="var(--surface, #131c2e)"
-        maskColor="rgba(15, 23, 42, 0.55)"
-        nodeColor="var(--accent, #6366f1)"
-        nodeStrokeColor="var(--border, #334155)"
-      />
     </ReactFlow>
   );
 }

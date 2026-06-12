@@ -3,14 +3,13 @@ import type { GraphExplorerState, StatusFilter } from "./types";
 interface Props {
   view: GraphExplorerState;
   onFocus: (patch: Partial<GraphExplorerState>) => void;
-  onAskAssistant: () => void;
   onReset: () => void;
   detailsOpen: boolean;
   onToggleDetails: () => void;
-  /** BFS expansion from the seed. `hops` = how many frontier rounds. */
+  /** BFS expansion from the selected node (or seed). `hops` = frontier rounds. */
   onExpand: (hops: number) => void;
   isSampleMode: boolean;
-  /** Depth applied when the user clicks the "+" expand button. */
+  /** Depth applied when the user clicks the expand button. */
   bfsHops: number;
   onBfsHopsChange: (next: number) => void;
 }
@@ -24,9 +23,13 @@ interface Props {
  *   - Right-side actions collapse to icons when cramped.
  */
 export function FilterBar({
-  view, onFocus, onAskAssistant, onReset, detailsOpen, onToggleDetails, onExpand, isSampleMode,
+  view, onFocus, onReset, detailsOpen, onToggleDetails, onExpand, isSampleMode,
   bfsHops, onBfsHopsChange,
 }: Props) {
+  // The expand button operates on the selected node when there is one, else the
+  // seed — surfaced in the label/title so the target is never a mystery.
+  const expandTarget = view.selected_node_id ? "selected node" : "seed";
+  const canExpand = Boolean(view.selected_node_id || view.seed_node?.id);
   return (
     <header className="ge-topbar">
       <div className="ge-topbar-left">
@@ -58,7 +61,7 @@ export function FilterBar({
           <input
             type="number"
             min={1}
-            max={500}
+            max={2000}
             value={view.max_neighbors}
             onChange={(e) =>
               onFocus({ max_neighbors: Math.max(1, Number(e.target.value) || 0) })
@@ -122,26 +125,26 @@ export function FilterBar({
       </div>
 
       <div className="ge-topbar-right">
-        <label className="ge-pill" title="Hops per Expand click — multi-round BFS over the whole frontier">
+        <label className="ge-pill" title="BFS depth — how many frontier rounds the expand button (and double-click) add">
           <span className="ge-pill-icon" aria-hidden>⇢</span>
           <input
             type="number"
             min={1}
-            max={20}
+            max={50}
             value={bfsHops}
-            onChange={(e) => onBfsHopsChange(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+            onChange={(e) => onBfsHopsChange(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
             style={{ width: 28 }}
           />
           <span className="ge-pill-unit">hop</span>
         </label>
         <button
           type="button"
-          className="ge-icon-btn"
+          className="ge-btn primary ge-expand-btn"
           onClick={() => onExpand(bfsHops)}
-          title={`Expand seed by BFS, ${bfsHops} hop${bfsHops === 1 ? "" : "s"} of frontier rounds`}
-          disabled={!view.seed_node?.id}
+          title={`Expand the ${expandTarget} by ${bfsHops} hop${bfsHops === 1 ? "" : "s"} (BFS frontier rounds)`}
+          disabled={!canExpand}
         >
-          +
+          + Expand {expandTarget}
         </button>
         <button
           type="button"
@@ -159,14 +162,6 @@ export function FilterBar({
           title="Back to catalog"
         >
           ↺
-        </button>
-        <button
-          type="button"
-          className="ge-btn primary"
-          onClick={onAskAssistant}
-          title="Ask the assistant about this subgraph"
-        >
-          Ask
         </button>
       </div>
     </header>

@@ -14,6 +14,7 @@ from typing import Any
 
 from mcp.types import CallToolResult
 
+from cerebro_mcp.config import settings
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
 from cerebro_mcp.semantic.graph_profiles import (
     GraphProfile,
@@ -27,7 +28,7 @@ from cerebro_mcp.semantic.graph_profiles import (
 )
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset
 from cerebro_mcp.models.mini_app import DatasetStats, MiniAppPayload
-from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.tools.visualization import mini_apps, web_apps
 from cerebro_mcp.tools.visualization.mini_apps import MiniAppQueryError
 
 logger = logging.getLogger(__name__)
@@ -35,9 +36,15 @@ logger = logging.getLogger(__name__)
 GRAPH_EXPLORER_APP_ID = "graph_explorer"
 GRAPH_EXPLORER_URI = "ui://cerebro/graph_explorer"
 DEFAULT_TITLE = "Graph Explorer"
-MAX_HOPS = 20
+MAX_HOPS = 50
 DEFAULT_WINDOW_DAYS = 365
-DEFAULT_MAX_NEIGHBORS = 100
+DEFAULT_MAX_NEIGHBORS = 250
+# BFS expansion ceilings (overridable via Settings / env). Promoted from a
+# function-local literal so the cap is centralized and tunable. The cap is
+# checked *after* each frontier round so at least one hop always expands, with
+# a per-hop budget so a dense first frontier can't consume the whole cap.
+BFS_NODE_CAP = settings.GRAPH_EXPLORER_BFS_NODE_CAP
+BFS_PER_HOP_BUDGET = settings.GRAPH_EXPLORER_BFS_PER_HOP_BUDGET
 
 _BUNDLED_HTML: str | None = None
 
@@ -120,6 +127,14 @@ EDGE_EVIDENCE_COLUMNS = ["edge_id", "column", "value"]
 NODE_EVIDENCE_COLUMNS = ["node_id", "column", "value"]
 METRICS_COLUMNS = ["metric", "value"]
 
+DATASET_TITLES = {
+    "nodes": "Nodes",
+    "edges": "Edges",
+    "node_evidence": "Node Evidence",
+    "edge_evidence": "Edge Evidence",
+    "graph_metrics": "Graph Metrics",
+}
+
 
 def _short(addr: str) -> str:
     if not addr:
@@ -184,13 +199,7 @@ def _seed_kind_of(roles: dict[str, Any] | None) -> str:
 
 
 def _build_payload(record: mini_apps.ViewRecord) -> MiniAppPayload:
-    titles = {
-        "nodes": "Nodes",
-        "edges": "Edges",
-        "node_evidence": "Node Evidence",
-        "edge_evidence": "Edge Evidence",
-        "graph_metrics": "Graph Metrics",
-    }
+    titles = DATASET_TITLES
     descriptors = {
         key: mini_apps.build_dataset_descriptor(
             key=key, dataset=dataset, title=titles.get(key, key)
@@ -253,6 +262,55 @@ def _resolve_address_roles(ch: ClickHouseManager, address: str) -> dict[str, Any
         return {}
     row = result.rows[0]
     return {col: value for col, value in zip(result.columns, row)}
+
+
+def _node_evidence_rows(node_id: str, roles: dict[str, Any]) -> list[list[Any]]:
+    """Flatten resolved role flags into (node_id, column, value) evidence rows.
+
+    Boolean role flags are emitted only when truthy; string-valued attributes
+    (controls_gpay_wallet, pool_protocol, dune_project, circles_avatar_type)
+    are emitted whenever non-empty so the details panel can surface the
+    backing identity context the badges alone don't show.
+    """
+    if not node_id or not roles:
+        return []
+    rows: list[list[Any]] = []
+    for col, value in roles.items():
+        if value in (None, "", 0, "0"):
+            continue
+        rows.append([node_id, col, str(value)])
+    return rows
+
+
+def _edge_evidence_rows(
+    ch: ClickHouseManager, edge_id: str, limit: int = 25
+) -> list[list[Any]]:
+    """Resolve the raw backing rows for a selected edge via the profile's
+    evidence model. Edge ids are `{profile}:{src}->{tgt}`."""
+    if not edge_id or ":" not in edge_id or "->" not in edge_id:
+        return []
+    profile_id, _, endpoints = edge_id.partition(":")
+    src, _, tgt = endpoints.partition("->")
+    profile = profile_by_id(profile_id)
+    if profile is None or not src or not tgt:
+        return []
+    try:
+        sql, params = build_evidence_sql(
+            profile, source_id=src, target_id=tgt, limit=limit
+        )
+        result = mini_apps.run_structured_query(
+            ch, sql, database="dbt", parameters=params, requested_max_rows=limit
+        )
+    except Exception as exc:
+        logger.info("graph_explorer: edge evidence failed for %s: %s", edge_id, exc)
+        return []
+    rows: list[list[Any]] = []
+    for row in result.rows:
+        for col, value in zip(result.columns, row):
+            if value in (None, ""):
+                continue
+            rows.append([edge_id, col, str(value)])
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -736,20 +794,26 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         already_expanded: set[str] = set()
         frontier: list[tuple[str, str]] = [(node_id, expand_kind or "address")]
         warnings: list[str] = []
-        BFS_NODE_CAP = 2000  # hard ceiling so runaway BFS can't wedge the UI
         hops_to_run = max(1, int(hops or 1))
         all_catalog = list(discover_profiles())
+        # True only when a frontier round genuinely had to truncate against the
+        # cap/budget — drives the user-facing warning so it doesn't fire merely
+        # because the *initial* seed load was already large.
+        truncated_at_hop: int | None = None
 
         for hop_round in range(hops_to_run):
             if not frontier:
                 break
-            if len(merged_nodes) >= BFS_NODE_CAP:
-                warnings.append(
-                    f"BFS stopped at {len(merged_nodes)} nodes "
-                    f"(cap {BFS_NODE_CAP}) after hop {hop_round}."
-                )
+            # Per-round node budget: bounded both by the remaining global cap and
+            # by the per-hop budget so one dense frontier can't consume everything.
+            remaining_global = BFS_NODE_CAP - len(merged_nodes)
+            if remaining_global <= 0:
+                truncated_at_hop = hop_round
                 break
+            round_budget = min(remaining_global, BFS_PER_HOP_BUDGET)
+            nodes_at_round_start = len(merged_nodes)
             next_frontier: list[tuple[str, str]] = []
+            round_truncated = False
             for cur_id, cur_kind in frontier:
                 if cur_id in already_expanded:
                     continue
@@ -790,11 +854,27 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
                     merged_nodes, merged_edges = _merge_graph(
                         merged_nodes, merged_edges, new_n, new_e
                     )
-                    if len(merged_nodes) >= BFS_NODE_CAP:
+                    # Stop once this round has spent its budget — but only after
+                    # having added at least some neighbours, so a hop always
+                    # makes progress before we declare truncation.
+                    if len(merged_nodes) - nodes_at_round_start >= round_budget:
+                        round_truncated = True
                         break
-                if len(merged_nodes) >= BFS_NODE_CAP:
+                if round_truncated:
                     break
             frontier = next_frontier
+            # Genuine truncation: we hit a budget AND there is still frontier
+            # left we didn't get to expand.
+            if round_truncated and frontier:
+                truncated_at_hop = hop_round + 1
+                break
+
+        if truncated_at_hop is not None:
+            warnings.append(
+                f"BFS reached the {BFS_NODE_CAP}-node cap after hop "
+                f"{truncated_at_hop}; {len(merged_nodes)} nodes loaded. "
+                "Reseed or narrow profiles/window to go deeper."
+            )
 
         # UX fallback: if the caller's chosen profiles couldn't emit any edges
         # from this node (e.g. expanding a token node with only
@@ -931,21 +1011,66 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
             patch["suggested_next_hops"] = suggested_next_hops(
                 _seed_kind_of(roles), discover_profiles()
             )
+            mini_apps.attach_dataset(
+                view_id,
+                "node_evidence",
+                _dataset_from_rows(
+                    NODE_EVIDENCE_COLUMNS,
+                    _node_evidence_rows(selected_node_id, roles),
+                    "node_evidence",
+                ),
+            )
 
-        if not patch:
+        if selected_edge_id:
+            mini_apps.attach_dataset(
+                view_id,
+                "edge_evidence",
+                _dataset_from_rows(
+                    EDGE_EVIDENCE_COLUMNS,
+                    _edge_evidence_rows(ch, selected_edge_id),
+                    "edge_evidence",
+                ),
+            )
+
+        if not patch and not selected_node_id and not selected_edge_id:
             return mini_apps.error_call_tool_result("no fields to update")
-        mini_apps.patch_view_state(view_id, patch)
+        if patch:
+            mini_apps.patch_view_state(view_id, patch)
 
         updated = mini_apps.get_view(view_id)
         assert updated is not None
+        # Surface any evidence datasets refreshed above so the details panel
+        # can render them without a full INITIAL_LOAD (which would reset the
+        # graph layout/zoom).
+        dataset_patch: dict[str, Any] = {}
+        for key in ("node_evidence", "edge_evidence"):
+            dataset = updated.datasets.get(key)
+            if dataset is not None:
+                dataset_patch[key] = mini_apps.build_dataset_descriptor(
+                    key=key, dataset=dataset, title=DATASET_TITLES.get(key, key)
+                )
         payload = MiniAppPayload(
             type="PATCH_VIEW_STATE",
             view_id=updated.view_id,
             app_id=GRAPH_EXPLORER_APP_ID,
             title=updated.title,
             status="ready",
-            patch={"view_state": patch},
+            patch={"view_state": patch, "datasets": dataset_patch}
+            if dataset_patch
+            else {"view_state": patch},
         )
         return mini_apps.payload_to_call_tool_result(
             payload, summary_text="Graph Explorer focus updated."
         )
+
+    web_apps.register_web_app(
+        app_id=GRAPH_EXPLORER_APP_ID,
+        open_tool="open_graph_explorer",
+        html_loader=get_graph_explorer_html,
+        tools={
+            "open_graph_explorer": open_graph_explorer,
+            "load_graph_explorer_seed": load_graph_explorer_seed,
+            "expand_graph_explorer_node": expand_graph_explorer_node,
+            "update_graph_explorer_focus": update_graph_explorer_focus,
+        },
+    )

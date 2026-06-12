@@ -2,15 +2,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MiniAppPayload } from "../shared/miniAppTypes";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
-import { MiniAppChrome, MaIdentity, MaKpiGrid, MaKpi } from "../shared/MiniAppChrome";
+import { MiniAppChrome } from "../shared/MiniAppChrome";
+import { MaHelpButton } from "../shared/HelpDialog";
+import { GRAPH_EXPLORER_HELP } from "../shared/helpContent";
 import { shortAddr } from "../../utils/format";
 import { CatalogScreen } from "./CatalogScreen";
 import { DetailsPanel } from "./DetailsPanel";
 import { FilterBar } from "./FilterBar";
-import { ForceGraph } from "./ForceGraph";
+import { CosmosGraph } from "./CosmosGraph";
 import type { GraphExplorerState, ProfileCard } from "./types";
 
 const APP_ID = "graph_explorer";
+
+// Mirror of the backend cap in tools/semantic/graph_explorer.py (MAX_HOPS).
+// Used only for the compact seed-line counter display.
+const MAX_HOPS = 50;
 
 const EMPTY_STATE: GraphExplorerState = {
   title: "Graph Explorer",
@@ -176,7 +182,7 @@ function groupProfilesBySector(
 }
 
 export default function GraphExplorerApp() {
-  const { view, callTool, updateModelContext, sendMessage } =
+  const { view, callTool } =
     useMiniApp<GraphExplorerState>({ appId: APP_ID, mockPayload: MOCK_PAYLOAD });
 
   // Optimistic view-only overrides. Chip toggle, layout change, and status
@@ -227,6 +233,12 @@ export default function GraphExplorerApp() {
     }
   }, [state.selected_node_id]);
 
+  // How many BFS hops each expand action performs (expand button, double-click,
+  // neighbor "+"). Local UI state so it survives view patches without a server
+  // round-trip on every change. Changing it does NOT auto-expand — expansion is
+  // always an explicit click (the silent debounced auto-expand was unintuitive).
+  const [bfsHops, setBfsHops] = useState(3);
+
   const onSeed = (profileId: string | null, nodeId: string) => {
     if (!view?.view_id) return;
     void callTool("load_graph_explorer_seed", {
@@ -255,20 +267,27 @@ export default function GraphExplorerApp() {
       seed_node_id: state.seed_node.id,
       seed_model: "",
       relation_types: merged.relation_types,
-      hops: 1,
+      // Preserve the echoed depth instead of hardcoding 1 — re-querying for a
+      // window/max-neighbors change should not visually collapse the hop
+      // counter back to 1. (Backend only stores hops here; BFS depth still
+      // comes from expand_graph_explorer_node.)
+      hops: Math.max(1, Math.min(Number(merged.hops) || 1, MAX_HOPS)),
       transfer_window_days: merged.transfer_window_days,
       max_neighbors: merged.max_neighbors,
     }).catch((err) => console.error("[graph_explorer] refetch failed", err));
   };
 
-  const onExpand = (nodeId: string, hops: number = 1) => {
+  // Expand `nodeId` by `hops` BFS frontier rounds. When hops is omitted (the
+  // double-click and neighbor "+" paths), it uses the current hop count so all
+  // expansion entry points respect the same control.
+  const onExpand = (nodeId: string, hops?: number) => {
     if (!view?.view_id || !nodeId) return;
     void callTool("expand_graph_explorer_node", {
       view_id: view.view_id,
       node_id: nodeId,
       relation_types: state.relation_types,
       direction: "both",
-      hops,
+      hops: Math.max(1, Math.min(hops ?? bfsHops, MAX_HOPS)),
     }).catch((err) => console.error("[graph_explorer] expand failed", err));
   };
 
@@ -359,37 +378,19 @@ export default function GraphExplorerApp() {
     }
   };
 
-  /** Expand the seed node by BFS with `hops` frontier rounds. */
-  const onExpandAll = (hops: number = 1) => {
-    if (!state.seed_node?.id) return;
-    onExpand(state.seed_node.id, Math.max(1, hops));
+  // Expand the CURRENTLY SELECTED node (or the seed if nothing is selected) by
+  // `hops` BFS frontier rounds. This is what the toolbar expand button drives,
+  // so "select a node, hit expand" deepens the graph from where the user is
+  // looking — consistent with double-click and the neighbor "+".
+  const onExpandTarget = (hops: number = bfsHops) => {
+    const target = state.selected_node_id || state.seed_node?.id;
+    if (!target) return;
+    onExpand(target, Math.max(1, hops));
   };
 
-  // How many BFS hops each click of the "+" expand button performs.
-  // Persisted in local UI state so it survives view patches but doesn't
-  // round-trip to the server on every change.
-  const [bfsHops, setBfsHops] = useState(3);
-
-  const onAskAssistant = () => {
-    updateModelContext({
-      view_id: view?.view_id ?? "",
-      seed: state.seed_node?.id,
-      selected_node: state.selected_node_id,
-      profiles: state.relation_types,
-      window_days: state.transfer_window_days,
-      node_kinds: Array.from(
-        new Set(
-          Object.values(state.node_roles || {})
-            .map((r) => (r?.is_circles_avatar ? "circles_avatar" : ""))
-            .filter(Boolean),
-        ),
-      ),
-    });
-    void sendMessage(
-      `Summarize the current Graph Explorer subgraph (seed ${state.seed_node?.id}, ` +
-        `${state.relation_types.length} active profiles) and highlight anomalies.`,
-    );
-  };
+  // Changing the hop count only updates the count — expansion is an explicit
+  // click (expand button, double-click, or neighbor "+").
+  const onBfsHopsChange = (next: number) => setBfsHops(next);
 
   const onReset = () => {
     if (!view?.view_id) return;
@@ -398,7 +399,7 @@ export default function GraphExplorerApp() {
     );
   };
 
-  if (!view) return <MiniAppChrome activeTabId="graph"><div className="ma-empty">Loading Graph Explorer…</div></MiniAppChrome>;
+  if (!view) return <MiniAppChrome activeTabId="graph" rightSlot={<MaHelpButton content={GRAPH_EXPLORER_HELP} />}><div className="ma-empty">Loading Graph Explorer…</div></MiniAppChrome>;
 
   const activeSet = new Set(state.relation_types);
   const statusFilter = state.semantic_status_filter;
@@ -424,7 +425,7 @@ export default function GraphExplorerApp() {
   const seedKind = state.seed_node?.kind ?? "";
 
   return (
-    <MiniAppChrome activeTabId="graph" bodyClassName="ma-body--flush">
+    <MiniAppChrome activeTabId="graph" bodyClassName="ma-body--flush" rightSlot={<MaHelpButton content={GRAPH_EXPLORER_HELP} />}>
     <div className="ge-shell">
       <WarningBanner warnings={view.warnings ?? []} />
       {isEmpty ? (
@@ -432,34 +433,37 @@ export default function GraphExplorerApp() {
       ) : (
         <>
           {seedId ? (
-            <div style={{ padding: "12px 14px 0" }}>
-              <MaIdentity
-                label={`Seed${seedKind ? " · " + seedKind : ""}`}
-                value={seedId.startsWith("0x") ? shortAddr(seedId, 10, 8) : seedId}
-                onCopy={() => navigator.clipboard?.writeText(seedId)}
-              />
-              <MaKpiGrid>
-                <MaKpi label="Nodes" value={String(nodeCount)} />
-                <MaKpi label="Edges" value={String(edgeCount)} />
-                <MaKpi label="Hops" value={`${state.hops}/2`} />
-                <MaKpi
-                  label="Profiles"
-                  value={`${state.relation_types.length}/${state.catalog?.length ?? 0}`}
-                />
-              </MaKpiGrid>
+            <div className="ge-seedline">
+              <span className="ge-seedline-label">Seed{seedKind ? ` · ${seedKind}` : ""}</span>
+              <span className="ge-seedline-addr" title={seedId}>
+                {seedId.startsWith("0x") ? shortAddr(seedId, 10, 8) : seedId}
+              </span>
+              <button
+                type="button"
+                className="ge-seedline-copy"
+                onClick={() => navigator.clipboard?.writeText(seedId)}
+                title="Copy seed id"
+              >
+                Copy
+              </button>
+              <span className="ge-seedline-stats">
+                <span><b>{nodeCount}</b> nodes</span>
+                <span><b>{edgeCount}</b> edges</span>
+                <span>hop <b>{state.hops}</b>/{MAX_HOPS}</span>
+                <span><b>{state.relation_types.length}</b>/{state.catalog?.length ?? 0} profiles</span>
+              </span>
             </div>
           ) : null}
           <FilterBar
             view={state}
             onFocus={onFocus}
-            onAskAssistant={onAskAssistant}
             onReset={onReset}
             detailsOpen={detailsOpen}
             onToggleDetails={() => setDetailsOpen((v) => !v)}
-            onExpand={(hops) => onExpandAll(hops)}
+            onExpand={(hops) => onExpandTarget(hops)}
             isSampleMode={isSampleMode}
             bfsHops={bfsHops}
-            onBfsHopsChange={setBfsHops}
+            onBfsHopsChange={onBfsHopsChange}
           />
           {trimmedCount > 0 && (
             <div
@@ -478,7 +482,13 @@ export default function GraphExplorerApp() {
               "All" to restore.
             </div>
           )}
-          <nav className="ge-chip-strip">
+          <nav className="ge-chip-strip" aria-label="Edge types">
+            <span
+              className="ge-chip-strip-caption"
+              title="Click a chip to add or remove that relationship type from the graph. The bold sector label toggles the whole group."
+            >
+              Edge types
+            </span>
             {sectors.map(([sector, profiles]) => {
               const visible = profiles.filter((p) =>
                 statusFilter === "all" ? true : p.semantic_status === statusFilter,
@@ -522,11 +532,12 @@ export default function GraphExplorerApp() {
           </nav>
           <div className={`ge-body ${detailsOpen ? "details-open" : "details-closed"}`}>
             <main className="ge-canvas">
-              <ForceGraph
+              <CosmosGraph
                 nodes={view.datasets?.nodes}
                 edges={view.datasets?.edges}
                 selectedNodeId={state.selected_node_id}
                 selectedEdgeId={state.selected_edge_id}
+                seedNodeId={state.seed_node?.id}
                 activeProfiles={effectiveRelationTypes}
                 layout={state.layout}
                 onSelectNode={(id) => onFocus({ selected_node_id: id })}
@@ -537,6 +548,7 @@ export default function GraphExplorerApp() {
             <DetailsPanel
               view={view}
               onExpand={onExpand}
+              onSelectNode={(id) => onFocus({ selected_node_id: id })}
               onRecenter={(id) => onSeed(null, id)}
               onApplyHop={(profileId) => {
                 const current = new Set(state.relation_types);
@@ -544,15 +556,6 @@ export default function GraphExplorerApp() {
                 onFocus({ relation_types: Array.from(current) });
               }}
             />
-          </div>
-          <div className="ge-statusbar">
-            <span>
-              {(view.datasets?.nodes?.preview_rows?.length ?? 0)} nodes ·{" "}
-              {(view.datasets?.edges?.preview_rows?.length ?? 0)} edges · hop {state.hops}/2
-            </span>
-            <span>
-              {state.relation_types.length} / {state.catalog?.length ?? 0} profiles
-            </span>
           </div>
         </>
       )}

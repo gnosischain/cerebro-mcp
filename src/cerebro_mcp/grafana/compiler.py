@@ -176,11 +176,15 @@ def _options_barchart(panel: GrafanaPanelDef) -> dict:
 
 def _options_piechart(panel: GrafanaPanelDef) -> dict:
     return {
-        "legend": {"displayMode": "list", "placement": "right", "values": ["percent"]},
+        "legend": {"displayMode": "table", "placement": "right",
+                   "values": ["value", "percent"]},
         "pieType": "donut",
         "displayLabels": ["name", "percent"],
-        "reduceOptions": dict(_REDUCE_LAST),
-        "tooltip": {"mode": "single", "sort": "none"},
+        # values=True => one slice per ROW (per category), not one slice per
+        # field. A category breakdown (label col + value col) is meaningless
+        # with values=False: it reduces the value column to a single slice.
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": True},
+        "tooltip": {"mode": "single", "sort": "desc"},
     }
 
 
@@ -283,7 +287,24 @@ def _field_config(panel: GrafanaPanelDef) -> dict:
         if gmax is not None:
             defaults["max"] = gmax
 
-    return {"defaults": defaults, "overrides": []}
+    return {"defaults": defaults, "overrides": _field_overrides(panel)}
+
+
+def _field_overrides(panel: GrafanaPanelDef) -> list[dict]:
+    """Per-column overrides. Forces declared text columns (addresses, hashes,
+    ids) to render verbatim — otherwise the panel's numeric `unit` leaks onto
+    every table column and Grafana formats hex strings as numbers."""
+    overrides: list[dict] = []
+    for col in panel.text_columns:
+        overrides.append({
+            "matcher": {"id": "byName", "options": col},
+            "properties": [
+                {"id": "unit", "value": "string"},
+                {"id": "decimals", "value": 0},
+                {"id": "custom.cellOptions", "value": {"type": "auto"}},
+            ],
+        })
+    return overrides
 
 
 # Grafana ClickHouse plugin `format` is a NUMERIC enum (see

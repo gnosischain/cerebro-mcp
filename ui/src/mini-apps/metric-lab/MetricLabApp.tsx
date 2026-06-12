@@ -4,6 +4,8 @@ import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
 import { CollapsibleSection } from "../shared/CollapsibleSection";
 import { MiniAppChrome, MaIdentity, MaKpiGrid, MaKpi, MaSkeletonKpiGrid } from "../shared/MiniAppChrome";
+import { MaHelpButton } from "../shared/HelpDialog";
+import { METRIC_LAB_HELP } from "../shared/helpContent";
 import { useDebouncedValue } from "../shared/useDebouncedValue";
 import type { DatasetMode, MiniAppPayload } from "../shared/miniAppTypes";
 
@@ -112,11 +114,50 @@ const MOCK_CATALOG: MetricCatalogEntry[] = [
     label: "Active validators",
     description: "Number of active validators per day on the Gnosis Beacon Chain.",
     module: "consensus",
+    sector: "consensus",
+    subsector: "validators",
     root_model: "int_consensus_validators_daily",
     quality_tier: "approved",
     unit: "count",
     allowed_dimensions: ["day", "status"],
     default_dimensions: ["day"],
+  },
+  {
+    kind: "model",
+    name: "api_execution_gpay_active_users",
+    label: "GPay active users (table)",
+    description: "Daily active GPay wallet users with column-level schema.",
+    module: "execution",
+    sector: "execution",
+    subsector: "gpay",
+    root_model: "api_execution_gpay_active_users",
+    quality_tier: "approved",
+    unit: "count",
+    allowed_dimensions: [],
+    default_dimensions: [],
+    executable: true,
+    columns: [
+      { name: "day", type: "Date" },
+      { name: "active_users", type: "UInt64" },
+      { name: "new_users", type: "UInt64" },
+      { name: "returning_users", type: "UInt64" },
+    ],
+  },
+  {
+    kind: "model",
+    name: "api_execution_internal_audit",
+    label: "Internal audit table (locked)",
+    description: "Restricted table — not approved for execution.",
+    module: "execution",
+    sector: "execution",
+    subsector: "audit",
+    root_model: "api_execution_internal_audit",
+    quality_tier: "internal",
+    unit: "count",
+    allowed_dimensions: [],
+    default_dimensions: [],
+    executable: false,
+    columns: [{ name: "day", type: "Date" }],
   },
 ];
 
@@ -922,7 +963,12 @@ function MetricPicker({ catalog, onLoad, onConfigChange, loading, errorMessage, 
                   className="mini-app-picker__dropdown-item"
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => addToBasket(m.name)}
-                  disabled={basket.includes(m.name)}
+                  disabled={basket.includes(m.name) || m.executable === false}
+                  title={
+                    m.executable === false
+                      ? "Not approved for execution"
+                      : undefined
+                  }
                 >
                   <span className="mini-app-picker__kind-pill">
                     {m.kind === "model" ? "tbl" : "mtr"}
@@ -930,6 +976,9 @@ function MetricPicker({ catalog, onLoad, onConfigChange, loading, errorMessage, 
                   <span className="mini-app-picker__dropdown-label">
                     {m.label}
                   </span>
+                  {m.executable === false && (
+                    <span className="ml-exec-pill is-blocked">locked</span>
+                  )}
                   <span className="mini-app-picker__dropdown-path">
                     {[m.sector, m.subsector].filter(Boolean).join(" > ")}
                   </span>
@@ -1062,6 +1111,35 @@ function MetricPicker({ catalog, onLoad, onConfigChange, loading, errorMessage, 
 
           {anchor?.description && (
             <p className="mini-app-picker__description">{anchor.description}</p>
+          )}
+
+          <div className="mini-app-picker__anchor-meta">
+            <span
+              className={`mini-app-pill ml-exec-pill ${
+                anchor?.executable === false ? "is-blocked" : "is-runnable"
+              }`}
+              title={
+                anchor?.executable === false
+                  ? "This entry is not approved for execution"
+                  : "Approved for execution"
+              }
+            >
+              {anchor?.executable === false ? "not runnable" : "runnable"}
+            </span>
+          </div>
+
+          {anchor?.columns && anchor.columns.length > 0 && (
+            <details className="mini-app-picker__columns">
+              <summary>Column schema ({anchor.columns.length})</summary>
+              <ul className="ml-column-schema">
+                {anchor.columns.map((c) => (
+                  <li key={c.name}>
+                    <code>{c.name}</code>
+                    <span className="ml-column-type">{c.type}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
           )}
         </div>
       )}
@@ -1595,7 +1673,7 @@ export default function MetricLabApp() {
   );
 
   if (!view) {
-    return <MiniAppChrome activeTabId="metric"><div className="ma-empty">Loading Metric Lab…</div></MiniAppChrome>;
+    return <MiniAppChrome activeTabId="metric" rightSlot={<MaHelpButton content={METRIC_LAB_HELP} />}><div className="ma-empty">Loading Metric Lab…</div></MiniAppChrome>;
   }
 
   const state = view.view_state;
@@ -1612,7 +1690,7 @@ export default function MetricLabApp() {
       (state?.selected_metric ? 1 : 0));
 
   return (
-    <MiniAppChrome activeTabId="metric">
+    <MiniAppChrome activeTabId="metric" rightSlot={<MaHelpButton content={METRIC_LAB_HELP} />}>
     <div className="mini-app-root mini-app-metric-lab">
       {selectedMetricName ? (
         <MaIdentity

@@ -37,6 +37,8 @@ _VALID_ROLES = {
     "cerebro_dispatcher",
     # Grafana dashboard architect (mixed-audience dashboard composition)
     "grafana_architect",
+    # On-chain incident forensics via the bulk RPC scan toolkit
+    "chain_forensics",
 }
 
 

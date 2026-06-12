@@ -67,6 +67,13 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "5190"],
       "port": 5190
+    },
+    {
+      "name": "incident-report",
+      "cwd": "scripts/incident_gpay_2026_05/output",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "5191"],
+      "port": 5191
     }
   ]
 }

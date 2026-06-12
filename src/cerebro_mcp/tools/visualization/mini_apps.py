@@ -750,6 +750,16 @@ def register_mini_app_infra(mcp, ch: ClickHouseManager) -> None:
     mark_app_only("get_mini_app_rows")
     mark_app_only("get_mini_app_state")
 
+    # Also expose these plain callables for standalone web-app delivery.
+    from cerebro_mcp.tools.visualization.web_apps import register_mini_app_tools
+
+    register_mini_app_tools(
+        {
+            "get_mini_app_rows": get_mini_app_rows,
+            "get_mini_app_state": get_mini_app_state,
+        }
+    )
+
 
 __all__ = [
     "MiniAppDefinition",
