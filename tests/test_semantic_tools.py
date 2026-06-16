@@ -756,3 +756,27 @@ def test_clickhouse_query_rules_registers_only_with_valid_bundle(
     result = fn()
     assert "Pinned ref: fab8c0077a42aad93069dbc2b65170191edbf52a" in result
     assert "compiled rules" in result
+
+
+def test_resolve_dimension_name_handles_mixed_date_day_naming():
+    """The registry mixes daily time-dimension names (`date` on scaffolded
+    marts, `day` on consensus/transactions/spine). The resolver must map a
+    request to whatever the metric actually exposes, regardless of which
+    convention the user types — the `date -> day` alias alone broke
+    `date`-named metrics (the day-grain query_metrics bug)."""
+    from cerebro_mcp.tools.semantic.semantic import _resolve_dimension_name
+
+    date_named = {"date", "week", "month"}
+    day_named = {"day", "week", "month"}
+
+    # date-named metric: both 'date' and 'day' inputs must resolve to 'date'
+    assert _resolve_dimension_name("date", date_named) == "date"
+    assert _resolve_dimension_name("day", date_named) == "date"
+    # day-named metric: forward alias and literal both resolve to 'day'
+    assert _resolve_dimension_name("date", day_named) == "day"
+    assert _resolve_dimension_name("day", day_named) == "day"
+    # coarser grains and non-time dimensions pass through untouched
+    assert _resolve_dimension_name("week", date_named) == "week"
+    assert _resolve_dimension_name("country_code", {"date", "country_code"}) == "country_code"
+    # genuinely unsupported names fall through (caller flags them)
+    assert _resolve_dimension_name("nope", date_named) == "nope"

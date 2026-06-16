@@ -691,6 +691,30 @@ def _normalize_dimension_name(name: str) -> str:
     return _DIMENSION_ALIASES.get(normalized_name, normalized_name)
 
 
+def _resolve_dimension_name(name: str, supported: set[str]) -> str:
+    """Resolve a requested dimension to the name a metric actually exposes.
+
+    The registry mixes daily time-dimension names — scaffolded marts call it
+    `date`, while consensus/transactions/yields/time-spine models call it
+    `day` — so the fixed `date -> day` alias satisfies one convention and
+    breaks the other (it rewrote `date` to `day`, which is absent from a
+    `date`-named metric's supported set). Prefer whichever candidate — the
+    literal name, its forward alias, or a reverse alias — is in the metric's
+    supported set; fall back to the forward-aliased name so the unsupported
+    error message stays stable.
+    """
+    normalized = normalize(name).replace(" ", "_")
+    forward = _DIMENSION_ALIASES.get(normalized, normalized)
+    candidates = [normalized, forward]
+    candidates.extend(
+        alias for alias, target in _DIMENSION_ALIASES.items() if target == normalized
+    )
+    for candidate in candidates:
+        if candidate in supported:
+            return candidate
+    return forward
+
+
 def _time_spine_upcast_targets(snapshot, metric: dict[str, Any]) -> list[str]:
     """Return the time-spine grain names this metric's root can be upcast
     to (e.g. a metric with a daily `date` column can be grouped to
@@ -833,7 +857,7 @@ def _normalize_requested_dimensions(
     shared_supported = set.intersection(*supported_sets) if supported_sets else set()
 
     for original_name in requested_dimensions:
-        canonical_name = _normalize_dimension_name(original_name)
+        canonical_name = _resolve_dimension_name(original_name, shared_supported)
         requested_pairs.append((original_name, canonical_name))
         if canonical_name not in normalized_dimensions:
             normalized_dimensions.append(canonical_name)
