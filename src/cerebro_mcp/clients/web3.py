@@ -7,7 +7,6 @@ from typing import Any, Callable
 from web3 import Web3
 
 from cerebro_mcp.config import settings
-from cerebro_mcp.runtime.tool_output import normalize_value
 
 
 LATEST_BLOCK_TAGS = {"latest", "pending", "safe", "finalized", "earliest"}
@@ -61,11 +60,19 @@ class GnosisRpcManager:
         return self.archive
 
     def retry(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """Run an RPC callable with exponential backoff. Normalizes the result."""
+        """Run an RPC callable with exponential backoff, returning the RAW result.
+
+        Do NOT normalize here. web3.py returns AttributeDict (a Mapping, not a
+        ``dict``) for transactions/receipts; normalize_value() would miss the
+        dict branch and fall through to ``str(value)``, stringifying the whole
+        object and breaking ``receipt.get("logs")`` / ``process_receipt(receipt)``
+        in the decode tools. JSON-normalization is applied at each tool's output
+        boundary instead (e.g. ``normalize_value(result)`` on the call path).
+        """
         last: Exception | None = None
         for attempt in range(max(1, settings.RPC_MAX_RETRIES)):
             try:
-                return normalize_value(fn(*args, **kwargs))
+                return fn(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001
                 last = exc
                 if attempt < settings.RPC_MAX_RETRIES - 1:
