@@ -214,7 +214,10 @@ def test_discover_metrics_returns_ranked_hits(semantic_runtime_ready):
     assert result.results[0].name == "transaction_count"
 
 
-def test_discover_metrics_hides_candidate_only_metrics(semantic_runtime_ready):
+def test_discover_metrics_surfaces_candidate_metrics_as_provisional(semantic_runtime_ready):
+    """Candidate-tier metrics are no longer hidden from discovery: they
+    appear flagged executable=False / provisional=True, and the summary
+    carries the not-analyst-vetted warning with the allow_candidate hint."""
     _semantic_tools, _snapshot = semantic_runtime_ready
     mcp = FastMCP("semantic-discovery-filter-test")
 
@@ -222,7 +225,43 @@ def test_discover_metrics_hides_candidate_only_metrics(semantic_runtime_ready):
     fn = mcp._tool_manager._tools["discover_metrics"].fn
     result = fn(query="wallet candidate")
 
-    assert result.results == []
+    names = [hit.name for hit in result.results]
+    assert "candidate_wallet_metric" in names
+    hit = next(h for h in result.results if h.name == "candidate_wallet_metric")
+    assert hit.executable is False
+    assert hit.provisional is True
+    assert hit.quality_tier == "candidate"
+    assert "provisional (candidate)" in result.summary_markdown
+    assert "not analyst-vetted" in result.summary_markdown
+    assert "allow_candidate=true" in result.summary_markdown
+
+
+def test_discover_metrics_ranks_approved_before_higher_scoring_candidates(semantic_runtime_ready):
+    """Approved metrics fill the result limit FIRST; provisional candidates
+    only take remaining slots even when they outscore the approved hits."""
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-discovery-ranking-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["discover_metrics"].fn
+    # "wallet candidate execution" is a substring of the candidate's search
+    # blob (base 25 + three token bonuses) while transaction_count only gets
+    # the "execution" token bonus + approved bonus — the candidate outscores
+    # the approved metric on raw score.
+    result = fn(query="wallet candidate execution")
+
+    names = [hit.name for hit in result.results]
+    assert names.index("transaction_count") < names.index("candidate_wallet_metric")
+    approved_hit = next(h for h in result.results if h.name == "transaction_count")
+    candidate_hit = next(h for h in result.results if h.name == "candidate_wallet_metric")
+    assert candidate_hit.score > approved_hit.score  # ranking ignores raw score across tiers
+    assert approved_hit.executable is True and approved_hit.provisional is False
+
+    # With limit=1 the single slot goes to the approved hit.
+    limited = fn(query="wallet candidate execution", limit=1)
+    assert [hit.name for hit in limited.results] == ["transaction_count"]
+    # The provisional warning still fires so the candidate isn't silently lost.
+    assert "provisional (candidate)" in limited.summary_markdown
 
 
 def test_preflight_routes_approved_metric_to_semantic_ready(semantic_runtime_ready):
@@ -500,6 +539,142 @@ def test_query_metrics_returns_semantic_coverage_gap_for_candidate_metric(semant
     # `allow_candidate` opt-in (PR 3) so authoring loops can iterate
     # without promoting to approved.
     assert "allow_candidate" in result
+
+
+# ─── PROVISIONAL CANDIDATES: allow_candidate end-to-end ──────────────
+
+
+def _candidate_query_executed():
+    return SimpleNamespace(
+        sql="SELECT sector, candidate_wallet_metric FROM branch_1",
+        database="dbt",
+        columns=["sector", "candidate_wallet_metric"],
+        rows=[["defi", 7]],
+        row_count=1,
+        elapsed_seconds=0.01,
+        fetch_mode="rows",
+        warnings=[],
+        truncated=False,
+        rows_returned=1,
+    )
+
+
+def test_query_metrics_allow_candidate_plans_and_executes_candidate_metric(semantic_runtime_ready):
+    """End-to-end: `allow_candidate=True` on a candidate metric with an
+    approved root must survive the tool gate AND the planner (which used to
+    re-reject it with `not approved for semantic execution`)."""
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-allow-candidate-exec-test")
+
+    executed = _candidate_query_executed()
+
+    class FakeClickHouse:
+        def run_query(self, sql, database, requested_max_rows, audience, fetch_mode):
+            return executed
+
+        def build_query_result(self, executed_query, max_rows):
+            return executed_query
+
+    register_semantic_tools(mcp, FakeClickHouse(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["query_metrics"].fn
+    result = fn(
+        metrics=["candidate_wallet_metric"],
+        dimensions=["sector"],
+        limit=10,
+        allow_candidate=True,
+    )
+
+    assert not isinstance(result, str), result
+    assert result.resolved_metrics == ["candidate_wallet_metric"]
+    assert result.planner_mode == "single_model"
+    assert result.rows == [["defi", 7]]
+
+
+def test_explain_metric_query_allow_candidate_plans_candidate_metric(semantic_runtime_ready):
+    """explain_metric_query with allow_candidate=True compiles SQL for a
+    candidate metric (approved root); without the flag it still refuses."""
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-allow-candidate-explain-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["explain_metric_query"].fn
+
+    result = fn(
+        metrics=["candidate_wallet_metric"],
+        dimensions=["sector"],
+        allow_candidate=True,
+    )
+    assert not isinstance(result, str), result
+    assert result.resolved_metrics == ["candidate_wallet_metric"]
+    assert result.planner_mode == "single_model"
+    assert "FROM dbt.api_execution_transactions_by_sector_daily" in result.compiled_sql
+
+    denied = fn(metrics=["candidate_wallet_metric"], dimensions=["sector"])
+    assert isinstance(denied, str)
+    assert "allow_candidate" in denied
+
+
+def test_get_metric_details_returns_provisional_banner_for_candidate(semantic_runtime_ready):
+    """Candidate metrics return full details (dims/root — needed to decide
+    whether allow_candidate is worth pulling) behind a provisional banner,
+    instead of the old refusal."""
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-candidate-details-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["get_metric_details"].fn
+
+    result = fn(metric_name="candidate_wallet_metric")
+    assert not isinstance(result, str), result
+    assert result.name == "candidate_wallet_metric"
+    assert result.root_model == "api_execution_transactions_by_sector_daily"
+    assert result.allowed_dimensions == ["sector"]
+    assert result.semantic_status == "candidate"
+    assert "PROVISIONAL" in result.summary_markdown
+    assert "allow_candidate" in result.summary_markdown
+
+    # Approved metrics carry no banner.
+    approved = fn(metric_name="transaction_count")
+    assert not isinstance(approved, str)
+    assert "PROVISIONAL" not in approved.summary_markdown
+
+
+def test_preflight_provisional_topics_surface_candidate_coverage(semantic_runtime_ready):
+    """When approved coverage leaves topics uncovered but a candidate metric
+    matches them, preflight surfaces provisional_topics + an allow_candidate
+    hint WITHOUT changing the route."""
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-preflight-provisional-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["preflight_analytics_request"].fn
+    result = fn(query="wallet candidate activity", mode="answer")
+
+    # Routing is decided on approved coverage only — still a gap.
+    assert result.route == "semantic_coverage_gap"
+    assert result.fallback_reason == "semantic_coverage_gap"
+    assert result.recommended_metrics == []
+    # But the candidate coverage is surfaced as informational metadata.
+    assert "wallet" in result.provisional_topics
+    md = result.summary_markdown
+    assert "candidate_wallet_metric" in md
+    assert "allow_candidate" in md
+    assert "not analyst-vetted" in md
+
+
+def test_preflight_provisional_topics_empty_when_no_candidate_matches(semantic_runtime_ready):
+    """Uncovered topics with no candidate coverage leave provisional_topics
+    empty and the summary free of the provisional line."""
+    _semantic_tools, _snapshot = semantic_runtime_ready
+    mcp = FastMCP("semantic-preflight-no-provisional-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["preflight_analytics_request"].fn
+    result = fn(query="transaction count and bridge volume weekly report", mode="report")
+
+    assert result.route == "hybrid_ready"  # routing unchanged
+    assert result.provisional_topics == []
+    assert "Provisional coverage" not in result.summary_markdown
 
 
 # ─── PR 3: allow_candidate + scalar-KPI dedicated error ──────────────
@@ -780,3 +955,377 @@ def test_resolve_dimension_name_handles_mixed_date_day_naming():
     assert _resolve_dimension_name("country_code", {"date", "country_code"}) == "country_code"
     # genuinely unsupported names fall through (caller flags them)
     assert _resolve_dimension_name("nope", date_named) == "nope"
+
+
+def test_semantic_runtime_stats_record_calls_latencies_and_cache(semantic_runtime_ready):
+    """The rolling stats registry counts calls, samples latencies, and
+    tracks the token-idf cache hit/miss pattern for discover_metrics."""
+    semantic_tools, _snapshot = semantic_runtime_ready
+    semantic_tools.reset_semantic_runtime_stats()
+    semantic_tools._TOKEN_IDF_CACHE.clear()
+    mcp = FastMCP("semantic-runtime-stats-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["discover_metrics"].fn
+    first = fn(query="tx count")
+    second = fn(query="tx count")
+
+    # Sanity: both calls succeeded (error paths return str).
+    assert first.results and second.results
+
+    stats = semantic_tools.get_semantic_runtime_stats()
+    # Every tracked tool appears in the summary even when unused.
+    for tool_name in (
+        "discover_metrics",
+        "query_metrics",
+        "preflight_analytics_request",
+        "explain_metric_query",
+    ):
+        assert tool_name in stats
+
+    discover = stats["discover_metrics"]
+    assert discover["count"] == 2
+    assert discover["errors"] == 0
+    assert discover["latency_samples"] == 2
+    assert discover["p50_ms"] is not None and discover["p50_ms"] >= 0.0
+    assert discover["p95_ms"] is not None and discover["p95_ms"] >= discover["p50_ms"]
+    # First call computes the idf table (miss); second reuses it (hit).
+    assert discover["cache_misses"] == 1
+    assert discover["cache_hits"] == 1
+    assert discover["cache_hit_rate"] == 0.5
+
+    # Untouched tools carry zeroed counters and null percentiles.
+    assert stats["query_metrics"]["count"] == 0
+    assert stats["query_metrics"]["p50_ms"] is None
+    assert stats["query_metrics"]["cache_hit_rate"] is None
+
+
+def test_semantic_runtime_stats_count_error_returns(semantic_runtime_ready, monkeypatch):
+    """Error-path returns (plain strings) increment the errors counter and
+    still record a latency sample."""
+    semantic_tools, _snapshot = semantic_runtime_ready
+    semantic_tools.reset_semantic_runtime_stats()
+    mcp = FastMCP("semantic-runtime-stats-error-test")
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+
+    monkeypatch.setattr(semantic_tools.semantic_runtime, "_snapshot", None)
+    monkeypatch.setattr(
+        semantic_tools.semantic_runtime,
+        "_stale_reason",
+        "registry_unavailable",
+    )
+
+    fn = mcp._tool_manager._tools["discover_metrics"].fn
+    result = fn(query="tx count")
+
+    assert isinstance(result, str)
+    discover = semantic_tools.get_semantic_runtime_stats()["discover_metrics"]
+    assert discover["count"] == 1
+    assert discover["errors"] == 1
+    assert discover["latency_samples"] == 1
+
+
+def test_semantic_runtime_stats_track_preflight_cache_hits(semantic_runtime_ready):
+    """The preflight result cache feeds the per-tool cache hit/miss counters."""
+    semantic_tools, _snapshot = semantic_runtime_ready
+    semantic_tools.reset_semantic_runtime_stats()
+    mcp = FastMCP("semantic-runtime-preflight-cache-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["preflight_analytics_request"].fn
+    fn(query="How many active validators are there over time?", mode="answer")
+    fn(query="How many active validators are there over time?", mode="answer")
+
+    preflight = semantic_tools.get_semantic_runtime_stats()["preflight_analytics_request"]
+    assert preflight["count"] == 2
+    assert preflight["cache_misses"] == 1
+    assert preflight["cache_hits"] == 1
+    assert preflight["cache_hit_rate"] == 0.5
+
+
+def test_discover_uses_prebaked_token_idf_without_recompute(
+    semantic_runtime_ready, monkeypatch
+):
+    """A snapshot warmed at build time (token_idf pre-baked) must be used
+    as-is: discover never calls the compute fn and counts the warm table
+    as a cache hit on the very first call."""
+    import dataclasses
+
+    from cerebro_mcp.semantic.index import build_token_idf
+
+    semantic_tools, snapshot = semantic_runtime_ready
+    warmed = dataclasses.replace(
+        snapshot,
+        registry_hash="registry-hash-warmed",
+        token_idf=build_token_idf(snapshot.metrics.values()),
+    )
+    monkeypatch.setattr(semantic_tools.semantic_runtime, "_snapshot", warmed)
+
+    calls = {"n": 0}
+    real_build_token_idf = semantic_tools.build_token_idf
+
+    def counting_build_token_idf(metrics):
+        calls["n"] += 1
+        return real_build_token_idf(metrics)
+
+    monkeypatch.setattr(semantic_tools, "build_token_idf", counting_build_token_idf)
+    semantic_tools.reset_semantic_runtime_stats()
+    semantic_tools._TOKEN_IDF_CACHE.clear()
+
+    mcp = FastMCP("semantic-warm-idf-test")
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["discover_metrics"].fn
+    first = fn(query="tx count")
+    second = fn(query="tx count")
+
+    assert first.results and second.results
+    assert first.results[0].name == "transaction_count"
+    assert calls["n"] == 0  # pre-baked table used; lazy compute never ran
+    assert semantic_tools._TOKEN_IDF_CACHE == {}  # fallback cache untouched
+
+    stats = semantic_tools.get_semantic_runtime_stats()["discover_metrics"]
+    # Call 1: warm idf table counts as a hit. Call 2: result-LRU hit.
+    assert stats["cache_hits"] == 2
+    assert stats["cache_misses"] == 0
+    assert stats["cache_hit_rate"] == 1.0
+
+
+def test_discover_result_cache_hit_recorded_and_skips_rescoring(
+    semantic_runtime_ready, monkeypatch
+):
+    """Second identical discover call is served from the result LRU: no
+    re-scoring, hit recorded in the rolling stats, key is normalization-
+    insensitive, and the returned copy echoes the caller's raw query."""
+    semantic_tools, _snapshot = semantic_runtime_ready
+    semantic_tools.reset_semantic_runtime_stats()
+    semantic_tools._TOKEN_IDF_CACHE.clear()
+
+    calls = {"n": 0}
+    real_score_metric = semantic_tools.score_metric
+
+    def counting_score_metric(query, metric, token_idf=None):
+        calls["n"] += 1
+        return real_score_metric(query, metric, token_idf=token_idf)
+
+    monkeypatch.setattr(semantic_tools, "score_metric", counting_score_metric)
+
+    mcp = FastMCP("semantic-discover-lru-test")
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["discover_metrics"].fn
+
+    first = fn(query="tx count")
+    scored_once = calls["n"]
+    assert scored_once > 0
+    second = fn(query="TX  Count")  # normalizes to the same cache key
+
+    assert calls["n"] == scored_once  # LRU hit -> scoring skipped entirely
+    assert second.results == first.results
+    assert second.query == "TX  Count"  # copy echoes the raw query
+
+    stats = semantic_tools.get_semantic_runtime_stats()["discover_metrics"]
+    assert stats["cache_hits"] == 1  # the LRU hit
+    assert stats["cache_misses"] == 1  # call 1's lazy token-idf miss
+
+
+def test_discover_result_cache_invalidates_on_registry_hash_change(
+    semantic_runtime_ready, monkeypatch
+):
+    """A new registry generation (fresh registry_hash) must drop the result
+    LRU: the same query re-runs scoring instead of serving stale rankings."""
+    import dataclasses
+
+    semantic_tools, snapshot = semantic_runtime_ready
+    semantic_tools.reset_semantic_runtime_stats()
+    semantic_tools._TOKEN_IDF_CACHE.clear()
+
+    calls = {"n": 0}
+    real_score_metric = semantic_tools.score_metric
+
+    def counting_score_metric(query, metric, token_idf=None):
+        calls["n"] += 1
+        return real_score_metric(query, metric, token_idf=token_idf)
+
+    monkeypatch.setattr(semantic_tools, "score_metric", counting_score_metric)
+
+    mcp = FastMCP("semantic-discover-lru-invalidate-test")
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["discover_metrics"].fn
+
+    fn(query="tx count")
+    scored_once = calls["n"]
+    fn(query="tx count")
+    assert calls["n"] == scored_once  # same generation -> cached
+
+    monkeypatch.setattr(
+        semantic_tools.semantic_runtime,
+        "_snapshot",
+        dataclasses.replace(snapshot, registry_hash="registry-hash-v2"),
+    )
+    result = fn(query="tx count")
+
+    assert calls["n"] == 2 * scored_once  # rescored under the new generation
+    assert result.results[0].name == "transaction_count"
+
+    stats = semantic_tools.get_semantic_runtime_stats()["discover_metrics"]
+    # Call 2 is the only hit; calls 1 and 3 each record a token-idf miss.
+    assert stats["cache_hits"] == 1
+    assert stats["cache_misses"] == 2
+
+
+def test_discover_result_cache_copies_are_mutation_safe(semantic_runtime_ready):
+    """Cached discover results are stored/served as deep copies — a caller
+    mutating a returned payload cannot poison later hits."""
+    semantic_tools, _snapshot = semantic_runtime_ready
+    semantic_tools.reset_semantic_runtime_stats()
+
+    mcp = FastMCP("semantic-discover-lru-copy-test")
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["discover_metrics"].fn
+
+    first = fn(query="tx count")
+    first.results[0].name = "poisoned"
+    second = fn(query="tx count")
+
+    assert second.results[0].name == "transaction_count"
+    assert second is not first
+
+
+def test_performance_stats_include_semantic_runtime_section(semantic_runtime_ready):
+    """get_performance_stats surfaces the semantic_runtime section (rendered
+    by the shared `_semantic_runtime_stats_lines` helper)."""
+    semantic_tools, _snapshot = semantic_runtime_ready
+    semantic_tools.reset_semantic_runtime_stats()
+    mcp = FastMCP("semantic-runtime-perf-stats-test")
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    fn = mcp._tool_manager._tools["discover_metrics"].fn
+    fn(query="tx count")
+    fn(query="active validators")
+
+    from cerebro_mcp.tools.governance.reasoning import _semantic_runtime_stats_lines
+
+    text = "\n".join(_semantic_runtime_stats_lines())
+    assert "semantic_runtime" in text
+    assert "| `discover_metrics` | 2 | 0 |" in text
+    assert "| `query_metrics` | 0 | 0 |" in text
+
+    stats = semantic_tools.get_semantic_runtime_stats()
+    assert stats["discover_metrics"]["count"] >= 2
+
+
+def test_reload_semantic_registry_includes_runtime_stats(
+    semantic_runtime_ready, monkeypatch
+):
+    """reload_semantic_registry exposes the rolling runtime summary so
+    authoring loops can read before/after numbers in one call."""
+    semantic_tools, _snapshot = semantic_runtime_ready
+    semantic_tools.reset_semantic_runtime_stats()
+    mcp = FastMCP("semantic-reload-runtime-stats-test")
+
+    monkeypatch.setattr(
+        semantic_tools.semantic_runtime,
+        "force_reload",
+        lambda: (True, None),
+    )
+
+    register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
+    discover = mcp._tool_manager._tools["discover_metrics"].fn
+    discover(query="tx count")
+    result = mcp._tool_manager._tools["reload_semantic_registry"].fn()
+
+    assert set(result["runtime_stats"]) == {
+        "discover_metrics",
+        "query_metrics",
+        "preflight_analytics_request",
+        "explain_metric_query",
+    }
+    assert result["runtime_stats"]["discover_metrics"]["count"] == 1
+    assert result["runtime_stats"]["discover_metrics"]["p50_ms"] is not None
+
+
+# ─── Ratio / derived metric executable gating (tool layer) ────────────
+
+
+def _derived_gate_snapshot(input_tier: str = "approved") -> SimpleNamespace:
+    """Minimal snapshot for _resolve_executable_metrics: a ratio metric
+    whose denominator input's quality tier is parameterised."""
+    return SimpleNamespace(
+        models={"root_a": {"name": "root_a", "semantic_status": "approved"}},
+        synonym_index={},
+        metrics={
+            "num_metric": {
+                "name": "num_metric",
+                "type": "simple",
+                "root_model": "root_a",
+                "measure": "num_value",
+                "quality_tier": "approved",
+                "semantic_status": "approved",
+                "allowed_dimensions": ["day"],
+                "default_filters": [],
+            },
+            "den_metric": {
+                "name": "den_metric",
+                "type": "simple",
+                "root_model": "root_a",
+                "measure": "den_value",
+                "quality_tier": input_tier,
+                "semantic_status": input_tier,
+                "allowed_dimensions": ["day"],
+                "default_filters": [],
+            },
+            "rate_metric": {
+                "name": "rate_metric",
+                "type": "ratio",
+                "type_params": {"numerator": "num_metric", "denominator": "den_metric"},
+                "root_model": "root_a",
+                "measure": "",
+                "quality_tier": "approved",
+                "semantic_status": "approved",
+                "allowed_dimensions": ["day"],
+                "default_filters": [],
+            },
+        },
+    )
+
+
+class TestDerivedMetricExecutableGate:
+    def test_ratio_executable_when_all_inputs_executable(self):
+        from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
+
+        snapshot = _derived_gate_snapshot()
+        names, metrics, error = _resolve_executable_metrics(snapshot, ["rate_metric"])
+
+        assert error == ""
+        assert names == ["rate_metric"]
+        assert metrics[0]["type"] == "ratio"
+
+    def test_ratio_blocked_when_input_is_candidate(self):
+        from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
+
+        snapshot = _derived_gate_snapshot(input_tier="candidate")
+        names, _metrics, error = _resolve_executable_metrics(snapshot, ["rate_metric"])
+
+        assert names == []
+        assert "input metric 'den_metric' is not approved" in error
+        assert "allow_candidate" in error
+
+    def test_ratio_candidate_input_passes_with_allow_candidate(self):
+        from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
+
+        snapshot = _derived_gate_snapshot(input_tier="candidate")
+        names, _metrics, error = _resolve_executable_metrics(
+            snapshot, ["rate_metric"], allow_candidate=True
+        )
+
+        assert error == ""
+        assert names == ["rate_metric"]
+
+    def test_ratio_blocked_on_unknown_input(self):
+        from cerebro_mcp.tools.semantic.semantic import _resolve_executable_metrics
+
+        snapshot = _derived_gate_snapshot()
+        snapshot.metrics["rate_metric"]["type_params"]["denominator"] = "ghost"
+        names, _metrics, error = _resolve_executable_metrics(snapshot, ["rate_metric"])
+
+        assert names == []
+        assert "unknown input metric 'ghost'" in error

@@ -45,6 +45,12 @@ class SemanticSnapshot:
     graph_search_documents: tuple[dict[str, Any], ...] = ()
     graph_catalog_hash: str = ""
     schema_version: int = 1
+    # Token-idf table pre-baked at snapshot build time (cache warming).
+    # `build_token_idf(metrics.values())` output; `None` means "not warmed"
+    # so older construction sites and test fakes fall back to the lazy
+    # per-process cache in tools/semantic/semantic.py. An EMPTY dict is a
+    # valid warmed table (registry with no metrics) — check `is not None`.
+    token_idf: dict[str, float] | None = None
 
 
 class SemanticRetryTrace(BaseModel):
@@ -62,6 +68,12 @@ class MetricDiscoveryHit(BaseModel):
     root_model: str = ""
     score: int
     quality_tier: str = ""
+    # Provisional discovery: candidate-tier metrics are now VISIBLE in
+    # discovery but flagged. `executable` mirrors the tool-layer
+    # `_metric_is_executable` gate; `provisional` is its negation, kept as
+    # an explicit field so agents don't have to infer it from quality_tier.
+    executable: bool = True
+    provisional: bool = False
 
 
 class MetricDiscoveryResult(BaseModel):
@@ -91,6 +103,10 @@ class AnalyticsPreflightResult(BaseModel):
     hybrid_ready: bool = False
     covered_topics: list[str] = Field(default_factory=list)
     uncovered_topics: list[str] = Field(default_factory=list)
+    # Uncovered topics that a candidate-tier metric could cover via the
+    # `allow_candidate=true` escape hatch. Informational only — routing
+    # decisions never consider candidate coverage.
+    provisional_topics: list[str] = Field(default_factory=list)
     recommended_metrics: list[str] = Field(default_factory=list)
     recommended_dimensions: list[str] = Field(default_factory=list)
     recommended_next_tool: str = ""

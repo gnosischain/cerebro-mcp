@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import itertools
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
@@ -22,7 +23,14 @@ class PathResult:
     cost: float
 
 
+# Keyed (registry_hash, source_model, target_model, max_hops). Bounded like
+# the token-idf cache in tools/semantic/semantic.py: entries for the current
+# registry hash are the only live ones, so once more than
+# _PATH_CACHE_MAX_REGISTRY_HASHES distinct hashes accumulate (long-running
+# server surviving many registry reloads) the whole cache is dropped rather
+# than leaking stale generations forever.
 _PATH_CACHE: dict[tuple[str, str, str, int], PathResult] = {}
+_PATH_CACHE_MAX_REGISTRY_HASHES = 4
 
 
 def _invert_cardinality(cardinality: str) -> str:
@@ -39,13 +47,20 @@ def _base_cost(cardinality: str) -> float:
         "many_to_one": 1.0,
         "one_to_one": 1.2,
         "one_to_many": 5.0,
+        # many_to_many fans out on both sides; explicit rather than relying
+        # on the dict-miss default so the intent is visible.
+        "many_to_many": 5.0,
     }.get(cardinality, 5.0)
 
 
 def _edge_cost(relationship: dict[str, Any], *, reverse: bool) -> float:
     cardinality = _invert_cardinality(relationship.get("cardinality", "")) if reverse else relationship.get("cardinality", "")
     cost = _base_cost(cardinality)
-    if relationship.get("preferred_bridge"):
+    # preferred_bridge may only discount non-fanning traversals. A fan-out
+    # edge (one_to_many / many_to_many, including a many_to_one crossed in
+    # reverse) keeps its full base cost so the path search never routes
+    # row-level enrichment through a row-multiplying bridge on the cheap.
+    if relationship.get("preferred_bridge") and cardinality in ("many_to_one", "one_to_one"):
         cost = min(cost, 0.5)
     return cost
 
@@ -130,14 +145,19 @@ def _search_paths(
     *,
     max_hops: int,
 ) -> list[PathResult]:
-    heap: list[tuple[float, str, tuple[str, ...], tuple[dict[str, Any], ...]]] = [
-        (0.0, source_model, (source_model,), ())
-    ]
+    # The monotonic tiebreaker keeps heap comparisons off the edge dicts:
+    # parallel relationships between the same model pair (e.g. a bridge's
+    # safe-side and owner-side edges) produce entries with identical
+    # (cost, node, models) prefixes, and dicts are not orderable.
+    counter = itertools.count()
+    heap: list[
+        tuple[float, int, str, tuple[str, ...], tuple[dict[str, Any], ...]]
+    ] = [(0.0, next(counter), source_model, (source_model,), ())]
     best_cost: float | None = None
     found: list[PathResult] = []
 
     while heap:
-        cost, node, models, edges = heapq.heappop(heap)
+        cost, _, node, models, edges = heapq.heappop(heap)
         hop_count = len(models) - 1
         if best_cost is not None and cost > best_cost:
             break
@@ -156,6 +176,7 @@ def _search_paths(
                 heap,
                 (
                     cost + float(edge["cost"]),
+                    next(counter),
                     target,
                     models + (target,),
                     edges + (edge,),
@@ -192,5 +213,7 @@ def find_safest_path(
             f"Ambiguous semantic path found from {source_model} to {target_model}"
         )
 
+    if len({key[0] for key in _PATH_CACHE}) > _PATH_CACHE_MAX_REGISTRY_HASHES:
+        _PATH_CACHE.clear()
     _PATH_CACHE[cache_key] = best
     return best

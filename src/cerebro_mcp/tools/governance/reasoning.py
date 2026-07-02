@@ -1117,6 +1117,42 @@ def _list_session_files(last_n: int = 0) -> list[Path]:
     return files
 
 
+def _semantic_runtime_stats_lines() -> list[str]:
+    """Render the in-process semantic tool runtime stats (`semantic_runtime`)
+    as a markdown section for `get_performance_stats`.
+
+    Imported lazily so this module keeps no load-time dependency on the
+    semantic tools package (which itself lazily imports reasoning for trace
+    events). Returns [] when semantic tooling is unavailable.
+    """
+    try:
+        from cerebro_mcp.tools.semantic.semantic import get_semantic_runtime_stats
+
+        semantic_stats = get_semantic_runtime_stats()
+    except Exception:
+        return []
+    if not semantic_stats:
+        return []
+    lines = [
+        "",
+        "## Semantic Runtime (semantic_runtime, current process)\n",
+        "| Tool | Calls | Errors | p50 | p95 | Cache Hit Rate |",
+        "|------|-------|--------|-----|-----|----------------|",
+    ]
+    for tool_name, stats in semantic_stats.items():
+        p50 = f"{stats['p50_ms']}ms" if stats.get("p50_ms") is not None else "n/a"
+        p95 = f"{stats['p95_ms']}ms" if stats.get("p95_ms") is not None else "n/a"
+        hit_rate = stats.get("cache_hit_rate")
+        hit_rate_text = (
+            f"{round(hit_rate * 100, 1)}%" if hit_rate is not None else "n/a"
+        )
+        lines.append(
+            f"| `{tool_name}` | {stats.get('count', 0)} | {stats.get('errors', 0)} "
+            f"| {p50} | {p95} | {hit_rate_text} |"
+        )
+    return lines
+
+
 def register_reasoning_tools(mcp):
     """Register thinking/performance tracing tools."""
 
@@ -1472,6 +1508,10 @@ def register_reasoning_tools(mcp):
             lines.append(
                 f"| {sid} | {started} | {n_steps} | {dur}ms | {rate} |"
             )
+
+        # In-process semantic tool runtime (rolling window) — lets cache/perf
+        # improvements be measured before/after without leaving the session.
+        lines.extend(_semantic_runtime_stats_lines())
 
         return "\n".join(lines)
 

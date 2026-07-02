@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -88,7 +89,13 @@ def _compile_join_chain(snapshot, binding: dict[str, Any], root_alias: str, warn
         right_model = snapshot.models[edge["target"]]
         join_type = "LEFT JOIN"
         relationship = edge["relationship"]
-        if relationship.get("allow_any_join"):
+        # Honor authored join semantics: 'inner' means unmatched left rows
+        # are intentionally dropped (e.g. scoping joins). Anything else
+        # keeps the historical LEFT JOIN, and only then may allow_any_join
+        # collapse right-side duplicates via ANY LEFT JOIN.
+        if relationship.get("join_semantics") == "inner":
+            join_type = "INNER JOIN"
+        elif relationship.get("allow_any_join"):
             join_type = "ANY LEFT JOIN"
             warnings.append(
                 f"ANY LEFT JOIN used on relationship {relationship.get('name', '')}; right-side duplicates are intentionally collapsed"
@@ -316,6 +323,56 @@ def _can_inline_single_branch(snapshot, branch: dict[str, Any]) -> bool:
     return True
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Ratio / derived metrics (same-root post-aggregation)
+# ──────────────────────────────────────────────────────────────────────
+# The planner records `plan["derived_metrics"]` specs; the compiler renders
+# each one as a computed column over the branch CTE's aggregated metric
+# aliases (which is why the CTE path is forced whenever specs are present —
+# the inline single-branch shortcut has no post-aggregation scope).
+# Derived exprs are restricted to a conservative charset so an authored
+# expression can never smuggle arbitrary SQL past the aggregation layer.
+_DERIVED_EXPR_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_+\-*/(). ]+$")
+
+
+def _render_derived_select(spec: dict[str, Any], branch_name: str) -> str:
+    """Render one derived-metric output column for the OUTER select.
+
+    ratio   -> ``branch_N.<num> / nullIf(branch_N.<den>, 0) AS <name>``
+    derived -> ``(<expr with input names -> branch_N.<input>>) AS <name>``
+    """
+    name = spec.get("name", "")
+    inputs = list(spec.get("inputs") or [])
+    if spec.get("kind") == "ratio":
+        if len(inputs) != 2:
+            raise ValueError(
+                f"Ratio metric '{name}' must have exactly two inputs "
+                f"(numerator, denominator); got {inputs}"
+            )
+        numerator, denominator = inputs
+        return (
+            f"{branch_name}.{numerator} / nullIf({branch_name}.{denominator}, 0) "
+            f"AS {name}"
+        )
+    expr = str(spec.get("expr") or "")
+    if not expr or not _DERIVED_EXPR_ALLOWED_RE.match(expr):
+        raise ValueError(
+            f"Derived metric '{name}' has an unsupported expr {expr!r}. "
+            "Only input metric names, numbers, whitespace and + - * / ( ) . "
+            "are allowed."
+        )
+    rendered = expr
+    # Longest-first so no input name can partially shadow another; \b keeps
+    # the replacement from touching substrings inside other identifiers.
+    for input_name in sorted(set(inputs), key=len, reverse=True):
+        rendered = re.sub(
+            rf"\b{re.escape(input_name)}\b",
+            f"{branch_name}.{input_name}",
+            rendered,
+        )
+    return f"({rendered}) AS {name}"
+
+
 def _order_by(dimensions: list[str], metrics: list[str], requested_order_by: list[str] | None = None) -> str:
     if requested_order_by:
         return ", ".join(requested_order_by)
@@ -340,12 +397,28 @@ def compile_metric_plan(
     ctes: list[str] = []
     branch_dimensions: list[str] = plan["resolved_dimensions"]
     all_metrics = plan["resolved_metrics"]
+    derived_specs = plan.get("derived_metrics") or []
     limit = int(plan.get("limit", 100))
     requested_order_by = plan.get("order_by", [])
 
+    def _spec_branch_name(spec: dict[str, Any]) -> str:
+        """The CTE hosting ALL of a derived spec's inputs (the planner puts
+        them on one branch — the same-root contract)."""
+        spec_inputs = set(spec.get("inputs") or [])
+        for index, candidate in enumerate(branches, start=1):
+            if spec_inputs and spec_inputs <= set(candidate["metrics"]):
+                return f"branch_{index}"
+        raise ValueError(
+            f"Derived metric '{spec.get('name', '')}' inputs "
+            f"{sorted(spec_inputs)} are not aggregated on any branch of this plan"
+        )
+
     if len(branches) == 1:
         branch = branches[0]
-        if _can_inline_single_branch(snapshot, branch):
+        # Derived metrics are computed columns over the branch's aggregated
+        # aliases, so the CTE path is mandatory — the inline single-branch
+        # shortcut has no post-aggregation scope to hang them off.
+        if not derived_specs and _can_inline_single_branch(snapshot, branch):
             try:
                 sql, branch_warnings = _compile_single_branch_select(
                     snapshot,
@@ -388,7 +461,14 @@ def compile_metric_plan(
             ctes.append(cte_sql)
             warnings.extend(branch_warnings)
             branch_name = "branch_1"
-            select_parts = [*branch_dimensions, *all_metrics]
+            # With derived specs the aggregated columns are the branch's
+            # metrics (the derived INPUTS — always selected alongside the
+            # derived value); the resolved list may name only the derived
+            # metric, which is not a CTE column.
+            aggregated_metrics = branch["metrics"] if derived_specs else all_metrics
+            select_parts = [*branch_dimensions, *aggregated_metrics]
+            for spec in derived_specs:
+                select_parts.append(_render_derived_select(spec, branch_name))
             sql = (
                 "WITH\n"
                 + ",\n".join(ctes)
@@ -412,41 +492,55 @@ def compile_metric_plan(
                 "  SELECT " + ", ".join(branch_dimensions) + f" FROM branch_{idx}"
                 for idx in range(1, len(branches) + 1)
             )
-            keys_projection = ", ".join(branch_dimensions)
-        else:
-            union_keys = "\n  UNION DISTINCT\n".join(
-                f"  SELECT 1 AS join_key FROM branch_{idx}"
-                for idx in range(1, len(branches) + 1)
-            )
-            keys_projection = "join_key"
-        ctes.append("keys AS (\n" + union_keys + "\n)")
-        select_parts = (
-            [f"keys.{dimension} AS {dimension}" for dimension in branch_dimensions]
-            if branch_dimensions
-            else []
-        )
-        for index, branch in enumerate(branches, start=1):
-            for metric_name in branch["metrics"]:
-                select_parts.append(f"branch_{index}.{metric_name} AS {metric_name}")
-        join_sql = []
-        for index, _branch in enumerate(branches, start=1):
-            if branch_dimensions:
+            ctes.append("keys AS (\n" + union_keys + "\n)")
+            select_parts = [f"keys.{dimension} AS {dimension}" for dimension in branch_dimensions]
+            for index, branch in enumerate(branches, start=1):
+                for metric_name in branch["metrics"]:
+                    select_parts.append(f"branch_{index}.{metric_name} AS {metric_name}")
+            for spec in derived_specs:
+                select_parts.append(_render_derived_select(spec, _spec_branch_name(spec)))
+            join_sql = []
+            for index, _branch in enumerate(branches, start=1):
                 on_clause = " AND ".join(
                     f"keys.{dimension} = branch_{index}.{dimension}"
                     for dimension in branch_dimensions
                 )
-            else:
-                on_clause = f"keys.{keys_projection} = 1"
-            join_sql.append(f"LEFT JOIN branch_{index} ON {on_clause}")
-        sql = (
-            "WITH\n"
-            + ",\n".join(ctes)
-            + "\nSELECT\n  "
-            + ",\n  ".join(select_parts)
-            + "\nFROM keys\n"
-            + "\n".join(join_sql)
-            + f"\nORDER BY {_order_by(branch_dimensions, all_metrics, requested_order_by)}\nLIMIT {limit}"
-        )
+                join_sql.append(f"LEFT JOIN branch_{index} ON {on_clause}")
+            sql = (
+                "WITH\n"
+                + ",\n".join(ctes)
+                + "\nSELECT\n  "
+                + ",\n  ".join(select_parts)
+                + "\nFROM keys\n"
+                + "\n".join(join_sql)
+                + f"\nORDER BY {_order_by(branch_dimensions, all_metrics, requested_order_by)}\nLIMIT {limit}"
+            )
+        else:
+            # Zero-dimension multi-root plan. Each branch CTE has no
+            # GROUP BY, so it aggregates to exactly ONE row — a CROSS
+            # JOIN of the single-row branches is exact and cheap. The
+            # previous scaffolding (`keys AS (SELECT 1 AS join_key ...)`
+            # + `LEFT JOIN branch_N ON keys.join_key = 1`) is rejected
+            # by ClickHouse with Code 403 INVALID_JOIN_ON_EXPRESSION
+            # because the ON clause references only one side.
+            select_parts = []
+            for index, branch in enumerate(branches, start=1):
+                for metric_name in branch["metrics"]:
+                    select_parts.append(f"branch_{index}.{metric_name} AS {metric_name}")
+            for spec in derived_specs:
+                select_parts.append(_render_derived_select(spec, _spec_branch_name(spec)))
+            cross_joins = [
+                f"CROSS JOIN branch_{idx}" for idx in range(2, len(branches) + 1)
+            ]
+            sql = (
+                "WITH\n"
+                + ",\n".join(ctes)
+                + "\nSELECT\n  "
+                + ",\n  ".join(select_parts)
+                + "\nFROM branch_1\n"
+                + "\n".join(cross_joins)
+                + f"\nORDER BY {_order_by(branch_dimensions, all_metrics, requested_order_by)}\nLIMIT {limit}"
+            )
 
     observe_semantic_sql_compile_latency(
         planner_mode=plan["planner_mode"],

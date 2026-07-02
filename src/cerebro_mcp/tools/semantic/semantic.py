@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import logging
 import os
+import threading
 import time
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -124,25 +127,192 @@ def _resolve_agent_role(explicit_role: str = "") -> str:
     return explicit_role or runtime_state.current_agent_role or "unknown"
 
 
+# ---------------------------------------------------------------------------
+# In-process rolling runtime stats for the semantic tools.
+#
+# Prometheus counters (observability.py) survive process restarts via scrape,
+# but they aren't queryable from inside an MCP session. This registry keeps a
+# cheap per-tool rolling window (last 256 latencies + monotonic counters) so
+# cache/perf improvements can be measured before/after from the same process:
+# surfaced via `get_semantic_runtime_stats()` (used by `get_performance_stats`
+# and `reload_semantic_registry`). Guarded by a lock because the MCP serves
+# concurrent requests through run_in_executor threads.
+# ---------------------------------------------------------------------------
+_SEMANTIC_RUNTIME_TOOLS = (
+    "discover_metrics",
+    "query_metrics",
+    "preflight_analytics_request",
+    "explain_metric_query",
+)
+_SEMANTIC_RUNTIME_LATENCY_WINDOW = 256
+_semantic_runtime_stats_lock = threading.Lock()
+
+
+def _new_runtime_tool_stats() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "latencies": deque(maxlen=_SEMANTIC_RUNTIME_LATENCY_WINDOW),
+    }
+
+
+_semantic_runtime_stats: dict[str, dict[str, Any]] = {
+    name: _new_runtime_tool_stats() for name in _SEMANTIC_RUNTIME_TOOLS
+}
+
+
+def _record_semantic_tool_runtime(tool_name: str, seconds: float, *, error: bool) -> None:
+    """Record one completed tool invocation (wall latency in seconds)."""
+    with _semantic_runtime_stats_lock:
+        stats = _semantic_runtime_stats.get(tool_name)
+        if stats is None:
+            return
+        stats["count"] += 1
+        if error:
+            stats["errors"] += 1
+        stats["latencies"].append(float(seconds))
+
+
+def _record_semantic_cache_event(tool_name: str, *, hit: bool) -> None:
+    """Record a hit/miss on an in-process cache used by `tool_name`."""
+    with _semantic_runtime_stats_lock:
+        stats = _semantic_runtime_stats.get(tool_name)
+        if stats is None:
+            return
+        if hit:
+            stats["cache_hits"] += 1
+        else:
+            stats["cache_misses"] += 1
+
+
+def _observe_semantic_tool(tool_name: str):
+    """Decorator timing the full tool body (planning + execution included).
+
+    The wrapped tools return a plain ``str`` only on error paths (success
+    payloads are pydantic models), so ``isinstance(result, str)`` doubles as
+    the error signal — the same heuristic ``query_metrics`` already uses for
+    ``observe_semantic_tool_call``. ``functools.wraps`` preserves the original
+    signature (via ``__wrapped__``) so FastMCP schema generation is unchanged.
+    """
+
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any):
+            started = time.perf_counter()
+            failed = False
+            try:
+                result = fn(*args, **kwargs)
+                failed = isinstance(result, str)
+                return result
+            except BaseException:
+                failed = True
+                raise
+            finally:
+                _record_semantic_tool_runtime(
+                    tool_name,
+                    time.perf_counter() - started,
+                    error=failed,
+                )
+
+        return wrapper
+
+    return decorate
+
+
+def _latency_percentile_ms(sorted_latencies: list[float], fraction: float) -> float | None:
+    """Nearest-rank percentile over an ascending latency list, in ms."""
+    if not sorted_latencies:
+        return None
+    index = int(round(fraction * (len(sorted_latencies) - 1)))
+    index = min(max(index, 0), len(sorted_latencies) - 1)
+    return round(sorted_latencies[index] * 1000.0, 3)
+
+
+def get_semantic_runtime_stats() -> dict[str, dict[str, Any]]:
+    """Per-tool rolling runtime summary for the current process.
+
+    Returns ``{tool_name: {count, errors, cache_hits, cache_misses,
+    cache_hit_rate, p50_ms, p95_ms, latency_samples}}`` for every tracked
+    semantic tool. ``cache_hit_rate`` is ``None`` when the tool has no cache
+    concept (or no cache events yet); percentiles are ``None`` until the
+    first call lands.
+    """
+    summary: dict[str, dict[str, Any]] = {}
+    with _semantic_runtime_stats_lock:
+        for tool_name in _SEMANTIC_RUNTIME_TOOLS:
+            stats = _semantic_runtime_stats[tool_name]
+            latencies = sorted(stats["latencies"])
+            cache_events = stats["cache_hits"] + stats["cache_misses"]
+            summary[tool_name] = {
+                "count": stats["count"],
+                "errors": stats["errors"],
+                "cache_hits": stats["cache_hits"],
+                "cache_misses": stats["cache_misses"],
+                "cache_hit_rate": (
+                    round(stats["cache_hits"] / cache_events, 4) if cache_events else None
+                ),
+                "p50_ms": _latency_percentile_ms(latencies, 0.5),
+                "p95_ms": _latency_percentile_ms(latencies, 0.95),
+                "latency_samples": len(latencies),
+            }
+    return summary
+
+
+def reset_semantic_runtime_stats() -> None:
+    """Reset all rolling counters (tests / before-after benchmark baselines).
+
+    Also clears the discover_metrics result LRU so a benchmark baseline
+    starts cold — otherwise a warm result cache would skew the very
+    hit/miss counters this reset is meant to zero.
+    """
+    with _semantic_runtime_stats_lock:
+        for tool_name in _SEMANTIC_RUNTIME_TOOLS:
+            _semantic_runtime_stats[tool_name] = _new_runtime_tool_stats()
+    _clear_discover_result_cache()
+
+
 # Cache the per-snapshot idf table so we don't recompute it on every
 # `discover_metrics` call. Keyed on the snapshot's registry hash so a
 # semantic reload (PR 4) invalidates automatically.
 _TOKEN_IDF_CACHE: dict[str, dict[str, float]] = {}
 
 
-def _token_idf_for_snapshot(snapshot) -> dict[str, float]:
-    """Return (and cache) the idf weight table for the snapshot's metrics.
+def _token_idf_for_snapshot(snapshot, *, tool_name: str | None = None) -> dict[str, float]:
+    """Return the idf weight table for the snapshot's metrics.
 
-    Computing idf is O(N_metrics × |blob|) — cheap (a few hundred
-    metrics) but not free per-call. The cache is keyed on
-    ``registry_hash`` so:
+    Fast path: snapshots built by ``SemanticRuntime._build_snapshot`` carry a
+    pre-baked ``token_idf`` table (cache warming at snapshot build time) —
+    use it directly and count it as a cache hit. Note ``is not None``: an
+    empty dict is a valid warmed table for a metric-less registry.
+
+    Lazy fallback: snapshots without the field (older construction sites,
+    test fakes) compute-and-cache per ``registry_hash``:
       * Same snapshot, multiple discover calls -> shared computation.
       * Registry reload (PR 4 force_reload) -> fresh hash, fresh table.
+
+    Hits/misses always feed the process-wide ``semantic_token_idf``
+    Prometheus counters; ``tool_name`` additionally attributes the event
+    to that tool's rolling cache counters (used by ``discover_metrics``;
+    the preflight path tracks its own result cache instead).
     """
+    prebaked = getattr(snapshot, "token_idf", None)
+    if prebaked is not None:
+        observe_cache_hit("semantic_token_idf")
+        if tool_name:
+            _record_semantic_cache_event(tool_name, hit=True)
+        return prebaked
     key = getattr(snapshot, "registry_hash", "") or ""
     cached = _TOKEN_IDF_CACHE.get(key)
     if cached is not None:
+        observe_cache_hit("semantic_token_idf")
+        if tool_name:
+            _record_semantic_cache_event(tool_name, hit=True)
         return cached
+    observe_cache_miss("semantic_token_idf")
+    if tool_name:
+        _record_semantic_cache_event(tool_name, hit=False)
     table = build_token_idf(snapshot.metrics.values())
     # Bound the cache to a few entries so stale snapshots don't leak
     # memory on long-running servers that survive many reloads.
@@ -150,6 +320,68 @@ def _token_idf_for_snapshot(snapshot) -> dict[str, float]:
         _TOKEN_IDF_CACHE.clear()
     _TOKEN_IDF_CACHE[key] = table
     return table
+
+
+# ---------------------------------------------------------------------------
+# discover_metrics result LRU.
+#
+# Discovery is a pure function of (registry content, query, limit), so
+# identical calls within one registry generation can reuse the ranked result.
+# Keyed on (registry_hash, normalized query, effective limit); the whole cache
+# is dropped whenever the registry hash changes (single-generation cache, so a
+# force_reload / TTL refresh can never serve stale rankings). Entries are
+# stored AND returned as deep copies so callers can't mutate the cached
+# pydantic models. query_metrics results are intentionally NOT cached — they
+# carry live ClickHouse rows.
+# ---------------------------------------------------------------------------
+_DISCOVER_RESULT_CACHE_MAX = 64
+_DISCOVER_RESULT_CACHE: OrderedDict[tuple[str, str, int], MetricDiscoveryResult] = OrderedDict()
+_discover_result_cache_lock = threading.Lock()
+_discover_result_cache_registry_hash: str | None = None
+
+
+def _discover_result_cache_get(
+    registry_hash: str, cache_key: tuple[str, str, int]
+) -> MetricDiscoveryResult | None:
+    """Return a deep copy of the cached result, or ``None`` on miss.
+
+    Also performs the registry-generation check: a hash different from the
+    one the cache was filled under clears everything before the lookup.
+    """
+    global _discover_result_cache_registry_hash
+    with _discover_result_cache_lock:
+        if _discover_result_cache_registry_hash != registry_hash:
+            _DISCOVER_RESULT_CACHE.clear()
+            _discover_result_cache_registry_hash = registry_hash
+            return None
+        cached = _DISCOVER_RESULT_CACHE.get(cache_key)
+        if cached is None:
+            return None
+        _DISCOVER_RESULT_CACHE.move_to_end(cache_key)
+        return cached.model_copy(deep=True)
+
+
+def _discover_result_cache_put(
+    registry_hash: str,
+    cache_key: tuple[str, str, int],
+    result: MetricDiscoveryResult,
+) -> None:
+    global _discover_result_cache_registry_hash
+    with _discover_result_cache_lock:
+        if _discover_result_cache_registry_hash != registry_hash:
+            _DISCOVER_RESULT_CACHE.clear()
+            _discover_result_cache_registry_hash = registry_hash
+        _DISCOVER_RESULT_CACHE[cache_key] = result.model_copy(deep=True)
+        _DISCOVER_RESULT_CACHE.move_to_end(cache_key)
+        while len(_DISCOVER_RESULT_CACHE) > _DISCOVER_RESULT_CACHE_MAX:
+            _DISCOVER_RESULT_CACHE.popitem(last=False)
+
+
+def _clear_discover_result_cache() -> None:
+    global _discover_result_cache_registry_hash
+    with _discover_result_cache_lock:
+        _DISCOVER_RESULT_CACHE.clear()
+        _discover_result_cache_registry_hash = None
 
 
 def _metric_is_executable(snapshot, metric: dict[str, Any] | None) -> bool:
@@ -179,6 +411,68 @@ def _metric_is_candidate(snapshot, metric: dict[str, Any] | None) -> bool:
     if root_model.get("semantic_status") != "approved":
         return False  # root not even queryable — can't bypass that
     return bool(metric.get("allowed_dimensions"))
+
+
+# Metric types computed FROM other metrics post-aggregation (same-root MVP).
+# Mirrors cerebro_mcp.semantic.planner._DERIVED_METRIC_TYPES.
+_DERIVED_METRIC_TYPES = ("ratio", "derived")
+
+
+def _derived_metric_input_names(metric: dict[str, Any]) -> list[str]:
+    """Input metric names for a ratio/derived metric. Accepts both the
+    bare-string and the MetricFlow ``{name: ...}`` mapping forms."""
+
+    def _name(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            return str(value.get("name", "") or "")
+        return ""
+
+    type_params = metric.get("type_params") or {}
+    if str(metric.get("type", "") or "").lower() == "ratio":
+        raw = [type_params.get("numerator"), type_params.get("denominator")]
+    else:
+        raw = list(type_params.get("metrics") or [])
+    return [name for name in (_name(value) for value in raw) if name]
+
+
+def _derived_metric_gate_error(
+    snapshot,
+    resolved_name: str,
+    metric: dict[str, Any],
+    *,
+    allow_candidate: bool = False,
+) -> str:
+    """A ratio/derived metric is executable iff ALL of its input metrics are
+    executable (candidate inputs pass only under ``allow_candidate``, same
+    opt-in semantics as the metric-level gate). Returns an error string, or
+    "" when every input passes."""
+    kind = str(metric.get("type", "") or "").lower()
+    input_names = _derived_metric_input_names(metric)
+    if not input_names:
+        return (
+            f"Error: {kind} metric '{resolved_name}' declares no input "
+            "metrics in type_params."
+        )
+    for input_name in input_names:
+        input_resolved, input_metric = _lookup_metric(snapshot, input_name)
+        if not input_metric:
+            return (
+                f"Error: {kind} metric '{resolved_name}' references unknown "
+                f"input metric '{input_name}'."
+            )
+        if _metric_is_executable(snapshot, input_metric):
+            continue
+        if allow_candidate and _metric_is_candidate(snapshot, input_metric):
+            continue
+        return (
+            f"Error: {kind} metric '{resolved_name}' is not executable: "
+            f"input metric '{input_resolved}' is not approved for semantic "
+            "execution. Pass `allow_candidate=true` to run it anyway for "
+            "authoring/testing, or use `execute_query`."
+        )
+    return ""
 
 
 def _metric_is_scalar_kpi(metric: dict[str, Any] | None) -> bool:
@@ -838,6 +1132,12 @@ def _resolve_executable_metrics(
                 f"semantic execution yet. Pass `allow_candidate=true` to run "
                 f"it anyway for authoring/testing, or use `execute_query`."
             )
+        if str(metric.get("type", "") or "").lower() in _DERIVED_METRIC_TYPES:
+            derived_error = _derived_metric_gate_error(
+                snapshot, resolved_name, metric, allow_candidate=allow_candidate
+            )
+            if derived_error:
+                return [], [], derived_error
         resolved_metric_names.append(resolved_name)
         metrics.append(metric)
     return resolved_metric_names, metrics, ""
@@ -1009,6 +1309,30 @@ def get_semantic_preflight(
 
     next_tool = _recommended_semantic_next_tool(route, normalized_mode, len(accepted))
 
+    # Provisional (candidate-tier) coverage probe. Routing NEVER considers
+    # candidate metrics — the route above is decided purely on approved
+    # coverage — but when the approved layer leaves topics uncovered we
+    # check whether a candidate metric would match and surface it as an
+    # informational escape hatch (`allow_candidate=true`).
+    provisional_topics: list[str] = []
+    provisional_metric_names: list[str] = []
+    if uncovered_topics:
+        provisional_matches: list[tuple[int, str, dict[str, Any]]] = []
+        for metric_name, metric in snapshot.metrics.items():
+            if not _metric_is_candidate(snapshot, metric):
+                continue
+            candidate_score = score_metric(query, metric, token_idf=token_idf)
+            if candidate_score > 0 and _is_preflight_ready_match(query, metric, candidate_score):
+                provisional_matches.append((candidate_score, metric_name, metric))
+        provisional_matches.sort(key=lambda item: (-item[0], item[1]))
+        if provisional_matches:
+            uncovered_set = set(uncovered_topics)
+            covered_by_candidates: set[str] = set()
+            for _score, _name, metric in provisional_matches:
+                covered_by_candidates |= uncovered_set & _metric_tokens(metric)
+            provisional_topics = sorted(covered_by_candidates)
+            provisional_metric_names = [name for _score, name, _metric in provisional_matches[:3]]
+
     lines = [
         f"Route: `{route}`",
         f"Recommended metrics: {', '.join(recommended_metrics) or 'none'}",
@@ -1020,6 +1344,15 @@ def get_semantic_preflight(
         lines.append(f"Uncovered topics (use raw): {', '.join(uncovered_topics)}")
     if fallback_reason:
         lines.append(f"Fallback reason: `{fallback_reason}`")
+    if provisional_metric_names:
+        names_repr = ", ".join(f"`{name}`" for name in provisional_metric_names)
+        topics_repr = ", ".join(provisional_topics) or "(none)"
+        lines.append(
+            f"Provisional coverage (candidate, not analyst-vetted): {names_repr} "
+            f"may cover uncovered topics: {topics_repr}. To run anyway, pass "
+            f"`allow_candidate=true` to `query_metrics` — authoring/testing only; "
+            f"routing above is unchanged."
+        )
 
     # Output discipline — bake the call-action into the response so the
     # caller agent can't miss it. Without this, agents tend to ignore
@@ -1047,6 +1380,7 @@ def get_semantic_preflight(
         hybrid_ready=hybrid_ready,
         covered_topics=covered_topics,
         uncovered_topics=uncovered_topics,
+        provisional_topics=provisional_topics,
         recommended_metrics=recommended_metrics,
         recommended_dimensions=recommended_dimensions,
         recommended_next_tool=next_tool,
@@ -1101,6 +1435,7 @@ def execute_metric_query(
             requested_dimensions=normalized_dimensions,
             filters=filters,
             agent_role=role,
+            allow_candidate=allow_candidate,
         )
         plan["requested_dimensions"] = list(dimensions or [])
         plan["resolved_dimensions"] = normalized_dimensions
@@ -1377,7 +1712,9 @@ def _semantic_docs_page(uri: str, fallback_payload: dict[str, Any]) -> str:
     return json.dumps(fallback_payload, indent=2, ensure_ascii=False)
 
 
-def _render_metric_details(metric: dict[str, Any]) -> MetricDetailsResult:
+def _render_metric_details(
+    metric: dict[str, Any], *, provisional_banner: str = ""
+) -> MetricDetailsResult:
     summary = format_results_table(
         ["field", "value"],
         [
@@ -1388,6 +1725,8 @@ def _render_metric_details(metric: dict[str, Any]) -> MetricDetailsResult:
             ["quality_tier", metric.get("quality_tier", "")],
         ],
     )
+    if provisional_banner:
+        summary = f"{provisional_banner}\n\n{summary}"
     return MetricDetailsResult(
         name=metric["name"],
         label=metric.get("label", ""),
@@ -1450,6 +1789,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
     state.set_semantic_tools_available(True)
 
     @mcp.tool()
+    @_observe_semantic_tool("preflight_analytics_request")
     def preflight_analytics_request(
         query: str,
         mode: str = "answer",
@@ -1471,6 +1811,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 mode=normalized_mode,
             )
             cache_hit = cached is not None
+            _record_semantic_cache_event("preflight_analytics_request", hit=cache_hit)
             if cache_hit:
                 observe_cache_hit("semantic_preflight")
             else:
@@ -1556,6 +1897,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
             return f"Error: {exc}"
 
     @mcp.tool()
+    @_observe_semantic_tool("discover_metrics")
     def discover_metrics(
         query: str,
         limit: int = 10,
@@ -1568,26 +1910,62 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
             snapshot, error = _snapshot_or_error()
             if snapshot is None:
                 return error or "Semantic snapshot unavailable."
+            registry_hash = getattr(snapshot, "registry_hash", "") or ""
+            effective_limit = max(1, min(limit, 20))
+            cache_key = (registry_hash, normalize(query), effective_limit)
+            cached_result = _discover_result_cache_get(registry_hash, cache_key)
+            if cached_result is not None:
+                # Result LRU hit: skip scoring entirely. Only HITS feed the
+                # rolling per-tool cache counters — on a miss the token-idf
+                # accessor below records the (hit|miss) event for this call,
+                # so recording a miss here too would double-count.
+                observe_cache_hit("semantic_discover_result")
+                _record_semantic_cache_event("discover_metrics", hit=True)
+                # Key is the NORMALIZED query — echo the caller's raw string.
+                cached_result.query = query
+                state.record_search_models(query, len(cached_result.results), source="semantic")
+                observe_semantic_tool_call(
+                    tool_name="discover_metrics",
+                    status="success",
+                    agent_role=role,
+                    entrypoint="semantic",
+                )
+                return cached_result
+            observe_cache_miss("semantic_discover_result")
+            # Provisional discovery: score EVERY metric (candidate tier
+            # included) so unvetted coverage is at least visible, but rank
+            # approved coverage first — vetted metrics always outrank
+            # candidates regardless of raw score.
             scored = []
-            token_idf = _token_idf_for_snapshot(snapshot)
+            token_idf = _token_idf_for_snapshot(snapshot, tool_name="discover_metrics")
             for metric_name, metric in snapshot.metrics.items():
-                if not _metric_is_executable(snapshot, metric):
-                    continue
                 score = score_metric(query, metric, token_idf=token_idf)
                 if score > 0:
                     scored.append((score, metric_name, metric))
             scored.sort(key=lambda item: (-item[0], item[1]))
-            hits = [
-                MetricDiscoveryHit(
-                    name=metric_name,
-                    label=metric.get("label", ""),
-                    module=metric.get("module", ""),
-                    root_model=metric.get("root_model", ""),
-                    score=score,
-                    quality_tier=metric.get("quality_tier", ""),
-                )
-                for score, metric_name, metric in scored[: max(1, min(limit, 20))]
+            approved_matches = [
+                item for item in scored if _metric_is_executable(snapshot, item[2])
             ]
+            provisional_matches = [
+                item for item in scored if not _metric_is_executable(snapshot, item[2])
+            ]
+            selected = approved_matches[:effective_limit]
+            selected.extend(provisional_matches[: effective_limit - len(selected)])
+            hits = []
+            for score, metric_name, metric in selected:
+                executable = _metric_is_executable(snapshot, metric)
+                hits.append(
+                    MetricDiscoveryHit(
+                        name=metric_name,
+                        label=metric.get("label", ""),
+                        module=metric.get("module", ""),
+                        root_model=metric.get("root_model", ""),
+                        score=score,
+                        quality_tier=metric.get("quality_tier", ""),
+                        executable=executable,
+                        provisional=not executable,
+                    )
+                )
             state.record_search_models(query, len(hits), source="semantic")
             observe_semantic_tool_call(
                 tool_name="discover_metrics",
@@ -1595,16 +1973,32 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 agent_role=role,
                 entrypoint="semantic",
             )
-            return MetricDiscoveryResult(
+            summary = format_results_table(
+                ["name", "module", "root_model", "score", "provisional"],
+                [
+                    [
+                        hit.name,
+                        hit.module,
+                        hit.root_model,
+                        hit.score,
+                        "yes" if hit.provisional else "",
+                    ]
+                    for hit in hits
+                ],
+            )
+            if provisional_matches:
+                summary += (
+                    f"\n\n{len(provisional_matches)} provisional (candidate) "
+                    "metrics matched — not analyst-vetted; execution requires "
+                    "`allow_candidate=true`."
+                )
+            result = MetricDiscoveryResult(
                 query=query,
                 results=hits,
-                summary_markdown=truncate_response(
-                    format_results_table(
-                        ["name", "module", "root_model", "score"],
-                        [[hit.name, hit.module, hit.root_model, hit.score] for hit in hits],
-                    )
-                ),
+                summary_markdown=truncate_response(summary),
             )
+            _discover_result_cache_put(registry_hash, cache_key, result)
+            return result
         except Exception as exc:
             observe_semantic_tool_call(
                 tool_name="discover_metrics",
@@ -1626,10 +2020,19 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
             resolved_name, metric = _lookup_metric(snapshot, metric_name)
             if not metric:
                 return f"Metric '{metric_name}' not found."
+            # Candidate-tier metrics get their details back too — agents
+            # need the dimensions / root model to decide whether the
+            # `allow_candidate=true` escape hatch is worth pulling. A
+            # banner makes the provisional status impossible to miss.
+            provisional_banner = ""
             if not _metric_is_executable(snapshot, metric):
-                return (
-                    f"Metric '{resolved_name}' exists, but it is not approved for semantic execution yet. "
-                    "Use `discover_metrics` for approved metrics or fall back to `execute_query`."
+                provisional_banner = (
+                    f"PROVISIONAL: metric '{resolved_name}' is "
+                    f"'{metric.get('quality_tier') or 'unknown'}'-tier and has NOT been "
+                    "analyst-vetted. Execution requires `allow_candidate=true` on "
+                    "`query_metrics` / `explain_metric_query` (only works when the root "
+                    "model is approved) — authoring/testing only, never production "
+                    "dashboards."
                 )
             state.record_get_model_details(metric.get("root_model", ""), source="semantic")
             observe_semantic_tool_call(
@@ -1638,7 +2041,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 agent_role=role,
                 entrypoint="semantic",
             )
-            return _render_metric_details(metric)
+            return _render_metric_details(metric, provisional_banner=provisional_banner)
         except Exception as exc:
             observe_semantic_tool_call(
                 tool_name="get_metric_details",
@@ -1649,6 +2052,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
             return f"Error: {exc}"
 
     @mcp.tool()
+    @_observe_semantic_tool("explain_metric_query")
     def explain_metric_query(
         metrics: list[str],
         dimensions: list[str] | None = None,
@@ -1687,6 +2091,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 requested_dimensions=normalized_dimensions,
                 filters=filters,
                 agent_role=role,
+                allow_candidate=allow_candidate,
             )
             plan["requested_dimensions"] = list(dimensions or [])
             plan["resolved_dimensions"] = normalized_dimensions
@@ -1762,6 +2167,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
             return f"Error: {exc}"
 
     @mcp.tool()
+    @_observe_semantic_tool("query_metrics")
     def query_metrics(
         metrics: list[str],
         dimensions: list[str] | None = None,
@@ -1876,6 +2282,7 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 "model_count": model_count,
                 "approved_metric_count": approved_metrics,
                 "error": error or "",
+                "runtime_stats": get_semantic_runtime_stats(),
             }
         except Exception as exc:
             observe_semantic_tool_call(

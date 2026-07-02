@@ -18,7 +18,7 @@ from cerebro_mcp.runtime.observability import (
     set_semantic_snapshot_age,
 )
 from cerebro_mcp.semantic.graph import build_semantic_graph
-from cerebro_mcp.semantic.index import build_indexes
+from cerebro_mcp.semantic.index import build_indexes, build_token_idf
 from cerebro_mcp.models.semantic import SemanticSnapshot
 
 logger = logging.getLogger(__name__)
@@ -268,6 +268,12 @@ class SemanticRuntime:
         registry = _filter_internal_models(registry)
 
         synonym_index, dimension_index, metrics = build_indexes(registry)
+        # Cache warming: bake the token-idf table into the snapshot at build
+        # time so the first discover/preflight call doesn't pay the
+        # O(N_metrics x |blob|) computation. Consumers treat a present table
+        # as a cache hit; snapshots built elsewhere (token_idf=None) keep the
+        # lazy per-process path in tools/semantic/semantic.py.
+        token_idf = build_token_idf(metrics.values())
         models = registry.get("models", {})
         graph, vertex_ids = build_semantic_graph(
             models,
@@ -339,6 +345,7 @@ class SemanticRuntime:
             graph_search_documents=graph_search_documents,
             graph_catalog_hash=graph_catalog_hash,
             schema_version=schema_version,
+            token_idf=token_idf,
         )
 
     @staticmethod
