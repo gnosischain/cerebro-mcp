@@ -73,6 +73,9 @@ def test_force_reload_clears_manifest_hash_mismatch(monkeypatch):
         sem, "semantic_registry", _FakeArtifact(registry_body, "registry-hash")
     )
     monkeypatch.setattr(sem, "semantic_docs", _FakeArtifact([], "docs-hash"))
+    # 5th artifact (WS4): keep the test hermetic — no graph catalog -> live
+    # discovery. Its reload is part of the coordinated refresh.
+    monkeypatch.setattr(sem, "semantic_graph_catalog", _FakeArtifact(None, "cat-hash"))
     # Manifest in memory is STALE ("manifest-OLD"); the deploy published
     # "manifest-NEW", which is what the new registry embeds.
     fake_manifest = _FakeHashLoader("manifest-OLD", new_manifest_hash)

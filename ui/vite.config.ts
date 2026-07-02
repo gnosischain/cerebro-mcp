@@ -24,6 +24,7 @@ const ENTRY_MAP: Record<string, { html: string; out: string }> = {
   graphExplorer:    { html: "graph-explorer.html",   out: "graph-explorer.html" },
   contractExplorer: { html: "contract-explorer.html", out: "contract-explorer.html" },
   modelLineage:     { html: "model-lineage.html",    out: "model-lineage.html" },
+  dataCatalog:      { html: "data-catalog.html",     out: "data-catalog.html" },
 };
 
 const entryName = process.env.CEREBRO_UI_ENTRY ?? "report";
@@ -34,12 +35,20 @@ if (!entry) {
   );
 }
 
+// The Data Catalog ships as a SPLIT bundle (hashed JS/CSS/woff2 emitted as
+// separate cacheable assets under /app/data_catalog/assets/) instead of one
+// inlined HTML — so the immutable code+fonts cache across visits while only the
+// tiny token-bearing HTML shell is re-fetched. All other apps stay single-file.
+const isSplit = entryName === "dataCatalog";
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), viteSingleFile()],
+  base: isSplit ? "/app/data_catalog/" : "./",
+  plugins: [react(), tailwindcss(), ...(isSplit ? [] : [viteSingleFile()])],
   build: {
     target: "es2020",
     outDir: "dist",
     emptyOutDir: entryName === "report",
+    assetsInlineLimit: isSplit ? 0 : undefined,
     rollupOptions: {
       input: resolve(__dirname, entry.html),
     },

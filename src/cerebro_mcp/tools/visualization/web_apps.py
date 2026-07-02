@@ -19,6 +19,7 @@ through :data:`MINI_APP_TOOL_REGISTRY`.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -143,8 +144,22 @@ def _json_safe_structured(result: CallToolResult) -> dict[str, Any] | None:
     return dumped.get("structuredContent")
 
 
-def _result_to_dict(result: CallToolResult) -> dict[str, Any]:
-    """Adapt a CallToolResult to the JSON shape the frontend expects."""
+def _result_to_dict(result: Any) -> dict[str, Any]:
+    """Adapt a tool result to the JSON shape the frontend expects.
+
+    A mini-app tool may return a ``CallToolResult`` OR a plain JSON-able value
+    (dict/list) — the MCP bridge auto-wraps the latter as ``structuredContent``,
+    so the HTTP web-app path must do the same. Without this, a plain-dict tool
+    (e.g. search_graph_catalog / explore_neighborhood / calculate_flow_efficiency)
+    500s here on ``result.content`` / ``result.model_dump``.
+    """
+    if not isinstance(result, CallToolResult):
+        # Plain JSON-able value (dict/list). Coerce non-JSON primitives
+        # (datetime/date from ClickHouse rows, Decimal, etc.) to strings so the
+        # stdlib json.dumps in JSONResponse can't 500 — mirrors the date-safe
+        # behavior the CallToolResult path gets from Pydantic mode="json".
+        safe = json.loads(json.dumps(result, default=str))
+        return {"structuredContent": safe, "isError": False, "content": []}
     content: list[Any] = []
     for item in result.content or []:
         try:
@@ -244,7 +259,27 @@ async def serve_app(request: Request) -> Response:
         if auth_header.startswith("Bearer "):
             token = auth_header[len("Bearer ") :]
     html = _inject_payload(config.html_loader(), payload_json, app_id, token)
-    return HTMLResponse(content=html)
+    # gzip the (large, ~2.9MB single-file) bundle when the client accepts it —
+    # ~40% wire cut. Scoped to this HTML route only; never touches the SSE
+    # transport (response-buffering middleware would break the long-poll GET).
+    # The HTML embeds a per-request token → never cache the shell (only the
+    # hashed /assets/* are cacheable). For split-bundle apps the shell is tiny;
+    # for single-file apps this preserves prior behavior (just adds no-store).
+    accept = request.headers.get("accept-encoding", "").lower()
+    if "gzip" in accept:
+        import gzip as _gzip
+
+        body = _gzip.compress(html.encode("utf-8"), compresslevel=6)
+        return Response(
+            content=body,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Content-Encoding": "gzip",
+                "Vary": "Accept-Encoding",
+                "Cache-Control": "no-store",
+            },
+        )
+    return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
 
 
 async def dispatch_app_tool(request: Request) -> JSONResponse:
@@ -274,7 +309,11 @@ async def dispatch_app_tool(request: Request) -> JSONResponse:
 
     kwargs = _filtered_kwargs(fn, arguments)
     try:
-        result = fn(**kwargs)
+        # Run the (synchronous) tool in a worker thread so a slow/unreachable
+        # ClickHouse call can't block the event loop and freeze the whole server.
+        # CH-free tools (search / entity / lineage / governance) then keep
+        # responding even while a CH-touching tool (sample / stats) is stalled.
+        result = await asyncio.get_event_loop().run_in_executor(None, lambda: fn(**kwargs))
     except Exception as exc:  # noqa: BLE001
         logger.exception("web app %s tool %s failed", app_id, tool_name)
         return JSONResponse(
@@ -284,11 +323,76 @@ async def dispatch_app_tool(request: Request) -> JSONResponse:
             status_code=200,
         )
 
-    return JSONResponse(_result_to_dict(result))
+    # gzip large tool payloads (e.g. lineage subgraphs run to hundreds of KB)
+    # when the client accepts it — same treatment the /assets route gets.
+    body = json.dumps(_result_to_dict(result), default=str).encode("utf-8")
+    accept = request.headers.get("accept-encoding", "").lower()
+    if "gzip" in accept and len(body) > 1024:
+        import gzip as _gzip
+
+        return Response(
+            content=_gzip.compress(body, compresslevel=6),
+            media_type="application/json",
+            headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+        )
+    return Response(content=body, media_type="application/json")
+
+
+_ASSET_MEDIA = {
+    ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
+    ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf",
+    ".svg": "image/svg+xml", ".json": "application/json", ".map": "application/json",
+    ".png": "image/png", ".webp": "image/webp",
+}
+_GZIP_ASSET_EXT = {".js", ".mjs", ".css", ".svg", ".json", ".map"}
+
+
+async def serve_app_asset(request: Request) -> Response:
+    """GET /app/{app_id}/assets/{path} — serve hashed, immutable build assets
+    (JS/CSS/fonts) for split-bundle apps with long-lived cache headers.
+
+    These are public client assets (app code + fonts, no data); auth gates the
+    tool-dispatch route, not the static code. Filenames are content-hashed by
+    Vite, so ``immutable`` + a 1-year max-age is safe — a new build = a new name.
+    """
+    app_id = request.path_params["app_id"]
+    asset_path = request.path_params["path"]
+    if app_id not in WEB_APP_CONFIGS:
+        return Response("unknown app", status_code=404, media_type="text/plain")
+    # Hashed assets are flat filenames under static/assets/ — reject any traversal.
+    if "/" in asset_path or "\\" in asset_path or ".." in asset_path or not asset_path:
+        return Response("bad path", status_code=400, media_type="text/plain")
+    try:
+        import importlib.resources as _res
+
+        data = (
+            _res.files("cerebro_mcp")
+            .joinpath("static/assets")
+            .joinpath(asset_path)
+            .read_bytes()
+        )
+    except (FileNotFoundError, ModuleNotFoundError, OSError, NotADirectoryError):
+        return Response("not found", status_code=404, media_type="text/plain")
+
+    ext = os.path.splitext(asset_path)[1].lower()
+    media = _ASSET_MEDIA.get(ext) or "application/octet-stream"
+    headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+    accept = request.headers.get("accept-encoding", "").lower()
+    if ext in _GZIP_ASSET_EXT and "gzip" in accept:
+        import gzip as _gzip
+
+        data = _gzip.compress(data, compresslevel=6)
+        headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+    return Response(content=data, media_type=media, headers=headers)
 
 
 def register_web_app_routes(mcp) -> None:
-    """Register the two web-app routes on the FastMCP Starlette app."""
+    """Register the web-app routes on the FastMCP Starlette app."""
+    # Assets first (more specific) so it wins over the bare /app/{app_id} route.
+    mcp.custom_route(
+        "/app/{app_id}/assets/{path:path}", methods=["GET"]
+    )(serve_app_asset)
     mcp.custom_route("/app/{app_id}", methods=["GET"])(serve_app)
     mcp.custom_route(
         "/app/{app_id}/api/tool/{tool_name}", methods=["POST"]

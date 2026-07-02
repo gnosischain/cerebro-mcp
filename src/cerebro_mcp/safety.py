@@ -41,6 +41,12 @@ def _strip_comments_and_strings(sql: str) -> str:
     sql = re.sub(r"--[^\n]*", " ", sql)
     # Remove multi-line comments
     sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    # Normalize backtick-quoted identifiers (`db`.`tbl`) to bare form. Without
+    # this, ClickHouse/MySQL backtick quoting bypasses both keyword detection
+    # and table-name extraction — e.g. `dbt`.`int_..._bridge` would never match
+    # the internal-only deny list. Done before quote removal so the bare
+    # identifiers survive into the cleaned SQL.
+    sql = re.sub(r"`([^`]*)`", r"\1", sql)
     # Remove single-quoted strings
     sql = re.sub(r"'[^']*'", "''", sql)
     # Remove double-quoted identifiers
@@ -56,11 +62,22 @@ def _strip_comments_and_strings(sql: str) -> str:
 # caller could in principle hardcode the table name; this list is the
 # defence-in-depth check.
 #
-# Keep this list in sync with the dbt-cerebro models tagged `internal_only`.
-INTERNAL_ONLY_TABLES = frozenset({
+# Seeded with the known identity bridges; the manifest loader extends this at
+# load time with EVERY model tagged `internal_only` / `privacy:tier_internal`
+# (see register_internal_only_tables), so the deny list stays complete without
+# hardcoding all names here. Mutable on purpose — checked live by validate_query.
+INTERNAL_ONLY_TABLES: set[str] = {
     "int_execution_gnosis_app_user_identity_bridge",
     "int_execution_gpay_user_identity_bridge",
-})
+}
+
+
+def register_internal_only_tables(names) -> None:
+    """Extend the internal-only deny list at runtime (called by the manifest
+    loader with the full set of internal-tagged model/alias names)."""
+    for name in names or ():
+        if name:
+            INTERNAL_ONLY_TABLES.add(str(name))
 
 
 def validate_query(sql: str, max_length: int = 10000) -> Tuple[bool, str]:

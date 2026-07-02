@@ -221,6 +221,7 @@ class ManifestLoader:
         search_index: dict[str, str] = {}
         tests_by_model: dict[str, list[dict]] = {}
         owner_index: dict[str, list[str]] = {}
+        internal_only_names: set[str] = set()
 
         for key, node in data.get("nodes", {}).items():
             resource_type = node.get("resource_type")
@@ -237,10 +238,14 @@ class ManifestLoader:
                 # place where raw addresses + pseudonyms coexist) from
                 # `execute_query`-style raw-SQL recovery.
                 tags = node.get("tags", []) or []
-                if any(t in INTERNAL_ONLY_TAGS for t in tags):
-                    continue
                 _meta = node.get("config", {}).get("meta") or node.get("meta") or {}
-                if isinstance(_meta, dict) and _meta.get("expose_to_mcp") is False:
+                _expose_false = isinstance(_meta, dict) and _meta.get("expose_to_mcp") is False
+                if any(t in INTERNAL_ONLY_TAGS for t in tags) or _expose_false:
+                    # Record both the model name and its physical alias so the
+                    # raw-SQL deny list (safety.INTERNAL_ONLY_TABLES) covers
+                    # every internal model, not just the two hardcoded bridges.
+                    internal_only_names.add(name)
+                    internal_only_names.add(node.get("alias", name))
                     continue
 
                 models[name] = node
@@ -335,6 +340,14 @@ class ManifestLoader:
 
         parent_map = data.get("parent_map", {})
         child_map = data.get("child_map", {})
+
+        # Extend the raw-SQL internal-only deny list with every internal model
+        # discovered this load (defence-in-depth for execute_query; the index
+        # filter above already hides them from search/lineage).
+        if internal_only_names:
+            from cerebro_mcp import safety
+
+            safety.register_internal_only_tables(internal_only_names)
 
         test_count = sum(len(v) for v in tests_by_model.values())
         logger.info(

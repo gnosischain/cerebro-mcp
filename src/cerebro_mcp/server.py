@@ -58,6 +58,7 @@ from cerebro_mcp.tools.visualization.metric_lab import register_metric_lab_tools
 from cerebro_mcp.tools.visualization.portfolio import register_portfolio_tools
 from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_tools
 from cerebro_mcp.tools.analytics.model_lineage_app import register_model_lineage_tools
+from cerebro_mcp.tools.semantic.data_catalog import register_data_catalog_tools
 from cerebro_mcp.tools.web3.rpc import register_rpc_tools
 from cerebro_mcp.tools.web3.rpc_scan import register_rpc_scan_tools
 from cerebro_mcp.tools.visualization.grafana import register_grafana_tools
@@ -346,6 +347,7 @@ register_metric_lab_tools(mcp, ch)
 register_portfolio_tools(mcp, ch)
 register_graph_explorer_tools(mcp, ch)
 register_model_lineage_tools(mcp, ch)
+register_data_catalog_tools(mcp, ch)
 
 # Standalone web-app delivery: serve the mini-apps as plain browser URLs
 # (GET /app/{id}) with HTTP tool dispatch (POST /app/{id}/api/tool/{tool}).

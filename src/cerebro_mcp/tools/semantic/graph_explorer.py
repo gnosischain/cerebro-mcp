@@ -10,20 +10,26 @@ from __future__ import annotations
 
 import importlib.resources
 import logging
+import time
 from typing import Any
 
 from mcp.types import CallToolResult
 
 from cerebro_mcp.config import settings
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.semantic import graph_telemetry
+from cerebro_mcp.semantic.bm25 import BM25Doc, BM25Index
 from cerebro_mcp.semantic.graph_profiles import (
     GraphProfile,
     build_evidence_sql,
     build_neighbors_sql,
+    build_node_flow_sql,
     build_sample_sql,
+    current_snapshot,
     discover_profiles,
     profile_by_id,
     profiles_for_address_roles,
+    profiles_for_kind,
     suggested_next_hops,
 )
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset
@@ -198,7 +204,7 @@ def _seed_kind_of(roles: dict[str, Any] | None) -> str:
     return "address"
 
 
-def _build_payload(record: mini_apps.ViewRecord) -> MiniAppPayload:
+def _build_payload(record: mini_apps.ViewRecord, app_id: str = GRAPH_EXPLORER_APP_ID) -> MiniAppPayload:
     titles = DATASET_TITLES
     descriptors = {
         key: mini_apps.build_dataset_descriptor(
@@ -215,7 +221,7 @@ def _build_payload(record: mini_apps.ViewRecord) -> MiniAppPayload:
     return MiniAppPayload(
         type="INITIAL_LOAD",
         view_id=record.view_id,
-        app_id=GRAPH_EXPLORER_APP_ID,
+        app_id=app_id,
         title=record.title,
         status="ready",
         summary_cards=[],
@@ -478,6 +484,20 @@ def _fetch_sample_edges(
     return list(nodes.values()), edges, warnings
 
 
+def _canonical_edge_id(profile: str, source: str, target: str, directed: bool) -> tuple[str, str, str]:
+    """Stable edge id + ordered endpoints.
+
+    Directed edges keep ``profile:src->tgt``. Undirected edges (directed=False)
+    collapse the reciprocal pair onto one canonical id ``profile:min|max`` so a
+    B->A row is not stored as a distinct edge from A->B (Q6). Returns
+    ``(edge_id, source, target)`` with endpoints reordered for undirected.
+    """
+    if directed:
+        return f"{profile}:{source}->{target}", source, target
+    a, b = sorted([str(source), str(target)])
+    return f"{profile}:{a}|{b}", a, b
+
+
 def _merge_graph(
     existing_nodes: list[list[Any]],
     existing_edges: list[list[Any]],
@@ -500,23 +520,40 @@ def _merge_graph(
         else:
             node_index[node_id] = [node["id"], node["kind"], node["label"], node["profiles"]]
     edge_rows = list(existing_edges)
-    seen_edge_ids = {row[0] for row in edge_rows if row}
+    # Index existing edges by their (already-canonical) id so an incoming
+    # undirected reciprocal sums into the existing row instead of being dropped.
+    edge_pos = {row[0]: i for i, row in enumerate(edge_rows) if row}
     for edge in new_edges:
-        if edge["id"] in seen_edge_ids:
+        eid, src, tgt = _canonical_edge_id(
+            edge["profile"], edge["source"], edge["target"], edge.get("directed", True)
+        )
+        if eid in edge_pos:
+            if not edge.get("directed", True):
+                row = edge_rows[edge_pos[eid]]
+                row[4] = (row[4] or 0) + edge["weight"]
+                row[5] = (row[5] or 0) + edge["edge_count"]
             continue
         edge_rows.append(
-            [
-                edge["id"],
-                edge["source"],
-                edge["target"],
-                edge["profile"],
-                edge["weight"],
-                edge["edge_count"],
-                edge["directed"],
-            ]
+            [eid, src, tgt, edge["profile"], edge["weight"], edge["edge_count"], edge["directed"]]
         )
-        seen_edge_ids.add(edge["id"])
+        edge_pos[eid] = len(edge_rows) - 1
     return list(node_index.values()), edge_rows
+
+
+# Quality-tier ordinal for the search gate (D1). Higher = more trusted.
+_TIER_ORDINAL = {"approved": 3, "candidate": 2, "docs_only": 1, "": 0}
+
+
+def _search_doc_hit(doc: dict[str, Any], score: float | None) -> dict[str, Any]:
+    return {
+        "id": doc.get("id"),
+        "type": doc.get("type"),
+        "title": doc.get("title"),
+        "module": doc.get("module", ""),
+        "quality_tier": doc.get("quality_tier", ""),
+        "payload_ref": doc.get("payload_ref"),
+        "score": round(score, 4) if score is not None else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1063,6 +1100,325 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
             payload, summary_text="Graph Explorer focus updated."
         )
 
+    # -----------------------------------------------------------------------
+    # Graph-native, non-UI tools (WS5/6/7). Plain data tools (no resourceUri):
+    # an agent can search the catalog, walk the neighborhood, and measure flow
+    # without driving the mini-app.
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def search_graph_catalog(
+        query: str = "",
+        node_kind: str = "",
+        min_quality_tier: str = "approved",
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Search the knowledge-graph catalog (node types, edge profiles).
+
+        BM25 over the catalog's search documents, gated by quality tier
+        (``approved`` > ``candidate`` > ``docs_only``; ``all`` disables the gate)
+        and optionally filtered to a single ``node_kind``. An empty query returns
+        a browsable, tier-filtered listing. Falls back to live-discovered profiles
+        when no catalog is published.
+        """
+        _t0 = time.perf_counter()
+        snap = current_snapshot()
+        if snap is None:
+            return {"query": query, "results": [], "count": 0, "warnings": ["semantic snapshot unavailable"]}
+        warnings: list[str] = []
+        docs = list(getattr(snap, "graph_search_documents", ()) or [])
+        from_fallback = not getattr(snap, "graph_catalog_hash", "")
+
+        # node_kind restricts the RESULT set, but we rank over the full corpus so
+        # BM25 IDF stays stable (ranking over a tiny filtered set drives the IDF
+        # of a query term present in every doc negative -> everything dropped).
+        allowed_ids: set[str] | None = None
+        if node_kind:
+            kind_profiles = {p.profile for p in profiles_for_kind(node_kind)}
+            if not kind_profiles:
+                known = sorted((getattr(snap, "kind_to_profiles", {}) or {}).keys())
+                warnings.append(
+                    f"no graph profiles for node_kind '{node_kind}'"
+                    + (f"; known kinds: {known}" if known else "")
+                )
+            allowed_ids = {
+                d["id"]
+                for d in docs
+                if (d.get("type") == "edge_type" and d.get("payload_ref") in kind_profiles)
+                or (d.get("type") == "node_type" and d.get("title") == node_kind)
+            }
+
+        min_ord = None if min_quality_tier == "all" else _TIER_ORDINAL.get(min_quality_tier, 3)
+        hidden = 0
+        gated: list[dict[str, Any]] = []
+        for d in docs:
+            # The tier gate applies only to docs that carry a real quality tier
+            # (edge profiles / metrics). Structural node-type docs always pass.
+            if min_ord is None or d.get("type") == "node_type":
+                gated.append(d)
+            elif _TIER_ORDINAL.get(d.get("quality_tier", ""), 0) >= min_ord:
+                gated.append(d)
+            else:
+                hidden += 1
+
+        def _in_scope(doc_id: str) -> bool:
+            return allowed_ids is None or doc_id in allowed_ids
+
+        q = (query or "").strip()
+        if not q:
+            ordered = [
+                d for d in sorted(gated, key=lambda d: (d.get("type", ""), d.get("title", "")))
+                if _in_scope(d["id"])
+            ][: max(0, limit)]
+            results = [_search_doc_hit(d, None) for d in ordered]
+            graph_telemetry.record(
+                "search_graph_catalog", node_kind=node_kind, query=query,
+                latency_ms=(time.perf_counter() - _t0) * 1000.0,
+            )
+            return {
+                "query": query,
+                "results": results,
+                "count": len(results),
+                "hidden_by_tier_count": hidden,
+                "results_from_fallback": from_fallback,
+                "browse": True,
+                "warnings": warnings,
+            }
+
+        index = BM25Index(BM25Doc(model_name=d["id"], text=d.get("body", "")) for d in gated)
+        by_id = {d["id"]: d for d in gated}
+        ranked = index.search(q, top_k=max(len(gated), limit) or 1)
+        results = [
+            _search_doc_hit(by_id[doc_id], score)
+            for doc_id, score in ranked
+            if doc_id in by_id and _in_scope(doc_id)
+        ][:limit]
+        graph_telemetry.record(
+            "search_graph_catalog", node_kind=node_kind, query=query,
+            latency_ms=(time.perf_counter() - _t0) * 1000.0,
+        )
+        return {
+            "query": query,
+            "results": results,
+            "count": len(results),
+            "hidden_by_tier_count": hidden,
+            "results_from_fallback": from_fallback,
+            "warnings": warnings,
+        }
+
+    @mcp.tool()
+    def explore_neighborhood(
+        seed_ids: list[str],
+        profiles: list[str] | None = None,
+        direction: str = "both",
+        hops: int = 1,
+        window_days: int = DEFAULT_WINDOW_DAYS,
+        max_nodes: int = DEFAULT_MAX_NEIGHBORS,
+    ) -> dict[str, Any]:
+        """Bounded multi-hop neighborhood traversal around seed node ids.
+
+        Walks up to ``hops`` hops over the selected graph profiles (all profiles
+        when ``profiles`` is omitted), capping the result at ``max_nodes`` nodes
+        (sets ``truncated`` when the cap is hit). Undirected profiles collapse
+        reciprocal edges onto one canonical edge with summed weight (Q6). A
+        per-profile query failure degrades to a warning, not an error.
+        """
+        _t0 = time.perf_counter()
+        snap = current_snapshot()
+        if snap is None:
+            return {"seed_ids": [], "nodes": [], "edges": [], "warnings": ["semantic snapshot unavailable"]}
+        seeds = [str(s) for s in (seed_ids or []) if str(s)]
+        if not seeds:
+            return {"seed_ids": [], "nodes": [], "edges": [], "warnings": ["no seed_ids provided"]}
+        hops = max(1, min(int(hops), MAX_HOPS))
+        max_nodes = max(1, int(max_nodes))
+        if profiles:
+            profile_objs = [p for p in (profile_by_id(pid) for pid in profiles) if p is not None]
+        else:
+            profile_objs = list(discover_profiles())
+        warnings: list[str] = []
+        if not profile_objs:
+            return {"seed_ids": seeds, "nodes": [], "edges": [], "warnings": ["no graph profiles selected"]}
+
+        nodes_acc: dict[str, dict[str, Any]] = {
+            s: {"id": s, "kind": "", "label": _short(s), "profiles": []} for s in seeds
+        }
+        edges_acc: dict[str, dict[str, Any]] = {}
+        profiles_used: set[str] = set()
+        frontier = list(seeds)
+        visited = set(seeds)
+        truncated = False
+        hops_completed = 0
+        for _ in range(hops):
+            if not frontier:
+                break
+            next_frontier: set[str] = set()
+            for profile in profile_objs:
+                try:
+                    fnodes, fedges, fwarn = _fetch_edges(
+                        ch,
+                        profile,
+                        seed_ids=frontier,
+                        direction=direction,
+                        window_days=window_days,
+                        limit=max_nodes,
+                    )
+                except Exception as exc:  # never let one profile abort the walk
+                    warnings.append(f"{profile.profile}: {exc}")
+                    continue
+                warnings.extend(fwarn)
+                if fedges:
+                    profiles_used.add(profile.profile)
+                for node in fnodes:
+                    existing = nodes_acc.get(node["id"])
+                    if existing is None:
+                        if len(nodes_acc) >= max_nodes:
+                            truncated = True
+                            continue
+                        nodes_acc[node["id"]] = node
+                    else:
+                        # Node seen via another profile this walk — merge the
+                        # profile list instead of dropping the new provenance.
+                        for prof_id in node.get("profiles", []):
+                            if prof_id not in existing["profiles"]:
+                                existing["profiles"].append(prof_id)
+                    if node["id"] not in visited:
+                        next_frontier.add(node["id"])
+                for edge in fedges:
+                    eid, src, tgt = _canonical_edge_id(
+                        edge["profile"], edge["source"], edge["target"], edge.get("directed", True)
+                    )
+                    if eid in edges_acc:
+                        if not edge.get("directed", True):
+                            edges_acc[eid]["weight"] += edge["weight"]
+                            edges_acc[eid]["edge_count"] += edge["edge_count"]
+                    else:
+                        edges_acc[eid] = {
+                            "id": eid,
+                            "source": src,
+                            "target": tgt,
+                            "profile": edge["profile"],
+                            "weight": edge["weight"],
+                            "edge_count": edge["edge_count"],
+                            "directed": edge.get("directed", True),
+                        }
+            hops_completed += 1
+            visited |= next_frontier
+            frontier = list(next_frontier)
+            if len(nodes_acc) >= max_nodes:
+                truncated = True
+                break
+        graph_telemetry.record(
+            "explore_neighborhood",
+            profiles=sorted(profiles_used),
+            latency_ms=(time.perf_counter() - _t0) * 1000.0,
+        )
+        return {
+            "seed_ids": seeds,
+            "nodes": list(nodes_acc.values()),
+            "edges": list(edges_acc.values()),
+            "profiles_used": sorted(profiles_used),
+            "hops_requested": hops,
+            "hops_completed": hops_completed,
+            "node_count": len(nodes_acc),
+            "edge_count": len(edges_acc),
+            "truncated": truncated,
+            "max_nodes": max_nodes,
+            "warnings": warnings,
+        }
+
+    @mcp.tool()
+    def calculate_flow_efficiency(
+        profile: str,
+        node_ids: list[str],
+        window_days: int = DEFAULT_WINDOW_DAYS,
+        exclude_self_loops: bool = True,
+    ) -> dict[str, Any]:
+        """Per-node weighted-flow efficiency = outflow / inflow for a profile.
+
+        Self-loops are excluded by default so circular flow isn't counted as
+        exiting flow. A node with zero inflow returns ``efficiency=null`` and
+        ``status="no_inflow"`` (never a divide-by-zero). Uses the profile's
+        ``weight_column`` when present, else edge counts (``weight_unit`` reports
+        which).
+        """
+        _t0 = time.perf_counter()
+        prof = profile_by_id(profile)
+        if prof is None:
+            return {"profile": profile, "nodes": [], "warnings": [f"unknown profile '{profile}'"]}
+        nids = [str(n) for n in (node_ids or []) if str(n)]
+        if not nids:
+            return {"profile": profile, "nodes": [], "warnings": ["no node_ids provided"]}
+        warnings: list[str] = []
+        weight_unit = prof.weight_column or "edge_count"
+        if not prof.weight_column:
+            warnings.append("profile has no weight_column; flow uses edge counts")
+        if not prof.directed:
+            warnings.append("profile is undirected; efficiency assumes directed flow and may double-count")
+        sql, params = build_node_flow_sql(
+            prof, node_ids=nids, window_days=window_days, exclude_self_loops=exclude_self_loops
+        )
+        try:
+            result = mini_apps.run_structured_query(
+                ch, sql, database="dbt", parameters=params, requested_max_rows=len(nids) + 16
+            )
+        except Exception as exc:
+            return {"profile": profile, "nodes": [], "warnings": warnings + [f"query failed: {exc}"], "sql": sql}
+        flows: dict[str, tuple[float, float]] = {}
+        for row in result.rows:
+            if not row:
+                continue
+            node_id = str(row[0])
+            outflow = float(row[1]) if len(row) > 1 and row[1] is not None else 0.0
+            inflow = float(row[2]) if len(row) > 2 and row[2] is not None else 0.0
+            flows[node_id] = (outflow, inflow)
+        nodes = []
+        for nid in nids:
+            outflow, inflow = flows.get(nid, (0.0, 0.0))
+            if inflow > 0:
+                efficiency: float | None = round(outflow / inflow, 6)
+                status = "ok"
+            else:
+                efficiency = None
+                status = "no_inflow"
+            nodes.append(
+                {
+                    "node_id": nid,
+                    "inflow": inflow,
+                    "outflow": outflow,
+                    "efficiency": efficiency,
+                    "status": status,
+                }
+            )
+        graph_telemetry.record(
+            "calculate_flow_efficiency",
+            profiles=[profile],
+            latency_ms=(time.perf_counter() - _t0) * 1000.0,
+        )
+        return {
+            "profile": profile,
+            "weight_unit": weight_unit,
+            "window_days": window_days,
+            "exclude_self_loops": exclude_self_loops,
+            "directed": prof.directed,
+            "nodes": nodes,
+            "warnings": warnings,
+            "sql": sql,
+        }
+
+    @mcp.tool()
+    def graph_usage_analytics(limit: int = 20) -> dict[str, Any]:
+        """Adoption analytics for the graph tools (WS12).
+
+        Most-explored profiles, popular search queries, per-tool call counts and
+        latency percentiles, and coverage gaps (registered node kinds that have
+        never been explored). Sourced from in-process telemetry recorded by the
+        graph tools this session.
+        """
+        snap = current_snapshot()
+        coverage_kinds = set((getattr(snap, "kind_to_profiles", {}) or {}).keys()) if snap else set()
+        return graph_telemetry.snapshot(limit=limit, coverage_kinds=coverage_kinds)
+
     web_apps.register_web_app(
         app_id=GRAPH_EXPLORER_APP_ID,
         open_tool="open_graph_explorer",
@@ -1072,5 +1428,9 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
             "load_graph_explorer_seed": load_graph_explorer_seed,
             "expand_graph_explorer_node": expand_graph_explorer_node,
             "update_graph_explorer_focus": update_graph_explorer_focus,
+            "search_graph_catalog": search_graph_catalog,
+            "explore_neighborhood": explore_neighborhood,
+            "calculate_flow_efficiency": calculate_flow_efficiency,
+            "graph_usage_analytics": graph_usage_analytics,
         },
     )

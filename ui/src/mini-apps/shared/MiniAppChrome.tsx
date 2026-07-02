@@ -14,6 +14,7 @@ export interface MiniAppTab {
 
 /** Cross-app navigation. Each mini-app passes `activeTabId` to highlight its slot. */
 export const DEFAULT_APP_TABS: MiniAppTab[] = [
+  { id: "catalog", label: "Catalog", href: "/data-catalog.html", appId: "data_catalog" },
   { id: "portfolio", label: "Portfolio", href: "/portfolio.html", appId: "portfolio" },
   { id: "contract", label: "Contract", href: "/contract-explorer.html", appId: "contract_explorer" },
   { id: "graph", label: "Graph", href: "/graph-explorer.html", appId: "graph_explorer" },
@@ -41,6 +42,9 @@ interface MiniAppChromeProps {
   activeTabId?: string;
   onTabClick?: (id: string) => void;
   rightSlot?: ReactNode;
+  /** Optional fixed sub-header (e.g. a global search bar) rendered between the
+   * app chrome and the scrolling body — always visible, never scrolls. */
+  subBar?: ReactNode;
   bodyClassName?: string;
   children: ReactNode;
 }
@@ -68,6 +72,7 @@ export function MiniAppChrome({
   activeTabId,
   onTabClick,
   rightSlot,
+  subBar,
   bodyClassName,
   children,
 }: MiniAppChromeProps) {
@@ -80,30 +85,62 @@ export function MiniAppChrome({
         ? DEFAULT_APP_TABS
         : [];
 
+  // Cross-app nav is a subordinate APP-SWITCHER (one control under the brand),
+  // not a row of tab-styled links — so each app's in-body section nav reads as
+  // the primary navigation spine instead of competing with the chrome.
+  const [appMenuOpen, setAppMenuOpen] = useState(false);
+  const current = effectiveTabs.find((t) => t.id === activeTabId);
+
   return (
     <div className="ma-chrome mini-app-scope">
       <nav className="ma-bar">
         <span className="ma-brand">{brand}</span>
-        {effectiveTabs.map((t) => (
-          <a
-            key={t.id}
-            href={tabHref(t)}
-            className={`ma-tab${t.id === activeTabId ? " is-active" : ""}`}
-            onClick={(e) => {
-              if (onTabClick) {
-                e.preventDefault();
-                onTabClick(t.id);
-              }
-            }}
-          >
-            {t.label}
-          </a>
-        ))}
+        {effectiveTabs.length > 0 && (
+          <div className="ma-appsw">
+            <button
+              type="button"
+              className="ma-appsw-btn"
+              aria-haspopup="menu"
+              aria-expanded={appMenuOpen}
+              onClick={() => setAppMenuOpen((o) => !o)}
+            >
+              <span className="ma-appsw-glyph" aria-hidden>⊞</span>
+              <span className="ma-appsw-current">{current?.label ?? "Apps"}</span>
+              <span className="ma-appsw-caret" aria-hidden>▾</span>
+            </button>
+            {appMenuOpen && (
+              <>
+                <div className="ma-appsw-scrim" onClick={() => setAppMenuOpen(false)} />
+                <div className="ma-appsw-menu" role="menu">
+                  <div className="ma-appsw-head">Apps</div>
+                  {effectiveTabs.map((t) => (
+                    <a
+                      key={t.id}
+                      role="menuitem"
+                      href={tabHref(t)}
+                      className={`ma-appsw-item${t.id === activeTabId ? " is-active" : ""}`}
+                      onClick={(e) => {
+                        if (onTabClick) {
+                          e.preventDefault();
+                          onTabClick(t.id);
+                        }
+                        setAppMenuOpen(false);
+                      }}
+                    >
+                      {t.label}
+                    </a>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
         <span className="ma-bar-right">
           {rightSlot}
           <MaThemeToggle />
         </span>
       </nav>
+      {subBar && <div className="ma-subbar">{subBar}</div>}
       <div className={`ma-body${bodyClassName ? ` ${bodyClassName}` : ""}`}>
         {children}
       </div>

@@ -8,132 +8,90 @@ here — everything comes from the dbt-cerebro semantic authoring layer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 from cerebro_mcp.loaders.semantic import semantic_runtime
-
-# Control / pagination parameters that may appear in a profile's
-# `default_filters` authoring block but are NOT column filters. The Graph
-# Explorer applies these as query controls (SQL LIMIT, hop depth, time window,
-# etc.) — never as `toString(col) = 'val'` WHERE predicates. Leaking one of
-# these into the WHERE clause crashes ClickHouse with
-# `Code: 47 Unknown identifier '<key>'` (e.g. a published registry that carries
-# `token_transfers -> default_filters={"limit": 500}`).
-_CONTROL_KEYS = frozenset(
-    {
-        "limit",
-        "max_neighbors",
-        "hops",
-        "window_days",
-        "transfer_window_days",
-        "direction",
-        "relation_types",
-        "offset",
-        "seed_ids",
-    }
+from cerebro_mcp.semantic.graph_extraction import (
+    _CONTROL_KEYS,
+    GraphExtractionError,
+    GraphProfile,
+    extract_graph_profile,
 )
 
+logger = logging.getLogger(__name__)
 
-@dataclass(frozen=True)
-class GraphProfile:
-    profile: str
-    model_name: str
-    relation_name: str
-    source_column: str
-    target_column: str
-    source_kind: str
-    target_kind: str
-    directed: bool = True
-    time_column: str | None = None
-    weight_column: str | None = None
-    evidence_model: str | None = None
-    evidence_source_column: str | None = None
-    evidence_target_column: str | None = None
-    node_enrichment_model: str | None = None
-    node_enrichment_key: str | None = None
-    default_filters: dict[str, Any] = field(default_factory=dict)
-    module: str = ""
-    description: str = ""
-    semantic_status: str = "docs_only"
-    quality_tier: str = ""
-    question_synonyms: tuple[str, ...] = ()
-    semantic_source_file: str = ""
-
-    @property
-    def time_aware(self) -> bool:
-        return self.time_column is not None
+# Re-exported for backward compatibility — the canonical definitions now live in
+# `graph_extraction` (the single, pure place that reads the raw graph block).
+__all__ = [
+    "GraphProfile",
+    "discover_profiles",
+    "build_kind_index",
+    "profile_by_id",
+    "profiles_for_kind",
+]
 
 
-def _coerce_str(value: Any) -> str | None:
-    if isinstance(value, str) and value:
-        return value
-    return None
+def discover_profiles(models: dict[str, Any] | None = None) -> list[GraphProfile]:
+    """Build the list of graph profiles.
 
-
-def _graph_meta(model: dict[str, Any]) -> dict[str, Any] | None:
-    meta = (model.get("semantic", {}) or {}).get("meta") or {}
-    graph = meta.get("graph")
-    if isinstance(graph, dict) and graph.get("enabled"):
-        return graph
-    return None
-
-
-def discover_profiles() -> list[GraphProfile]:
-    snap = semantic_runtime.snapshot
-    if snap is None:
-        return []
+    Callers in hot paths pass ``models=None`` and get the list cached on the
+    active snapshot (built once in ``SemanticRuntime._build_snapshot``), avoiding
+    an O(N_models) rescan per call. The snapshot builder passes ``models`` in
+    explicitly to derive the list before the snapshot exists. A snapshot without
+    the cached field (e.g. older fakes) transparently falls back to a live scan.
+    """
+    if models is None:
+        snap = semantic_runtime.snapshot
+        if snap is None:
+            return []
+        cached = getattr(snap, "graph_profiles", None)
+        if cached:
+            return list(cached)
+        models = snap.models
     profiles: list[GraphProfile] = []
-    for name, model in snap.models.items():
-        graph = _graph_meta(model)
-        if graph is None:
-            continue
+    for name, model in models.items():
         try:
-            source_column = graph["source_column"]
-            target_column = graph["target_column"]
-            source_kind = graph["source_kind"]
-            target_kind = graph["target_kind"]
-            profile_id = graph["profile"]
-        except KeyError:
+            profile = extract_graph_profile(name, model)
+        except GraphExtractionError as exc:
+            # Malformed-but-enabled block: historically skipped silently; now
+            # observable (D4). The dbt validator is the authoritative gate.
+            logger.warning("skipping graph profile: %s", exc)
             continue
-        meta = (model.get("semantic", {}) or {}).get("meta") or {}
-        profiles.append(
-            GraphProfile(
-                profile=profile_id,
-                model_name=name,
-                relation_name=model.get("relation_name", "") or name,
-                source_column=source_column,
-                target_column=target_column,
-                source_kind=source_kind,
-                target_kind=target_kind,
-                directed=bool(graph.get("directed", True)),
-                time_column=_coerce_str(graph.get("time_column")),
-                weight_column=_coerce_str(graph.get("weight_column")),
-                evidence_model=_coerce_str(graph.get("evidence_model")),
-                evidence_source_column=_coerce_str(graph.get("evidence_source_column"))
-                or source_column,
-                evidence_target_column=_coerce_str(graph.get("evidence_target_column"))
-                or target_column,
-                node_enrichment_model=_coerce_str(graph.get("node_enrichment_model")),
-                node_enrichment_key=_coerce_str(graph.get("node_enrichment_key")),
-                default_filters={
-                    k: v
-                    for k, v in (graph.get("default_filters") or {}).items()
-                    if k not in _CONTROL_KEYS
-                },
-                module=model.get("module", "") or "",
-                description=model.get("description", "") or "",
-                semantic_status=model.get("semantic_status", "docs_only") or "docs_only",
-                quality_tier=model.get("quality_tier", "") or "",
-                question_synonyms=tuple(meta.get("question_synonyms") or ()),
-                semantic_source_file=model.get("semantic_source_file", "") or "",
-            )
-        )
+        if profile is not None:
+            profiles.append(profile)
     profiles.sort(key=lambda p: (p.module, p.profile))
     return profiles
 
 
+def current_snapshot():
+    """Active semantic snapshot (or None). Single accessor so tools resolve the
+    snapshot through this module — which tests patch via `semantic_runtime`."""
+    return semantic_runtime.snapshot
+
+
+def build_kind_index(
+    profiles: tuple[GraphProfile, ...] | list[GraphProfile],
+) -> dict[str, tuple[GraphProfile, ...]]:
+    """Map each node kind to the profiles that touch it (source or target).
+
+    Built once at snapshot time so ``profiles_for_kind`` is an O(1) lookup. Using
+    a set over ``{source_kind, target_kind}`` dedups self-referential profiles
+    (e.g. circles_avatar -> circles_avatar) so a profile appears once per kind.
+    """
+    index: dict[str, list[GraphProfile]] = {}
+    for profile in profiles:
+        for kind in {profile.source_kind, profile.target_kind}:
+            if kind:
+                index.setdefault(kind, []).append(profile)
+    return {kind: tuple(items) for kind, items in index.items()}
+
+
 def profile_by_id(profile_id: str) -> GraphProfile | None:
+    snap = semantic_runtime.snapshot
+    cached = getattr(snap, "profiles_by_id", None) if snap is not None else None
+    if cached:
+        return cached.get(profile_id)
     for profile in discover_profiles():
         if profile.profile == profile_id:
             return profile
@@ -141,6 +99,10 @@ def profile_by_id(profile_id: str) -> GraphProfile | None:
 
 
 def profiles_for_kind(node_kind: str) -> list[GraphProfile]:
+    snap = semantic_runtime.snapshot
+    cached = getattr(snap, "kind_to_profiles", None) if snap is not None else None
+    if cached:
+        return list(cached.get(node_kind, ()))
     return [
         profile
         for profile in discover_profiles()
@@ -193,6 +155,20 @@ def _default_filter_clauses(profile: GraphProfile) -> list[str]:
     return clauses
 
 
+# Defense-in-depth for the SQL builders: column/relation names are interpolated
+# verbatim into ClickHouse SQL. The dbt build gate already rejects these tokens
+# in authored graph metadata; this is the second line of defence at query time
+# (a registry that bypassed the gate, or a hand-edited local one, still can't
+# inject). The tools catch the raised error and degrade to a warning.
+_DANGEROUS_SQL_TOKENS = (";", "--", "/*", "*/")
+
+
+def _reject_unsafe_identifiers(*values: str | None) -> None:
+    for value in values:
+        if value and any(tok in value for tok in _DANGEROUS_SQL_TOKENS):
+            raise ValueError(f"unsafe SQL identifier in graph profile: {value!r}")
+
+
 def build_neighbors_sql(
     profile: GraphProfile,
     *,
@@ -205,6 +181,7 @@ def build_neighbors_sql(
     src = profile.source_column
     tgt = profile.target_column
     rel = profile.relation_name or profile.model_name
+    _reject_unsafe_identifiers(src, tgt, rel, profile.time_column, profile.weight_column)
 
     params: dict[str, Any] = {"seed_ids": [str(s) for s in seed_ids], "lim": int(limit)}
     where_bits: list[str] = []
@@ -261,6 +238,7 @@ def build_sample_sql(
     src = profile.source_column
     tgt = profile.target_column
     rel = profile.relation_name or profile.model_name
+    _reject_unsafe_identifiers(src, tgt, rel, profile.time_column, profile.weight_column)
 
     params: dict[str, Any] = {"lim": int(limit)}
     where_bits: list[str] = []
@@ -295,12 +273,65 @@ def build_evidence_sql(
     model = profile.evidence_model or profile.model_name
     src = profile.evidence_source_column or profile.source_column
     tgt = profile.evidence_target_column or profile.target_column
+    _reject_unsafe_identifiers(src, tgt, model)
     params: dict[str, Any] = {"src": source_id, "tgt": target_id, "lim": int(limit)}
     sql = f"""
         SELECT *
         FROM {model}
         WHERE {src} = {{src:String}} AND {tgt} = {{tgt:String}}
         LIMIT {{lim:UInt32}}
+    """
+    return sql, params
+
+
+def build_node_flow_sql(
+    profile: GraphProfile,
+    *,
+    node_ids: list[str],
+    window_days: int = 90,
+    exclude_self_loops: bool = True,
+) -> tuple[str, dict[str, Any]]:
+    """Per-NODE inbound/outbound weighted flow for `node_ids` (WS7).
+
+    Returns ``(node_id, outflow, inflow)`` rows. Outflow is the weighted sum of
+    edges leaving the node (GROUP BY source); inflow is the weighted sum arriving
+    (GROUP BY target). Self-loops (source == target) are excluded by default so a
+    node's circular flow is not counted as exiting flow (D5). Falls back to
+    ``count()`` weight when the profile has no ``weight_column``.
+    """
+    src = profile.source_column
+    tgt = profile.target_column
+    rel = profile.relation_name or profile.model_name
+    _reject_unsafe_identifiers(src, tgt, rel, profile.time_column, profile.weight_column)
+    params: dict[str, Any] = {"node_ids": [str(n) for n in node_ids]}
+    # Wrap the weighted aggregate in toFloat64 so the inflow/outflow legs unify
+    # with the toFloat64(0) constant in the UNION (a UInt64 weight_column else
+    # collides: ClickHouse NO_COMMON_TYPE for Float64 vs UInt64).
+    weight_expr = (
+        f"toFloat64(sum({profile.weight_column}))" if profile.weight_column else "toFloat64(count())"
+    )
+
+    time_clause = ""
+    if profile.time_column:
+        time_clause = f" AND {profile.time_column} >= now() - INTERVAL {{win:UInt32}} DAY"
+        params["win"] = int(max(1, window_days))
+    self_clause = f" AND toString({src}) != toString({tgt})" if exclude_self_loops else ""
+    filter_clause = "".join(f" AND {c}" for c in _default_filter_clauses(profile))
+
+    sql = f"""
+        SELECT node_id, sum(outflow) AS outflow, sum(inflow) AS inflow
+        FROM (
+            SELECT toString({src}) AS node_id, {weight_expr} AS outflow, toFloat64(0) AS inflow
+            FROM {rel}
+            WHERE toString({src}) IN {{node_ids:Array(String)}}{time_clause}{self_clause}{filter_clause}
+            GROUP BY node_id
+            UNION ALL
+            SELECT toString({tgt}) AS node_id, toFloat64(0) AS outflow, {weight_expr} AS inflow
+            FROM {rel}
+            WHERE toString({tgt}) IN {{node_ids:Array(String)}}{time_clause}{self_clause}{filter_clause}
+            GROUP BY node_id
+        )
+        GROUP BY node_id
     """
     return sql, params
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -10,6 +10,10 @@ try:
     import igraph as ig
 except ImportError:  # pragma: no cover - optional at runtime until installed
     ig = None
+
+
+if TYPE_CHECKING:  # avoid a runtime import cycle (graph_profiles imports semantic_runtime)
+    from cerebro_mcp.semantic.graph_profiles import GraphProfile
 
 
 GraphType = Any if ig is None else ig.Graph
@@ -30,6 +34,17 @@ class SemanticSnapshot:
     relationships: list[dict[str, Any]]
     docs_index: dict[str, dict[str, Any]]
     loaded_at: float
+    # Graph profiles derived ONCE at snapshot build (WS1). Hot paths read these
+    # cached views instead of re-scanning `models` on every call. Defaults keep
+    # older construction sites (and test fakes) valid.
+    graph_profiles: tuple["GraphProfile", ...] = ()
+    profiles_by_id: dict[str, "GraphProfile"] = field(default_factory=dict)
+    kind_to_profiles: dict[str, tuple["GraphProfile", ...]] = field(default_factory=dict)
+    # BM25 search corpus for the graph catalog (from the published catalog when
+    # present, else synthesized from profiles). Powers search_graph_catalog (WS5).
+    graph_search_documents: tuple[dict[str, Any], ...] = ()
+    graph_catalog_hash: str = ""
+    schema_version: int = 1
 
 
 class SemanticRetryTrace(BaseModel):

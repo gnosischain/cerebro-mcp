@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -128,13 +129,21 @@ class ClickHouseManager:
     TABLE_PAGE_CACHE_MAX_ENTRIES = 64
 
     def __init__(self):
-        self._clients: dict[str, Any] = {}
+        # Per-thread clients: clickhouse_connect Client objects are NOT thread
+        # safe, and the web-app dispatch now runs tool calls in a thread pool
+        # (so a slow/unreachable ClickHouse can't freeze the async event loop).
+        # Each worker thread lazily gets its own client.
+        self._local = threading.local()
         self._schema_cache: dict[str, tuple[float, dict]] = {}
         self._table_page_cache: dict[str, tuple[float, dict]] = {}
 
     def get_client(self, database: str):
-        if database not in self._clients:
-            self._clients[database] = clickhouse_connect.get_client(
+        clients = getattr(self._local, "clients", None)
+        if clients is None:
+            clients = {}
+            self._local.clients = clients
+        if database not in clients:
+            clients[database] = clickhouse_connect.get_client(
                 host=settings.CLICKHOUSE_HOST,
                 port=settings.CLICKHOUSE_PORT,
                 username=settings.CLICKHOUSE_USER,
@@ -144,12 +153,16 @@ class ClickHouseManager:
                 verify=settings.CLICKHOUSE_VERIFY,
                 connect_timeout=settings.CLICKHOUSE_CONNECT_TIMEOUT,
                 send_receive_timeout=settings.CLICKHOUSE_SEND_RECEIVE_TIMEOUT,
+                # One connection attempt (no internal retry storm): a genuinely
+                # unreachable host used to burn ~180s of retries per query and,
+                # via the old synchronous dispatch, freeze the whole server.
+                query_retries=0,
                 settings={
                     "readonly": 1,
                     "max_execution_time": settings.effective_query_timeout_seconds,
                 },
             )
-        return self._clients[database]
+        return clients[database]
 
     def _validate_database(self, database: str) -> None:
         valid, err = validate_identifier(database)

@@ -90,6 +90,14 @@ class Settings(BaseSettings):
         "https://gnosischain.github.io/dbt-cerebro/semantic_docs_index.json"
     )
     SEMANTIC_DOCS_INDEX_PATH: str = ""
+    # Optional graph-catalog sidecar (WS4). When present and consistent with the
+    # registry, graph profiles are reconstructed from it 1:1; otherwise the
+    # runtime falls back to live discovery off the registry, so a missing or
+    # stale catalog never breaks the server.
+    SEMANTIC_GRAPH_CATALOG_URL: Optional[str] = (
+        "https://gnosischain.github.io/dbt-cerebro/semantic_graph_catalog.json"
+    )
+    SEMANTIC_GRAPH_CATALOG_PATH: str = ""
     SEMANTIC_REFRESH_INTERVAL_SECONDS: int = 300
     # When True, every semantic call also stats the local manifest /
     # catalog files and triggers an immediate force_reload if either

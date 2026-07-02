@@ -33,6 +33,13 @@ class FakeSnapshot:
     models: dict[str, dict[str, Any]] = field(default_factory=dict)
     relationships: list[dict[str, Any]] = field(default_factory=list)
     metrics: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # WS1 cached views — empty by default so the no-cache path (live scan of
+    # `models`) is still exercised by most fixtures.
+    graph_profiles: tuple[Any, ...] = ()
+    profiles_by_id: dict[str, Any] = field(default_factory=dict)
+    kind_to_profiles: dict[str, tuple[Any, ...]] = field(default_factory=dict)
+    graph_search_documents: tuple[dict[str, Any], ...] = ()
+    graph_catalog_hash: str = ""
 
 
 def _graph_model(
@@ -128,6 +135,15 @@ def fake_snapshot():
             },
         ],
     )
+    # Populate the WS1/WS5 cached views the way SemanticRuntime._build_snapshot
+    # does, so the new graph-native tools exercise their real (cached) paths.
+    from cerebro_mcp.semantic.graph_extraction import synthesize_search_documents
+
+    profiles = tuple(graph_profiles.discover_profiles(models=snap.models))
+    snap.graph_profiles = profiles
+    snap.profiles_by_id = {p.profile: p for p in profiles}
+    snap.kind_to_profiles = graph_profiles.build_kind_index(profiles)
+    snap.graph_search_documents = tuple(synthesize_search_documents(profiles))
     with patch.object(graph_profiles, "semantic_runtime") as rt:
         rt.snapshot = snap
         yield snap
@@ -211,6 +227,43 @@ def test_discover_profiles_from_snapshot(fake_snapshot):
     trust = next(p for p in profiles if p.profile == "circles_trust")
     assert trust.time_aware is True
     assert trust.source_kind == "circles_avatar"
+
+
+def test_discover_profiles_prefers_cached_tuple(fake_snapshot):
+    # WS1: when the snapshot carries a cached graph_profiles tuple, discover_profiles
+    # returns it verbatim rather than rescanning models.
+    live = tuple(graph_profiles.discover_profiles(models=fake_snapshot.models))
+    fake_snapshot.graph_profiles = live
+    returned = graph_profiles.discover_profiles()
+    assert [p.profile for p in returned] == [p.profile for p in live]
+    # Mutating models afterwards must NOT change the cached result.
+    fake_snapshot.models = {}
+    assert [p.profile for p in graph_profiles.discover_profiles()] == [p.profile for p in live]
+
+
+def test_profile_by_id_uses_snapshot_index(fake_snapshot):
+    # WS1: profile_by_id reads the precomputed profiles_by_id index when present.
+    live = tuple(graph_profiles.discover_profiles(models=fake_snapshot.models))
+    fake_snapshot.profiles_by_id = {p.profile: p for p in live}
+    fake_snapshot.models = {}  # index lookup must not fall back to a model scan
+    found = graph_profiles.profile_by_id("safe_ownership")
+    assert found is not None and found.profile == "safe_ownership"
+    assert graph_profiles.profile_by_id("does_not_exist") is None
+
+
+def test_build_kind_index_groups_by_kind(fake_snapshot):
+    # WS1: build_kind_index maps each node kind to the profiles touching it; a
+    # self-referential profile (circles_avatar -> circles_avatar) appears once.
+    profiles = graph_profiles.discover_profiles(models=fake_snapshot.models)
+    index = graph_profiles.build_kind_index(profiles)
+    assert {p.profile for p in index["address"]} == {"safe_ownership", "lp_in_pool"}
+    assert [p.profile for p in index["circles_avatar"]] == ["circles_trust"]
+    fake_snapshot.kind_to_profiles = index
+    fake_snapshot.models = {}
+    assert {p.profile for p in graph_profiles.profiles_for_kind("address")} == {
+        "safe_ownership",
+        "lp_in_pool",
+    }
 
 
 def test_open_graph_explorer_empty_catalog(fake_snapshot):
@@ -392,3 +445,194 @@ def test_edge_query_failure_reports_warning(fake_snapshot):
     sc = result.structuredContent
     warnings = sc.get("warnings") or []
     assert any("clickhouse exploded" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# WS5/6/7 — graph-native tools
+# ---------------------------------------------------------------------------
+
+
+def test_search_graph_catalog_matches_profile(fake_snapshot):
+    server = _server(StubCH())
+    res = _call_tool(server, "search_graph_catalog", {"query": "circles trust"})
+    ids = [r["id"] for r in res["results"]]
+    assert "profile:circles_trust" in ids
+    assert res["results_from_fallback"] is True  # no catalog hash on the fake
+
+
+def test_search_graph_catalog_tier_gate(fake_snapshot):
+    # safe_ownership is candidate-tier; default approved gate hides it, all shows it.
+    server = _server(StubCH())
+    approved = _call_tool(server, "search_graph_catalog", {"query": "safe ownership"})
+    assert "profile:safe_ownership" not in [r["id"] for r in approved["results"]]
+    assert approved["hidden_by_tier_count"] >= 1
+    allt = _call_tool(server, "search_graph_catalog", {"query": "safe ownership", "min_quality_tier": "all"})
+    assert "profile:safe_ownership" in [r["id"] for r in allt["results"]]
+
+
+def test_search_graph_catalog_node_kind_filter(fake_snapshot):
+    server = _server(StubCH())
+    res = _call_tool(server, "search_graph_catalog", {"query": "pool", "node_kind": "pool"})
+    ids = {r["id"] for r in res["results"]}
+    # lp_in_pool has target_kind=pool; the node:pool doc is also in scope
+    assert "profile:lp_in_pool" in ids
+
+
+def test_search_graph_catalog_empty_query_browses(fake_snapshot):
+    server = _server(StubCH())
+    res = _call_tool(server, "search_graph_catalog", {"query": "", "min_quality_tier": "all"})
+    assert res["browse"] is True
+    assert res["count"] > 0
+
+
+def test_explore_neighborhood_one_hop(fake_snapshot):
+    ch = StubCH(edge_rows={
+        "api_execution_circles_v2_trust_relations_current": [[AVATAR, TRUSTEE, 1.0, 1]],
+    })
+    server = _server(ch)
+    res = _call_tool(
+        server,
+        "explore_neighborhood",
+        {"seed_ids": [AVATAR], "profiles": ["circles_trust"], "hops": 1},
+    )
+    node_ids = {n["id"] for n in res["nodes"]}
+    assert {AVATAR, TRUSTEE} <= node_ids
+    assert res["edge_count"] == 1
+    assert "circles_trust" in res["profiles_used"]
+    assert res["truncated"] is False
+
+
+def test_explore_neighborhood_respects_max_nodes(fake_snapshot):
+    ch = StubCH(edge_rows={
+        "api_execution_circles_v2_trust_relations_current": [
+            [AVATAR, TRUSTEE, 1.0, 1],
+            [AVATAR, "0xaaaa000000000000000000000000000000000003", 1.0, 1],
+        ],
+    })
+    server = _server(ch)
+    res = _call_tool(
+        server,
+        "explore_neighborhood",
+        {"seed_ids": [AVATAR], "profiles": ["circles_trust"], "hops": 2, "max_nodes": 1},
+    )
+    assert res["truncated"] is True
+    assert res["node_count"] <= 1
+
+
+def test_explore_neighborhood_no_seeds(fake_snapshot):
+    res = _call_tool(_server(StubCH()), "explore_neighborhood", {"seed_ids": []})
+    assert res["nodes"] == [] and res["edges"] == []
+    assert any("no seed_ids" in w for w in res["warnings"])
+
+
+def test_explore_neighborhood_merges_node_profiles_across_profiles(fake_snapshot):
+    # AVATAR is the source in both circles_trust and safe_ownership this walk;
+    # its profiles list must carry BOTH, not just the first discovered.
+    ch = StubCH(edge_rows={
+        "api_execution_circles_v2_trust_relations_current": [[AVATAR, TRUSTEE, 1.0, 1]],
+        "int_execution_safes_current_owners": [[AVATAR, SAFE, 1.0, 1]],
+    })
+    server = _server(ch)
+    res = _call_tool(
+        server,
+        "explore_neighborhood",
+        {"seed_ids": [AVATAR], "profiles": ["circles_trust", "safe_ownership"], "hops": 1},
+    )
+    avatar = next(n for n in res["nodes"] if n["id"] == AVATAR)
+    assert {"circles_trust", "safe_ownership"} <= set(avatar["profiles"])
+
+
+def test_calculate_flow_efficiency_basic(fake_snapshot):
+    ch = StubCH(edge_rows={
+        "int_execution_pools_dex_liquidity_events": [["0xprovider", 200.0, 100.0]],
+    })
+    server = _server(ch)
+    res = _call_tool(
+        server,
+        "calculate_flow_efficiency",
+        {"profile": "lp_in_pool", "node_ids": ["0xprovider"]},
+    )
+    assert res["weight_unit"] == "amount_usd"
+    node = res["nodes"][0]
+    assert node["efficiency"] == 2.0 and node["status"] == "ok"
+
+
+def test_calculate_flow_efficiency_zero_inflow_is_null(fake_snapshot):
+    ch = StubCH(edge_rows={
+        "int_execution_pools_dex_liquidity_events": [["0xsink", 50.0, 0.0]],
+    })
+    server = _server(ch)
+    res = _call_tool(
+        server,
+        "calculate_flow_efficiency",
+        {"profile": "lp_in_pool", "node_ids": ["0xsink"]},
+    )
+    node = res["nodes"][0]
+    assert node["efficiency"] is None and node["status"] == "no_inflow"
+
+
+def test_build_node_flow_sql_casts_weight_to_float():
+    # Regression: a UInt64 weight_column must be wrapped in toFloat64 so the
+    # inflow/outflow UNION legs unify with the toFloat64(0) constant — otherwise
+    # ClickHouse raises NO_COMMON_TYPE (Float64 vs UInt64). Only caught live.
+    from cerebro_mcp.semantic.graph_profiles import GraphProfile, build_node_flow_sql
+
+    prof = GraphProfile(
+        profile="p", model_name="m", relation_name="m",
+        source_column="a", target_column="b",
+        source_kind="address", target_kind="address", weight_column="w",
+    )
+    sql, _ = build_node_flow_sql(prof, node_ids=["0xabc"])
+    assert "toFloat64(sum(w))" in sql
+    assert "toFloat64(0)" in sql
+
+
+def test_calculate_flow_efficiency_unknown_profile(fake_snapshot):
+    res = _call_tool(
+        _server(StubCH()),
+        "calculate_flow_efficiency",
+        {"profile": "nope", "node_ids": ["0xabc"]},
+    )
+    assert res["nodes"] == []
+    assert any("unknown profile" in w for w in res["warnings"])
+
+
+def test_graph_usage_analytics_records_tool_calls(fake_snapshot):
+    from cerebro_mcp.semantic import graph_telemetry
+
+    graph_telemetry.reset()
+    server = _server(StubCH())
+    _call_tool(server, "search_graph_catalog", {"query": "circles trust", "min_quality_tier": "all"})
+    _call_tool(server, "search_graph_catalog", {"query": "pool", "min_quality_tier": "all"})
+    res = _call_tool(server, "graph_usage_analytics", {})
+    assert res["tool_calls"].get("search_graph_catalog") == 2
+    assert res["total_calls"] >= 2
+    # coverage gaps = registered kinds never explored (we issued no node_kind)
+    assert isinstance(res["coverage_gaps"], list)
+    assert "search_graph_catalog" in res["latency_ms"]
+    graph_telemetry.reset()
+
+
+def test_canonical_edge_id_and_undirected_merge():
+    from cerebro_mcp.tools.semantic.graph_explorer import _canonical_edge_id, _merge_graph
+
+    e1, _, _ = _canonical_edge_id("p", "B", "A", False)
+    e2, _, _ = _canonical_edge_id("p", "A", "B", False)
+    assert e1 == e2 == "p:A|B"
+    # Undirected reciprocal edges collapse to one row with summed weight (Q6).
+    _, edges = _merge_graph([], [], [], [
+        {"id": "p:A->B", "source": "A", "target": "B", "profile": "p", "weight": 1.0, "edge_count": 1, "directed": False},
+        {"id": "p:B->A", "source": "B", "target": "A", "profile": "p", "weight": 2.0, "edge_count": 3, "directed": False},
+    ])
+    assert len(edges) == 1
+    assert edges[0][4] == 3.0 and edges[0][5] == 4
+
+
+def test_merge_graph_directed_keeps_both_directions():
+    from cerebro_mcp.tools.semantic.graph_explorer import _merge_graph
+
+    _, edges = _merge_graph([], [], [], [
+        {"id": "p:A->B", "source": "A", "target": "B", "profile": "p", "weight": 1.0, "edge_count": 1, "directed": True},
+        {"id": "p:B->A", "source": "B", "target": "A", "profile": "p", "weight": 2.0, "edge_count": 1, "directed": True},
+    ])
+    assert len(edges) == 2

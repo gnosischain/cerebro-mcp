@@ -121,6 +121,51 @@ async def test_dispatch_serializes_dates(registered):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_plain_dict_tool_is_wrapped(registered):
+    """A mini-app tool may return a plain JSON-able dict (FastMCP auto-wraps it
+    as structuredContent). The HTTP dispatch must do the same — not 500 on
+    `.content`/`.model_dump`. Regression for the graph-native tools
+    (search_graph_catalog / explore_neighborhood / calculate_flow_efficiency)
+    served in browser mode."""
+    def _plain_tool():
+        return {"count": 2, "results": [{"id": "profile:circles_trust"}]}
+
+    web_apps.MINI_APP_TOOL_REGISTRY["_plain_tool"] = _plain_tool
+    req = FakeRequest(
+        path_params={"app_id": "model_lineage", "tool_name": "_plain_tool"},
+        body={"arguments": {}},
+    )
+    resp = await web_apps.dispatch_app_tool(req)
+    assert resp.status_code == 200
+    data = json.loads(resp.body.decode())
+    assert data["isError"] is False
+    assert data["structuredContent"]["count"] == 2
+    assert data["content"] == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_plain_dict_with_datetime_is_serialized(registered):
+    """A plain-dict tool whose values include date/datetime (e.g. ClickHouse
+    rows from the observability tools) must not 500 — the plain-dict path
+    coerces them to strings like the CallToolResult path does."""
+    import datetime as dt
+
+    def _dt_tool():
+        return {"as_of": dt.datetime(2026, 5, 12, 23, 6, 48), "rows": [[dt.date(2026, 5, 12), 1]]}
+
+    web_apps.MINI_APP_TOOL_REGISTRY["_dt_tool"] = _dt_tool
+    req = FakeRequest(
+        path_params={"app_id": "model_lineage", "tool_name": "_dt_tool"},
+        body={"arguments": {}},
+    )
+    resp = await web_apps.dispatch_app_tool(req)
+    assert resp.status_code == 200
+    data = json.loads(resp.body.decode())
+    assert data["isError"] is False
+    assert data["structuredContent"]["as_of"].startswith("2026-05-12")
+
+
+@pytest.mark.asyncio
 async def test_dispatch_unknown_tool_404(registered):
     req = FakeRequest(
         path_params={"app_id": "model_lineage", "tool_name": "nope"},

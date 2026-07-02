@@ -1,0 +1,373 @@
+/* Data Platform — LAYOUT ONLY. All colors come from the shared design tokens
+ * (themes/tokens.css + mini-apps.css `.mini-app-scope` palette). Do not hard-code
+ * colors here beyond the semantic tier accents, which intentionally mirror the
+ * approved mockup. */
+
+/* The shell is the single width authority (caps + centers the whole app) so the
+ * rail, sticky search, and content all share one grid edge. .dc-root fills its
+ * column rather than re-capping (which left content off-grid on wide monitors). */
+.dc-root { display: flex; flex-direction: column; min-height: 0; gap: 16px; width: 100%; }
+
+/* Shared focus ring for all interactive surfaces (a11y). */
+.dc-card:focus-visible, .dc-domain:focus-visible, .dc-row:focus-visible,
+.dc-link-chip:focus-visible, .dc-mini-card:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
+}
+
+/* ---- App shell: persistent left rail + sticky search topbar -------------- */
+.dc-shell { display: grid; grid-template-columns: 184px minmax(0, 1fr); gap: 24px; align-items: start; max-width: 1440px; margin: 0 auto; }
+.dc-rail { position: sticky; top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.dc-rail-label { font-size: 10px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--text-muted); padding: 4px 12px 6px; }
+.dc-rail-item {
+  display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+  padding: 9px 12px; border: none; background: none; border-radius: var(--radius-md, 8px);
+  font-size: 13.5px; color: var(--text-secondary); cursor: pointer;
+}
+.dc-rail-item:hover { background: var(--surface-2); color: var(--text-primary); }
+.dc-rail-item.is-active { background: var(--accent-softer); color: var(--accent-text); font-weight: 500; }
+.dc-main { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+/* The global search now lives in the chrome's fixed sub-header (.ma-subbar), so
+ * it never scrolls and nothing bleeds past it. This inner wrapper just
+ * re-aligns the field with the 1440px content shell. */
+.dc-topbar-inner { max-width: 1440px; margin: 0 auto; width: 100%; display: flex; align-items: center; }
+.dc-topbar-inner .ma-search { flex: 1 1 auto; width: 100%; }
+
+/* ---- Search ---------------------------------------------------------------*/
+.dc-search-bar { display: flex; gap: 12px; align-items: center; }
+
+.dc-layout {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+/* Dashboard two-column variants (Governance / Observability). Defined as
+ * classes — NOT inline styles — so the mobile media query can collapse them. */
+.dc-layout--gov { grid-template-columns: 1fr 1fr; }
+/* Doc-coverage gets full width in a multi-col grid so all domains show at once. */
+.dc-cov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 20px; }
+/* Observability: the "needs attention" / failures column (first child) gets the
+ * WIDE column — incidents are the signal, the all-green run log is secondary. */
+.dc-layout--obs { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); }
+/* Sticks BELOW the sticky topbar (top: ~topbar height) so facet labels don't
+ * clip under the search bar on scroll. */
+.dc-sidebar { display: flex; flex-direction: column; gap: 18px; position: sticky; top: 64px; max-height: calc(100vh - 80px); overflow-y: auto; }
+.dc-facet { display: flex; flex-direction: column; gap: 8px; }
+.dc-facet-title {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+
+.dc-section-title { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 4px 0 10px; }
+
+.dc-results-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+.dc-applied-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.dc-filter-chip {
+  font-size: 11.5px; padding: 2px 9px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--accent-text); color: var(--accent-text); background: var(--accent-softer);
+}
+.dc-filter-chip:hover { background: var(--accent-soft); }
+.dc-results-count { font-size: 13px; color: var(--text-secondary); }
+.dc-owner-row { display: block; width: 100%; text-align: left; background: none; border: none; padding: 3px 4px; margin: -3px -4px; border-radius: var(--radius-sm); cursor: pointer; font: inherit; color: inherit; }
+.dc-owner-row:hover { background: var(--surface-2); }
+.dc-link-btn { background: none; border: none; color: var(--accent-text); cursor: pointer; font: inherit; padding: 0; }
+.dc-link-btn:hover { text-decoration: underline; }
+.dc-results { display: flex; flex-direction: column; gap: 10px; }
+
+/* ---- Search-led home hero ------------------------------------------------ */
+.dc-hero { margin: 2px 0 18px; }
+.dc-hero-title { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0; }
+.dc-hero-sub { font-size: 13.5px; color: var(--text-secondary); margin: 5px 0 0; }
+
+/* ---- Stat cards (overview) ----------------------------------------------- */
+.dc-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; }
+.dc-stat { background: var(--surface-2); border-radius: var(--radius-md, 8px); padding: 12px 14px; }
+/* Stat cards that drill into a filtered view (entry points, not vanity counters). */
+.dc-stat--action { border: 1px solid var(--border); text-align: left; cursor: pointer; transition: border-color 0.12s ease, background 0.12s ease; }
+.dc-stat--action:hover { border-color: var(--border-hover); background: var(--surface-1); }
+.dc-stat--action:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+.dc-stat-label { font-size: 12.5px; color: var(--text-secondary); }
+.dc-stat-value { font-size: 23px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.dc-stat-value.is-ok { color: #0f7b53; }
+.dc-stat-value.is-warn { color: #9a6b00; }
+.dc-stat-value.is-bad { color: #b3261e; }
+
+/* ---- Home dashboard layout ----------------------------------------------- */
+/* Full-width stacked bands (domains → products|metrics → glossary) — each band
+ * uses the whole width, so there's no tall-narrow side rail leaving dead space. */
+.dc-home-split { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+.dc-tag--link { cursor: pointer; }
+.dc-tag--link:hover { border-color: var(--accent-text); color: var(--accent-text); background: var(--accent-softer); }
+
+/* ---- Browse-by-domain ---------------------------------------------------- */
+/* Fixed 4-col so a known domain count (~12) reads as an intentional grid,
+ * not a ragged auto-fit final row. */
+.dc-domain-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.dc-domain {
+  width: 100%; text-align: left; cursor: pointer;
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius-base); padding: 12px 14px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.dc-domain:hover { border-color: var(--border-hover); background: var(--surface-2); }
+.dc-domain-head { display: flex; align-items: center; justify-content: space-between; }
+.dc-domain-name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.dc-domain-count { font-size: 18px; font-weight: 600; }
+.dc-tierbar { display: flex; height: 5px; border-radius: 3px; overflow: hidden; margin-top: 9px; }
+.dc-tierbar span:nth-child(1) { background: var(--success); }
+.dc-tierbar span:nth-child(2) { background: var(--warning); }
+.dc-tierbar span:nth-child(3) { background: var(--text-muted); opacity: 0.45; }
+.dc-domain-legend { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
+
+/* ---- Most-connected / link rows ------------------------------------------ */
+.dc-row {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-md, 8px); padding: 8px 12px;
+}
+button.dc-row { cursor: pointer; text-align: left; width: 100%; transition: border-color 0.12s ease, background 0.12s ease; }
+button.dc-row:hover { border-color: var(--border-hover); background: var(--surface-2); }
+.dc-row-chevron { color: var(--text-muted); margin-left: auto; flex: 0 0 auto; }
+.dc-row-name { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dc-list { display: flex; flex-direction: column; gap: 6px; }
+
+/* ---- Result card --------------------------------------------------------- */
+.dc-card {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 11px; align-items: center;
+  width: 100%; text-align: left; padding: 9px 13px;
+  background: var(--surface-1); border: 1px solid var(--border); border-left: 3px solid var(--border);
+  border-radius: var(--radius-base); cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, transform 0.06s ease;
+}
+.dc-card:hover { border-color: var(--border-hover); border-left-color: var(--accent-text); background: var(--surface-2); }
+.dc-card:active { transform: translateY(1px); }
+.dc-card--model { border-left-color: var(--accent-text); }
+.dc-card--metric { border-left-color: var(--success); }
+.dc-card--glossary { border-left-color: var(--warning); }
+.dc-card-icon {
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border-radius: var(--radius-sm); background: var(--accent-softer); color: var(--accent-text);
+  font-size: 13px; font-weight: 700;
+}
+.dc-card-body { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dc-card-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dc-card-title { font-size: 14px; font-weight: 600; color: var(--text-primary); word-break: break-word; }
+.dc-card-fqn { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--text-muted); word-break: break-all; }
+.dc-card-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+.dc-card-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; white-space: nowrap; }
+.dc-mark { background: var(--warning-bg, rgba(212,180,131,0.3)); color: inherit; border-radius: 2px; padding: 0 1px; }
+
+/* ---- Badges + chips ------------------------------------------------------ */
+.dc-badge {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.03em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-secondary); background: var(--surface-2);
+}
+.dc-badge--approved { color: #0f7b53; border-color: #1aa06822; background: #1aa06814; }
+.dc-badge--candidate { color: #9a6b00; border-color: #d6920022; background: #d6920014; }
+.dc-badge--pass, .dc-badge--ok { color: #0f7b53; border-color: #1aa06822; background: #1aa06814; }
+.dc-badge--warn { color: #9a6b00; border-color: #d6920022; background: #d6920014; }
+.dc-badge--bad { color: #b3261e; border-color: #d11a0022; background: #d11a0014; }
+.dc-badge--muted { color: var(--text-muted); }
+.dc-badge--docs_only { color: var(--text-muted); }
+.dc-badge--type { background: var(--accent-softer); color: var(--accent-text); border-color: transparent; }
+.dc-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.dc-tag { font-size: 11px; color: var(--text-secondary); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1px 7px; }
+
+.dc-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
+.dc-dot--ok { background: var(--success); }
+.dc-dot--warn { background: var(--warning); }
+.dc-dot--bad { background: var(--error); }
+.dc-dot--muted { background: var(--text-muted); opacity: 0.5; }
+
+/* ---- Entity profile ------------------------------------------------------ */
+.dc-breadcrumb { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; flex-wrap: wrap; }
+.dc-breadcrumb button { background: none; border: none; color: var(--accent-text); cursor: pointer; padding: 0; font: inherit; }
+.dc-breadcrumb button:hover { text-decoration: underline; }
+
+.dc-profile-header { display: flex; flex-direction: column; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.dc-profile-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.dc-profile-title { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0; }
+.dc-profile-fqn { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; color: var(--text-muted); word-break: break-all; }
+.dc-profile-badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.dc-profile-desc { font-size: 14px; line-height: 1.55; color: var(--text-secondary); max-width: 84ch; }
+
+/* freshness strip */
+.dc-strip {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  font-size: 12.5px; color: var(--text-secondary);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px); padding: 8px 12px; margin: 0 0 14px;
+}
+.dc-strip-item { display: inline-flex; align-items: center; gap: 6px; }
+
+/* KPI grid */
+.dc-kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; margin: 0 0 16px; }
+.dc-kpi { background: var(--surface-2); border-radius: var(--radius-md, 8px); padding: 9px 11px; }
+.dc-kpi-label { font-size: 12px; color: var(--text-secondary); }
+.dc-kpi-value { font-size: 19px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+
+.dc-tab-body { padding-top: 14px; }
+.dc-sql {
+  margin: 0; padding: 14px 16px; max-height: 60vh; overflow: auto;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-base);
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 12.5px; line-height: 1.55;
+  color: var(--text-primary); white-space: pre; tab-size: 2;
+}
+
+/* The 7-tab entity TabBar can exceed the (narrower) main column next to the
+ * 300px rail — let it scroll horizontally instead of clipping the last tabs. */
+.dc-entity-main .tabbar { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin; }
+.dc-entity-main .tabbar__tab { flex: 0 0 auto; white-space: nowrap; }
+
+/* Shared-system 'Load more' button (was an unstyled UA-default button). */
+.dc-loadmore {
+  font-size: 13px; padding: 7px 16px; border-radius: var(--radius-md, 8px); cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
+}
+.dc-loadmore:hover:not(:disabled) { border-color: var(--border-hover); background: var(--surface-2); }
+.dc-loadmore:disabled { cursor: default; opacity: 0.6; }
+
+/* ---- 2-column entity profile (main + sticky metadata rail) --------------- */
+.dc-entity-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; align-items: start; }
+.dc-entity-main { min-width: 0; }
+.dc-entity-rail { position: sticky; top: 64px; display: flex; flex-direction: column; gap: 14px; }
+.dc-rail-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-base); padding: 12px 14px; }
+.dc-rail-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin: 0 0 8px; }
+.dc-meta { margin: 0; display: flex; flex-direction: column; gap: 9px; }
+/* Stacked label-above-value (DataHub pattern): long mono identifiers get the
+ * full column width instead of breaking mid-word in a cramped right column. */
+.dc-meta-row { display: block; font-size: 12.5px; }
+.dc-meta-row dt { display: block; color: var(--text-muted); font-size: 11px; }
+.dc-meta-row dd { display: block; margin: 2px 0 0; color: var(--text-primary); overflow-wrap: anywhere; font-family: var(--font-mono, ui-monospace, monospace); }
+.dc-rail-link { background: none; border: none; padding: 0; font: inherit; color: var(--accent-text); cursor: pointer; text-align: left; }
+.dc-rail-link:hover { text-decoration: underline; }
+
+/* ---- Properties grid ----------------------------------------------------- */
+.dc-props { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+.dc-prop { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }
+.dc-prop-label { display: block; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+.dc-prop-value { display: block; font-size: 13px; color: var(--text-primary); word-break: break-word; margin-top: 3px; line-height: 1.4; }
+.dc-group { display: flex; flex-direction: column; gap: 14px; }
+.dc-group-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin: 0 0 8px; }
+
+.dc-relations { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 760px; }
+.dc-link-chip {
+  display: inline-flex; align-items: center; gap: 6px; text-align: left; width: 100%;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 6px 10px; color: var(--text-primary); font-size: 12.5px;
+  font-family: var(--font-mono, ui-monospace, monospace); cursor: pointer;
+}
+.dc-link-chip:hover { border-color: var(--border-hover); background: var(--surface-2); }
+
+/* ---- Tables (schema / sample / runs / tests) ----------------------------- */
+.dc-table-wrap { border: 1px solid var(--border); border-radius: var(--radius-base); overflow: auto; max-height: 60vh; }
+.dc-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.dc-table thead th {
+  position: sticky; top: 0; text-align: left; background: var(--surface-2); color: var(--text-muted);
+  font-weight: 600; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 9px 14px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.dc-table tbody td { padding: 8px 14px; border-bottom: 1px solid var(--border); color: var(--text-secondary); vertical-align: top; }
+.dc-table tbody tr:last-child td { border-bottom: none; }
+.dc-table.is-mono tbody td { font-family: var(--font-mono, ui-monospace, monospace); white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.dc-table.is-mono td:first-child { position: sticky; left: 0; background: var(--surface-1); }
+.dc-table.is-mono th:first-child { position: sticky; left: 0; z-index: 2; }
+.dc-col-name { font-family: var(--font-mono, ui-monospace, monospace); color: var(--text-primary); font-weight: 500; white-space: nowrap; }
+.dc-col-type { font-family: var(--font-mono, ui-monospace, monospace); color: var(--accent-text); white-space: nowrap; }
+
+/* ---- Lineage tab --------------------------------------------------------- */
+.dc-lineage { display: flex; flex-direction: column; gap: 12px; }
+.dc-lineage-controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.dc-lineage-canvas { height: 58vh; min-height: 360px; border: 1px solid var(--border); border-radius: var(--radius-base); overflow: hidden; background: var(--surface-1); }
+.dc-lineage-msg { display: grid; place-items: center; color: var(--text-muted); font-size: 14px; }
+.dc-control-group { display: flex; align-items: center; gap: 8px; }
+.dc-control-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+
+/* ---- Metrics tab --------------------------------------------------------- */
+.dc-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 320px)); justify-content: start; gap: 10px; }
+
+/* Metric/glossary bodies carry less metadata than models — constrain to a
+ * comfortable column so the page reads intentional, not a thin full-width stub. */
+.dc-entity-body-narrow { max-width: 760px; }
+
+/* Section title that carries an inline legend on the right. */
+.dc-section-title--legend { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+/* Color key for the tier bars / stat tones. */
+.dc-legend { display: inline-flex; align-items: center; gap: 12px; margin-left: 10px; font-size: 11px; color: var(--text-muted); font-weight: 400; text-transform: none; letter-spacing: 0; vertical-align: middle; }
+.dc-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.dc-legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+
+/* Observability "Recent runs" status cell — keep dot + label on one line. */
+.dc-status-cell { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+
+/* Lightweight SQL syntax highlighting for the Definition tab (no external dep). */
+.dc-sql-kw { color: var(--accent-text); font-weight: 600; }
+.dc-sql-str { color: var(--success); }
+.dc-sql-com { color: var(--text-muted); font-style: italic; }
+.dc-sql-num { color: var(--warning); }
+.dc-mini-card { border: 1px solid var(--border); border-radius: var(--radius-md, 8px); padding: 10px 12px; cursor: pointer; }
+.dc-mini-card:hover { border-color: var(--border-hover); background: var(--surface-2); }
+.dc-mini-title { font-size: 13px; font-weight: 500; }
+.dc-mini-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+/* ---- Notice (feature-flagged / empty) ------------------------------------ */
+.dc-notice {
+  display: flex; align-items: flex-start; gap: 12px; padding: 16px;
+  border: 1px dashed var(--border); border-radius: var(--radius-base);
+  background: var(--surface-1); color: var(--text-secondary);
+}
+.dc-notice-icon { font-size: 18px; color: var(--text-muted); font-style: normal; }
+.dc-notice-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.dc-notice-reason { font-size: 12.5px; color: var(--text-secondary); margin-top: 2px; }
+
+.dc-stale-banner {
+  display: flex; align-items: flex-start; gap: 10px; padding: 11px 14px; font-size: 13px;
+  border: 1px solid #d6920055; background: #d6920014; color: #9a6b00;
+  border-radius: var(--radius-base);
+}
+.dc-stale-banner strong { font-weight: 600; }
+/* ---- Skeletons (content-shaped loading, no blank-then-snap) -------------- */
+@keyframes dc-shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+.dc-skel {
+  border-radius: var(--radius-sm, 6px);
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-1) 37%, var(--surface-2) 63%);
+  background-size: 400px 100%; animation: dc-shimmer 1.2s ease-in-out infinite;
+}
+.dc-skel-row { height: 56px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: var(--radius-base); }
+.dc-skel-line { height: 12px; margin: 8px 0; }
+.dc-skel-card { height: 96px; border-radius: var(--radius-md, 8px); }
+.dc-skel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 12px; }
+@media (prefers-reduced-motion: reduce) { .dc-skel { animation: none; } }
+
+.dc-empty { padding: 36px; text-align: center; color: var(--text-muted); font-size: 14px; }
+/* Zero-result recovery: "Did you mean" / "Popular" chip rows. */
+.dc-empty-block { margin-top: 18px; }
+.dc-empty-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin-bottom: 8px; }
+.dc-chip-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.dc-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary); background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 10px; cursor: pointer; }
+.dc-chip:hover { border-color: var(--accent-text); color: var(--accent-text); background: var(--accent-softer); }
+.dc-chip-glyph { color: var(--text-muted); }
+.dc-error { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-base); background: var(--surface-1); color: var(--text-secondary); }
+.dc-placeholder { padding: 48px 24px; text-align: center; color: var(--text-muted); }
+.dc-placeholder h3 { color: var(--text-secondary); font-weight: 600; margin: 0 0 6px; }
+
+@media (max-width: 980px) {
+  .dc-shell { grid-template-columns: 1fr; gap: 12px; }
+  .dc-rail { position: static; flex-direction: row; flex-wrap: wrap; gap: 6px; }
+  .dc-rail-item { width: auto; }
+  .dc-entity-grid { grid-template-columns: 1fr; }
+  .dc-entity-rail { position: static; }
+  .dc-home-split { grid-template-columns: 1fr; }
+  .dc-domain-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 1200px) and (min-width: 981px) {
+  .dc-domain-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .dc-layout, .dc-layout--gov, .dc-layout--obs { grid-template-columns: 1fr; }
+  .dc-sidebar { position: static; }
+  .dc-relations { grid-template-columns: 1fr; }
+  .dc-domain-grid { grid-template-columns: 1fr; }
+}
