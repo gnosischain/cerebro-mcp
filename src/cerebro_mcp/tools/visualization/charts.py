@@ -2389,6 +2389,81 @@ def _build_standalone_html(
     return html[:insert_pos] + data_tag + "\n" + html[insert_pos:]
 
 
+def list_charts_impl() -> str:
+    """Shared implementation for the ``list_charts`` tool and the ``list``
+    unifier (``kind="charts"``). Byte-identical output for both callers."""
+    if not _chart_registry:
+        return (
+            "No charts registered. Use `generate_charts` for report batches "
+            "or `generate_chart` / `quick_chart` for one-off charts first."
+        )
+
+    lines = ["# Registered Charts\n"]
+    lines.append("| Chart ID | Title | Type | Data Points |")
+    lines.append("|----------|-------|------|-------------|")
+
+    for chart_id, info in _chart_registry.items():
+        lines.append(
+            f"| {chart_id} | {info['title']} | {info['chart_type']} "
+            f"| {info['data_points']} |"
+        )
+
+    lines.append(
+        f"\nTotal: {len(_chart_registry)} charts. "
+        f"Use `{{{{chart:CHART_ID}}}}` placeholders in `generate_report`."
+    )
+    return "\n".join(lines)
+
+
+def list_reports_impl(limit: int = 20) -> str:
+    """Shared implementation for the ``list_reports`` tool and the ``list``
+    unifier (``kind="reports"``). Byte-identical output for both callers."""
+    report_dir = Path(
+        os.environ.get("CEREBRO_REPORT_DIR", "~/.cerebro/reports")
+    ).expanduser()
+    if not report_dir.exists():
+        return "No report directory found. Generate a report first with `generate_report`."
+
+    html_files = sorted(
+        _iter_report_files(report_dir),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not html_files:
+        return "No saved reports found. Generate a report first with `generate_report` or `generate_research_report`."
+
+    lines = ["# Saved Reports\n"]
+    lines.append("| # | Report ID | Kind | Title | Created (UTC) | Size | Link |")
+    lines.append("|---|-----------|------|-------|---------------|------|------|")
+
+    for i, f in enumerate(html_files[:limit], 1):
+        stat = f.stat()
+        modified = datetime.fromtimestamp(
+            stat.st_mtime, tz=timezone.utc
+        ).strftime("%Y-%m-%d %H:%M")
+        size_kb = stat.st_size / 1024
+        file_uri = _get_report_link(f)
+        full_id = _extract_report_id_from_path(f)
+        short_id = full_id[:8]
+        kind = _report_kind_from_path(f)
+        # Slug is the 4th segment in both filename schemes (0-indexed)
+        parts = f.stem.split("_")
+        slug = parts[3] if len(parts) >= 5 else ""
+        title_hint = slug.replace("-", " ").title() if slug else "—"
+        lines.append(
+            f"| {i} | `{short_id}` | {kind} | {title_hint} | {modified} "
+            f"| {size_kb:.0f} KB | {file_uri} |"
+        )
+
+    if len(html_files) > limit:
+        lines.append(f"\n_Showing {limit} of {len(html_files)} reports._")
+
+    lines.append(f"\nReport directory: `{report_dir}`")
+    lines.append("\nTo reopen: `open_report(\"<report_id>\")`")
+    return "\n".join(lines)
+
+
 def register_visualization_tools(mcp, ch: ClickHouseManager):
     """Register chart generation and report tools."""
 
@@ -3258,30 +3333,12 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
     def list_charts() -> str:
         """List all charts in the registry with IDs, titles, and types.
 
+        Deprecated: use `list(kind="charts")`.
+
         Returns:
             Table of registered charts available for use in generate_report.
         """
-        if not _chart_registry:
-            return (
-                "No charts registered. Use `generate_charts` for report batches "
-                "or `generate_chart` / `quick_chart` for one-off charts first."
-            )
-
-        lines = ["# Registered Charts\n"]
-        lines.append("| Chart ID | Title | Type | Data Points |")
-        lines.append("|----------|-------|------|-------------|")
-
-        for chart_id, info in _chart_registry.items():
-            lines.append(
-                f"| {chart_id} | {info['title']} | {info['chart_type']} "
-                f"| {info['data_points']} |"
-            )
-
-        lines.append(
-            f"\nTotal: {len(_chart_registry)} charts. "
-            f"Use `{{{{chart:CHART_ID}}}}` placeholders in `generate_report`."
-        )
-        return "\n".join(lines)
+        return list_charts_impl()
 
     @mcp.tool(meta={
         "ui": {"resourceUri": REPORT_URI},
@@ -3698,6 +3755,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
     def list_reports(limit: int = 20) -> str:
         """List previously generated reports saved on disk.
 
+        Deprecated: use `list(kind="reports")`.
+
         Returns a table of saved reports sorted newest-first with file:// links.
         Use `open_report(report_id)` to reopen any report.
 
@@ -3707,50 +3766,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         Returns:
             Table of saved reports with IDs, dates, sizes, and links.
         """
-        report_dir = Path(
-            os.environ.get("CEREBRO_REPORT_DIR", "~/.cerebro/reports")
-        ).expanduser()
-        if not report_dir.exists():
-            return "No report directory found. Generate a report first with `generate_report`."
-
-        html_files = sorted(
-            _iter_report_files(report_dir),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-
-        if not html_files:
-            return "No saved reports found. Generate a report first with `generate_report` or `generate_research_report`."
-
-        lines = ["# Saved Reports\n"]
-        lines.append("| # | Report ID | Kind | Title | Created (UTC) | Size | Link |")
-        lines.append("|---|-----------|------|-------|---------------|------|------|")
-
-        for i, f in enumerate(html_files[:limit], 1):
-            stat = f.stat()
-            modified = datetime.fromtimestamp(
-                stat.st_mtime, tz=timezone.utc
-            ).strftime("%Y-%m-%d %H:%M")
-            size_kb = stat.st_size / 1024
-            file_uri = _get_report_link(f)
-            full_id = _extract_report_id_from_path(f)
-            short_id = full_id[:8]
-            kind = _report_kind_from_path(f)
-            # Slug is the 4th segment in both filename schemes (0-indexed)
-            parts = f.stem.split("_")
-            slug = parts[3] if len(parts) >= 5 else ""
-            title_hint = slug.replace("-", " ").title() if slug else "—"
-            lines.append(
-                f"| {i} | `{short_id}` | {kind} | {title_hint} | {modified} "
-                f"| {size_kb:.0f} KB | {file_uri} |"
-            )
-
-        if len(html_files) > limit:
-            lines.append(f"\n_Showing {limit} of {len(html_files)} reports._")
-
-        lines.append(f"\nReport directory: `{report_dir}`")
-        lines.append("\nTo reopen: `open_report(\"<report_id>\")`")
-        return "\n".join(lines)
+        return list_reports_impl(limit)
 
     # --- Export Report as HTML ---
 

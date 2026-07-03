@@ -65,6 +65,12 @@ class SessionState:
     semantic_tools_available: bool = False
     semantic_tool_calls: int = 0
     semantic_preflight_ran: bool = False
+    # `find` router routed the request (answer/auto mode discovery). SEPARATE
+    # from `semantic_preflight_ran` on purpose: an answer-mode `find` unblocks
+    # raw discovery for free but must NOT open the chart/report hard gates,
+    # which stay reserved for a real `preflight_analytics_request`.
+    semantic_find_ran: bool = False
+    semantic_find_route: str = ""
     semantic_route_last: str = ""
     semantic_mode_last: str = ""
     semantic_execution_attempted: bool = False
@@ -233,6 +239,35 @@ class SessionState:
             self.semantic_mode_last = mode
             self.semantic_fallback_reason = fallback_reason
             self.semantic_fallback_recorded = route == "semantic_coverage_gap"
+            if route == "semantic_ready":
+                self.analysis_path = "semantic_only"
+            elif route == "hybrid_ready":
+                self.analysis_path = "hybrid"
+            elif route in ("semantic_coverage_gap", "semantic_disabled", "semantic_unavailable"):
+                self.analysis_path = "raw_only"
+
+    def record_semantic_find(
+        self,
+        *,
+        route: str,
+        mode: str,
+        recommended_metrics: list[str] | None = None,
+    ) -> None:
+        """Record that the `find` router routed a request.
+
+        Mirrors :meth:`record_semantic_preflight` for `semantic_route_last` /
+        `semantic_mode_last` / `analysis_path` bookkeeping BUT sets
+        `semantic_find_ran` instead of `semantic_preflight_ran`. This lets an
+        answer-mode `find` satisfy the discovery nudge (`_semantic_discovery_gate`)
+        for free while the chart/report hard gates keep requiring the real
+        preflight flag.
+        """
+        with self.lock:
+            self.semantic_tools_available = True
+            self.semantic_find_ran = True
+            self.semantic_find_route = route
+            self.semantic_route_last = route
+            self.semantic_mode_last = mode
             if route == "semantic_ready":
                 self.analysis_path = "semantic_only"
             elif route == "hybrid_ready":
@@ -601,6 +636,8 @@ class SessionState:
                 "semantic_route_last": self.semantic_route_last,
                 "semantic_mode_last": self.semantic_mode_last,
                 "semantic_preflight_ran": self.semantic_preflight_ran,
+                "semantic_find_ran": self.semantic_find_ran,
+                "semantic_find_route": self.semantic_find_route,
                 "semantic_execution_attempted": self.semantic_execution_attempted,
                 "semantic_fallback_recorded": self.semantic_fallback_recorded,
                 "semantic_fallback_reason": self.semantic_fallback_reason,
@@ -650,6 +687,8 @@ class SessionState:
             self.semantic_tools_available = False
             self.semantic_tool_calls = 0
             self.semantic_preflight_ran = False
+            self.semantic_find_ran = False
+            self.semantic_find_route = ""
             self.semantic_route_last = ""
             self.semantic_mode_last = ""
             self.semantic_execution_attempted = False

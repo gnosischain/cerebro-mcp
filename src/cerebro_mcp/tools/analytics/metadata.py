@@ -222,39 +222,47 @@ TABLE_ROW_SCALE = {
 }
 
 
+def list_databases_impl(ch: ClickHouseManager) -> str:
+    """Shared implementation for the ``list_databases`` tool and the ``list``
+    unifier (``kind="databases"``). Byte-identical output for both callers."""
+    try:
+        lines = ["# Available Databases\n"]
+
+        for db_name in settings.ALLOWED_DATABASES:
+            desc = DATABASE_DESCRIPTIONS.get(db_name, "")
+            try:
+                sql = (
+                    "SELECT count() FROM system.tables "
+                    "WHERE database = {db:String}"
+                )
+                cache_key = f"tables:{db_name}:"
+                result = ch.execute_raw_cached(
+                    sql, db_name, cache_key, parameters={"db": db_name}
+                )
+                count = result["rows"][0][0] if result["rows"] else "?"
+            except Exception:
+                count = "?"
+
+            lines.append(
+                f"## {db_name} ({count} tables)\n{desc}\n"
+            )
+
+        return truncate_response("\n".join(lines))
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def register_metadata_tools(mcp, ch: ClickHouseManager):
     @mcp.tool()
     def list_databases() -> str:
         """List all available ClickHouse databases with descriptions and table counts.
 
+        Deprecated: use `list(kind="databases")`.
+
         Returns:
             Database listing with name, description, and table count.
         """
-        try:
-            lines = ["# Available Databases\n"]
-
-            for db_name in settings.ALLOWED_DATABASES:
-                desc = DATABASE_DESCRIPTIONS.get(db_name, "")
-                try:
-                    sql = (
-                        "SELECT count() FROM system.tables "
-                        "WHERE database = {db:String}"
-                    )
-                    cache_key = f"tables:{db_name}:"
-                    result = ch.execute_raw_cached(
-                        sql, db_name, cache_key, parameters={"db": db_name}
-                    )
-                    count = result["rows"][0][0] if result["rows"] else "?"
-                except Exception:
-                    count = "?"
-
-                lines.append(
-                    f"## {db_name} ({count} tables)\n{desc}\n"
-                )
-
-            return truncate_response("\n".join(lines))
-        except Exception as e:
-            return f"Error: {e}"
+        return list_databases_impl(ch)
 
     @mcp.tool()
     def quality_metrics() -> str:

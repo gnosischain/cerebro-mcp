@@ -1196,74 +1196,75 @@ def get_executable_metrics_for_model(model_name: str) -> list[dict[str, Any]]:
     ]
 
 
-def get_semantic_preflight(
-    query: str,
-    mode: str = "answer",
-    *,
-    agent_role: str = "",
-) -> AnalyticsPreflightResult:
+def _normalize_route_mode(mode: str) -> str:
     normalized_mode = normalize(mode) or "answer"
     if normalized_mode not in {"answer", "chart", "report"}:
         normalized_mode = "answer"
+    return normalized_mode
+
+
+def _route(query: str, mode: str) -> dict[str, Any]:
+    """Shared routing core for BOTH `preflight_analytics_request` and `find`.
+
+    Resolves the semantic snapshot (same availability checks + one-shot retry
+    as the preflight tool) then scores approved metrics against the query and
+    returns the routing decision. Single source of truth so the two front doors
+    can never drift.
+
+    Returns a dict with:
+      - ``status``: ``"ok"`` when routing succeeded, else ``"disabled"`` /
+        ``"unavailable"`` (the preflight/find caller renders a fallback).
+      - ``route``: one of ``semantic_ready`` / ``hybrid_ready`` /
+        ``semantic_coverage_gap`` (or ``semantic_disabled`` /
+        ``semantic_unavailable`` on a non-ok status).
+      - ``recommended_metrics`` / ``recommended_dimensions``
+      - ``next_tool``: mode-aware recommended next tool.
+      - ``covered_topics`` / ``uncovered_topics``
+      - ``accepted`` / ``rejected``: scored ``(score, name, metric)`` tuples for
+        the caller's downstream provisional-coverage / markdown building.
+      - ``hybrid_ready`` / ``fallback_reason`` / ``mode``
+    """
+    normalized_mode = _normalize_route_mode(mode)
+
+    def _fail(status: str, route: str, fallback_reason: str) -> dict[str, Any]:
+        return {
+            "status": status,
+            "mode": normalized_mode,
+            "route": route,
+            "recommended_metrics": [],
+            "recommended_dimensions": [],
+            "next_tool": "discover_models",
+            "covered_topics": [],
+            "uncovered_topics": [],
+            "accepted": [],
+            "rejected": [],
+            "hybrid_ready": False,
+            "fallback_reason": fallback_reason,
+        }
 
     if not settings.SEMANTIC_ENABLED:
-        return AnalyticsPreflightResult(
-            query=query,
-            mode=normalized_mode,
-            route="semantic_disabled",
-            recommended_next_tool="discover_models",
-            fallback_reason="semantic_disabled",
-            summary_markdown=truncate_response(
-                "Semantic routing is disabled. Continue with raw model discovery."
-            ),
-        )
+        return _fail("disabled", "semantic_disabled", "semantic_disabled")
 
     _maybe_refresh_semantic()
     snapshot, error = _snapshot_or_error()
     if snapshot is None:
-        return AnalyticsPreflightResult(
-            query=query,
-            mode=normalized_mode,
-            route="semantic_unavailable",
-            recommended_next_tool="discover_models",
-            fallback_reason=(error or "semantic_unavailable").replace("Semantic ", "").rstrip("."),
-            summary_markdown=truncate_response(
-                f"Semantic routing unavailable: {error or 'snapshot unavailable'}"
-            ),
-        )
+        reason = (error or "semantic_unavailable").replace("Semantic ", "").rstrip(".")
+        return _fail("unavailable", "semantic_unavailable", reason)
 
     if not semantic_runtime.is_execution_available:
-        # One-shot retry on hash mismatch — same retry the execution-bound
-        # tools (query_metrics, explain_metric_query) get via
-        # `_snapshot_or_error_with_retry`. Closes the gap where a fresh
-        # `dbt build` + `build_registry.py` cycle leaves the runtime
-        # holding a stale snapshot until the next 5-minute TTL tick.
         is_available, stale_reason = _retry_execution_state_if_hash_mismatch()
         if not is_available:
-            reason = stale_reason or "semantic execution unavailable"
-            return AnalyticsPreflightResult(
-                query=query,
-                mode=normalized_mode,
-                route="semantic_unavailable",
-                recommended_next_tool="discover_models",
-                fallback_reason=reason,
-                summary_markdown=truncate_response(
-                    f"Semantic execution unavailable: {reason}. Continue with raw discovery."
-                ),
+            return _fail(
+                "unavailable",
+                "semantic_unavailable",
+                stale_reason or "semantic execution unavailable",
             )
-        # Retry cleared the mismatch — refresh the local snapshot reference
-        # so downstream scoring uses the newly-loaded registry.
         snapshot = semantic_runtime.snapshot
         if snapshot is None:
-            return AnalyticsPreflightResult(
-                query=query,
-                mode=normalized_mode,
-                route="semantic_unavailable",
-                recommended_next_tool="discover_models",
-                fallback_reason="snapshot unavailable after retry",
-                summary_markdown=truncate_response(
-                    "Semantic snapshot unavailable after retry. Continue with raw discovery."
-                ),
+            return _fail(
+                "unavailable",
+                "semantic_unavailable",
+                "snapshot unavailable after retry",
             )
 
     scored: list[tuple[int, str, dict[str, Any]]] = []
@@ -1292,10 +1293,8 @@ def get_semantic_preflight(
     if accepted:
         recommended_dimensions = _infer_dimensions_from_query(query, accepted[0][2])
 
-    # Topic-level hybrid routing
     covered_topics, uncovered_topics = _extract_topic_labels(query, accepted, rejected)
     hybrid_ready = False
-
     if accepted and uncovered_topics:
         route = "hybrid_ready"
         hybrid_ready = True
@@ -1309,6 +1308,115 @@ def get_semantic_preflight(
 
     next_tool = _recommended_semantic_next_tool(route, normalized_mode, len(accepted))
 
+    return {
+        "status": "ok",
+        "mode": normalized_mode,
+        "route": route,
+        "recommended_metrics": recommended_metrics,
+        "recommended_dimensions": recommended_dimensions,
+        "next_tool": next_tool,
+        "covered_topics": covered_topics,
+        "uncovered_topics": uncovered_topics,
+        "accepted": accepted,
+        "rejected": rejected,
+        "hybrid_ready": hybrid_ready,
+        "fallback_reason": fallback_reason,
+        "snapshot": snapshot,
+    }
+
+
+def _build_slim_preflight(query: str, mode: str) -> AnalyticsPreflightResult:
+    """Compact preflight result from the shared `_route` core: route + top-5
+    metrics + dimensions + next tool, with a one-line summary. Skips the
+    covered/uncovered-topic and provisional-coverage dump the full path emits.
+    """
+    normalized_mode = _normalize_route_mode(mode)
+    routing = _route(query, normalized_mode)
+    if routing["status"] == "disabled":
+        return AnalyticsPreflightResult(
+            query=query,
+            mode=normalized_mode,
+            route="semantic_disabled",
+            recommended_next_tool="discover_models",
+            fallback_reason="semantic_disabled",
+            summary_markdown="Semantic routing is disabled. Continue with raw model discovery.",
+        )
+    if routing["status"] == "unavailable":
+        reason = routing["fallback_reason"] or "semantic_unavailable"
+        return AnalyticsPreflightResult(
+            query=query,
+            mode=normalized_mode,
+            route="semantic_unavailable",
+            recommended_next_tool="discover_models",
+            fallback_reason=reason,
+            summary_markdown=f"Semantic routing unavailable: {reason}.",
+        )
+    metrics = routing["recommended_metrics"]
+    dims = routing["recommended_dimensions"]
+    summary = (
+        f"Route: `{routing['route']}` | "
+        f"metrics: {', '.join(metrics) or 'none'} | "
+        f"dimensions: {', '.join(dims) or 'none'} | "
+        f"next: `{routing['next_tool']}`"
+    )
+    return AnalyticsPreflightResult(
+        query=query,
+        mode=normalized_mode,
+        route=routing["route"],
+        hybrid_ready=routing["hybrid_ready"],
+        recommended_metrics=metrics,
+        recommended_dimensions=dims,
+        recommended_next_tool=routing["next_tool"],
+        fallback_reason=routing["fallback_reason"],
+        summary_markdown=truncate_response(summary),
+    )
+
+
+def get_semantic_preflight(
+    query: str,
+    mode: str = "answer",
+    *,
+    agent_role: str = "",
+) -> AnalyticsPreflightResult:
+    normalized_mode = normalize(mode) or "answer"
+    if normalized_mode not in {"answer", "chart", "report"}:
+        normalized_mode = "answer"
+
+    routing = _route(query, normalized_mode)
+    if routing["status"] == "disabled":
+        return AnalyticsPreflightResult(
+            query=query,
+            mode=normalized_mode,
+            route="semantic_disabled",
+            recommended_next_tool="discover_models",
+            fallback_reason="semantic_disabled",
+            summary_markdown=truncate_response(
+                "Semantic routing is disabled. Continue with raw model discovery."
+            ),
+        )
+    if routing["status"] == "unavailable":
+        reason = routing["fallback_reason"] or "semantic_unavailable"
+        return AnalyticsPreflightResult(
+            query=query,
+            mode=normalized_mode,
+            route="semantic_unavailable",
+            recommended_next_tool="discover_models",
+            fallback_reason=reason,
+            summary_markdown=truncate_response(
+                f"Semantic routing unavailable: {reason}. Continue with raw discovery."
+            ),
+        )
+
+    snapshot = routing["snapshot"]
+    recommended_metrics = routing["recommended_metrics"]
+    recommended_dimensions = routing["recommended_dimensions"]
+    covered_topics = routing["covered_topics"]
+    uncovered_topics = routing["uncovered_topics"]
+    hybrid_ready = routing["hybrid_ready"]
+    route = routing["route"]
+    fallback_reason = routing["fallback_reason"]
+    next_tool = routing["next_tool"]
+
     # Provisional (candidate-tier) coverage probe. Routing NEVER considers
     # candidate metrics — the route above is decided purely on approved
     # coverage — but when the approved layer leaves topics uncovered we
@@ -1317,6 +1425,7 @@ def get_semantic_preflight(
     provisional_topics: list[str] = []
     provisional_metric_names: list[str] = []
     if uncovered_topics:
+        token_idf = _token_idf_for_snapshot(snapshot)
         provisional_matches: list[tuple[int, str, dict[str, Any]]] = []
         for metric_name, metric in snapshot.metrics.items():
             if not _metric_is_candidate(snapshot, metric):
@@ -1387,6 +1496,49 @@ def get_semantic_preflight(
         fallback_reason=fallback_reason,
         summary_markdown=truncate_response("\n".join(lines)),
     )
+
+
+def _time_dimension_names_from_plan(plan: dict[str, Any]) -> set[str]:
+    """Names of all resolved TIME dimensions in a metric plan.
+
+    Reads the plan's branch ``dimension_bindings`` and keeps any binding whose
+    ``dimension.type == "time"``. This is authoritative and covers BOTH direct
+    root-model time columns AND synthesised time-spine upcasts (``week`` /
+    ``month`` via ``toMonday`` / ``toStartOfMonth`` — those bindings carry
+    ``type: "time"`` too). Result columns are aliased ``AS <dimension_name>``,
+    so a name here is exactly the output column name.
+    """
+    names: set[str] = set()
+    for branch in plan.get("branches", []) or []:
+        for dim_name, binding in (branch.get("dimension_bindings") or {}).items():
+            dimension = (binding or {}).get("dimension") or {}
+            if dimension.get("type") == "time":
+                names.add(dim_name)
+    return names
+
+
+def _format_time_dimension_cells(plan: dict[str, Any], result: Any) -> None:
+    """In-place: render epoch-int cells in resolved TIME-dimension columns as
+    ISO strings, using the authoritative typed formatter (`_format_sample_cell`
+    with a ``Date`` type). Only known time-dimension columns are touched, so a
+    plain numeric metric near 17000-25000 is never reinterpreted as a date.
+    """
+    time_names = _time_dimension_names_from_plan(plan)
+    if not time_names:
+        return
+    columns = getattr(result, "columns", None) or []
+    rows = getattr(result, "rows", None)
+    if not rows:
+        return
+    time_col_idxs = [i for i, col in enumerate(columns) if col in time_names]
+    if not time_col_idxs:
+        return
+    from cerebro_mcp.tools.semantic.data_catalog import _format_sample_cell
+
+    for row in rows:
+        for i in time_col_idxs:
+            if i < len(row):
+                row[i] = _format_sample_cell(row[i], "Date", columns[i])
 
 
 def execute_metric_query(
@@ -1475,6 +1627,7 @@ def execute_metric_query(
                     fetch_mode="auto",
                 )
                 result = ch.build_query_result(executed, max_rows=limit)
+                _format_time_dimension_cells(plan, result)
                 repair_traces.append(
                     SemanticRetryTrace(
                         attempt=attempt,
@@ -1794,11 +1947,13 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         query: str,
         mode: str = "answer",
         agent_role: str = "",
+        detail: str = "full",
     ) -> AnalyticsPreflightResult | str:
         role = _resolve_agent_role(agent_role)
         normalized_mode = normalize(mode) or "answer"
         if normalized_mode not in {"answer", "chart", "report"}:
             normalized_mode = "answer"
+        slim = (detail or "full").strip().lower() == "slim"
         try:
             # Each preflight marks the start of a new analysis cycle. Reset
             # per-cycle discovery and execution accumulators so prior-session
@@ -1816,12 +1971,21 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
                 observe_cache_hit("semantic_preflight")
             else:
                 observe_cache_miss("semantic_preflight")
-            result = (
-                AnalyticsPreflightResult(**cached)
-                if cached is not None
-                else get_semantic_preflight(query, mode=normalized_mode, agent_role=role)
-            )
-            if not cache_hit:
+            if slim:
+                # Slim detail: route + top-5 from the SHARED `_route` core,
+                # skipping the covered-topics / provisional-coverage dump.
+                # Still one of the three preflight modes (answer|chart|report)
+                # so all downstream state recording is unchanged.
+                result = _build_slim_preflight(query, normalized_mode)
+            else:
+                result = (
+                    AnalyticsPreflightResult(**cached)
+                    if cached is not None
+                    else get_semantic_preflight(query, mode=normalized_mode, agent_role=role)
+                )
+            if not cache_hit and not slim:
+                # Don't cache the slim (compact) variant under the shared key —
+                # a later full preflight for the same query must not read it back.
                 state.cache_semantic_preflight(
                     query=query,
                     mode=result.mode,
@@ -1903,6 +2067,10 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         limit: int = 10,
         agent_role: str = "",
     ) -> MetricDiscoveryResult | str:
+        """Search the semantic layer for metrics matching a natural-language query.
+
+        Prefer `find(query=...)` for one-call discovery.
+        """
         role = _resolve_agent_role(agent_role)
         try:
             state.record_semantic_tool_call("discover_metrics")

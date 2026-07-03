@@ -27,6 +27,33 @@ def _save_queries(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
+def list_saved_queries_impl() -> str:
+    """Shared implementation for the ``list_saved_queries`` tool and the ``list``
+    unifier (``kind="saved_queries"``). Byte-identical output for both callers."""
+    try:
+        data = _load_saved_queries()
+        queries = data.get("queries", {})
+
+        if not queries:
+            return "No saved queries found. Use `save_query` to save one."
+
+        lines = ["# Saved Queries\n"]
+        lines.append("| Name | Database | Description | Updated |")
+        lines.append("|------|----------|-------------|---------|")
+
+        for name, q in sorted(queries.items()):
+            desc = q.get("description", "")[:60]
+            updated = q.get("updated_at", "")[:10]
+            lines.append(
+                f"| {name} | {q.get('database', 'dbt')} | {desc} | {updated} |"
+            )
+
+        lines.append(f"\nTotal: {len(queries)} saved queries")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def register_saved_query_tools(mcp, ch: ClickHouseManager):
     """Register saved query management tools."""
 
@@ -94,31 +121,12 @@ def register_saved_query_tools(mcp, ch: ClickHouseManager):
     def list_saved_queries() -> str:
         """List all saved queries with their names, databases, and descriptions.
 
+        Deprecated: use `list(kind="saved_queries")`.
+
         Returns:
             Table of saved queries or message if none exist.
         """
-        try:
-            data = _load_saved_queries()
-            queries = data.get("queries", {})
-
-            if not queries:
-                return "No saved queries found. Use `save_query` to save one."
-
-            lines = ["# Saved Queries\n"]
-            lines.append("| Name | Database | Description | Updated |")
-            lines.append("|------|----------|-------------|---------|")
-
-            for name, q in sorted(queries.items()):
-                desc = q.get("description", "")[:60]
-                updated = q.get("updated_at", "")[:10]
-                lines.append(
-                    f"| {name} | {q.get('database', 'dbt')} | {desc} | {updated} |"
-                )
-
-            lines.append(f"\nTotal: {len(queries)} saved queries")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error: {e}"
+        return list_saved_queries_impl()
 
     @mcp.tool()
     def run_saved_query(name: str, max_rows: int = 100) -> str:

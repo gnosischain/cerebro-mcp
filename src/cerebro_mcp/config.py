@@ -115,6 +115,15 @@ class Settings(BaseSettings):
     DASHBOARD_BUILDER_ENABLED: bool = False
     METRICS_DASHBOARD_PATH: str = ""
 
+    # Lean-core tool surface (Phase 3). When True, tools classified
+    # tier="advanced" in tools/tool_meta.py are dropped from the model-facing
+    # `list_tools` (the app-only drop still applies too); only the ~17 core
+    # tools stay visible by default. OFF until measured — flip on after a
+    # transcript replay confirms the core set covers common follow-ups.
+    # Advanced tools remain callable and can be un-hidden at runtime via
+    # `load_tools([...])`.
+    LEAN_CORE_ENABLED: bool = False
+
     # Custom tools (MCP Toolbox pattern)
     CUSTOM_TOOLS_ENABLED: bool = False
     CUSTOM_TOOLS_PATH: str = ""

@@ -624,6 +624,15 @@ APP_ONLY_META = {"ui": {"visibility": ["app"]}}
 _app_only_tool_names: set[str] = set()
 _app_only_lock = threading.Lock()
 
+# Advanced tools explicitly un-hidden at runtime via `load_tools([...])` so they
+# pass the lean-core drop below. NOTE: the `list_tools` wrapper is
+# PROCESS-GLOBAL (one monkey-patch per server object, no per-request state), so
+# this un-hide set is process-global too — every session sees the same visible
+# surface. Making it per-session would require request/session context in the
+# wrapper, which FastMCP does not thread through `list_tools`.
+_force_visible_tool_names: set[str] = set()
+_force_visible_lock = threading.Lock()
+
 
 def mark_app_only(name: str) -> None:
     with _app_only_lock:
@@ -635,15 +644,72 @@ def get_app_only_tool_names() -> set[str]:
         return set(_app_only_tool_names)
 
 
+def mark_force_visible(*names: str) -> None:
+    """Un-hide advanced tools so they survive the lean-core drop (process-global)."""
+    with _force_visible_lock:
+        _force_visible_tool_names.update(n for n in names if n)
+
+
+def get_force_visible_tool_names() -> set[str]:
+    with _force_visible_lock:
+        return set(_force_visible_tool_names)
+
+
+def clear_force_visible_tool_names() -> None:
+    """Reset the un-hide set (used by tests)."""
+    with _force_visible_lock:
+        _force_visible_tool_names.clear()
+
+
+def _is_app_only_tool(tool) -> bool:
+    """True if a tool is marked app-only via its ``meta.ui.visibility``."""
+    meta = getattr(tool, "meta", None) or {}
+    ui = meta.get("ui") if isinstance(meta, dict) else None
+    visibility = (ui or {}).get("visibility") if isinstance(ui, dict) else None
+    return isinstance(visibility, list) and "app" in visibility
+
+
+def _lean_core_hides(tool) -> bool:
+    """True if the lean-core filter should drop this tool.
+
+    Only when ``LEAN_CORE_ENABLED`` is on, the tool classifies ``advanced``,
+    and it has NOT been un-hidden via ``load_tools``. Core tools are never
+    dropped. The flag is read at call-time (not import-time) so tests /
+    hot-reloads see the current value.
+    """
+    # Imported here (not at module top) so the flag is read live and to avoid
+    # any import cycle between config and the mini-app module.
+    from cerebro_mcp.config import settings
+    from cerebro_mcp.tools.tool_meta import is_core_tool
+
+    if not getattr(settings, "LEAN_CORE_ENABLED", False):
+        return False
+    name = getattr(tool, "name", "") or ""
+    if not name or name in get_force_visible_tool_names():
+        return False
+    description = getattr(tool, "description", "") or ""
+    return not is_core_tool(name, description)
+
+
 def install_app_only_filter(mcp) -> None:
-    """Wrap ``mcp.list_tools`` so app-only tools never reach the model.
+    """Wrap ``mcp.list_tools`` so hidden tools never reach the model.
 
-    The MCP protocol exposes every registered tool. We monkey-patch the
-    server's ``list_tools`` to filter out anything whose ``meta.ui.visibility``
-    contains ``"app"``. The tools are still callable by the frontend (which
-    uses the ext-apps SDK ``callTool`` path that bypasses ``list_tools``).
+    Two drops share this single wrapper:
 
-    Idempotent: a marker attribute prevents double-wrapping.
+    1. **App-only** — anything whose ``meta.ui.visibility`` contains ``"app"``
+       (mini-app hydration tools). Always applied. The tools stay callable by
+       the frontend, which uses the ext-apps SDK ``callTool`` path that bypasses
+       ``list_tools``.
+    2. **Lean-core** — when ``settings.LEAN_CORE_ENABLED`` is on, tools
+       classified ``tier="advanced"`` in ``tools/tool_meta.py`` (and not
+       un-hidden via ``load_tools``) are also dropped, leaving the ~17 core
+       tools. When the flag is OFF, behaviour is unchanged (all non-app tools
+       visible). Advanced tools stay registered and callable either way — this
+       only trims the advertised list.
+
+    Idempotent: a marker attribute prevents double-wrapping. NOTE: the wrapper
+    is process-global (no per-request/session state), so the lean-core surface
+    is the same for every session.
     """
     if getattr(mcp, "_mini_app_filter_installed", False):
         return
@@ -654,16 +720,104 @@ def install_app_only_filter(mcp) -> None:
         tools = await original_list_tools()
         filtered = []
         for tool in tools:
-            meta = getattr(tool, "meta", None) or {}
-            ui = meta.get("ui") if isinstance(meta, dict) else None
-            visibility = (ui or {}).get("visibility") if isinstance(ui, dict) else None
-            if isinstance(visibility, list) and "app" in visibility:
+            if _is_app_only_tool(tool):
+                continue
+            if _lean_core_hides(tool):
                 continue
             filtered.append(tool)
         return filtered
 
     mcp.list_tools = list_tools_filtered  # type: ignore[assignment]
     mcp._mini_app_filter_installed = True  # type: ignore[attr-defined]
+
+
+async def _emit_tool_list_changed(mcp) -> bool:
+    """Best-effort emit of ``notifications/tools/list_changed``.
+
+    COMPATIBILITY SPIKE — UNPROVEN. This repo has no established list_changed
+    emit path. FastMCP exposes no public helper; the notification lives on the
+    low-level ``ServerSession`` (``send_tool_list_changed``), reachable only
+    within a live request via ``mcp.get_context().session``. Outside a request
+    (or if the client ignores the notification) this is a no-op. Returns True
+    only if the send call was made without raising; that does NOT prove the
+    client refetched. Never raises.
+    """
+    try:
+        ctx = mcp.get_context()
+        session = getattr(ctx, "session", None)
+        send = getattr(session, "send_tool_list_changed", None)
+        if session is None or send is None:
+            logger.info("load_tools: no session available; list_changed not emitted")
+            return False
+        await send()
+        return True
+    except Exception as exc:  # pragma: no cover - depends on live session
+        logger.info("load_tools: list_changed emit failed (best-effort): %s", exc)
+        return False
+
+
+def register_load_tools_tool(mcp) -> None:
+    """Register ``load_tools`` — the advanced-tool un-hide COMPATIBILITY SPIKE.
+
+    Un-hiding is deterministic; the client-refresh half is not. Register LAST
+    (after the full tool surface exists) so name validation sees every tool.
+    Idempotent via a marker attribute.
+    """
+    if getattr(mcp, "_load_tools_installed", False):
+        return
+
+    @mcp.tool()
+    async def load_tools(names: list[str]) -> dict[str, Any]:
+        """Un-hide advanced tools so they appear in the tool list (lean-core mode).
+
+        When ``LEAN_CORE_ENABLED`` is on, only the ~17 core tools are advertised
+        by default; advanced tools stay registered and CALLABLE but are hidden
+        from ``list_tools``. This un-hides the named advanced tools so they also
+        show up, then best-effort asks the client to refetch the tool list.
+
+        CAVEATS (read before relying on this):
+        * The un-hide is PROCESS-GLOBAL, not per-session — the visibility filter
+          has no per-request state, so every session sees the same surface.
+        * The client-refresh half (``notifications/tools/list_changed``) is an
+          UNPROVEN spike: emission is best-effort and only works inside a live
+          request; a client may ignore it. If a name doesn't appear afterward,
+          the tool is still callable directly by name. Prefer the core set /
+          ``find`` follow-ups, which need no refresh.
+
+        Args:
+            names: Tool names to un-hide (unknown names are reported, not fatal).
+
+        Returns:
+            ``{unhidden, unknown, already_core, list_changed_emitted, note}``.
+        """
+        registered = getattr(getattr(mcp, "_tool_manager", None), "_tools", {}) or {}
+        from cerebro_mcp.tools.tool_meta import is_core_tool
+
+        requested = [n for n in (names or []) if n]
+        unknown = [n for n in requested if n not in registered]
+        known = [n for n in requested if n in registered]
+        already_core = [n for n in known if is_core_tool(n)]
+        to_unhide = [n for n in known if n not in already_core]
+
+        if to_unhide:
+            mark_force_visible(*to_unhide)
+
+        emitted = await _emit_tool_list_changed(mcp) if to_unhide else False
+
+        return {
+            "unhidden": to_unhide,
+            "unknown": unknown,
+            "already_core": already_core,
+            "list_changed_emitted": emitted,
+            "note": (
+                "Un-hide is process-global. list_changed emission is best-effort "
+                "and unproven; if a tool doesn't appear in the list, call it "
+                "directly by name — it is still callable."
+            ),
+        }
+
+    mcp._load_tools_installed = True  # type: ignore[attr-defined]
+    return load_tools
 
 
 # ---------------------------------------------------------------------------

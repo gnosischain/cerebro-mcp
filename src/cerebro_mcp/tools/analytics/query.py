@@ -61,6 +61,15 @@ def register_query_tools(
                 research_store.load_project(research_project_id)
 
             extra_notes: list[str] = []
+            # fetch_mode="rows" (native), NOT "auto"/arrow: ClickHouse's Arrow
+            # export encodes Date as uint16 (epoch-days) and DateTime as uint32
+            # (epoch-seconds) with NO type metadata, so the arrow path can't tell
+            # a date column from a plain integer and returns raw epochs (e.g.
+            # 20626 instead of "2026-06-22"). The native path returns real
+            # date/datetime objects, which build_query_result -> normalize_value
+            # renders as ISO strings. execute_query is capped at MAX_ROWS and
+            # exploratory, so the marginal arrow speed-up isn't worth the
+            # date-correctness regression.
             executed = ch.run_query(
                 sql,
                 database,
@@ -73,7 +82,7 @@ def register_query_tools(
                     else max_rows
                 ),
                 audience="internal" if persist_result else "tool",
-                fetch_mode="auto",
+                fetch_mode="rows",
             )
             result = ch.build_query_result(executed, max_rows=max_rows)
 

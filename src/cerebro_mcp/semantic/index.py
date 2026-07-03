@@ -178,11 +178,30 @@ def score_metric(
     if score == 0 and not matched_tokens:
         return 0
 
-    if token_idf is not None:
-        for token in matched_tokens:
-            score += int(token_idf.get(token, _TOKEN_BONUS_FLOOR))
-    else:
-        score += _TOKEN_BONUS_FLOOR * len(matched_tokens)
+    # Field-weighted token bonus. Tokens that match the metric's curated
+    # TOPICAL fields (name / label / question-synonyms) earn full idf weight;
+    # tokens that match ONLY in the free-text description are heavily
+    # discounted. Without this, a verbose description makes an off-topic metric
+    # rank for generic query tokens — e.g. `bridge_netflow_weekly_by_bridge`,
+    # whose description happens to mention "active users", scoring 76 for
+    # "gnosis app active users" purely on description prose. Standard IR
+    # title-vs-body weighting: the name/label/synonyms are the signal, the
+    # description is context.
+    topical_tokens = _tokens(metric.get("name", "")) | _tokens(metric.get("label", "") or "")
+    for _syn in metric.get("all_synonyms", []) or []:
+        topical_tokens |= _tokens(_syn)
+    for token in matched_tokens:
+        weight = (
+            token_idf.get(token, _TOKEN_BONUS_FLOOR)
+            if token_idf is not None
+            else _TOKEN_BONUS_FLOOR
+        )
+        if token in topical_tokens:
+            score += int(weight)
+        else:
+            # description-only match: keep a weak recall signal, but never
+            # enough to lift an off-topic metric over a topical one.
+            score += int(min(2, weight * 0.25))
 
     if metric.get("quality_tier") == "approved":
         score += 20

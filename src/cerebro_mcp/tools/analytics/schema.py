@@ -143,6 +143,129 @@ def build_table_schema(
     )
 
 
+def list_tables_impl(
+    ch: ClickHouseManager,
+    database: str,
+    name_pattern: str = "",
+    like: str = "",
+    page_size: int = 50,
+    page_token: str | None = None,
+    include_detailed_columns: bool = False,
+) -> TableListPage | str:
+    """Shared implementation for the ``list_tables`` tool and the ``list``
+    unifier (``kind="tables"``). Byte-identical output for both callers."""
+    try:
+        valid, err = validate_identifier(database)
+        if not valid:
+            return f"Error: {err}"
+        if database not in settings.ALLOWED_DATABASES:
+            return (
+                f"Error: Database '{database}' is not allowed. "
+                f"Allowed: {', '.join(settings.ALLOWED_DATABASES)}"
+            )
+
+        pattern = like or name_pattern
+        capped_page_size = min(max(page_size, 1), 200)
+        warnings: list[str] = []
+        if page_size != capped_page_size:
+            warnings.append("page_size_capped")
+        if include_detailed_columns:
+            warnings.append(
+                "include_detailed_columns_ignored_use_describe_table"
+            )
+
+        last_name = _decode_page_token(
+            page_token,
+            database=database,
+            pattern=pattern,
+        )
+
+        sql = """
+SELECT name, engine, total_rows, formatReadableSize(total_bytes) AS size
+FROM system.tables
+WHERE database = {db:String}
+  AND ({pat:String} = '' OR name LIKE {pat:String})
+  AND ({last:String} = '' OR name > {last:String})
+ORDER BY name
+LIMIT {limit:UInt32}
+"""
+        params = {
+            "db": database,
+            "pat": pattern,
+            "last": last_name,
+            "limit": capped_page_size + 1,
+        }
+
+        cursor_key = hashlib.sha256((page_token or "").encode()).hexdigest()[:12]
+        cache_key = (
+            f"tables_page:{database}:{pattern}:{capped_page_size}:{cursor_key}"
+        )
+        result = ch.execute_raw_cached(
+            sql,
+            database,
+            cache_key,
+            parameters=params,
+            page_cache=True,
+        )
+
+        rows = result["rows"]
+        has_next = len(rows) > capped_page_size
+        page_rows = rows[:capped_page_size]
+        next_token = (
+            _encode_page_token(database, pattern, str(page_rows[-1][0]))
+            if has_next and page_rows
+            else None
+        )
+
+        tables = [
+            TableSummary(
+                name=str(row[0]),
+                engine=str(row[1]),
+                total_rows=normalize_value(row[2]),
+                size=str(row[3]),
+            )
+            for row in page_rows
+        ]
+
+        table_rows = [
+            [table.name, table.engine, table.total_rows, table.size]
+            for table in tables
+        ]
+        summary_parts = [f"## {database} tables\n"]
+        if tables:
+            summary_parts.append(
+                format_results_table(
+                    ["name", "engine", "total_rows", "size"],
+                    table_rows,
+                )
+            )
+        else:
+            summary_parts.append(f"No tables found in database '{database}'.")
+
+        if warnings:
+            summary_parts.append(
+                "\n".join(["**Warnings:**", *[f"- {w}" for w in warnings]])
+            )
+        if next_token:
+            summary_parts.append(
+                "More tables are available. Call `list_tables` again with "
+                "`page_token` to continue."
+            )
+
+        return TableListPage(
+            database=database,
+            name_pattern=pattern,
+            page_size=capped_page_size,
+            include_detailed_columns=include_detailed_columns,
+            tables=tables,
+            next_page_token=next_token,
+            warnings=warnings,
+            summary_markdown=truncate_response("\n\n".join(summary_parts)),
+        )
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def register_schema_tools(mcp, ch: ClickHouseManager):
     @mcp.tool()
     def list_tables(
@@ -153,117 +276,19 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
         page_token: str | None = None,
         include_detailed_columns: bool = False,
     ) -> TableListPage | str:
-        """List tables in a ClickHouse database with cursor pagination."""
-        try:
-            valid, err = validate_identifier(database)
-            if not valid:
-                return f"Error: {err}"
-            if database not in settings.ALLOWED_DATABASES:
-                return (
-                    f"Error: Database '{database}' is not allowed. "
-                    f"Allowed: {', '.join(settings.ALLOWED_DATABASES)}"
-                )
+        """List tables in a ClickHouse database with cursor pagination.
 
-            pattern = like or name_pattern
-            capped_page_size = min(max(page_size, 1), 200)
-            warnings: list[str] = []
-            if page_size != capped_page_size:
-                warnings.append("page_size_capped")
-            if include_detailed_columns:
-                warnings.append(
-                    "include_detailed_columns_ignored_use_describe_table"
-                )
-
-            last_name = _decode_page_token(
-                page_token,
-                database=database,
-                pattern=pattern,
-            )
-
-            sql = """
-SELECT name, engine, total_rows, formatReadableSize(total_bytes) AS size
-FROM system.tables
-WHERE database = {db:String}
-  AND ({pat:String} = '' OR name LIKE {pat:String})
-  AND ({last:String} = '' OR name > {last:String})
-ORDER BY name
-LIMIT {limit:UInt32}
-"""
-            params = {
-                "db": database,
-                "pat": pattern,
-                "last": last_name,
-                "limit": capped_page_size + 1,
-            }
-
-            cursor_key = hashlib.sha256((page_token or "").encode()).hexdigest()[:12]
-            cache_key = (
-                f"tables_page:{database}:{pattern}:{capped_page_size}:{cursor_key}"
-            )
-            result = ch.execute_raw_cached(
-                sql,
-                database,
-                cache_key,
-                parameters=params,
-                page_cache=True,
-            )
-
-            rows = result["rows"]
-            has_next = len(rows) > capped_page_size
-            page_rows = rows[:capped_page_size]
-            next_token = (
-                _encode_page_token(database, pattern, str(page_rows[-1][0]))
-                if has_next and page_rows
-                else None
-            )
-
-            tables = [
-                TableSummary(
-                    name=str(row[0]),
-                    engine=str(row[1]),
-                    total_rows=normalize_value(row[2]),
-                    size=str(row[3]),
-                )
-                for row in page_rows
-            ]
-
-            table_rows = [
-                [table.name, table.engine, table.total_rows, table.size]
-                for table in tables
-            ]
-            summary_parts = [f"## {database} tables\n"]
-            if tables:
-                summary_parts.append(
-                    format_results_table(
-                        ["name", "engine", "total_rows", "size"],
-                        table_rows,
-                    )
-                )
-            else:
-                summary_parts.append(f"No tables found in database '{database}'.")
-
-            if warnings:
-                summary_parts.append(
-                    "\n".join(["**Warnings:**", *[f"- {w}" for w in warnings]])
-                )
-            if next_token:
-                summary_parts.append(
-                    "More tables are available. Call `list_tables` again with "
-                    "`page_token` to continue."
-                )
-
-            return TableListPage(
-                database=database,
-                name_pattern=pattern,
-                page_size=capped_page_size,
-                include_detailed_columns=include_detailed_columns,
-                tables=tables,
-                next_page_token=next_token,
-                warnings=warnings,
-                summary_markdown=truncate_response("\n\n".join(summary_parts)),
-            )
-        except Exception as e:
-            return f"Error: {e}"
+        Deprecated: use `list(kind="tables", database=...)`.
+        """
+        return list_tables_impl(
+            ch,
+            database=database,
+            name_pattern=name_pattern,
+            like=like,
+            page_size=page_size,
+            page_token=page_token,
+            include_detailed_columns=include_detailed_columns,
+        )
 
     @mcp.tool()
     def record_model_exclusion(

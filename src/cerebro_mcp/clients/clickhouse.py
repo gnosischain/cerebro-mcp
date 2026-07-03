@@ -28,6 +28,53 @@ from cerebro_mcp.models.tool import QueryResult
 logger = logging.getLogger(__name__)
 
 
+def _arrow_temporal_columns(schema) -> list[str]:
+    """Names of arrow fields whose type is a date (date32/date64) or any
+    timestamp (any unit, any timezone). Read from the schema so the decision is
+    type-based, never a numeric-range guess."""
+    try:
+        import pyarrow as pa
+    except Exception:  # pragma: no cover - pyarrow is a hard dependency
+        return []
+    out: list[str] = []
+    for field_ in schema:
+        ftype = field_.type
+        if pa.types.is_date(ftype) or pa.types.is_timestamp(ftype):
+            out.append(field_.name)
+    return out
+
+
+def _iso_temporal(value: Any) -> Any:
+    """Render a temporal cell as an ISO string.
+
+    ``to_pydict()`` yields ``datetime.date`` for date32/date64 and
+    ``datetime.datetime`` for timestamps (tz-aware when the arrow type carried a
+    timezone) — ``.isoformat()`` gives ``YYYY-MM-DD`` / ``YYYY-MM-DDTHH:MM:SS``.
+    Ints (some pyarrow versions surface date32 as epoch-days) are converted by
+    magnitude. ``None`` passes through.
+    """
+    if value is None:
+        return value
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        import datetime as _dt
+
+        av = abs(value)
+        try:
+            if av < 100_000:  # epoch-days
+                return (_dt.date(1970, 1, 1) + _dt.timedelta(days=int(value))).isoformat()
+            if av < 1e11:  # epoch-seconds
+                return _dt.datetime.fromtimestamp(int(value), tz=_dt.timezone.utc).isoformat()
+            if av < 1e14:  # epoch-milliseconds
+                return _dt.datetime.fromtimestamp(int(value) / 1000, tz=_dt.timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            return value
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: Parquet sanitization
 #
@@ -277,10 +324,23 @@ class ClickHouseManager:
         }
 
     def _rows_from_arrow(self, arrow_table) -> tuple[list[str], list[list[Any]]]:
+        # Read the arrow SCHEMA field types BEFORE to_pydict() so temporal
+        # columns are converted from authoritative types — date32 / date64 and
+        # ALL timestamp units/timezones become ISO strings. The type survives
+        # here; converting on type (not on a numeric-range guess) means a real
+        # metric near an epoch-day magnitude (e.g. 17000-25000) is never
+        # misread as a date.
+        temporal_cols = _arrow_temporal_columns(arrow_table.schema)
         col_dict = arrow_table.to_pydict()
         columns = list(col_dict.keys())
         if not columns:
             return columns, []
+        if temporal_cols:
+            for name in temporal_cols:
+                series = col_dict.get(name)
+                if series is None:
+                    continue
+                col_dict[name] = [_iso_temporal(v) for v in series]
         row_count = len(col_dict[columns[0]])
         rows = [
             [col_dict[column][i] for column in columns]

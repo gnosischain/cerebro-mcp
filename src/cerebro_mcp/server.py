@@ -51,7 +51,10 @@ from cerebro_mcp.tools.analytics.sandbox import register_sandbox_tools
 from cerebro_mcp.tools.workflow.resume import register_workflow_resume_tools
 from cerebro_mcp.tools.governance.cross_check import register_cross_check_tools
 from cerebro_mcp.tools.storyteller.storyteller import register_storyteller_tools
-from cerebro_mcp.tools.visualization.mini_apps import register_mini_app_infra
+from cerebro_mcp.tools.visualization.mini_apps import (
+    register_load_tools_tool,
+    register_mini_app_infra,
+)
 from cerebro_mcp.tools.visualization.web_apps import register_web_app_routes
 from cerebro_mcp.tools.web3.contract_explorer import register_contract_explorer_tools
 from cerebro_mcp.tools.visualization.metric_lab import register_metric_lab_tools
@@ -59,6 +62,8 @@ from cerebro_mcp.tools.visualization.portfolio import register_portfolio_tools
 from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_tools
 from cerebro_mcp.tools.analytics.model_lineage_app import register_model_lineage_tools
 from cerebro_mcp.tools.semantic.data_catalog import register_data_catalog_tools
+from cerebro_mcp.tools.semantic.find import register_find_tool
+from cerebro_mcp.tools.analytics.list_unifier import register_list_tool
 from cerebro_mcp.tools.web3.rpc import register_rpc_tools
 from cerebro_mcp.tools.web3.rpc_scan import register_rpc_scan_tools
 from cerebro_mcp.tools.visualization.grafana import register_grafana_tools
@@ -80,8 +85,19 @@ mcp = FastMCP(
         "For lightweight visual answers, just summarize the insight.\n"
         "2. No emojis or Unicode symbols — use clean, professional markdown only.\n\n"
 
+        "DEFAULT DISCOVERY PATH:\n"
+        "- For almost any analytical question, call `find(query, mode=\"answer\")` FIRST. "
+        "It routes in one call to the right tools, metrics, and models and returns a "
+        "pre-filled `recommended_action`. For a plain answer, follow it straight to "
+        "`query_metrics` — NO `preflight_analytics_request` is needed in answer mode. "
+        "Only use `mode=\"chart\"`/`\"report\"` on `find` when the user asked for a chart/report; "
+        "those modes route you through preflight so the chart/report gate is respected.\n\n"
+
         "ENFORCEMENT GATES (CANNOT BE BYPASSED):\n"
-        "- When `SEMANTIC_ENABLED=true`, analytical chart/report workflows MUST call "
+        "- `preflight_analytics_request` is REQUIRED only before `generate_chart` / "
+        "`generate_charts` / `generate_report` (the chart/report hard gates). "
+        "Plain answer-mode questions do NOT need preflight — use `find` -> `query_metrics`.\n"
+        "- When `SEMANTIC_ENABLED=true`, chart/report workflows MUST call "
         "`preflight_analytics_request` first.\n"
         "  - If the route is `semantic_ready`, use semantic tools "
         "(`quick_metric_chart`, `generate_metric_charts`, `query_metrics`) "
@@ -194,9 +210,9 @@ mcp = FastMCP(
         "- Default here for plain analytical questions, including time-series questions, "
         "unless the user explicitly asks for visual output.\n"
         "- Workflow: if this is a business-metric question and semantic is enabled, call "
-        "`preflight_analytics_request(query, mode=\"answer\")` first, then use "
-        "`query_metrics` when the route is `semantic_ready`. Otherwise query data and "
-        "output a Markdown response.\n"
+        "`find(query, mode=\"answer\")` first, then follow its `recommended_action` — "
+        "usually `query_metrics` directly when the route is `semantic_ready` (NO preflight "
+        "needed in answer mode). Otherwise query data and output a Markdown response.\n"
         "- Answer mode MAY include one or two supporting visualizations. If you already "
         "have an answer-mode or chart-mode chart, you may render it in the visual UI "
         "without satisfying the full report-quality gate.\n"
@@ -226,12 +242,14 @@ mcp = FastMCP(
         "- Do NOT publish before verification and peer review.\n\n"
 
         "STANDARD OPERATING PROCEDURE:\n"
-        "1. DISCOVER: For analytical questions, call `preflight_analytics_request` first. "
-        "If the route is `semantic_ready` or `hybrid_ready`, continue with "
-        "`discover_metrics` and `get_metric_details` for covered topics; "
-        "for uncovered topics (or `semantic_coverage_gap`), use `discover_models(query, detail_top_n=5)` "
-        "for combined search + details in one call. Only use separate `search_models` + "
-        "`get_model_details` when you need more than 5 models detailed.\n"
+        "1. DISCOVER: For analytical questions, call `find(query, mode=\"answer\")` first "
+        "(use `mode=\"chart\"`/`\"report\"` when a chart/report was requested). Follow its "
+        "`recommended_action`: for an answer-mode `semantic_ready`/`hybrid_ready` route go "
+        "straight to `query_metrics`; for chart/report modes it routes you through "
+        "`preflight_analytics_request`. For uncovered topics (or `semantic_coverage_gap`), "
+        "use `discover_models(query, detail_top_n=5)` for combined search + details in one "
+        "call. Only use separate `search_models` + `get_model_details` when you need more "
+        "than 5 models detailed.\n"
         "2. EXPLORE: Ensure at least 3 models explored via `get_model_details` "
         "(discover_models counts). Map lineage. Identify all dimensions "
         "(token, action, user segment). Use int_* models when marts lack needed breakdowns.\n"
@@ -356,6 +374,20 @@ register_web_app_routes(mcp)
 
 # Grafana dashboard publishing (no-op unless GRAFANA_TOOLS_ENABLED).
 register_grafana_tools(mcp, ch)
+
+# `list(kind=...)` unifier (Phase 4): one read-only listing front door that
+# delegates to the same helpers the legacy `list_*` shims call. Register after
+# the tools whose `list_*_impl` helpers it imports are defined.
+register_list_tool(mcp, ch)
+
+# `find` MUST register LAST: it builds its tool corpus lazily from the full
+# registered-tool map on first call, so every other tool must already be
+# registered for the corpus to be complete.
+register_find_tool(mcp)
+
+# `load_tools` un-hides advanced tools when LEAN_CORE_ENABLED is on. Register
+# after the full surface exists so it can validate names against every tool.
+register_load_tools_tool(mcp)
 
 install_auto_tool_tracing(mcp)
 

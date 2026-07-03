@@ -53,8 +53,20 @@ def _semantic_discovery_gate(query: str) -> str:
         return ""
 
     try:
-        from cerebro_mcp.tools.semantic.semantic import get_semantic_preflight
         from cerebro_mcp.tools.governance.session_state import state
+    except Exception:
+        return ""
+
+    # State FIRST — if a router (either `find` in answer/auto mode or a real
+    # `preflight_analytics_request`) has already routed this request, raw
+    # discovery is unblocked and we return immediately WITHOUT paying the O(N)
+    # `get_semantic_preflight` scoring cost. An answer-mode `find` thus unblocks
+    # discovery for free. Only compute the preview when nothing has routed yet.
+    if state.semantic_find_ran or state.semantic_preflight_ran:
+        return ""
+
+    try:
+        from cerebro_mcp.tools.semantic.semantic import get_semantic_preflight
 
         preview = get_semantic_preflight(query, mode="answer")
     except Exception:
@@ -63,23 +75,13 @@ def _semantic_discovery_gate(query: str) -> str:
     metrics = ", ".join(f"`{name}`" for name in preview.recommended_metrics[:3])
     metrics_line = f" Approved metrics: {metrics}." if metrics else ""
 
-    if not state.semantic_preflight_ran:
-        return (
-            "Semantic preflight required: call "
-            "`preflight_analytics_request(query, mode=\"answer\")` before "
-            "raw model discovery when semantic is enabled."
-            f"{metrics_line}"
-        )
-
-    if state.semantic_route_last == "semantic_ready" and not state.semantic_execution_attempted:
-        return (
-            "Approved semantic coverage already exists for this request. "
-            "Use `discover_metrics`, `query_metrics`, "
-            "`quick_metric_chart`, or `generate_metric_charts` before raw "
-            f"model discovery.{metrics_line}"
-        )
-
-    return ""
+    return (
+        "Semantic preflight required: call "
+        "`find(query, mode=\"answer\")` (or "
+        "`preflight_analytics_request(query, mode=\"answer\")`) before "
+        "raw model discovery when semantic is enabled."
+        f"{metrics_line}"
+    )
 
 
 def _semantic_nudge_for_model(model_name: str) -> str:
@@ -110,6 +112,8 @@ def register_dbt_tools(mcp):
         limit: int = 50,
     ) -> str:
         """Search dbt models by name, description, or tags.
+
+        Prefer `find(query=...)` for one-call discovery.
 
         Args:
             query: Search term to match against model name or description.
@@ -212,6 +216,8 @@ def register_dbt_tools(mcp):
         detail_top_n: int = 5,
     ) -> str:
         """Search models AND return full details for top N matches in one call.
+
+        Prefer `find(query=...)` for one-call discovery.
 
         Equivalent to calling search_models + get_model_details for each top result,
         but uses only ONE tool call instead of N+1. Prefer this over separate calls.
