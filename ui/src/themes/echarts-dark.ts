@@ -1,54 +1,50 @@
-const sage = "#9ec081";
-const sageMid = "#b5d195";
-const sageSoft = "#7d9966";
-const tan = "#c9b487";
-const sand = "#d4b483";
-const clay = "#d4906a";
-const brick = "#d97565";
+// Gnosis "Terminal" — DARK ECharts theme.
+// Series order: index 0 = line (lime), 1 = bar (violet), full array = donut.
+const palette = ["#B4F03C", "#7B61FF", "#FF7A9C", "#4DD0E1", "#C6A6FF", "#F5B14C"];
 
-const ink = "#f1ece2";
-// Axis / legend labels need higher contrast on the dark surface than the
-// `--text-muted` token gives — that color anti-aliases to a soft, blurry
-// fringe on near-black. Promote labels to `--text-secondary`.
-const labelInk = "#c9c2b3";
-const rule = "rgba(241,236,226,0.07)";
-const surface = "#1c1a15";
+const ink = "#EDE8FA";
+// Axis / legend labels need higher contrast on the deep-indigo surface than the
+// `--text-muted` token (#7E77AD) gives — it anti-aliases to a soft fringe on
+// near-black. Promote a step toward `--text-secondary`.
+const muted = "#8b84b5";
+const rule = "rgba(200,194,232,0.12)";
+const surface = "#16123a";
 
 const fontMono = "JetBrains Mono, ui-monospace, Menlo, monospace";
-const fontDisplay = "Instrument Serif, Iowan Old Style, Georgia, serif";
 
 export const ECHARTS_DARK = {
-  color: [sage, clay, sageMid, sand, sageSoft, tan, brick],
+  color: palette,
   backgroundColor: "transparent",
-  textStyle: { fontFamily: fontMono, color: labelInk },
+  textStyle: { fontFamily: fontMono, color: muted },
   title: {
-    textStyle: { fontFamily: fontDisplay, color: ink, fontWeight: 400 },
+    textStyle: { fontFamily: fontMono, color: ink, fontWeight: 600 },
   },
   legend: {
-    textStyle: { color: labelInk, fontFamily: fontMono, fontSize: 11 },
+    textStyle: { color: muted, fontFamily: fontMono, fontSize: 11 },
   },
   tooltip: {
-    backgroundColor: "rgba(28,26,21,0.97)",
+    backgroundColor: "rgba(29,24,72,0.97)",
     borderColor: rule,
     borderWidth: 1,
-    borderRadius: 8,
-    extraCssText: "box-shadow:0 6px 24px -10px rgba(0,0,0,0.5);",
+    borderRadius: 4,
+    extraCssText: "box-shadow:0 6px 24px -10px rgba(0,0,0,0.6);",
     textStyle: { color: ink, fontFamily: fontMono, fontSize: 12 },
   },
   categoryAxis: {
     axisLine: { show: false },
     axisTick: { show: false },
-    axisLabel: { color: labelInk, fontFamily: fontMono, fontSize: 10 },
+    axisLabel: { color: muted, fontFamily: fontMono, fontSize: 10 },
     splitLine: { show: false },
   },
   valueAxis: {
     axisLine: { show: false },
-    axisLabel: { color: labelInk, fontFamily: fontMono, fontSize: 10 },
+    axisTick: { show: false },
+    axisLabel: { color: muted, fontFamily: fontMono, fontSize: 10 },
     splitLine: {
       lineStyle: { color: rule, type: [2, 3] as unknown as "dashed" },
     },
   },
-  line: { lineStyle: { width: 2 }, smooth: true, symbolSize: 0 },
-  bar: { itemStyle: { borderRadius: [4, 4, 0, 0] } },
+  line: { lineStyle: { width: 2.4 }, smooth: true, symbolSize: 0 },
+  bar: { itemStyle: { borderRadius: [3, 3, 0, 0] } },
   pie: { itemStyle: { borderColor: surface, borderWidth: 2 } },
 };

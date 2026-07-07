@@ -1,3 +1,5 @@
+import { useTheme } from "../hooks/useTheme";
+
 interface Props {
   kind: "dashboard" | "research" | "scrollytelling";
   chartCount: number;
@@ -5,26 +7,33 @@ interface Props {
   timestamp: string;
 }
 
-const KIND_LABEL: Record<Props["kind"], string> = {
-  dashboard: "dashboard report",
-  research: "research report",
-  scrollytelling: "case study",
-};
+export function StatusStrip({ chartCount, queryCount, timestamp }: Props) {
+  const { isDark, toggle } = useTheme();
+  const dateOnly = timestamp.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? timestamp;
 
-export function StatusStrip({ kind, chartCount, queryCount, timestamp }: Props) {
   return (
     <div className="report-cli">
-      <span className="prompt">cerebro</span>
-      <span style={{ opacity: 0.5 }}>/</span>
-      <span>{KIND_LABEL[kind]}</span>
+      <span className="dots" aria-hidden="true">
+        <span className="dot-r" />
+        <span className="dot-v" />
+        <span className="dot-l" />
+      </span>
+      <span className="whoami">
+        <span className="user">cerebro@gnosis</span>
+        <span className="sep">:</span>
+        <span className="path">~/reports</span>
+      </span>
       <span className="spacer" />
-      <span className="pill">
-        <span className="dot" /> {chartCount} charts
+      <span className="meta">
+        {chartCount} charts · {queryCount} queries · {dateOnly}
       </span>
-      <span className="pill">
-        <span className="dot" /> {queryCount} queries
-      </span>
-      <span style={{ opacity: 0.6 }}>{timestamp}</span>
+      <button
+        className="term-toggle no-print"
+        onClick={toggle}
+        title="Toggle theme"
+      >
+        ◐ {isDark ? "Dark" : "Light"}
+      </button>
     </div>
   );
 }

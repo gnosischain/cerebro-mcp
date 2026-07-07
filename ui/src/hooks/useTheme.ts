@@ -20,8 +20,9 @@ const ThemeContext = createContext<ThemeContextValue>({
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [isDark, setIsDark] = useState(() => {
-    document.documentElement.dataset.theme = "light";
-    return false;
+    // Honor the initial data-theme declared on <html> per entry point
+    // (report/index.html defaults to dark; mini-app entries set their own).
+    return document.documentElement.dataset.theme === "dark";
   });
 
   useEffect(() => {

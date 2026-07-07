@@ -8,6 +8,10 @@
 @import "@fontsource/plus-jakarta-sans/latin-700.css";
 @import "@fontsource/instrument-serif/latin-400.css";
 @import "@fontsource/instrument-serif/latin-400-italic.css";
+@import "@fontsource/space-grotesk/latin-400.css";
+@import "@fontsource/space-grotesk/latin-500.css";
+@import "@fontsource/space-grotesk/latin-600.css";
+@import "@fontsource/space-grotesk/latin-700.css";
 @import "@fontsource/inter/latin-400.css";
 @import "@fontsource/inter/latin-500.css";
 @import "@fontsource/inter/latin-600.css";
@@ -17,56 +21,66 @@
 @import "@fontsource/jetbrains-mono/latin-600.css";
 
 :root {
-  /* Surfaces — deep warm ink, not cold slate */
-  --bg: #14130f;
-  --surface: #1c1a15;
-  --surface-1: #1c1a15;
-  --surface-2: #24221c;
-  --surface-3: #2d2a23;
-  --table-header: #24221c;
-  --table-stripe: rgba(241, 236, 226, 0.02);
+  /* Gnosis "Terminal" — DARK (default). Deep-indigo canvas, electric-violet
+   * primary, neon-lime accent. Replaces the legacy warm-cream + sage theme. */
 
-  /* Paper-cream text */
-  --text-primary: #f1ece2;
-  --text-secondary: #d2ccbe;
-  --text-muted: #a39a8a;
-  --border: rgba(241, 236, 226, 0.12);
-  --border-hover: rgba(241, 236, 226, 0.20);
-  --section-divider: rgba(241, 236, 226, 0.06);
+  /* Surfaces — near-black indigo */
+  --bg: #0f0c24;
+  --surface: #16123a;
+  --surface-1: #16123a;
+  --surface-2: #1d1848;
+  --surface-3: #241e58;
+  --table-header: #1d1848;
+  --table-stripe: transparent; /* no zebra — hairline rows only */
 
-  /* Accent — brighter sage so it lifts off ink */
-  --primary: #9ec081;
-  --primary-hover: #b5d195;
-  --accent-soft: rgba(158, 192, 129, 0.14);
-  --accent-softer: rgba(158, 192, 129, 0.07);
+  /* Cream / lavender text */
+  --text-primary: #ede8fa;
+  --text-secondary: #b9b2e0;
+  --text-muted: #7e77ad;
+  --border: rgba(200, 194, 232, 0.14);
+  --border-hover: rgba(200, 194, 232, 0.3);
+  --section-divider: rgba(200, 194, 232, 0.08);
 
-  /* Status */
-  --success: #9ec081;
-  --warning: #d4b483;
-  --error: #d97565;
+  /* Accent — electric violet */
+  --primary: #7b61ff;
+  --primary-hover: #9a83ff;
+  --accent-soft: rgba(123, 97, 255, 0.16);
+  --accent-softer: rgba(123, 97, 255, 0.08);
 
-  /* Semantic surface/state tokens (warm dark fallback) */
-  --surface-translucent: rgba(241, 236, 226, 0.05);
-  --surface-translucent-strong: rgba(241, 236, 226, 0.09);
-  --accent-bg: rgba(158, 192, 129, 0.14);
-  --accent-border: rgba(158, 192, 129, 0.35);
-  --accent-text: #b5d195;
-  --success-bg: rgba(158, 192, 129, 0.14);
-  --warning-bg: rgba(212, 180, 131, 0.14);
-  --error-bg: rgba(217, 117, 101, 0.14);
-  --code-bg: rgba(241, 236, 226, 0.06);
+  /* Status — lime positive, coral negative */
+  --success: #b4f03c;
+  --warning: #f5b14c;
+  --error: #ff7a9c;
 
-  /* Geometry */
+  /* Brand accents (Terminal) */
+  --lime: #b4f03c;
+  --lime-text: #b4f03c;
+  --pos: #b4f03c;
+  --neg: #ff7a9c;
+
+  /* Semantic surface/state tokens */
+  --surface-translucent: rgba(200, 194, 232, 0.05);
+  --surface-translucent-strong: rgba(200, 194, 232, 0.09);
+  --accent-bg: rgba(123, 97, 255, 0.16);
+  --accent-border: rgba(123, 97, 255, 0.35);
+  --accent-text: #b4f03c;
+  --success-bg: rgba(180, 240, 60, 0.14);
+  --warning-bg: rgba(245, 177, 76, 0.14);
+  --error-bg: rgba(255, 122, 156, 0.14);
+  --code-bg: #1d1848;
+
+  /* Geometry — sharp 4px corners for the terminal feel, flat (no shadow) */
+  --radius: 4px;
   --radius-sm: 6px;
   --radius-base: 10px;
   --radius-lg: 14px;
   --radius-xl: 18px;
   --radius-card: 12px;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow-base: 0 6px 24px -10px rgba(0, 0, 0, 0.5);
+  --shadow-sm: none;
+  --shadow-base: none;
 
   /* Type — Gnosis system (shared with light) */
-  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
   --font-body: "Inter", system-ui, -apple-system, sans-serif;
   --font-sans: var(--font-body);
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
@@ -78,56 +92,66 @@
 }
 
 [data-theme="light"] {
-  /* Surfaces — soft warm paper */
-  --bg: #f6f2eb;
+  /* Gnosis "Terminal" — LIGHT. Cream canvas; lime stays bright as a fill but
+   * inline lime text darkens to --lime-text for contrast on cream. */
+
+  /* Surfaces — soft cream paper */
+  --bg: #f4efe4;
   --surface: #ffffff;
   --surface-1: #ffffff;
-  --surface-2: #f1ece2;
-  --surface-3: #e8e2d4;
-  --table-header: #f6f2eb;
-  --table-stripe: rgba(31, 29, 24, 0.018);
+  --surface-2: #f0e9da;
+  --surface-3: #e7dec9;
+  --table-header: #f0e9da;
+  --table-stripe: transparent; /* no zebra — hairline rows only */
 
   /* Ink + rules */
-  --text-primary: #1a1a1a;
-  --text-secondary: #44413a;
-  --text-muted: #635c4f;
-  --border: rgba(31, 29, 24, 0.16);
-  --border-hover: rgba(31, 29, 24, 0.26);
-  --section-divider: rgba(31, 29, 24, 0.10);
+  --text-primary: #14102e;
+  --text-secondary: #3c3766;
+  --text-muted: #726c97;
+  --border: rgba(20, 16, 46, 0.14);
+  --border-hover: rgba(20, 16, 46, 0.3);
+  --section-divider: rgba(20, 16, 46, 0.1);
 
-  /* Accent — sage */
-  --primary: #4a5a3c;
-  --primary-hover: #3a4830;
-  --accent-soft: rgba(74, 90, 60, 0.10);
-  --accent-softer: rgba(74, 90, 60, 0.06);
+  /* Accent — electric violet (darkened for cream) */
+  --primary: #5b44e0;
+  --primary-hover: #4632c0;
+  --accent-soft: rgba(91, 68, 224, 0.12);
+  --accent-softer: rgba(91, 68, 224, 0.07);
 
-  /* Status */
-  --success: #4a5a3c;
-  --warning: #b59569;
-  --error: #a64a3b;
+  /* Status — lime-text positive, coral negative */
+  --success: #4c7a0e;
+  --warning: #c08a2e;
+  --error: #d64b6a;
 
-  /* Semantic surface/state tokens (warm paper fallback) */
-  --surface-translucent: rgba(31, 29, 24, 0.04);
-  --surface-translucent-strong: rgba(31, 29, 24, 0.07);
-  --accent-bg: rgba(74, 90, 60, 0.10);
-  --accent-border: rgba(74, 90, 60, 0.32);
-  --accent-text: #3a4830;
-  --success-bg: rgba(74, 90, 60, 0.12);
-  --warning-bg: rgba(181, 149, 105, 0.16);
-  --error-bg: rgba(166, 74, 59, 0.10);
-  --code-bg: rgba(31, 29, 24, 0.06);
+  /* Brand accents (Terminal) */
+  --lime: #b4f03c; /* bright fill (KPI top-tick, dots, cursor) */
+  --lime-text: #5e7a0a; /* lime as text — darkened for contrast on cream */
+  --pos: #4c7a0e;
+  --neg: #d64b6a;
 
-  /* Geometry */
+  /* Semantic surface/state tokens (cream paper) */
+  --surface-translucent: rgba(20, 16, 46, 0.04);
+  --surface-translucent-strong: rgba(20, 16, 46, 0.07);
+  --accent-bg: rgba(91, 68, 224, 0.1);
+  --accent-border: rgba(91, 68, 224, 0.32);
+  --accent-text: #5e7a0a;
+  --success-bg: rgba(76, 122, 14, 0.12);
+  --warning-bg: rgba(192, 138, 46, 0.14);
+  --error-bg: rgba(214, 75, 106, 0.1);
+  --code-bg: #f0e9da;
+
+  /* Geometry — sharp 4px corners, flat */
+  --radius: 4px;
   --radius-sm: 6px;
   --radius-base: 10px;
   --radius-lg: 14px;
   --radius-xl: 18px;
   --radius-card: 12px;
-  --shadow-sm: 0 1px 2px rgba(31, 29, 24, 0.04);
-  --shadow-base: 0 4px 16px -8px rgba(31, 29, 24, 0.08);
+  --shadow-sm: none;
+  --shadow-base: none;
 
   /* Type — same system as dark */
-  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
   --font-body: "Inter", system-ui, -apple-system, sans-serif;
   --font-sans: var(--font-body);
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
