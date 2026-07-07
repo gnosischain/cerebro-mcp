@@ -600,12 +600,19 @@ def register_metric_lab_tools(mcp, ch: ClickHouseManager) -> None:
         }
     )
     def open_metric_lab(query: str = "", title: str = "") -> CallToolResult:
-        """Open Metric Lab with a metric catalog but no pre-loaded data.
+        """Open the interactive Metric Lab app with an empty metric catalog.
 
-        Use this as the default entry point. The app renders a searchable
-        metric picker sourced from the semantic registry; once the user
-        picks a metric the frontend calls ``load_metric_lab_metric`` to
-        run the query and attach the dataset to the same view.
+        Call ONLY when the user explicitly asks to open, explore, or
+        interact with the Metric Lab. This is NOT the default path for
+        answering metric questions — for a plain answer use ``find`` ->
+        ``query_metrics``; for a chart/report use the preflight -> charts
+        -> report pipeline. This tool opens a UI, it does not answer a
+        question on its own.
+
+        Once open, the app renders a searchable metric picker sourced from
+        the semantic registry; when the user picks a metric the frontend
+        calls ``load_metric_lab_metric`` to run the query and attach the
+        dataset to the same view.
 
         Args:
             query: Optional search hint — reorders the catalog by
@@ -657,6 +664,8 @@ def register_metric_lab_tools(mcp, ch: ClickHouseManager) -> None:
     ) -> CallToolResult:
         """Load a semantic metric into an existing Metric Lab view.
 
+        Operates on an already-open view (requires ``view_id``), so it is
+        never a first step — the user must already have a Metric Lab open.
         Delegates to the semantic planner/compiler (``compile_metric_query_sql``)
         which enforces metric and dimension validation before any SQL runs.
         On success, re-emits ``INITIAL_LOAD`` for the same ``view_id`` so
@@ -803,11 +812,13 @@ def register_metric_lab_tools(mcp, ch: ClickHouseManager) -> None:
         database: str = "dbt",
         title: str = "",
     ) -> CallToolResult:
-        """Open Metric Lab from a raw SQL query.
+        """Open the interactive Metric Lab app from a raw SQL query.
 
-        Loads a bounded dataset (≤2,000 rows or a deterministic random
-        sample for larger queries) and renders an interactive table-and-chart
-        view that the user and the model can reshape together.
+        Call only when the user asked to open/explore the Metric Lab
+        interactively — not as the default way to answer a question. Loads
+        a bounded dataset (≤2,000 rows or a deterministic random sample for
+        larger queries) and renders an interactive table-and-chart view that
+        the user and the model can reshape together.
         """
         try:
             dataset = mini_apps.load_bounded_dataset(
@@ -860,11 +871,13 @@ def register_metric_lab_tools(mcp, ch: ClickHouseManager) -> None:
         limit: int = 2000,
         title: str = "",
     ) -> CallToolResult:
-        """Open Metric Lab from a semantic metric request.
+        """Open the interactive Metric Lab app from a semantic metric request.
 
-        Compiles ``metrics`` + ``dimensions`` + ``filters`` to SQL via the
-        semantic registry, then funnels through the same bounded loader as
-        ``open_metric_lab_from_sql``.
+        Call only when the user asked to open/explore the Metric Lab
+        interactively — not as the default way to answer a metric question
+        (use ``query_metrics`` for that). Compiles ``metrics`` +
+        ``dimensions`` + ``filters`` to SQL via the semantic registry, then
+        funnels through the same bounded loader as ``open_metric_lab_from_sql``.
         """
         try:
             sql, database = compile_metric_query_sql(
@@ -938,6 +951,9 @@ def register_metric_lab_tools(mcp, ch: ClickHouseManager) -> None:
         group_by: str = "",
     ) -> CallToolResult:
         """Patch the chart configuration in an open Metric Lab view.
+
+        Operates on an already-open view (requires ``view_id``), so it is
+        never a first step — the user must already have a Metric Lab open.
 
         ``chart_type`` ∈ ``{table, line, bar, scatter, heatmap, pie, numberDisplay}``
         ``aggregation`` ∈ ``{count, sum, avg, min, max, median}``

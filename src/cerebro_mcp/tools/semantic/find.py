@@ -43,6 +43,21 @@ _tool_index: BM25Index | None = None
 _tool_docs: dict[str, dict[str, Any]] = {}
 _corpus_signature: frozenset[str] | None = None
 
+# Metric Lab tools open an interactive UI — they never *answer* a question, and
+# they are dense with the word "metric", so a metric-flavored `find` query would
+# otherwise surface them in `top_tools` and nudge the model to open the app
+# unprompted. Keep them out of the corpus entirely; the recommended-action
+# router steers metric questions to `query_metrics` instead.
+_FIND_EXCLUDED_TOOLS: frozenset[str] = frozenset(
+    {
+        "open_metric_lab",
+        "open_metric_lab_from_sql",
+        "open_metric_lab_from_metrics",
+        "load_metric_lab_metric",
+        "update_metric_lab_chart",
+    }
+)
+
 
 def _registered_tools(mcp) -> dict[str, Any]:
     """The unfiltered registered-tool map (`name -> Tool`)."""
@@ -83,7 +98,7 @@ def _build_tool_corpus(mcp) -> tuple[BM25Index, dict[str, dict[str, Any]]]:
     docs: list[BM25Doc] = []
     meta_by_name: dict[str, dict[str, Any]] = {}
     for name, tool in _registered_tools(mcp).items():
-        if name in app_only:
+        if name in app_only or name in _FIND_EXCLUDED_TOOLS:
             continue
         description = getattr(tool, "description", "") or ""
         meta = classify_tool(name, description)
@@ -114,7 +129,11 @@ def _build_tool_corpus(mcp) -> tuple[BM25Index, dict[str, dict[str, Any]]]:
 def _tool_corpus(mcp) -> tuple[BM25Index, dict[str, dict[str, Any]]]:
     """Return the cached tool corpus, (re)building when the tool set changes."""
     global _tool_index, _tool_docs, _corpus_signature
-    signature = frozenset(_registered_tools(mcp).keys()) - get_app_only_tool_names()
+    signature = (
+        frozenset(_registered_tools(mcp).keys())
+        - get_app_only_tool_names()
+        - _FIND_EXCLUDED_TOOLS
+    )
     with _corpus_lock:
         if _tool_index is None or signature != _corpus_signature:
             _tool_index, _tool_docs = _build_tool_corpus(mcp)

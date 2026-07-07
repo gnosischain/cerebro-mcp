@@ -136,6 +136,11 @@ def _mcp_with_find(name: str) -> FastMCP:
         """Hydration tool for the mini-app frontend (app-only)."""
         return ""
 
+    @mcp.tool()
+    def open_metric_lab(query: str = "", title: str = "") -> str:
+        """Open the interactive Metric Lab app to explore metric datasets."""
+        return ""
+
     mark_app_only("get_mini_app_rows")
 
     register_semantic_tools(mcp, SimpleNamespace(), SimpleNamespace())
@@ -195,6 +200,22 @@ def test_find_corpus_excludes_app_only(semantic_ready):
     # ordinary tools ARE in the corpus
     assert "execute_query" in docs
     assert "describe_table" in docs
+
+
+def test_find_corpus_excludes_metric_lab_tools(semantic_ready):
+    """Metric Lab tools open a UI, they never answer a question — they must be
+    kept out of the corpus so `find` never surfaces them and nudges the model
+    to open the app unprompted."""
+    mcp = _mcp_with_find("find-metriclab-test")
+    from cerebro_mcp.tools.semantic.find import _tool_corpus
+
+    _idx, docs = _tool_corpus(mcp)
+    assert "open_metric_lab" not in docs
+    # a directly metric-flavored query must not surface the lab in top_tools
+    find = mcp._tool_manager._tools["find"].fn
+    result = find(query="open metric lab to explore metrics", mode="answer")
+    tool_names = [t["name"] for t in result["top_tools"]]
+    assert "open_metric_lab" not in tool_names
 
 
 def test_find_sets_find_ran_not_preflight_ran(semantic_ready):
