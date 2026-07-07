@@ -28,7 +28,9 @@ There is one report tool (`generate_report`) but **four effective tiers**, selec
 
 **Default to the lightest tier that actually answers the question.** A "how did the bridge sector do last quarter?" question is a `lite_report`, not a `full_report`. Only escalate to `full_report` when the analysis itself requires statistical depth, multi-axis correlation, or ≥3 distinct chart types.
 
-The lite-mode bypass is enforced in `tools/session_state.py:373-379`: when `semantic_mode_last` is `"answer"` or `"chart"`, `check_report_preconditions` short-circuits after confirming ≥1 chart. So calling `preflight_analytics_request(mode="chart")` is what actually unlocks the fast path — there is no separate "lite report" tool.
+The lite-mode bypass is enforced in `check_report_preconditions` (in `src/cerebro_mcp/tools/governance/session_state.py`): when `semantic_mode_last` is `"answer"` or `"chart"`, it short-circuits after confirming ≥1 chart. So calling `preflight_analytics_request(mode="chart")` is what actually unlocks the fast path — there is no separate "lite report" tool.
+
+The `chart` / `answer` tiers also lighten the **chart** gate (`check_chart_preconditions`, same file): they require only `MIN_MODELS_DETAILED_LITE` (default 1) model-detail lookups instead of the full-report `MIN_MODELS_DETAILED` (default 3). And when several chart preconditions are unmet, the gate now returns **all** of them in one message, so preflight + discovery + lineage + schema are satisfied in a single follow-up batch rather than one tool round-trip per gate.
 
 ## Report Workflow (CRITICAL)
 

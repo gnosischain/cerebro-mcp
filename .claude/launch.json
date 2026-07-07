@@ -74,6 +74,13 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "5191"],
       "port": 5191
+    },
+    {
+      "name": "report-dist",
+      "cwd": "ui/dist",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "5192"],
+      "port": 5192
     }
   ]
 }

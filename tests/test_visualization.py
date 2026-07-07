@@ -766,7 +766,7 @@ class TestSemanticChartRouting:
         )
 
         assert "Chart workflow check failed" in result
-        assert "Insufficient schema verification" in result
+        assert "Schema: verify" in result
         assert "Semantic routing check failed" not in result
 
     def test_quick_metric_chart_uses_semantic_result(self, monkeypatch):
@@ -854,7 +854,7 @@ class TestSemanticChartRouting:
                 }
             ]
         )
-        assert "Discovery skipped" in blocked
+        assert "Discovery:" in blocked
 
         state.record_search_models("active validators", 1, source="semantic")
         state.record_get_model_details(
@@ -1845,3 +1845,93 @@ class TestResearchReport:
         passed, reason = state.check_chart_preconditions(raw_path=True)
         assert not passed
         assert "semantic coverage" in reason.lower()
+
+
+class TestReportDownloadUrl:
+    """A1: report links must resolve (auth token + public base, no dead loopback)."""
+
+    def test_base_url_appends_auth_token(self, monkeypatch):
+        monkeypatch.setattr(
+            session_state_mod.settings,
+            "REPORT_BASE_URL",
+            "https://mcp.example.com/reports",
+        )
+        monkeypatch.setenv("MCP_AUTH_TOKEN", "secret-123")
+        url = viz._get_report_download_url("abcd1234")
+        assert url == "https://mcp.example.com/reports/abcd1234?token=secret-123"
+
+    def test_base_url_without_token_has_no_query(self, monkeypatch):
+        monkeypatch.setattr(
+            session_state_mod.settings,
+            "REPORT_BASE_URL",
+            "https://mcp.example.com/reports",
+        )
+        monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+        url = viz._get_report_download_url("abcd1234")
+        assert url == "https://mcp.example.com/reports/abcd1234"
+        assert "token=" not in url
+
+    def test_sse_loopback_without_base_returns_none(self, monkeypatch):
+        # Loopback bind host + no public base -> emit no dead http link; the
+        # caller (`_get_report_link`) falls back to a working file:// path.
+        monkeypatch.setattr(session_state_mod.settings, "REPORT_BASE_URL", "")
+        monkeypatch.setenv("CEREBRO_TRANSPORT", "sse")
+        monkeypatch.setenv("FASTMCP_HOST", "0.0.0.0")
+        monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+        assert viz._get_report_download_url("abcd1234") is None
+
+    def test_sse_public_host_gets_token(self, monkeypatch):
+        monkeypatch.setattr(session_state_mod.settings, "REPORT_BASE_URL", "")
+        monkeypatch.setenv("CEREBRO_TRANSPORT", "sse")
+        monkeypatch.setenv("FASTMCP_HOST", "reports.example.com")
+        monkeypatch.setenv("FASTMCP_PORT", "9000")
+        monkeypatch.setenv("MCP_AUTH_TOKEN", "tok")
+        url = viz._get_report_download_url("abcd1234")
+        assert url == "http://reports.example.com:9000/reports/abcd1234?token=tok"
+
+
+class TestChartGateAggregationAndTiering:
+    """B1 (one combined message) + B2 (tier-scaled lineage depth)."""
+
+    def _enable(self, monkeypatch):
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        monkeypatch.setattr(
+            session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", True
+        )
+
+    def test_all_prerequisites_reported_in_one_message(self, monkeypatch):
+        self._enable(monkeypatch)
+        # Cold state: nothing done yet. One call must surface EVERY remaining
+        # prerequisite, not just the first, so the caller fixes them in one pass.
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert not passed
+        assert "Semantic preflight required" in reason
+        assert "Discovery:" in reason
+        assert "Lineage:" in reason
+        assert "Schema:" in reason
+
+    def test_lite_tier_passes_with_one_model_detail(self, monkeypatch):
+        self._enable(monkeypatch)
+        state.record_semantic_preflight(route="hybrid_ready", mode="chart")
+        state.record_search_models("active validators", 1)
+        state.record_get_model_details("api_consensus_validators_active_daily")
+        state.record_describe_table("api_consensus_validators_active_daily")
+
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert passed, reason
+
+    def test_report_tier_still_requires_three_model_details(self, monkeypatch):
+        self._enable(monkeypatch)
+        state.record_semantic_preflight(route="hybrid_ready", mode="report")
+        state.record_search_models("active validators", 1)
+        state.record_get_model_details("api_consensus_validators_active_daily")
+        state.record_describe_table("api_consensus_validators_active_daily")
+
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert not passed
+        assert "Lineage:" in reason and "at least 3" in reason
+
+        state.record_get_model_details("api_consensus_validators_active_weekly")
+        state.record_get_model_details("api_consensus_validators_active_monthly")
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert passed, reason

@@ -369,8 +369,14 @@ Hard gates for chart creation:
 
 - `generate_chart` and `generate_charts` require:
   - at least one discovery call (`search_models` or `discover_models`)
-  - at least `MIN_MODELS_DETAILED` model detail explorations
+  - model detail explorations: `MIN_MODELS_DETAILED` for the full `report` tier,
+    or the lighter `MIN_MODELS_DETAILED_LITE` in the `chart` / `answer` tiers
+    (a single-chart request charts from one known model, so it needs fewer)
   - at least `MIN_TABLES_VERIFIED` table schema checks
+
+  When more than one of these is unmet, the gate reports **all** of them in a
+  single message so they can be satisfied in one follow-up batch rather than one
+  tool round-trip per requirement.
 
 Hard gates for report creation:
 
@@ -1019,6 +1025,13 @@ Use charts when you are actively building a report in the current session.
 - reports can be reopened later by report ID
 - in SSE mode, reports can be exposed through `/reports/{id}`
 - `export_report` can return a local path or a download URL
+- the "Open Report" link generated with each report automatically carries
+  `?token=` when `MCP_AUTH_TOKEN` is set (otherwise `/reports/{id}` answers 401)
+- for **remote** clients (e.g. Claude Desktop via an `mcp-remote` bridge), set
+  `REPORT_BASE_URL` to the server's public reports base (e.g.
+  `https://host/reports`). Without it, an SSE server bound to a loopback host
+  cannot build a link a remote client can reach, so no link is emitted (a
+  warning is logged) and only the on-disk `file://` fallback applies
 
 Use reports for durable visual deliverables.
 
@@ -1408,7 +1421,8 @@ All settings are environment variables or `.env` values.
 | Variable | Default | Description |
 |---|---|---|
 | `ENFORCE_CHART_PRECONDITIONS` | `True` | enable chart/report gates |
-| `MIN_MODELS_DETAILED` | `3` | model detail explorations required before gated charting |
+| `MIN_MODELS_DETAILED` | `3` | model detail explorations required before gated charting (`report` tier) |
+| `MIN_MODELS_DETAILED_LITE` | `1` | model detail explorations required in the `chart` / `answer` tiers |
 | `MIN_TABLES_VERIFIED` | `1` | tables to verify before gated charting |
 | `MIN_CHARTS_FOR_REPORT` | `3` | minimum registered charts before report creation |
 | `MIN_EXPLORATORY_QUERIES` | `2` | minimum prior query executions before report creation |

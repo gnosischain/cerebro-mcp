@@ -11,7 +11,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { parseHtmlSections } from "./utils/parseHtmlSections";
 
 export default function App() {
-  const data = useReportData();
+  const { data, timedOut } = useReportData();
 
   const sections = useMemo(
     () =>
@@ -24,7 +24,7 @@ export default function App() {
   );
 
   if (!data) {
-    return <LoadingState />;
+    return <LoadingState timedOut={timedOut} />;
   }
 
   if (data.presentation_mode === "research") {

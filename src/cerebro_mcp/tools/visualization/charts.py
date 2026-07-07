@@ -8,6 +8,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from numbers import Number
 from pathlib import Path
+from urllib.parse import quote
 import sys
 if sys.version_info >= (3, 11):
     from typing import NotRequired, TypedDict
@@ -314,20 +315,58 @@ def _resolve_report(
     return None, None, None
 
 
+def _append_report_token(url: str) -> str:
+    """Append ``?token=<MCP_AUTH_TOKEN>`` so the report route authorizes.
+
+    The download route (``server.download_report``) accepts the shared token as
+    either an ``Authorization: Bearer`` header or a ``?token=`` query param. A
+    plain browser click on the report link carries no header, so without the
+    query param the route answers 401 whenever ``MCP_AUTH_TOKEN`` is set. No-op
+    when the token is unset.
+    """
+    token = os.environ.get("MCP_AUTH_TOKEN")
+    if not token:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}token={quote(token, safe='')}"
+
+
 def _get_report_download_url(report_id: str) -> str | None:
-    """Build the HTTP download URL for a report, or None if unavailable."""
+    """Build the HTTP download URL for a report, or None if unavailable.
+
+    Prefers the deployment's public ``REPORT_BASE_URL``. In SSE mode without a
+    public base, an http link built from the bind host only resolves when the
+    client shares this host (local dev); for a remote client (e.g. Claude
+    Desktop via an ``mcp-remote`` bridge) it would be a dead link, so we return
+    None and let ``_get_report_link`` fall back to a ``file://`` path — valid
+    when the client shares the filesystem — while warning the operator to set
+    ``REPORT_BASE_URL`` for reachable remote report links. Any URL we do return
+    carries the auth token when ``MCP_AUTH_TOKEN`` is set.
+    """
     from cerebro_mcp.config import settings
 
     if settings.REPORT_BASE_URL:
-        return f"{settings.REPORT_BASE_URL.rstrip('/')}/{report_id}"
+        return _append_report_token(
+            f"{settings.REPORT_BASE_URL.rstrip('/')}/{report_id}"
+        )
 
-    # Check if running in SSE mode (HTTP server available)
+    # SSE mode exposes an HTTP server, but only a non-loopback bind host can be
+    # reached by a remote client.
     if os.environ.get("CEREBRO_TRANSPORT") == "sse":
         host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
         port = os.environ.get("FASTMCP_PORT", "8000")
-        if host == "0.0.0.0":
-            host = "localhost"
-        return f"http://{host}:{port}/reports/{report_id}"
+        if host in ("0.0.0.0", "localhost", "127.0.0.1"):
+            logger.warning(
+                "Report link unavailable: SSE mode without REPORT_BASE_URL. "
+                "Reports are not reachable by remote clients via the loopback "
+                "bind host %r. Set REPORT_BASE_URL to the server's public "
+                "reports base (e.g. https://host/reports) to enable links.",
+                host,
+            )
+            return None
+        return _append_report_token(
+            f"http://{host}:{port}/reports/{report_id}"
+        )
 
     return None
 
@@ -2718,24 +2757,27 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         )
         return reason
 
+    def _reason_mentions_semantic_routing(reason: str) -> bool:
+        # A gate reason may now bundle several prerequisites in one message, so
+        # match the semantic-routing phrases as substrings, not a prefix.
+        return (
+            "Semantic preflight required" in reason
+            or "Semantic charting requires" in reason
+            or "Approved semantic coverage" in reason
+        )
+
     def _check_raw_chart_gate(stage: str) -> str:
         from cerebro_mcp.tools.governance.session_state import state
 
         passed, reason = state.check_chart_preconditions(raw_path=True)
         if passed:
             return ""
-        if (
-            reason.startswith("Semantic")
-            or reason.startswith("Approved semantic coverage")
-        ):
+        if _reason_mentions_semantic_routing(reason):
             return _semantic_gate_error(stage, reason)
         return reason
 
     def _format_raw_chart_gate_failure(reason: str) -> str:
-        if (
-            reason.startswith("Semantic")
-            or reason.startswith("Approved semantic coverage")
-        ):
+        if _reason_mentions_semantic_routing(reason):
             return (
                 f"**Semantic routing check failed:** {reason}\n\n"
                 "Call `preflight_analytics_request` first, then use "
@@ -2754,7 +2796,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             passed, reason = state.check_chart_preconditions(raw_path=False)
             if passed:
                 return ""
-            if reason.startswith("Semantic"):
+            if _reason_mentions_semantic_routing(reason):
                 return _semantic_gate_error(stage, reason)
             return reason
 

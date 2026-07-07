@@ -219,7 +219,8 @@ class Settings(BaseSettings):
 
     # Agent enforcement settings
     ENFORCE_CHART_PRECONDITIONS: bool = True
-    MIN_MODELS_DETAILED: int = 3      # get_model_details calls required
+    MIN_MODELS_DETAILED: int = 3      # get_model_details calls required (report tier)
+    MIN_MODELS_DETAILED_LITE: int = 1  # get_model_details required in chart/answer tiers
     MIN_TABLES_VERIFIED: int = 1      # describe_table calls required
     MIN_CHARTS_FOR_REPORT: int = 3
     REQUIRE_CHART_DIVERSITY: bool = True

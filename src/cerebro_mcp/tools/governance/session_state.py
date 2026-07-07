@@ -39,6 +39,23 @@ _QUALIFIED_TABLE_RE = re.compile(
 )
 
 
+def _format_chart_gate_reason(missing: list[str]) -> str:
+    """Render all unmet chart preconditions as one actionable message.
+
+    A single gap is returned verbatim (preserves the original one-line wording
+    and any downstream substring checks). Multiple gaps are bundled under one
+    header so the caller can satisfy them in a single follow-up batch instead of
+    one tool round-trip per gap.
+    """
+    if len(missing) == 1:
+        return missing[0]
+    bullets = "\n".join(f"- {item}" for item in missing)
+    return (
+        "Chart prerequisites not yet met — complete all of the following, "
+        "then retry in one step:\n" + bullets
+    )
+
+
 @dataclass
 class SessionState:
     # Discovery tracking
@@ -118,37 +135,54 @@ class SessionState:
         fallback_key = hashlib.md5(normalized_sql.encode("utf-8")).hexdigest()[:12]
         self.verified_query_surfaces.add(f"query::{fallback_key}")
 
-    def _check_common_chart_preconditions_unlocked(self) -> tuple[bool, str]:
+    def _min_models_detailed_for_tier_unlocked(self) -> int:
+        """Lineage-depth requirement scaled to the active reporting tier.
+
+        Light tiers (`mode="chart"` / `mode="answer"`, i.e. single_chart /
+        lite_report) legitimately chart from a single known model, so they need
+        only `MIN_MODELS_DETAILED_LITE` lineage lookups. The full `report` tier
+        and the non-semantic path (where `semantic_mode_last` is unset) keep the
+        stricter `MIN_MODELS_DETAILED`.
+        """
+        if self.semantic_mode_last in {"chart", "answer"}:
+            return settings.MIN_MODELS_DETAILED_LITE
+        return settings.MIN_MODELS_DETAILED
+
+    def _collect_common_chart_gaps_unlocked(self) -> list[str]:
+        """Return every unmet discovery/lineage/schema precondition, together.
+
+        Unlike a first-failure early return, this reports ALL remaining gaps in
+        one pass so the caller can satisfy them in a single follow-up batch
+        instead of one tool round-trip per gap.
+        """
+        gaps: list[str] = []
+
         if self.search_models_count == 0:
-            return False, (
-                "Discovery skipped: You must call `search_models`, "
-                "`discover_models`, or `discover_metrics` first to find the "
-                "relevant public data surface."
+            gaps.append(
+                "Discovery: call `search_models`, `discover_models`, or "
+                "`discover_metrics` to find the relevant public data surface."
             )
 
-        min_detailed = settings.MIN_MODELS_DETAILED
+        min_detailed = self._min_models_detailed_for_tier_unlocked()
         if len(self.explored_models) < min_detailed:
-            return False, (
-                f"Insufficient lineage exploration: You must call "
-                f"`get_model_details` or `get_metric_details` for at least "
-                f"{min_detailed} items. (Currently explored: "
-                f"{len(self.explored_models)}). `describe_table` alone is "
-                f"not sufficient because it does not explain lineage or "
-                f"semantic coverage."
+            gaps.append(
+                f"Lineage: call `get_model_details` or `get_metric_details` "
+                f"for at least {min_detailed} item(s) (currently explored: "
+                f"{len(self.explored_models)}). `describe_table` alone does not "
+                f"explain lineage or semantic coverage."
             )
 
         min_verified = settings.MIN_TABLES_VERIFIED
         verified_surfaces = set(self.explored_tables)
         verified_surfaces.update(self.verified_query_surfaces)
         if len(verified_surfaces) < min_verified:
-            return False, (
-                f"Insufficient schema verification: You must verify at least "
-                f"{min_verified} table(s) via `describe_table`, a successful "
-                f"`execute_query`, or execute a semantic query first. "
-                f"(Currently verified: {len(verified_surfaces)})."
+            gaps.append(
+                f"Schema: verify at least {min_verified} table(s) via "
+                f"`describe_table`, a successful `execute_query`, or a semantic "
+                f"query (currently verified: {len(verified_surfaces)})."
             )
 
-        return True, ""
+        return gaps
 
     # ── Record methods ──────────────────────────────────────────────
 
@@ -340,45 +374,59 @@ class SessionState:
     # ── Precondition checks ─────────────────────────────────────────
 
     def check_chart_preconditions(self, *, raw_path: bool = True) -> tuple[bool, str]:
-        """Gate for chart generation. Returns (passed, reason)."""
+        """Gate for chart generation. Returns (passed, reason).
+
+        Reports EVERY unmet precondition in a single combined message (preflight
+        + discovery + lineage + schema) so the caller satisfies them in one
+        retry instead of one tool round-trip per gate. Route-redirect errors
+        (approved semantic coverage / wrong route) stay standalone: they tell
+        the caller to switch tools, not to gather more context.
+        """
         if not settings.ENFORCE_CHART_PRECONDITIONS:
             return True, ""
 
         with self.lock:
+            missing: list[str] = []
+
             if settings.SEMANTIC_ENABLED:
                 if not self.semantic_preflight_ran:
-                    return False, (
+                    missing.append(
                         "Semantic preflight required: call "
                         "`preflight_analytics_request(query, mode=\"chart\")` "
                         "before charting when semantic is enabled."
                     )
+                else:
+                    # Route redirects only make sense once preflight has run.
+                    if raw_path:
+                        # In hybrid mode, allow raw charts alongside semantic
+                        if self.analysis_path == "hybrid":
+                            pass  # raw allowed in hybrid
+                        elif self.semantic_route_last == "semantic_ready" and not self.semantic_execution_attempted:
+                            return False, (
+                                "Approved semantic coverage already exists for this "
+                                "request. Use `quick_metric_chart`, "
+                                "`generate_metric_charts`, `query_metrics`, or "
+                                "`explain_metric_query` before raw charting."
+                            )
 
-                if raw_path:
-                    # In hybrid mode, allow raw charts alongside semantic
-                    if self.analysis_path == "hybrid":
-                        pass  # raw allowed in hybrid
-                    elif self.semantic_route_last == "semantic_ready" and not self.semantic_execution_attempted:
+                    if not raw_path and self.semantic_route_last not in ("semantic_ready", "hybrid_ready"):
+                        fallback = (
+                            f" Fallback reason: {self.semantic_fallback_reason}."
+                            if self.semantic_fallback_reason
+                            else ""
+                        )
                         return False, (
-                            "Approved semantic coverage already exists for this "
-                            "request. Use `quick_metric_chart`, "
-                            "`generate_metric_charts`, `query_metrics`, or "
-                            "`explain_metric_query` before raw charting."
+                            "Semantic charting requires a `semantic_ready` or "
+                            "`hybrid_ready` route from "
+                            f"`preflight_analytics_request`. Current route: "
+                            f"`{self.semantic_route_last or 'unknown'}`.{fallback}"
                         )
 
-                if not raw_path and self.semantic_route_last not in ("semantic_ready", "hybrid_ready"):
-                    fallback = (
-                        f" Fallback reason: {self.semantic_fallback_reason}."
-                        if self.semantic_fallback_reason
-                        else ""
-                    )
-                    return False, (
-                        "Semantic charting requires a `semantic_ready` or "
-                        "`hybrid_ready` route from "
-                        f"`preflight_analytics_request`. Current route: "
-                        f"`{self.semantic_route_last or 'unknown'}`.{fallback}"
-                    )
+            missing.extend(self._collect_common_chart_gaps_unlocked())
 
-            return self._check_common_chart_preconditions_unlocked()
+            if missing:
+                return False, _format_chart_gate_reason(missing)
+            return True, ""
 
     def check_report_preconditions(
         self,
