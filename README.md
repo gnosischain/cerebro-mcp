@@ -378,6 +378,23 @@ Hard gates for chart creation:
   single message so they can be satisfied in one follow-up batch rather than one
   tool round-trip per requirement.
 
+Friction removals (semantic mode):
+
+- A first-touch `discover_models` / `search_models` call **auto-routes** — the
+  discovery gate runs the semantic routing internally (recorded as an
+  answer-mode `find`) and lets discovery proceed instead of rejecting with
+  "call `find` first".
+- `find` **or** `preflight_analytics_request` satisfies the chart gate's
+  routing requirement (they record identical route/mode data). Only the report
+  tier still requires an explicit `preflight_analytics_request(mode="report")`.
+- In `chart` / `answer` mode, `generate_charts` / `quick_chart` return a
+  **model-inline payload** — per-chart data + SQL + the cerebro palette + an
+  instruction for the assistant to draw the charts inline itself, since Claude
+  Desktop/claude.ai don't mount the server UI iframe (ext-apps #671). The result
+  also carries an `[Open Report](file://…)` link to the full native report. Set
+  `MCP_UI_INLINE_ENABLED=true` to attach the inline UI resource for hosts that
+  do render server MCP-UI.
+
 Hard gates for report creation:
 
 - at least `MIN_CHARTS_FOR_REPORT` registered charts
@@ -1403,6 +1420,8 @@ All settings are environment variables or `.env` values.
 | `THINKING_ALWAYS_ON` | `True` | auto capture tool calls |
 | `THINKING_LOG_RETENTION_DAYS` | `30` | trace retention |
 | `REPORT_BASE_URL` | empty | URL prefix for exported reports |
+| `REPORT_AUTO_OPEN` | `False` | opt-in: auto-open rendered artifacts in the default browser (local stdio only, never SSE). Fired off-thread so it never blocks the event loop |
+| `MCP_UI_INLINE_ENABLED` | `False` | attach MCP-UI resource meta so hosts render the native report inline. Off by default because Claude Desktop/claude.ai don't mount the iframe (ext-apps #671); chart/answer tier delivers a model-inline payload instead. Set `true` for hosts that render server MCP-UI (e.g. Claude Code) |
 | `MCP_AUTH_TOKEN` | empty | required for SSE unless insecure mode is enabled |
 | `ALLOW_INSECURE_REMOTE_TRANSPORT` | `False` | disable SSE auth for local testing |
 | `FASTMCP_HOST` | `0.0.0.0` | SSE bind host |
@@ -1421,6 +1440,7 @@ All settings are environment variables or `.env` values.
 | Variable | Default | Description |
 |---|---|---|
 | `ENFORCE_CHART_PRECONDITIONS` | `True` | enable chart/report gates |
+| `REPORT_REQUIRES_EXPLICIT_MODE` | `True` | hard-block `generate_report` unless the request was routed `mode="report"`; chart/answer requests present charts inline and stop |
 | `MIN_MODELS_DETAILED` | `3` | model detail explorations required before gated charting (`report` tier) |
 | `MIN_MODELS_DETAILED_LITE` | `1` | model detail explorations required in the `chart` / `answer` tiers |
 | `MIN_TABLES_VERIFIED` | `1` | tables to verify before gated charting |

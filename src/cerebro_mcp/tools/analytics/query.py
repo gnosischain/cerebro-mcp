@@ -5,6 +5,7 @@ from cerebro_mcp.config import settings
 from cerebro_mcp.research.store import ResearchStore
 from cerebro_mcp.safety import validate_query
 from cerebro_mcp.models.tool import ExplainResult, QueryResult
+from cerebro_mcp.runtime.offload import offloaded as _offloaded
 from cerebro_mcp.runtime.tool_output import (
     build_explain_summary,
     build_query_summary,
@@ -26,6 +27,7 @@ def register_query_tools(
     research_store: ResearchStore | None = None,
 ):
     @mcp.tool()
+    @_offloaded
     def execute_query(
         sql: str,
         database: str = "dbt",

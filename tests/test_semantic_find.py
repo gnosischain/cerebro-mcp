@@ -256,15 +256,29 @@ def test_discovery_gate_passes_after_find_without_preflight(semantic_ready):
     assert gate == ""
 
 
-def test_discovery_gate_nudges_when_nothing_routed(semantic_ready):
+def test_discovery_gate_auto_routes_when_nothing_routed(semantic_ready):
+    """First-touch discovery is no longer bounced: the gate runs the routing
+    itself, records it as an answer-mode `find`, and returns "" so discovery
+    proceeds immediately (no extra round-trip)."""
+    semantic_tools, _snap = semantic_ready
     from cerebro_mcp.tools.analytics import dbt as dbt_tools
 
+    st = semantic_tools.state
+    assert st.semantic_find_ran is False
+
     gate = dbt_tools._semantic_discovery_gate("transaction count by sector")
-    assert "find(" in gate  # nudges toward the find front door
+
+    assert gate == ""
+    assert st.semantic_find_ran is True
+    assert st.semantic_mode_last == "answer"
+    assert st.semantic_route_last != ""
 
 
-def test_generate_chart_still_hard_requires_preflight_after_find(semantic_ready):
-    """Regression: an answer-mode `find` must NOT satisfy the chart hard gate."""
+def test_find_satisfies_chart_gate_but_not_report_gate(semantic_ready):
+    """`find` (any mode) satisfies the chart gate's routing leg — it records
+    the same route/mode data as a preflight. The REPORT gate stays strict:
+    it still demands an explicit `preflight_analytics_request(mode="report")`,
+    so a chart ask can never silently escalate into a report."""
     semantic_tools, _snap = semantic_ready
     mcp = _mcp_with_find("find-hardgate-test")
     find = mcp._tool_manager._tools["find"].fn
@@ -272,12 +286,24 @@ def test_generate_chart_still_hard_requires_preflight_after_find(semantic_ready)
 
     import cerebro_mcp.config as cfg
 
-    # The chart gate only enforces when these are on.
+    # The gates only enforce when these are on.
     object.__setattr__(cfg.settings, "SEMANTIC_ENABLED", True)
     object.__setattr__(cfg.settings, "ENFORCE_CHART_PRECONDITIONS", True)
-    passed, reason = semantic_tools.state.check_chart_preconditions(raw_path=True)
-    assert passed is False
-    assert "preflight" in reason.lower()
+
+    st = semantic_tools.state
+    _passed, reason = st.check_chart_preconditions(raw_path=True)
+    # The routing leg is satisfied by find — any remaining failure must be a
+    # route redirect or depth gap, never the preflight requirement.
+    assert "Semantic preflight required" not in reason
+
+    r_passed, r_reason, _w = st.check_report_preconditions(
+        {"chart_1": {"chart_type": "bar"}}
+    )
+    assert r_passed is False
+    assert (
+        "preflight" in r_reason.lower()
+        or "not routed as a report" in r_reason
+    )
 
 
 def test_preflight_slim_is_compact(semantic_ready):

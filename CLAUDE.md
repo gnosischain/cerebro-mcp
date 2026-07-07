@@ -22,19 +22,35 @@ There is one report tool (`generate_report`) but **four effective tiers**, selec
 | Tier | When to use | Preflight call | What runs |
 |---|---|---|---|
 | `quick_answer` | Scalar lookups: "current X", "how many Y", "latest Z". | None — call `execute_query` / `query_metrics` directly. | No chart, no report. |
-| `single_chart` | "Plot X over time", a single metric, no narrative needed. | `preflight_analytics_request(query, mode="chart")` | 1–2 charts via `generate_charts` / `generate_metric_charts`. `generate_report` runs in **lite mode** (skips 17 of 19 gates — only ≥1 chart required). |
-| `lite_report` | "How is sector X doing", 2–5 charts, light narrative. Most sector-performance questions live here. | `preflight_analytics_request(query, mode="answer")` | 2–5 charts; `generate_report` runs in lite mode. |
-| `full_report` | Analytical deep-dive: ≥3 charts, statistical depth, dimensional breakdown, correlations. | `preflight_analytics_request(query, mode="report")` | All 19 gates active (Fast Path SOP below). |
+| `single_chart` | "Plot/show/chart X", a single metric, no narrative needed. | `preflight_analytics_request(query, mode="chart")` — or just start with `discover_models` (it auto-routes). | 1–2 charts via `generate_charts` (or `quick_chart` for a one-off). In this tier the chart tools **render the visualization themselves** (inline UI + an Open link) — present the result and STOP; do **not** call `generate_report`. Only build a report if the user then explicitly asks for one. |
+| `lite_report` | "How is sector X doing", 2–5 charts, light narrative. Most sector-performance questions live here. | `preflight_analytics_request(query, mode="answer")` | 2–5 charts presented **inline** + a short written answer. `generate_report` is **not** called — only `full_report` produces a report artifact. |
+| `full_report` | Analytical deep-dive: ≥3 charts, statistical depth, dimensional breakdown, correlations. **The only tier that calls `generate_report`.** | `preflight_analytics_request(query, mode="report")` | All 19 gates active (Fast Path SOP below). |
 
 **Default to the lightest tier that actually answers the question.** A "how did the bridge sector do last quarter?" question is a `lite_report`, not a `full_report`. Only escalate to `full_report` when the analysis itself requires statistical depth, multi-axis correlation, or ≥3 distinct chart types.
 
-The lite-mode bypass is enforced in `check_report_preconditions` (in `src/cerebro_mcp/tools/governance/session_state.py`): when `semantic_mode_last` is `"answer"` or `"chart"`, it short-circuits after confirming ≥1 chart. So calling `preflight_analytics_request(mode="chart")` is what actually unlocks the fast path — there is no separate "lite report" tool.
+`generate_report` produces a report **only** when the request was routed as an explicit report (`mode="report"`). This is enforced in `check_report_preconditions` (in `src/cerebro_mcp/tools/governance/session_state.py`): when `semantic_mode_last` is `"answer"` or `"chart"`, it **hard-blocks** `generate_report` (controlled by `REPORT_REQUIRES_EXPLICIT_MODE`, default on) and tells the model to present the chart(s) inline and STOP. So a plain "show me / plot X" ask (mode `chart`/`answer`) cannot be escalated into a report artifact — prose guidance alone did not hold, so the gate enforces it. Set `REPORT_REQUIRES_EXPLICIT_MODE=false` to restore the legacy behavior where answer/chart mode auto-builds a lightweight report.
 
 The `chart` / `answer` tiers also lighten the **chart** gate (`check_chart_preconditions`, same file): they require only `MIN_MODELS_DETAILED_LITE` (default 1) model-detail lookups instead of the full-report `MIN_MODELS_DETAILED` (default 3). And when several chart preconditions are unmet, the gate now returns **all** of them in one message, so preflight + discovery + lineage + schema are satisfied in a single follow-up batch rather than one tool round-trip per gate.
 
+Three friction-killers to rely on (all enforced in code, not prose):
+
+- **Discovery auto-routes.** A first-touch `discover_models` / `search_models` call no longer bounces with "call `find` first" — the gate runs the semantic routing itself, records it (as an answer-mode `find`), and lets discovery proceed. No prior `find`/`preflight` needed just to discover.
+- **`find` OR `preflight` satisfies the chart gate.** They record identical route/mode data, so calling both is never necessary. Only the **report** tier still requires an explicit `preflight_analytics_request(query, mode="report")`.
+- **Chart tools deliver a model-inline payload — YOU render the charts.** In `chart`/`answer` mode, `generate_charts` / `quick_chart` return an assistant-facing block that says `RENDER THESE CHARTS INLINE` plus, per chart, its data (`x` + `series`), `chart_type`, `source_model`, and **`sql`**, plus the cerebro `palette_dark`/`palette_light` and `font`. **Draw the charts inline in your reply yourself** (Claude renders model-authored visuals inline; the server UI panel does NOT mount in Claude Desktop / claude.ai — an open client bug, ext-apps #671), one chart per spec, styled with the palette + a mono font, and put each chart's `sql` in a collapsible block beneath it labeled with the source model. Keep prose to a one-line takeaway per chart, then STOP. The response also carries an `[Open Report](file://…)` link to the full-fidelity native report (renders in a browser). Setting `MCP_UI_INLINE_ENABLED=true` re-enables the server-rendered inline panel for hosts that support it (e.g. Claude Code); it is off by default so Desktop shows no broken panel.
+
 ## Report Workflow (CRITICAL)
 
-When a user asks for a report, trends, or visual analysis using cerebro:
+**Decide first: chart request or report request?** A plain "show me / plot / chart / graph X"
+ask is a CHART request — produce the chart(s) and **STOP**. Do **not** call `generate_report`,
+and there is no minimum chart count. A trend / time-series question ("X over time", "weekly Y
+by Z") is a chart request, **not** automatically a report. Build a report only when the user
+explicitly asks for a report, dashboard, deep-dive, write-up, or written analysis.
+
+For a **chart request**:
+1. Produce the chart(s) with `generate_charts` (batch) — or `quick_chart` for a single one-off plot.
+2. Present them and stop. The charts are the deliverable.
+
+When the user **explicitly asks for a report / dashboard / analysis**:
 
 1. Use `generate_charts` (batch) with ALL chart specs in ONE call (minimum 3 charts)
 2. Do NOT use individual `generate_chart` calls for reports — use the batch tool
@@ -42,8 +58,6 @@ When a user asks for a report, trends, or visual analysis using cerebro:
 4. The report renders as a native UI in GUI clients; opens in browser for terminal clients
 5. After the report is generated, ask if the user wants conversion to docx/pdf/pptx
 6. If yes, use Claude Code's built-in file skills to convert
-
-Never skip the `generate_charts` -> `generate_report` pipeline.
 
 **Report enforcement gates (generate_report will REJECT without):**
 - At least 1 chart with `series_field` or pie/treemap/heatmap/sankey type (dimensional breakdown)

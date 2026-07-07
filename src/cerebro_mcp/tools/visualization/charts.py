@@ -23,6 +23,7 @@ from cerebro_mcp.runtime.observability import (
     observe_semantic_bypass,
     observe_semantic_tool_call,
 )
+from cerebro_mcp.runtime.offload import offloaded as _offloaded
 from cerebro_mcp.tools.analytics.query import truncate_response, _truncate_sql
 from cerebro_mcp.tools.governance.reasoning import _extract_models_from_sql
 from cerebro_mcp.tools.governance.session_state import state
@@ -99,6 +100,39 @@ ECHARTS_PALETTE_DARK = [
     "#60A5FA", "#F472B6", "#2DD4BF", "#FDBA74", "#A3E635",
     "#67E8F9", "#C4B5FD", "#4ADE80", "#FDA4AF", "#38BDF8",
 ]
+
+# Canonical cerebro chart palette handed to the model for inline rendering, so
+# a model-drawn visualization matches the native "Gnosis Terminal" report look.
+# Mirrors ui/src/themes/echarts-dark.ts / echarts-light.ts.
+CEREBRO_CHART_PALETTE_DARK = [
+    "#B4F03C", "#7B61FF", "#FF7A9C", "#4DD0E1", "#C6A6FF", "#F5B14C",
+]
+CEREBRO_CHART_PALETTE_LIGHT = [
+    "#5E7A0A", "#5B44E0", "#C11E5B", "#0E7C8B", "#6B3FD1", "#B25E00",
+]
+CEREBRO_CHART_FONT = "JetBrains Mono, ui-monospace, SFMono-Regular, monospace"
+
+
+def _open_in_browser_async(url: str) -> None:
+    """Open ``url`` in the default browser WITHOUT blocking the caller.
+
+    On macOS ``webbrowser.open`` drives a blocking ``osascript``/``open
+    location`` call; a cold browser launch takes seconds. Sync MCP tools run
+    inline on the single asyncio event loop, so a synchronous open would freeze
+    the whole server (and time out every concurrent tool). Running it on a
+    daemon thread makes it truly fire-and-forget.
+    """
+    def _open() -> None:
+        try:
+            import webbrowser
+
+            webbrowser.open(url)
+        except Exception:
+            # Best-effort; never break the artifact.
+            pass
+
+    threading.Thread(target=_open, daemon=True).start()
+
 
 # --- Chart Registry ---
 _chart_registry: dict[str, dict] = {}
@@ -600,6 +634,20 @@ def create_report_artifact(
             "title": title,
         }
 
+    # Opt-in (REPORT_AUTO_OPEN, default off): pop the rendered artifact in the
+    # user's default browser. Local stdio only — never on SSE (the browser
+    # would open on the SERVER host). Fired on a daemon thread: on macOS
+    # webbrowser.open() drives a blocking `osascript`/`open location` call, and
+    # because sync MCP tools run inline on the single event loop, doing it
+    # synchronously here would freeze the whole server (and time out every
+    # concurrent tool) on a cold browser launch. Off-thread it can never block.
+    from cerebro_mcp.config import settings as _settings
+    if (
+        _settings.REPORT_AUTO_OPEN
+        and os.environ.get("CEREBRO_TRANSPORT", "stdio") != "sse"
+    ):
+        _open_in_browser_async(report_path.resolve().as_uri())
+
     # Telemetry: record time-to-first-report on the first successful
     # report of a session, retry counter on every subsequent call.
     # Done before reset_session_state so it captures the cycle that
@@ -665,6 +713,136 @@ def create_report_artifact(
         "reply_text": reply_text,
         "chart_count": len(chart_specs),
     }
+
+
+def _report_instance_uri(report_id: str) -> str:
+    """Per-report UI resource URI serving standalone HTML with EMBEDDED data.
+
+    Unlike the static ``ui://cerebro/report`` bundle (which waits for the
+    ext-apps handshake to receive its data), the per-report resource returns
+    the same self-contained HTML that is written to disk — the React app reads
+    the embedded ``<script id="report-data">`` blob and renders with zero
+    handshake. Attached to tool results as result-level ``_meta`` so hosts
+    that honor per-call UI metadata can render inline in any client.
+    """
+    return f"{REPORT_URI}/{report_id}"
+
+
+def _result_ui_meta(report_id: str) -> dict | None:
+    """Result-level MCP-UI meta pointing at the per-report resource.
+
+    Returns None when ``MCP_UI_INLINE_ENABLED`` is off (the default) so the
+    host does not try to mount the native report iframe — Claude Desktop /
+    claude.ai currently negotiate the protocol but never create the iframe
+    (ext-apps #671), which would leave a blank/"couldn't load" panel. With it
+    off, chart/answer results deliver model-rendered inline charts + a link.
+    """
+    from cerebro_mcp.config import settings
+    if not settings.MCP_UI_INLINE_ENABLED:
+        return None
+    return {"ui": {"resourceUri": _report_instance_uri(report_id)}}
+
+
+def _ui_tool_meta(resource_uri: str) -> dict | None:
+    """Tool-level MCP-UI meta, or None when inline UI is disabled.
+
+    Evaluated at tool-registration time. When off (default) the tool carries no
+    UI resource pointer, so hosts render nothing server-side and the chart
+    tools' model-inline payload is the deliverable. See ``_result_ui_meta``.
+    """
+    from cerebro_mcp.config import settings
+    if not settings.MCP_UI_INLINE_ENABLED:
+        return None
+    return {"ui": {"resourceUri": resource_uri}, "ui/resourceUri": resource_uri}
+
+
+def _chart_mode_active() -> bool:
+    """True when the request was routed as a chart/answer (light) tier.
+
+    In these tiers `generate_report` is hard-blocked, so the chart tools
+    themselves must deliver the rendered visualization.
+    """
+    return state.semantic_summary().get("semantic_mode_last", "") in {
+        "answer",
+        "chart",
+    }
+
+
+def _model_inline_block(chart_ids: list[str]) -> str:
+    """Everything the model needs to render the charts INLINE itself.
+
+    Model-authored inline visuals are the only inline path that works in
+    Claude Desktop today (server MCP-UI iframes don't mount — ext-apps #671),
+    so instead of relying on the panel we hand the assistant the per-chart data
+    + SQL + the cerebro palette and tell it to draw the charts in its reply.
+    """
+    charts: list[dict] = []
+    with _chart_lock:
+        for cid in chart_ids:
+            entry = _chart_registry.get(cid)
+            if not entry:
+                continue
+            option = entry.get("option", {}) or {}
+            xaxis = option.get("xAxis")
+            x = None
+            if isinstance(xaxis, dict):
+                x = xaxis.get("data")
+            elif isinstance(xaxis, list) and xaxis and isinstance(xaxis[0], dict):
+                x = xaxis[0].get("data")
+            series = [
+                {"name": s.get("name"), "type": s.get("type"), "data": s.get("data")}
+                for s in (option.get("series") or [])
+                if isinstance(s, dict)
+            ]
+            charts.append({
+                "chart_id": cid,
+                "title": entry.get("title"),
+                "chart_type": entry.get("chart_type"),
+                "x": x,
+                "series": series,
+                "sql": entry.get("sql", ""),
+                "source_model": entry.get("source_model"),
+            })
+
+    payload = {
+        "palette_dark": CEREBRO_CHART_PALETTE_DARK,
+        "palette_light": CEREBRO_CHART_PALETTE_LIGHT,
+        "font": CEREBRO_CHART_FONT,
+        "charts": charts,
+    }
+    instructions = (
+        "RENDER THESE CHARTS INLINE in your reply now — draw them yourself as an "
+        "inline visualization (this client renders model-authored visuals "
+        "inline; it does not mount a server UI panel). One chart per spec, in "
+        "order, matching the cerebro look: use the palette colors (one per "
+        "series) and a monospace font. Beneath each chart put its `sql` in a "
+        "collapsed/expandable block labeled with the `source_model`. Keep prose "
+        "to a one-line takeaway per chart. Then STOP — do not call "
+        "`generate_report`. A full-fidelity native report is also linked below."
+    )
+    return f"{instructions}\n\n```json\n{json.dumps(payload, default=str)}\n```"
+
+
+def _render_visual_answer(chart_ids: list[str], title: str) -> dict:
+    """Render registered charts as a lightweight visual-answer artifact.
+
+    Internal to the chart tools: builds the ``{{chart:ID}}`` markdown,
+    bypasses the report-quality gate (this is NOT a report), and preserves
+    session state so a follow-up "now make that a report" still has the
+    charts and discovery evidence available.
+    """
+    content_markdown = "\n\n".join(f"{{{{chart:{cid}}}}}" for cid in chart_ids)
+    report = create_report_artifact(
+        title or "Visualization",
+        content_markdown,
+        enforce_quality_gate=False,
+        reset_session_state=False,
+        presentation_mode="visual_answer",
+    )
+    with _REPORT_LOCK:
+        _LAST_VISUAL["report_id"] = report["report_id"]
+        _LAST_VISUAL["created_at"] = datetime.now(timezone.utc)
+    return report
 
 
 def _estimate_reading_minutes(text: str) -> int:
@@ -2382,6 +2560,17 @@ def _escape_html(text: str) -> str:
 # --- MCP App Resource URI ---
 
 REPORT_URI = "ui://cerebro/report"
+VISUALIZATION_URI = "ui://cerebro/visualization"
+
+# The most recent visual-answer artifact rendered by the chart tools.
+# `ui://cerebro/visualization` (tool-level meta on generate_charts /
+# quick_chart) serves this artifact's standalone HTML — data EMBEDDED — so
+# hosts that render tool-level UI resources but ignore result-level `_meta`
+# and never complete the ext-apps handshake (e.g. Claude Desktop) still show
+# the actual charts inline. Freshness-gated so a report-tier batch call does
+# not surface a stale visualization.
+_LAST_VISUAL: dict = {"report_id": None, "created_at": None}
+_LAST_VISUAL_FRESH_SECONDS = 600
 
 
 def _build_standalone_html(
@@ -2800,10 +2989,10 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 return _semantic_gate_error(stage, reason)
             return reason
 
-        if not state.semantic_preflight_ran:
+        if not (state.semantic_preflight_ran or state.semantic_find_ran):
             return _semantic_gate_error(
                 stage,
-                "Semantic preflight required: call `preflight_analytics_request(query, mode=\"chart\")` before semantic charting.",
+                "Semantic preflight required: call `find(query, mode=\"chart\")` or `preflight_analytics_request(query, mode=\"chart\")` before semantic charting.",
             )
         if state.semantic_route_last not in ("semantic_ready", "hybrid_ready"):
             return _semantic_gate_error(
@@ -2910,6 +3099,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
     # ── Gated chart tool (for reports) ──────────────────────────────
 
     @mcp.tool()
+    @_offloaded
     def generate_chart(
         sql: str,
         database: str = "dbt",
@@ -2989,7 +3179,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
 
     # ── Quick chart tool (no gates) ─────────────────────────────────
 
-    @mcp.tool()
+    @mcp.tool(meta=_ui_tool_meta(VISUALIZATION_URI))
+    @_offloaded
     def quick_chart(
         sql: str,
         database: str = "dbt",
@@ -3001,16 +3192,18 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         title: str = "",
         max_rows: int = 500,
         explain_context: bool = False,
-    ) -> str:
-        """Generate a quick ad-hoc chart without workflow gates.
+    ) -> CallToolResult:
+        """Generate a quick ad-hoc chart for a one-off plot request.
 
-        Use this for simple, one-off plot requests. No discovery or
-        exploration preconditions — just provide SQL and get a chart.
-        Charts from quick_chart are registered and can be used in reports.
+        Use this for simple "show me / plot X" asks. This is the lightest
+        charting path, but note that when the semantic layer is enabled (the
+        deployed default) it still requires `preflight_analytics_request` first,
+        like the other chart tools — it does NOT bypass that gate. The chart is
+        the deliverable: present it and stop; do not follow up with
+        `generate_report` unless the user asks for a report.
 
-        For full analytical reports, use `generate_charts` instead so all
-        report charts are created in one batch call with the normal workflow
-        gates.
+        For a multi-chart report, use `generate_charts` instead so all report
+        charts are created in one batch call.
 
         Supported chart types: line, area, bar, pie, numberDisplay, scatter, heatmap, calendar, gauge, treemap, sankey, graph, funnel.
 
@@ -3033,29 +3226,83 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             max_rows: Maximum data points. Default: 500.
 
         Returns:
-            ECharts option JSON string. Render with: echarts.setOption(JSON.parse(result))
+            In chart/answer mode: the rendered visualization (inline UI where
+            supported, plus an Open link). Otherwise: the ECharts option JSON
+            string.
         """
         reason = _check_raw_chart_gate("quick_chart")
         if reason:
-            return _format_raw_chart_gate_failure(reason)
-        return _build_and_register_chart(
-            sql, database, chart_type, x_field, y_field, change_field,
-            series_field, title, max_rows, explain_context=explain_context,
+            return _text_result(_format_raw_chart_gate_failure(reason))
+
+        if _chart_mode_active():
+            meta_result = _build_and_register_chart(
+                sql, database, chart_type, x_field, y_field, change_field,
+                series_field, title, max_rows, return_metadata_only=True,
+                explain_context=explain_context,
+            )
+            if meta_result.startswith("OK|"):
+                chart_id = meta_result.split("|")[1]
+                try:
+                    report = _render_visual_answer(
+                        [chart_id], title or "Visualization"
+                    )
+                    return CallToolResult(
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=_model_inline_block([chart_id]),
+                                annotations=Annotations(
+                                    audience=["assistant"],
+                                    priority=1.0,
+                                ),
+                            ),
+                            TextContent(
+                                type="text",
+                                text=(
+                                    f"Chart `{chart_id}` created.\n\n"
+                                    + report["reply_text"]
+                                ),
+                            ),
+                        ],
+                        structuredContent=report["structured"],
+                        _meta=_result_ui_meta(report["report_id"]),
+                    )
+                except Exception:  # pragma: no cover - fall back to JSON
+                    pass
+            else:
+                return _text_result(meta_result)
+
+        return _text_result(
+            _build_and_register_chart(
+                sql, database, chart_type, x_field, y_field, change_field,
+                series_field, title, max_rows, explain_context=explain_context,
+            )
         )
 
     # ── Batch chart tool (for reports) ──────────────────────────────
 
-    @mcp.tool()
-    def generate_charts(charts: list[ChartSpec], explain_context: bool = False) -> str:
-        """Create multiple charts in ONE tool call. Use this for reports.
+    def _text_result(text: str, *, is_error: bool = False) -> CallToolResult:
+        return CallToolResult(
+            content=[TextContent(type="text", text=text)],
+            isError=is_error,
+        )
 
-        PREFERRED over generate_chart for reports. Creates all charts in a
-        single call instead of calling generate_chart repeatedly. This saves
-        steps and context — always use this when building a report.
+    @mcp.tool(meta=_ui_tool_meta(VISUALIZATION_URI))
+    @_offloaded
+    def generate_charts(
+        charts: list[ChartSpec], explain_context: bool = False
+    ) -> CallToolResult:
+        """Create multiple charts in ONE tool call.
+
+        PREFERRED over generate_chart whenever you need more than one chart.
+        For a standalone chart request (routed mode="chart"/"answer") this tool
+        ALSO RENDERS the charts as an inline visualization — the result carries
+        the rendered visual and an Open link; present it and stop, no report
+        needed. For a report (mode="report"), this batches all charts in one
+        call and `generate_report` renders them afterwards.
 
         Runs the same precondition checks as generate_chart but only once,
-        then creates all charts in sequence. Returns compact metadata (no
-        ECharts JSON, no SQL echo) mapping input index to chart ID.
+        then creates all charts in sequence.
 
         Each chart spec must have at least `sql`. All other fields are optional
         with sensible defaults.
@@ -3071,6 +3318,22 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
           auto-plotted. Use comma-separated `y_field` values for wide input or
           reshape to long form and provide `series_field`.
 
+        Choosing the chart type — match it to the data shape, not the default:
+        - Trend over time: `line` (or `area` only when the total itself is the
+          story). Weekly/monthly-by-dimension → `line` with `series_field`, one
+          line per dimension. Do NOT stack an `area` when you want to compare
+          series against each other.
+        - Composition at a point in time: `bar` (grouped) or `pie`/`treemap`.
+        - Two measures' relationship: `scatter` (+ trendline) or `heatmap`.
+        - Dominant-category skew (one bucket, e.g. `unknown`/residual, is >70%
+          of the total) flattens every other series into an unreadable sliver
+          and makes real movement look "flat" or "weak". Handle it explicitly:
+          plot the residual bucket on its own axis/chart, exclude it (and say so
+          in the title/subtitle — the residual_bucket_disclosure gate requires
+          the acknowledgment), index each series to its own start (=100), or use
+          a log y-axis. Never let a giant residual bucket decide the y-scale for
+          the series the user actually asked about.
+
         Reports MUST include:
         - At least 1 chart with series_field (dimensional breakdown)
         - At least 1 scatter/heatmap chart OR correlation query
@@ -3085,14 +3348,19 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 Default: False.
 
         Returns:
-            Summary table mapping input index to chart IDs for report placement.
+            In chart/answer mode: the rendered visualization (inline UI where
+            supported, plus an Open link). In report mode: a summary table
+            mapping input index to chart IDs for report placement.
         """
         if not charts:
-            return "Error: No chart specs provided. Pass a non-empty list."
+            return _text_result(
+                "Error: No chart specs provided. Pass a non-empty list.",
+                is_error=True,
+            )
 
         reason = _check_raw_chart_gate("generate_charts")
         if reason:
-            return (
+            return _text_result(
                 f"**Analysis depth check failed:** {reason}\n\n"
                 "Complete the missing steps, then retry `generate_charts`."
             )
@@ -3152,15 +3420,49 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             for idx, title, err in failed:
                 lines.append(f"- Input #{idx} (\"{title}\"): {err}")
 
-        # Chart registry summary
+        # Chart/answer tier: the charts ARE the deliverable, and
+        # generate_report is hard-blocked — so render them right here as a
+        # lightweight visualization (inline UI where the host supports it,
+        # plus an always-working Open link).
+        if ok_count >= 1 and _chart_mode_active():
+            try:
+                visual_title = succeeded[0]["title"] or "Visualization"
+                chart_ids = [s["chart_id"] for s in succeeded]
+                report = _render_visual_answer(chart_ids, visual_title)
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=_model_inline_block(chart_ids),
+                            annotations=Annotations(
+                                audience=["assistant"],
+                                priority=1.0,
+                            ),
+                        ),
+                        TextContent(
+                            type="text",
+                            text="\n".join(lines) + "\n\n" + report["reply_text"],
+                        ),
+                    ],
+                    structuredContent=report["structured"],
+                    _meta=_result_ui_meta(report["report_id"]),
+                )
+            except Exception as exc:  # pragma: no cover - render must not
+                # break chart creation; fall through to the text summary.
+                lines.append(f"\n(Inline render unavailable: {exc})")
+
+        # Report tier (or non-semantic): summary only; generate_report
+        # renders the charts.
         chart_list = ", ".join(_chart_registry.keys())
         lines.append(
             f"\n**Registered charts ({len(_chart_registry)}):** {chart_list}\n"
-            "**Next step:** Call `generate_report(title, content_markdown)` "
-            "with `{{chart:ID}}` placeholders."
+            "**Next step:** If the user asked for a report/dashboard/analysis, "
+            "call `generate_report(title, content_markdown)` with `{{chart:ID}}` "
+            "placeholders. For a plain chart request these charts are the "
+            "deliverable — present them and stop."
         )
 
-        return "\n".join(lines)
+        return _text_result("\n".join(lines))
 
     @mcp.tool()
     def quick_metric_chart(
@@ -3366,8 +3668,10 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         chart_list = ", ".join(_chart_registry.keys())
         lines.append(
             f"\n**Registered charts ({len(_chart_registry)}):** {chart_list}\n"
-            "**Next step:** Call `generate_report(title, content_markdown)` "
-            "with `{{chart:ID}}` placeholders."
+            "**Next step:** If the user asked for a report/dashboard/analysis, "
+            "call `generate_report(title, content_markdown)` with `{{chart:ID}}` "
+            "placeholders. For a plain chart request these charts are the "
+            "deliverable — present them and stop."
         )
         return "\n".join(lines)
 
@@ -3382,10 +3686,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         """
         return list_charts_impl()
 
-    @mcp.tool(meta={
-        "ui": {"resourceUri": REPORT_URI},
-        "ui/resourceUri": REPORT_URI,
-    })
+    @mcp.tool(meta=_ui_tool_meta(REPORT_URI))
+    @_offloaded
     def generate_report(
         title: str,
         content_markdown: str,
@@ -3395,9 +3697,12 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
     ) -> CallToolResult:
         """Create an interactive report rendered as a native UI in the chat client.
 
-        YOU MUST call this as the FINAL step when producing any report or visual
-        analysis. Call `generate_charts` (batch) first to create all charts in
-        one call, then call this tool with markdown containing {{chart:CHART_ID}}
+        Use this ONLY when the user explicitly asked for a report, dashboard,
+        deep-dive, write-up, or written analysis. Do NOT call it for a plain
+        "show me / plot X" chart request — return the chart(s) from
+        `generate_charts` / `quick_chart` and stop. When a report IS wanted,
+        call `generate_charts` (batch) first to create all charts in one call,
+        then call this tool with markdown containing {{chart:CHART_ID}}
         placeholders.
 
         For GUI clients (Claude Desktop, VS Code): renders as interactive iframe.
@@ -3477,6 +3782,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     ),
                 ],
                 structuredContent=report["structured"],
+                _meta=_result_ui_meta(report["report_id"]),
             )
 
         except Exception as e:
@@ -3485,10 +3791,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 isError=True,
             )
 
-    @mcp.tool(meta={
-        "ui": {"resourceUri": REPORT_URI},
-        "ui/resourceUri": REPORT_URI,
-    })
+    @mcp.tool(meta=_ui_tool_meta(REPORT_URI))
+    @_offloaded
     def generate_research_report(
         title: str,
         deck: str,
@@ -3568,6 +3872,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     ),
                 ],
                 structuredContent=report["structured"],
+                _meta=_result_ui_meta(report["report_id"]),
             )
 
         except Exception as e:
@@ -3576,10 +3881,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 isError=True,
             )
 
-    @mcp.tool(meta={
-        "ui": {"resourceUri": REPORT_URI},
-        "ui/resourceUri": REPORT_URI,
-    })
+    @mcp.tool(meta=_ui_tool_meta(REPORT_URI))
+    @_offloaded
     def generate_case_study_report(
         title: str,
         deck: str,
@@ -3684,6 +3987,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                     ),
                 ],
                 structuredContent=report["structured"],
+                _meta=_result_ui_meta(report["report_id"]),
             )
 
         except Exception as e:
@@ -3694,10 +3998,8 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
 
     # --- Report Reopen & List ---
 
-    @mcp.tool(meta={
-        "ui": {"resourceUri": REPORT_URI},
-        "ui/resourceUri": REPORT_URI,
-    })
+    @mcp.tool(meta=_ui_tool_meta(REPORT_URI))
+    @_offloaded
     def open_report(report_ref: str) -> CallToolResult:
         """Reopen a previously generated report by its ID.
 
@@ -3738,6 +4040,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             return CallToolResult(
                 content=content_items,
                 structuredContent=structured,
+                _meta=_result_ui_meta(report_id),
             )
 
         # Try in-memory cache first (full UUID)
@@ -3878,7 +4181,80 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
     def serve_report_app() -> str:
         """Serves the MCP App HTML for interactive report rendering.
 
-        Returns the Vite-built single-file React app. All assets (JS, CSS,
-        fonts, watermarks) are inlined — no external network requests needed.
+        Prefers the LATEST generated report's standalone HTML — with its data
+        EMBEDDED — so hosts that render this resource but never complete the
+        ext-apps handshake (e.g. Claude Desktop) still display real charts.
+        The React app reads the embedded `<script id="report-data">` blob
+        first; handshake-capable hosts lose nothing. Falls back to the
+        data-less Vite bundle when no report exists yet.
         """
+        try:
+            html, _rid, _path = _resolve_report("")
+        except ValueError:
+            html = None
+        if html:
+            return html
+        return _get_report_html()
+
+    @mcp.resource(
+        VISUALIZATION_URI,
+        mime_type="text/html;profile=mcp-app",
+    )
+    def serve_latest_visualization() -> str:
+        """Serve the visualization rendered by the LAST chart-tool call.
+
+        `generate_charts` / `quick_chart` carry this URI as tool-level meta.
+        When the last call auto-rendered a visual answer (chart/answer tier),
+        this returns its standalone HTML with the data EMBEDDED — actual
+        charts, zero handshake. Freshness-gated so a report-tier batch call
+        (which renders nothing itself) shows a neutral placeholder instead of
+        a stale visualization.
+        """
+        with _REPORT_LOCK:
+            rid = _LAST_VISUAL.get("report_id")
+            created = _LAST_VISUAL.get("created_at")
+        if rid and created:
+            age = (datetime.now(timezone.utc) - created).total_seconds()
+            if age <= _LAST_VISUAL_FRESH_SECONDS:
+                try:
+                    html, _r, _p = _resolve_report(rid)
+                except ValueError:
+                    html = None
+                if html:
+                    return html
+        return (
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+            "<meta name=\"color-scheme\" content=\"light dark\"></head>"
+            "<body style=\"font-family:system-ui,sans-serif;display:flex;"
+            "align-items:center;justify-content:center;min-height:120px;"
+            "margin:0;\"><p style=\"font-size:14px;opacity:.7;max-width:44em;"
+            "text-align:center;\">Charts are registered but no standalone "
+            "visualization was rendered by this call. For a report-tier flow "
+            "the report renders next; otherwise use the Open link in the "
+            "chat message.</p></body></html>"
+        )
+
+    @mcp.resource(
+        REPORT_URI + "/{report_id}",
+        mime_type="text/html;profile=mcp-app",
+    )
+    def serve_report_instance(report_id: str) -> str:
+        """Serve ONE report as standalone HTML with its data EMBEDDED.
+
+        Unlike the data-less `ui://cerebro/report` bundle (which depends on
+        the ext-apps handshake to receive `structuredContent`), this returns
+        the same self-contained HTML that is written to disk: the React app
+        reads the embedded `<script id="report-data">` blob and renders with
+        zero handshake — so it works in hosts where the handshake never
+        completes. Tool results reference it via result-level `_meta`
+        (`ui.resourceUri`). Accepts a full UUID or 8-char prefix.
+        """
+        try:
+            html, _rid, _path = _resolve_report(report_id)
+        except ValueError:
+            html = None
+        if html:
+            return html
+        # Unknown/expired id: fall back to the generic bundle (its own
+        # timeout fallback explains how to open the report).
         return _get_report_html()

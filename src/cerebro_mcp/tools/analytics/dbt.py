@@ -4,6 +4,7 @@ from typing import Optional
 
 from cerebro_mcp.config import settings
 from cerebro_mcp.loaders.manifest import manifest
+from cerebro_mcp.runtime.offload import offloaded as _offloaded
 from cerebro_mcp.runtime.schema_context import build_scoped_schema_block
 from cerebro_mcp.tools.analytics.query import truncate_response
 
@@ -49,6 +50,22 @@ def _semantic_nudge_for_query(query: str) -> str:
 
 
 def _semantic_discovery_gate(query: str) -> str:
+    """Auto-route a first-touch discovery call instead of bouncing it.
+
+    Historically this gate REJECTED the first `search_models` /
+    `discover_models` call with "call `find` first" — while already running
+    the full preflight routine internally just to name approved metrics in
+    the rejection message, then throwing the routing away. That cost the
+    caller a full extra round-trip for zero benefit.
+
+    Now: when nothing has routed yet, run the same (local, in-memory) routing
+    and RECORD it via `record_semantic_find` (mode="answer") so discovery
+    proceeds immediately. `record_semantic_find` is used deliberately — not
+    `record_semantic_preflight` — so the report tier still requires an
+    explicit `preflight_analytics_request(mode="report")`.
+    Always returns "" (never blocks); the return type is kept so call sites
+    stay untouched.
+    """
     if not settings.SEMANTIC_ENABLED or not query:
         return ""
 
@@ -57,11 +74,8 @@ def _semantic_discovery_gate(query: str) -> str:
     except Exception:
         return ""
 
-    # State FIRST — if a router (either `find` in answer/auto mode or a real
-    # `preflight_analytics_request`) has already routed this request, raw
-    # discovery is unblocked and we return immediately WITHOUT paying the O(N)
-    # `get_semantic_preflight` scoring cost. An answer-mode `find` thus unblocks
-    # discovery for free. Only compute the preview when nothing has routed yet.
+    # Already routed (a prior `find` or a real preflight) — nothing to do,
+    # and we skip the O(N) scoring cost.
     if state.semantic_find_ran or state.semantic_preflight_ran:
         return ""
 
@@ -69,19 +83,16 @@ def _semantic_discovery_gate(query: str) -> str:
         from cerebro_mcp.tools.semantic.semantic import get_semantic_preflight
 
         preview = get_semantic_preflight(query, mode="answer")
+        state.record_semantic_find(
+            route=preview.route,
+            mode="answer",
+            recommended_metrics=list(preview.recommended_metrics or []),
+        )
     except Exception:
-        return ""
+        # Routing is best-effort; never let it break discovery.
+        pass
 
-    metrics = ", ".join(f"`{name}`" for name in preview.recommended_metrics[:3])
-    metrics_line = f" Approved metrics: {metrics}." if metrics else ""
-
-    return (
-        "Semantic preflight required: call "
-        "`find(query, mode=\"answer\")` (or "
-        "`preflight_analytics_request(query, mode=\"answer\")`) before "
-        "raw model discovery when semantic is enabled."
-        f"{metrics_line}"
-    )
+    return ""
 
 
 def _semantic_nudge_for_model(model_name: str) -> str:
@@ -105,6 +116,7 @@ def _semantic_nudge_for_model(model_name: str) -> str:
 
 def register_dbt_tools(mcp):
     @mcp.tool()
+    @_offloaded
     def search_models(
         query: str = "",
         tags: Optional[list[str]] = None,
@@ -209,6 +221,7 @@ def register_dbt_tools(mcp):
         return result
 
     @mcp.tool()
+    @_offloaded
     def discover_models(
         query: str = "",
         tags: Optional[list[str]] = None,
@@ -353,6 +366,7 @@ def register_dbt_tools(mcp):
         return truncate_response("\n".join(lines)) + _semantic_nudge_for_query(query)
 
     @mcp.tool()
+    @_offloaded
     def get_model_details(model_name: str) -> str:
         """Get comprehensive details about a dbt model including SQL, columns, and lineage.
 
@@ -471,6 +485,7 @@ def register_dbt_tools(mcp):
         return truncate_response("\n".join(parts))
 
     @mcp.tool()
+    @_offloaded
     def get_relevant_columns(
         model_name: str,
         query: str,

@@ -389,14 +389,19 @@ class SessionState:
             missing: list[str] = []
 
             if settings.SEMANTIC_ENABLED:
-                if not self.semantic_preflight_ran:
+                # `find` and `preflight_analytics_request` record identical
+                # route/mode/analysis_path data, so EITHER satisfies the chart
+                # gate — no need to call both. (Reports remain stricter: the
+                # report gate requires an explicit preflight in mode="report".)
+                if not (self.semantic_preflight_ran or self.semantic_find_ran):
                     missing.append(
                         "Semantic preflight required: call "
+                        "`find(query, mode=\"chart\")` or "
                         "`preflight_analytics_request(query, mode=\"chart\")` "
                         "before charting when semantic is enabled."
                     )
                 else:
-                    # Route redirects only make sense once preflight has run.
+                    # Route redirects only make sense once routing has run.
                     if raw_path:
                         # In hybrid mode, allow raw charts alongside semantic
                         if self.analysis_path == "hybrid":
@@ -456,6 +461,26 @@ class SessionState:
                     ), []
 
                 if self.semantic_mode_last in {"answer", "chart"}:
+                    if settings.REPORT_REQUIRES_EXPLICIT_MODE:
+                        # A report artifact is only produced when the user
+                        # EXPLICITLY asked for one (preflight mode="report").
+                        # A request routed as a chart or a plain answer presents
+                        # its chart(s) inline and stops. Enforced here because
+                        # prose guidance alone did not hold — the model would
+                        # read "don't build a report" and build one anyway.
+                        return False, (
+                            "This request was not routed as a report "
+                            f"(mode=\"{self.semantic_mode_last}\"). The chart(s) "
+                            "you generated ARE the deliverable — present them in "
+                            "your reply and STOP. Do not build a report for a "
+                            "plain 'show me / plot X' or data question. Only if "
+                            "the user EXPLICITLY asked for a report, dashboard, "
+                            "or written analysis, re-run "
+                            "`preflight_analytics_request(query, mode=\"report\")` "
+                            "first, then satisfy the full report gates."
+                        ), []
+                    # Legacy lite-report bypass (toggle off): answer/chart mode
+                    # renders a lightweight report with >= 1 chart.
                     if len(chart_registry) < 1:
                         return False, (
                             "At least one chart is required before rendering "
@@ -697,26 +722,40 @@ class SessionState:
     # ── Reset ───────────────────────────────────────────────────────
 
     def begin_analysis_cycle(self) -> None:
-        """Reset per-analysis discovery and execution accumulators.
+        """Reset the per-report accumulators at the start of an analysis cycle.
 
-        Called at the start of each new analysis cycle (i.e. each
-        ``preflight_analytics_request``) so discovery state from prior
-        sessions cannot leak into the discovered-model coverage gate or
-        the chart-precondition counters. Preserves semantic preflight
-        cache so repeated identical preflights still hit the cache.
+        Called by each ``preflight_analytics_request``. Historically this wiped
+        EVERYTHING, including the discovery/lineage/schema evidence the chart
+        gate reads — which created a redo loop: the model would discover and
+        explore, then call preflight (the only way to set ``semantic_preflight_ran``
+        and open the chart gate), and that preflight erased the discovery, so the
+        chart gate then bounced with discovery/lineage/schema all at zero.
+
+        Fix: preserve the "data-surface evidence" the chart gate reads
+        (``search_models_count`` / ``explored_models`` / ``explored_tables`` /
+        ``verified_query_surfaces`` / ``execute_query_count``) so a preflight
+        that follows discovery does not throw it away. Still reset the per-report
+        accumulators that must be scoped to the current question: the
+        discovered-model coverage set and the chart / statistical / correlation
+        counters. The full ``reset()`` after a successful ``generate_report``
+        still clears everything, so isolation at the report boundary is
+        preserved. The semantic preflight cache is untouched so repeated
+        identical preflights still hit the cache.
         """
         with self.lock:
-            self.search_models_count = 0
-            self.explored_models.clear()
-            self.explored_tables.clear()
-            self.verified_query_surfaces.clear()
+            # Coverage-gate set — scoped to the current question so a stale
+            # discovered model can't leak into a new report's coverage gate.
             self.discovered_models.clear()
             self.excluded_models.clear()
-            self.execute_query_count = 0
+            # Report-quality accumulators — fresh per report.
             self.generate_chart_count = 0
             self.statistical_query_count = 0
             self.correlation_query_count = 0
             self.chart_types_generated.clear()
+            # PRESERVED (do NOT clear): search_models_count, explored_models,
+            # explored_tables, verified_query_surfaces, execute_query_count —
+            # the data-surface evidence the chart gate reads. Wiping these here
+            # is what created the discover -> preflight -> 0/0/0 redo loop.
 
     def reset(self) -> None:
         """Clear all tracked state. Called after successful generate_report."""

@@ -5,6 +5,7 @@ import json
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
 from cerebro_mcp.config import settings
 from cerebro_mcp.loaders.manifest import manifest
+from cerebro_mcp.runtime.offload import offloaded as _offloaded
 from cerebro_mcp.safety import validate_identifier
 from cerebro_mcp.models.tool import ColumnSchema, TableListPage, TableSchema, TableSummary
 from cerebro_mcp.runtime.tool_output import (
@@ -474,6 +475,7 @@ def register_schema_tools(mcp, ch: ClickHouseManager):
         )
 
     @mcp.tool()
+    @_offloaded
     def describe_table(
         table: str,
         database: str = "dbt",

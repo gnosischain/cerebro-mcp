@@ -219,6 +219,11 @@ class Settings(BaseSettings):
 
     # Agent enforcement settings
     ENFORCE_CHART_PRECONDITIONS: bool = True
+    # When True (and semantic enabled), generate_report is hard-blocked unless the
+    # request was routed as an explicit report (preflight mode="report"). Chart/answer
+    # requests present their chart(s) inline and stop. Set False to restore the legacy
+    # lite-report bypass (answer/chart mode auto-builds a light report).
+    REPORT_REQUIRES_EXPLICIT_MODE: bool = True
     MIN_MODELS_DETAILED: int = 3      # get_model_details calls required (report tier)
     MIN_MODELS_DETAILED_LITE: int = 1  # get_model_details required in chart/answer tiers
     MIN_TABLES_VERIFIED: int = 1      # describe_table calls required
@@ -246,6 +251,22 @@ class Settings(BaseSettings):
     # Report serving
     REPORT_SERVER_PORT: int = 0  # 0 = disabled; set to e.g. 8765 for HTTP serving
     REPORT_BASE_URL: str = ""   # Override full URL prefix for deployed setups
+    # Auto-open every rendered visualization/report in the default browser.
+    # OPT-IN (default off): "all plots/reports in-app unless asked". When
+    # enabled it applies on local stdio only (never SSE — the browser would
+    # open on the server host) and is fired off-thread so it can never block
+    # the event loop / freeze the server (see charts.create_report_artifact).
+    REPORT_AUTO_OPEN: bool = False
+
+    # Attach MCP-UI resource metadata (tool-level `meta` + result-level
+    # `_meta.ui.resourceUri`) to chart/report results so the host renders the
+    # native report inline in an iframe. Default OFF because Claude Desktop /
+    # claude.ai currently negotiate the MCP Apps protocol but never mount the
+    # iframe (ext-apps #671, claude-ai-mcp #165) — leaving a blank/"couldn't
+    # load" panel. With it off, chart/answer results deliver model-rendered
+    # inline charts + an Open link instead. Hosts that DO render server MCP-UI
+    # (Claude Code, a future-fixed Desktop) can set this True.
+    MCP_UI_INLINE_ENABLED: bool = False
 
     # Grafana dashboard publishing. Off by default — opt-in feature that
     # writes to an external Grafana instance via its HTTP API. When

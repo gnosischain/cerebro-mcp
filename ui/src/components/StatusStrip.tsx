@@ -13,24 +13,15 @@ export function StatusStrip({ chartCount, queryCount, timestamp }: Props) {
 
   return (
     <div className="report-cli">
-      <span className="dots" aria-hidden="true">
-        <span className="dot-r" />
-        <span className="dot-v" />
-        <span className="dot-l" />
-      </span>
-      <span className="whoami">
-        <span className="user">cerebro@gnosis</span>
-        <span className="sep">:</span>
-        <span className="path">~/reports</span>
-      </span>
-      <span className="spacer" />
       <span className="meta">
         {chartCount} charts · {queryCount} queries · {dateOnly}
       </span>
+      <span className="spacer" />
       <button
         className="term-toggle no-print"
         onClick={toggle}
         title="Toggle theme"
+        aria-label="Toggle light or dark theme"
       >
         ◐ {isDark ? "Dark" : "Light"}
       </button>

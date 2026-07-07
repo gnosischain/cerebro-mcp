@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from mcp.types import CallToolResult
 
 import cerebro_mcp.tools.visualization.charts as viz
 import cerebro_mcp.tools.analytics.query as query_mod
@@ -14,6 +15,16 @@ import cerebro_mcp.tools.analytics.dbt as dbt_mod
 import cerebro_mcp.tools.governance.session_state as session_state_mod
 from cerebro_mcp.tools.governance.session_state import state
 from cerebro_mcp.models.tool import QueryResult
+
+
+def _tool_text(result):
+    """Flatten a chart tool's CallToolResult into its text (tools that used
+    to return str now return CallToolResult)."""
+    if isinstance(result, CallToolResult):
+        return "\n".join(
+            c.text for c in result.content if getattr(c, "text", None)
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +40,10 @@ def reset_visualization_state(monkeypatch):
 
     # Report cache
     monkeypatch.setattr(viz, "_REPORT_CACHE", {})
+
+    # Last rendered visualization pointer
+    monkeypatch.setitem(viz._LAST_VISUAL, "report_id", None)
+    monkeypatch.setitem(viz._LAST_VISUAL, "created_at", None)
 
     # Query nudge state
     monkeypatch.setattr(query_mod, "_query_count", 0)
@@ -215,12 +230,16 @@ class TestGenerateReport:
         assert "structured" in cached
         assert cached["structured"]["title"] == "Cached Report"
 
-    def test_does_not_open_browser(self, tmp_path, monkeypatch):
-        """generate_report does NOT call webbrowser.open (removed)."""
+    def test_does_not_open_browser_when_disabled(self, tmp_path, monkeypatch):
+        """With REPORT_AUTO_OPEN off (the test default via conftest),
+        generate_report never calls webbrowser.open."""
+        import webbrowser
         from mcp.server.fastmcp import FastMCP
         from mcp.types import CallToolResult
 
         monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        opened = []
+        monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
 
         mcp = FastMCP("test-viz-no-browser")
         ch = MagicMock()
@@ -229,9 +248,55 @@ class TestGenerateReport:
         self._setup_chart("chart_1")
 
         fn = mcp._tool_manager._tools["generate_report"].fn
-        # This should succeed without any webbrowser import/call
         result = fn(title="No Browser", content_markdown="{{chart:chart_1}}")
         assert isinstance(result, CallToolResult)
+        assert opened == []
+
+    def test_auto_opens_browser_on_local_stdio(self, tmp_path, monkeypatch):
+        """With REPORT_AUTO_OPEN on and a non-SSE transport, the rendered
+        artifact pops in the default browser — the guaranteed-visible path
+        for clients that can't render UI resources or click file:// links."""
+        import webbrowser
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        monkeypatch.delenv("CEREBRO_TRANSPORT", raising=False)
+        monkeypatch.setattr(session_state_mod.settings, "REPORT_AUTO_OPEN", True)
+        opened = []
+        monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+
+        mcp = FastMCP("test-viz-auto-open")
+        ch = MagicMock()
+        viz.register_visualization_tools(mcp, ch)
+
+        self._setup_chart("chart_1")
+
+        fn = mcp._tool_manager._tools["generate_report"].fn
+        fn(title="Auto Open", content_markdown="{{chart:chart_1}}")
+        assert len(opened) == 1
+        assert opened[0].startswith("file://")
+        assert opened[0].endswith(".html")
+
+    def test_no_auto_open_on_sse(self, tmp_path, monkeypatch):
+        """On SSE the browser would open on the SERVER host — never do that."""
+        import webbrowser
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        monkeypatch.setenv("CEREBRO_TRANSPORT", "sse")
+        monkeypatch.setattr(session_state_mod.settings, "REPORT_AUTO_OPEN", True)
+        opened = []
+        monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+
+        mcp = FastMCP("test-viz-no-open-sse")
+        ch = MagicMock()
+        viz.register_visualization_tools(mcp, ch)
+
+        self._setup_chart("chart_1")
+
+        fn = mcp._tool_manager._tools["generate_report"].fn
+        fn(title="SSE No Open", content_markdown="{{chart:chart_1}}")
+        assert opened == []
 
     def test_filename_convention(self, tmp_path, monkeypatch):
         """Report filename contains UTC timestamp, slug, and full UUID."""
@@ -350,16 +415,26 @@ class TestGenerateReport:
         assert extracted["title"] == "Standalone Test"
         assert "chart_1" in extracted["charts"]
 
-    def test_tool_has_ui_metadata(self):
-        """generate_report tool has meta.ui.resourceUri for MCP App."""
+    def test_tool_has_ui_metadata(self, monkeypatch):
+        """generate_report tool's meta.ui.resourceUri is gated by
+        MCP_UI_INLINE_ENABLED: absent by default, present when enabled."""
         from mcp.server.fastmcp import FastMCP
 
-        mcp = FastMCP("test-meta")
         ch = MagicMock()
-        viz.register_visualization_tools(mcp, ch)
 
-        tool = mcp._tool_manager._tools["generate_report"]
-        assert tool.meta is not None
+        monkeypatch.setattr(
+            "cerebro_mcp.config.settings.MCP_UI_INLINE_ENABLED", False
+        )
+        mcp_off = FastMCP("test-meta-off")
+        viz.register_visualization_tools(mcp_off, ch)
+        assert mcp_off._tool_manager._tools["generate_report"].meta is None
+
+        monkeypatch.setattr(
+            "cerebro_mcp.config.settings.MCP_UI_INLINE_ENABLED", True
+        )
+        mcp_on = FastMCP("test-meta-on")
+        viz.register_visualization_tools(mcp_on, ch)
+        tool = mcp_on._tool_manager._tools["generate_report"]
         assert tool.meta.get("ui", {}).get("resourceUri") == viz.REPORT_URI
 
     def test_answer_mode_can_render_lightweight_visualization(self, monkeypatch, tmp_path):
@@ -459,7 +534,8 @@ class TestChartInputShapeValidation:
             elapsed_seconds=0.01,
         )
         mcp = self._make_mcp(executed)
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
 
         result = fn(
             sql=executed.sql,
@@ -483,7 +559,8 @@ class TestChartInputShapeValidation:
             elapsed_seconds=0.01,
         )
         mcp = self._make_mcp(executed)
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
 
         result = fn(
             sql=executed.sql,
@@ -507,7 +584,8 @@ class TestChartInputShapeValidation:
             elapsed_seconds=0.01,
         )
         mcp = self._make_mcp(executed)
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
 
         result = fn(
             sql=executed.sql,
@@ -529,7 +607,8 @@ class TestChartInputShapeValidation:
             elapsed_seconds=0.01,
         )
         mcp = self._make_mcp(executed)
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
 
         result = fn(
             sql=executed.sql,
@@ -555,7 +634,8 @@ class TestChartInputShapeValidation:
             elapsed_seconds=0.01,
         )
         mcp = self._make_mcp(executed)
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
 
         result = fn(
             sql=executed.sql,
@@ -609,7 +689,8 @@ class TestChartInputShapeValidation:
             elapsed_seconds=0.01,
         )
         mcp = self._make_mcp(executed)
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
 
         result = fn(
             sql=executed.sql,
@@ -636,7 +717,8 @@ class TestChartInputShapeValidation:
             elapsed_seconds=0.01,
         )
         mcp = self._make_mcp(executed)
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
 
         result = fn(
             sql=executed.sql,
@@ -668,7 +750,8 @@ class TestChartInputShapeValidation:
             elapsed_seconds=0.01,
         )
         mcp = self._make_mcp(executed)
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
 
         result = fn(
             sql=executed.sql,
@@ -729,7 +812,8 @@ class TestSemanticChartRouting:
         ch = MagicMock()
         viz.register_visualization_tools(mcp, ch)
 
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
         result = fn(
             sql="SELECT day, cnt FROM dbt.api_consensus_validators_active_daily",
             chart_type="line",
@@ -757,7 +841,8 @@ class TestSemanticChartRouting:
         ch = MagicMock()
         viz.register_visualization_tools(mcp, ch)
 
-        fn = mcp._tool_manager._tools["quick_chart"].fn
+        _raw_fn = mcp._tool_manager._tools["quick_chart"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
         result = fn(
             sql="SELECT day, cnt FROM dbt.api_consensus_validators_active_daily",
             chart_type="line",
@@ -1001,7 +1086,8 @@ class TestSemanticChartRouting:
 
         mcp = FastMCP("test-generate-charts-raw-query-verifies-schema")
         viz.register_visualization_tools(mcp, ch)
-        fn = mcp._tool_manager._tools["generate_charts"].fn
+        _raw_fn = mcp._tool_manager._tools["generate_charts"].fn
+        fn = lambda **kw: _tool_text(_raw_fn(**kw))  # noqa: E731
 
         result = fn(
             charts=[
@@ -1099,16 +1185,26 @@ class TestOpenReport:
         assert isinstance(result, CallToolResult)
         assert "not found" in result.content[0].text
 
-    def test_open_report_has_ui_metadata(self):
-        """open_report tool has meta.ui.resourceUri for MCP App."""
+    def test_open_report_has_ui_metadata(self, monkeypatch):
+        """open_report tool's meta.ui.resourceUri is gated by
+        MCP_UI_INLINE_ENABLED: absent by default, present when enabled."""
         from mcp.server.fastmcp import FastMCP
 
-        mcp = FastMCP("test-meta")
         ch = MagicMock()
-        viz.register_visualization_tools(mcp, ch)
 
-        tool = mcp._tool_manager._tools["open_report"]
-        assert tool.meta is not None
+        monkeypatch.setattr(
+            "cerebro_mcp.config.settings.MCP_UI_INLINE_ENABLED", False
+        )
+        mcp_off = FastMCP("test-meta-off")
+        viz.register_visualization_tools(mcp_off, ch)
+        assert mcp_off._tool_manager._tools["open_report"].meta is None
+
+        monkeypatch.setattr(
+            "cerebro_mcp.config.settings.MCP_UI_INLINE_ENABLED", True
+        )
+        mcp_on = FastMCP("test-meta-on")
+        viz.register_visualization_tools(mcp_on, ch)
+        tool = mcp_on._tool_manager._tools["open_report"]
         assert tool.meta.get("ui", {}).get("resourceUri") == viz.REPORT_URI
 
 
@@ -1720,18 +1816,22 @@ class TestResearchReport:
         assert "chart_clean" in out["structured"]["charts"]
         assert "chart_legacy" not in out["structured"]["charts"]
 
-    def test_begin_analysis_cycle_clears_discovery_accumulators(self):
-        """Regression: prior-session discovered_models must not leak into a
-        new analysis. begin_analysis_cycle() resets per-cycle accumulators
-        but preserves semantic preflight cache."""
-        # Simulate prior-session state
-        state.discovered_models.update({"old_model_a", "old_model_b"})
+    def test_begin_analysis_cycle_preserves_chart_gate_evidence(self):
+        """begin_analysis_cycle() (run by every preflight) must NOT wipe the
+        discovery/lineage/schema evidence the chart gate reads — wiping it is
+        what caused the discover -> preflight -> 0/0/0 redo loop. It still
+        resets the per-report accumulators (coverage set + chart/stat/corr
+        counters) and preserves the preflight cache."""
+        # Data-surface evidence the chart gate reads.
         state.explored_models.add("explored_x")
         state.explored_tables.add("table_y")
         state.verified_query_surfaces.add("dbt.fct_z")
-        state.excluded_models.add("excluded_w")
         state.search_models_count = 3
         state.execute_query_count = 5
+        # Per-report accumulators + coverage set.
+        state.discovered_models.update({"old_model_a", "old_model_b"})
+        state.excluded_models.add("excluded_w")
+        state.generate_chart_count = 4
         state.statistical_query_count = 2
         state.correlation_query_count = 1
         state.chart_types_generated.update({"line", "scatter"})
@@ -1739,18 +1839,40 @@ class TestResearchReport:
 
         state.begin_analysis_cycle()
 
+        # PRESERVED: chart-gate evidence survives a preflight.
+        assert state.explored_models == {"explored_x"}
+        assert state.explored_tables == {"table_y"}
+        assert state.verified_query_surfaces == {"dbt.fct_z"}
+        assert state.search_models_count == 3
+        assert state.execute_query_count == 5
+        # RESET: coverage set + report-quality accumulators.
         assert state.discovered_models == set()
-        assert state.explored_models == set()
-        assert state.explored_tables == set()
-        assert state.verified_query_surfaces == set()
         assert state.excluded_models == set()
-        assert state.search_models_count == 0
-        assert state.execute_query_count == 0
+        assert state.generate_chart_count == 0
         assert state.statistical_query_count == 0
         assert state.correlation_query_count == 0
         assert state.chart_types_generated == set()
-        # Preflight cache preserved across cycles
+        # Preflight cache preserved across cycles.
         assert "key1" in state.semantic_preflight_cache
+
+    def test_preflight_after_discovery_does_not_reset_chart_gate(self, monkeypatch):
+        """Regression for the redo loop: discover + explore + verify, THEN
+        preflight (which runs begin_analysis_cycle), must leave the chart gate
+        satisfiable instead of bouncing with discovery/lineage/schema at zero."""
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        monkeypatch.setattr(
+            session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", True
+        )
+        # Discovery / lineage / schema done BEFORE preflight (the failing order).
+        state.record_search_models("active validators", 1)
+        state.record_get_model_details("api_consensus_validators_active_daily")
+        state.record_describe_table("api_consensus_validators_active_daily")
+        # A preflight resets the cycle (begin_analysis_cycle) then records itself.
+        state.begin_analysis_cycle()
+        state.record_semantic_preflight(route="hybrid_ready", mode="chart")
+
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert passed, reason
 
     def test_record_model_exclusion_satisfies_coverage_gate(self, monkeypatch):
         """record_model_exclusion marks a discovered model as excluded so it
@@ -1935,3 +2057,294 @@ class TestChartGateAggregationAndTiering:
         state.record_get_model_details("api_consensus_validators_active_monthly")
         passed, reason = state.check_chart_preconditions(raw_path=True)
         assert passed, reason
+
+
+class TestReportModeGate:
+    """generate_report is hard-blocked unless the request was routed mode='report'."""
+
+    def _enable(self, monkeypatch):
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        monkeypatch.setattr(
+            session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", True
+        )
+        monkeypatch.setattr(
+            session_state_mod.settings, "REPORT_REQUIRES_EXPLICIT_MODE", True
+        )
+
+    def test_chart_mode_report_blocked(self, monkeypatch):
+        self._enable(monkeypatch)
+        state.record_semantic_preflight(route="hybrid_ready", mode="chart")
+        passed, reason, _ = state.check_report_preconditions(
+            {"chart_1": {"chart_type": "bar"}}
+        )
+        assert not passed
+        assert "not routed as a report" in reason
+        assert "STOP" in reason
+
+    def test_answer_mode_report_blocked(self, monkeypatch):
+        self._enable(monkeypatch)
+        state.record_semantic_preflight(route="hybrid_ready", mode="answer")
+        passed, reason, _ = state.check_report_preconditions(
+            {"chart_1": {"chart_type": "bar"}}
+        )
+        assert not passed
+        assert "not routed as a report" in reason
+
+    def test_report_mode_not_blocked_by_explicit_mode_gate(self, monkeypatch):
+        # mode="report" must get PAST the explicit-mode block into the normal
+        # report-quality gates. With only 1 chart it still fails the min-charts
+        # gate, but the failure must NOT be the explicit-mode block.
+        self._enable(monkeypatch)
+        state.record_semantic_preflight(route="hybrid_ready", mode="report")
+        passed, reason, _ = state.check_report_preconditions(
+            {"chart_1": {"chart_type": "bar"}}
+        )
+        assert "not routed as a report" not in reason
+
+    def test_toggle_off_restores_lite_bypass(self, monkeypatch):
+        self._enable(monkeypatch)
+        monkeypatch.setattr(
+            session_state_mod.settings, "REPORT_REQUIRES_EXPLICIT_MODE", False
+        )
+        state.record_semantic_preflight(route="hybrid_ready", mode="answer")
+        passed, reason, _ = state.check_report_preconditions(
+            {"chart_1": {"chart_type": "bar"}}
+        )
+        assert passed, reason
+
+
+class TestChartModeAutoRender:
+    """In chart/answer mode the chart tools RENDER the charts (visual_answer
+    artifact + per-report UI resource with embedded data) — the fix for
+    'charts generated but no visual output'."""
+
+    def _mcp(self, tmp_path, monkeypatch, ui_inline=False):
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setenv("CEREBRO_REPORT_DIR", str(tmp_path))
+        monkeypatch.delenv("CEREBRO_TRANSPORT", raising=False)
+        # UI-resource meta is gated (default off). Set before register so
+        # tool-level meta reflects the flag; it also covers result-level meta.
+        monkeypatch.setattr(
+            "cerebro_mcp.config.settings.MCP_UI_INLINE_ENABLED", ui_inline
+        )
+        executed = SimpleNamespace(
+            sql="SELECT day, cnt FROM dbt.t",
+            database="dbt",
+            columns=["day", "cnt"],
+            rows=[["2026-01-01", 1], ["2026-01-02", 2]],
+            elapsed_seconds=0.01,
+        )
+        ch = MagicMock()
+        ch.run_query.return_value = executed
+        mcp = FastMCP("test-chart-autorender")
+        viz.register_visualization_tools(mcp, ch)
+        return mcp
+
+    def _spec(self):
+        return {
+            "sql": "SELECT day, cnt FROM dbt.t",
+            "chart_type": "line",
+            "x_field": "day",
+            "y_field": "cnt",
+            "title": "Trend",
+        }
+
+    def test_generate_charts_chart_mode_renders_visualization(
+        self, tmp_path, monkeypatch
+    ):
+        state.record_semantic_preflight(route="hybrid_ready", mode="chart")
+        mcp = self._mcp(tmp_path, monkeypatch)
+        fn = mcp._tool_manager._tools["generate_charts"].fn
+
+        result = fn(charts=[self._spec()])
+
+        assert isinstance(result, CallToolResult)
+        assert result.structuredContent["presentation_mode"] == "visual_answer"
+        # Default (MCP_UI_INLINE_ENABLED off): no server UI panel meta — the
+        # model renders inline instead, from the model-inline payload.
+        assert result.meta is None
+        text = _tool_text(result)
+        assert "RENDER THESE CHARTS INLINE" in text
+        assert "palette_dark" in text
+        assert "SELECT day, cnt" in text  # per-chart SQL is handed to the model
+        assert "file://" in text  # full-fidelity report still linked
+        # Session NOT reset: charts stay registered for a follow-up report.
+        assert len(viz._chart_registry) == 1
+
+    def test_generate_charts_report_mode_returns_summary_only(
+        self, tmp_path, monkeypatch
+    ):
+        state.record_semantic_preflight(route="hybrid_ready", mode="report")
+        mcp = self._mcp(tmp_path, monkeypatch)
+        fn = mcp._tool_manager._tools["generate_charts"].fn
+
+        result = fn(charts=[self._spec()])
+
+        assert isinstance(result, CallToolResult)
+        assert result.structuredContent is None
+        assert result.meta is None
+        assert "Registered charts" in _tool_text(result)
+
+    def test_quick_chart_chart_mode_renders_visualization(
+        self, tmp_path, monkeypatch
+    ):
+        state.record_semantic_preflight(route="hybrid_ready", mode="chart")
+        mcp = self._mcp(tmp_path, monkeypatch)
+        fn = mcp._tool_manager._tools["quick_chart"].fn
+
+        result = fn(
+            sql="SELECT day, cnt FROM dbt.t",
+            chart_type="line",
+            x_field="day",
+            y_field="cnt",
+            title="Trend",
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.structuredContent["presentation_mode"] == "visual_answer"
+        # Default: model renders inline; no server UI panel meta.
+        assert result.meta is None
+        assert "RENDER THESE CHARTS INLINE" in _tool_text(result)
+
+    def test_report_instance_resource_serves_embedded_data(
+        self, tmp_path, monkeypatch
+    ):
+        """The per-report ui:// resource returns standalone HTML with the
+        report data EMBEDDED — renders with zero ext-apps handshake."""
+        state.record_semantic_preflight(route="hybrid_ready", mode="chart")
+        mcp = self._mcp(tmp_path, monkeypatch, ui_inline=True)
+        fn = mcp._tool_manager._tools["generate_charts"].fn
+        result = fn(charts=[self._spec()])
+        report_id = result.meta["ui"]["resourceUri"].rsplit("/", 1)[-1]
+
+        templates = mcp._resource_manager._templates
+        tpl_fn = None
+        for key, tpl in templates.items():
+            if "cerebro/report/" in str(key):
+                tpl_fn = tpl.fn
+                break
+        assert tpl_fn is not None, "per-report resource template not registered"
+
+        html = tpl_fn(report_id=report_id)
+        assert 'id="report-data"' in html
+        assert "visual_answer" in html
+
+    def _static_resource(self, mcp, uri_fragment):
+        for key, res in mcp._resource_manager._resources.items():
+            if uri_fragment in str(key):
+                return res.fn
+        return None
+
+    def test_chart_tools_carry_visualization_tool_meta(
+        self, tmp_path, monkeypatch
+    ):
+        """UI-resource meta is gated by MCP_UI_INLINE_ENABLED: absent by default
+        (so Claude Desktop shows no broken panel), present when enabled."""
+        mcp_off = self._mcp(tmp_path, monkeypatch)
+        for name in ("generate_charts", "quick_chart"):
+            assert mcp_off._tool_manager._tools[name].meta is None
+
+        mcp_on = self._mcp(tmp_path, monkeypatch, ui_inline=True)
+        for name in ("generate_charts", "quick_chart"):
+            meta = mcp_on._tool_manager._tools[name].meta
+            assert meta["ui"]["resourceUri"] == viz.VISUALIZATION_URI
+
+    def test_latest_visualization_resource_serves_embedded_data(
+        self, tmp_path, monkeypatch
+    ):
+        state.record_semantic_preflight(route="hybrid_ready", mode="chart")
+        mcp = self._mcp(tmp_path, monkeypatch)
+        fn = mcp._tool_manager._tools["generate_charts"].fn
+        fn(charts=[self._spec()])
+
+        res_fn = self._static_resource(mcp, "cerebro/visualization")
+        assert res_fn is not None, "visualization resource not registered"
+        html = res_fn()
+        assert 'id="report-data"' in html
+        assert "visual_answer" in html
+
+    def test_latest_visualization_resource_placeholder_when_none(
+        self, tmp_path, monkeypatch
+    ):
+        mcp = self._mcp(tmp_path, monkeypatch)
+        res_fn = self._static_resource(mcp, "cerebro/visualization")
+        html = res_fn()
+        assert "no standalone visualization" in html
+
+    def test_report_resource_serves_latest_embedded_report(
+        self, tmp_path, monkeypatch
+    ):
+        """ui://cerebro/report now prefers the latest report's standalone
+        HTML (data embedded) over the data-less bundle."""
+        state.record_semantic_preflight(route="hybrid_ready", mode="chart")
+        mcp = self._mcp(tmp_path, monkeypatch)
+        fn = mcp._tool_manager._tools["generate_charts"].fn
+        fn(charts=[self._spec()])
+
+        res_fn = self._static_resource(mcp, "cerebro/report")
+        html = res_fn()
+        assert 'id="report-data"' in html
+
+
+# ---------------------------------------------------------------------------
+# Off-loop hardening: tools run on worker threads without blocking the loop
+# ---------------------------------------------------------------------------
+
+class TestOffloadHardening:
+    """The `@_offloaded` wrapper and the non-blocking browser-open keep the
+    single asyncio event loop responsive under a slow tool / cold browser."""
+
+    def test_offloaded_runs_on_worker_thread(self):
+        import asyncio
+        import threading
+
+        from cerebro_mcp.runtime.offload import offloaded
+
+        main = threading.current_thread().name
+
+        @offloaded
+        def body(x):
+            return (x, threading.current_thread().name)
+
+        got, thread_name = asyncio.run(body(7))
+        assert got == 7
+        assert thread_name != main  # ran off the calling (event-loop) thread
+
+    def test_offloaded_preserves_signature_and_doc(self):
+        import inspect
+
+        from cerebro_mcp.runtime.offload import offloaded
+
+        @offloaded
+        def body(a: int, b: str = "x") -> str:
+            """Body doc."""
+            return f"{a}{b}"
+
+        sig = inspect.signature(body)
+        assert list(sig.parameters) == ["a", "b"]
+        assert body.__doc__ == "Body doc."
+
+    def test_open_in_browser_async_does_not_block(self, monkeypatch):
+        """A blocking webbrowser.open must not block the caller (it would
+        freeze the event loop and time out every concurrent tool)."""
+        import threading
+        import time
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_open(url):
+            started.set()
+            release.wait(5)
+
+        monkeypatch.setattr("webbrowser.open", blocking_open)
+
+        t0 = time.monotonic()
+        viz._open_in_browser_async("file:///tmp/x.html")
+        elapsed = time.monotonic() - t0
+        try:
+            assert elapsed < 0.5  # returned immediately despite the 5s open
+            assert started.wait(2)  # the open actually ran on a thread
+        finally:
+            release.set()

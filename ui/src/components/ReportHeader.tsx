@@ -16,34 +16,12 @@ function splitTitle(t: string) {
   );
 }
 
-/** Slug for the `$ render --report <slug>` prompt line — first few words of the
- * title, kebab-cased. Purely decorative terminal chrome. */
-function reportSlug(title: string): string {
-  return (
-    title
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ") // punctuation (incl. hyphens) -> spaces
-      .trim()
-      .split(/\s+/)
-      .slice(0, 4)
-      .join("-") || "report"
-  );
-}
-
 export function ReportHeader({ title, subtitle }: Props) {
   return (
     <header className="report-header">
       <div className="report-header-inner">
-        <div className="report-header-prompt">
-          $ render --report {reportSlug(title)} --brand gnosis
-        </div>
-        <h1 className="report-header-title">
-          {splitTitle(title)}
-          <span className="report-header-cursor">_</span>
-        </h1>
-        {subtitle && (
-          <p className="report-header-subtitle"># {subtitle}</p>
-        )}
+        <h1 className="report-header-title">{splitTitle(title)}</h1>
+        {subtitle && <p className="report-header-subtitle">{subtitle}</p>}
       </div>
       <div className="report-header-mark" aria-hidden="true">
         <svg viewBox="0 0 32 32" fill="none">
