@@ -4,6 +4,7 @@ import MetricLabApp from "./mini-apps/metric-lab/MetricLabApp";
 import { ThemeProvider } from "./hooks/useTheme";
 import "./themes/global.css";
 import "./mini-apps/shared/mini-apps.css";
+import "./mini-apps/metric-lab/metric-lab.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

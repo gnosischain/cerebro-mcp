@@ -15,6 +15,8 @@ interface Props {
   title?: string;
   sql?: string;
   sourceModel?: string;
+  /** Hide the CHART_NN id badge (mini-app hosts have no chart numbering). */
+  hideId?: boolean;
 }
 
 function buildDataViewTable(opt: EChartsOption): string {
@@ -82,7 +84,7 @@ function chartLabel(chartId: string): string {
   return chartId.replace(/^chart[_-]?/i, "CHART_").toUpperCase();
 }
 
-function ChartCardInner({ chartId, spec, title, sql, sourceModel }: Props) {
+function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId }: Props) {
   const { isDark } = useTheme();
   const [showSql, setShowSql] = useState(false);
 
@@ -96,7 +98,7 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel }: Props) {
       <div id={`chart-${chartId}`} className="chart-card">
         <div className="chart-card-head">
           <div className="chart-card-title">{title || spec.title || ""}</div>
-          <div className="chart-card-id">{label}</div>
+          {!hideId && <div className="chart-card-id">{label}</div>}
         </div>
         <NumberDisplay spec={spec} />
         {sql && (
@@ -155,7 +157,7 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel }: Props) {
     <div id={`chart-${chartId}`} className="chart-card">
       <div className="chart-card-head">
         <div className="chart-card-title">{title || ""}</div>
-        <div className="chart-card-id">{label}</div>
+        {!hideId && <div className="chart-card-id">{label}</div>}
       </div>
       <div className="chart-card-body">
         <ReactECharts

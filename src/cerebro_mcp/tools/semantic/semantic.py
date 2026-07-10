@@ -78,6 +78,10 @@ _DIMENSION_ALIASES = {
     "date": "day",
 }
 _PREFLIGHT_MIN_SCORE = 30
+# Softer second bar: a metric slightly under the main score bar still
+# qualifies when the query overlaps its blob on >= 2 tokens. Kills the
+# acceptance CLIFF where score 29 + perfect overlap returned nothing.
+_PREFLIGHT_MIN_SCORE_WITH_OVERLAP = 20
 _QUERY_SPECIFICITY_TOKENS = {
     "wallet",
     "wallets",
@@ -946,7 +950,14 @@ def _is_preflight_ready_match(query: str, metric: dict[str, Any], score: int) ->
         return False
     if _has_strong_metric_phrase_match(query, metric):
         return True
-    return score >= _PREFLIGHT_MIN_SCORE and token_overlap(query, metric.get("search_blob", "")) >= 2
+    # Two acceptance bars instead of one cliff: a strong score stands on its
+    # own; a slightly weaker one still qualifies with >= 2 tokens of overlap.
+    if score >= _PREFLIGHT_MIN_SCORE:
+        return True
+    return (
+        score >= _PREFLIGHT_MIN_SCORE_WITH_OVERLAP
+        and token_overlap(query, metric.get("search_blob", "")) >= 2
+    )
 
 
 def _infer_dimensions_from_query(
@@ -1238,6 +1249,7 @@ def _route(query: str, mode: str) -> dict[str, Any]:
             "uncovered_topics": [],
             "accepted": [],
             "rejected": [],
+            "low_confidence": [],
             "hybrid_ready": False,
             "fallback_reason": fallback_reason,
         }
@@ -1288,6 +1300,13 @@ def _route(query: str, mode: str) -> dict[str, Any]:
         if not _is_preflight_ready_match(query, metric, score)
     ]
 
+    # Below-bar softener (ADDITIVE — route/gates unchanged): when nothing
+    # clears the acceptance bars, carry the best 3 scored metrics so callers
+    # (find) can show closest matches instead of a dead end.
+    low_confidence: list[tuple[int, str, dict[str, Any]]] = []
+    if not accepted and scored:
+        low_confidence = scored[:3]
+
     recommended_metrics = [metric_name for _score, metric_name, _metric in accepted[:5]]
     recommended_dimensions: list[str] = []
     if accepted:
@@ -1319,6 +1338,7 @@ def _route(query: str, mode: str) -> dict[str, Any]:
         "uncovered_topics": uncovered_topics,
         "accepted": accepted,
         "rejected": rejected,
+        "low_confidence": low_confidence,
         "hybrid_ready": hybrid_ready,
         "fallback_reason": fallback_reason,
         "snapshot": snapshot,

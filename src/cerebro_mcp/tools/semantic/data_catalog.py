@@ -35,6 +35,8 @@ from mcp.types import CallToolResult, TextContent
 from cerebro_mcp.config import settings
 from cerebro_mcp.loaders.manifest import manifest
 from cerebro_mcp.semantic.bm25 import BM25Doc, BM25Index
+from cerebro_mcp.semantic.search import ModelSearchIndex
+from cerebro_mcp.semantic.search import tokenize as search_tokenize
 from cerebro_mcp.semantic.graph_profiles import current_snapshot
 from cerebro_mcp.tools.visualization import web_apps
 from cerebro_mcp.tools.visualization.mini_apps import run_structured_query
@@ -138,14 +140,13 @@ class _CatalogIndex:
                 tags=tags,
             )
             self.hits[hit.id] = hit
-            docs.append(
-                BM25Doc(
-                    model_name=hit.id,
-                    text=" ".join(
-                        [name, hit.description, hit.module, " ".join(tags)]
-                    ),
-                )
-            )
+            # NOTE: model docs are deliberately NOT added to the local BM25 —
+            # models rank through the canonical, field-weighted
+            # ModelSearchIndex (semantic/search.py) so every tool sees the
+            # same model ranking (incl. column-name recall this thin blob
+            # never had). Metrics + glossary stay on the local index below.
+
+        self.model_search = ModelSearchIndex.for_snapshot(snap)
 
         for name, metric in (getattr(snap, "metrics", {}) or {}).items():
             module = metric.get("module", "") or ""
@@ -204,6 +205,13 @@ class _CatalogIndex:
             )
 
         self.bm25 = BM25Index(docs)
+        # Token-overlap floor for the metric/glossary leg (shared tokenizer):
+        # rank_bm25's IDF degenerates in tiny corpora (0 at df=N/2, epsilon-
+        # negative at df=N), and with model docs gone the local corpus can be
+        # small in dev/test registries. Same blend as _FieldBM25.
+        self.doc_tokens: dict[str, set[str]] = {
+            d.model_name: set(search_tokenize(d.text)) for d in docs
+        }
 
 
 _INDEX_CACHE: dict[str, _CatalogIndex] = {}
@@ -988,6 +996,7 @@ def catalog_search(
     tags: list[str] | None = None,
     owner: str = "",
     limit: int = 30,
+    include_column_matches: bool = False,
 ) -> dict[str, Any]:
     """Search the data catalog across models, metrics, and glossary terms.
 
@@ -1035,9 +1044,30 @@ def catalog_search(
         # name/exact/model boost so canonical entities outrank the *_value metric
         # flood. Combined score drives the final order.
         scored: dict[str, float] = {}
+        # Metrics + glossary: local BM25 + token-overlap floor (the floor
+        # keeps matches surfacing when the corpus is too small for IDF).
         for hid, sc in idx.bm25.search(q, top_k=len(idx.hits) or 1):
             scored[hid] = float(sc)
+        qtok = set(search_tokenize(q))
+        if qtok:
+            for hid, toks in idx.doc_tokens.items():
+                overlap = len(qtok & toks)
+                if overlap:
+                    scored[hid] = scored.get(hid, 0.0) + 0.5 * overlap
+        # Models: the canonical field-weighted index (name/prefix bonuses and
+        # fuzzy tolerance are applied INSIDE it — no double-bonusing below).
+        column_matches: dict[str, list[dict[str, Any]]] = {}
+        for mh in idx.model_search.search(
+            q,
+            limit=len(idx.model_search) or 1,
+            include_column_matches=include_column_matches,
+        ):
+            scored[f"model:{mh.name}"] = mh.score
+            if mh.matched_columns:
+                column_matches[f"model:{mh.name}"] = mh.matched_columns
         for hid, hit in idx.hits.items():
+            if hit.type == "model":
+                continue  # bonused inside ModelSearchIndex
             nl = hit.name.lower()
             tl = hit.title.lower()
             bonus = 0.0
@@ -1159,7 +1189,14 @@ def catalog_search(
                 facets["tags"][t] = facets["tags"].get(t, 0) + 1
 
     filtered = [h for h in universe if _passes(h, "")]
-    hits = [h.as_dict() for h in filtered[:limit]]
+    hits = []
+    for h in filtered[:limit]:
+        d = h.as_dict()
+        if include_column_matches:
+            cols = column_matches.get(h.id) if q else None
+            if cols:
+                d["matched_columns"] = cols
+        hits.append(d)
     # On a zero-result query, surface the query-relevant universe (which already
     # includes the fuzzy-typo fallback) as "did you mean" suggestions so the
     # empty state isn't a dead end.

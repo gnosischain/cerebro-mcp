@@ -259,9 +259,14 @@ def test_allowed_aggregations_match_spec():
 # ---------------------------------------------------------------------------
 
 
+def _fake_catalog_result(entries):
+    """Shape build_metric_catalog returns: entries + total + facets."""
+    return {"entries": entries, "total_matching": len(entries), "facets": {}}
+
+
 def test_open_metric_lab_returns_catalog_when_available():
     """Zero-arg open_metric_lab must return an empty view with the metric
-    catalog bundled. We patch get_metric_catalog so the test doesn't
+    catalog bundled. We patch build_metric_catalog so the test doesn't
     depend on a live semantic snapshot."""
     server = _build_server(total=60)
     fn = _get_tool(server, "open_metric_lab")
@@ -291,7 +296,11 @@ def test_open_metric_lab_returns_catalog_when_available():
         },
     ]
 
-    with patch.object(metric_lab_module, "get_metric_catalog", return_value=fake_catalog):
+    with patch.object(
+        metric_lab_module,
+        "build_metric_catalog",
+        return_value=_fake_catalog_result(fake_catalog),
+    ):
         result = fn()
 
     assert result.isError is None or result.isError is False
@@ -299,6 +308,7 @@ def test_open_metric_lab_returns_catalog_when_available():
     assert sc["type"] == "INITIAL_LOAD"
     assert sc["view_state"]["mode"] == "empty"
     assert len(sc["view_state"]["metric_catalog"]) == 2
+    assert sc["view_state"]["catalog_total"] == 2
     assert sc["datasets"] == {}
     assert sc["view_state"]["analytics_disabled"] is True
 
@@ -309,7 +319,11 @@ def test_open_metric_lab_errors_when_catalog_is_empty():
     server = _build_server(total=60)
     fn = _get_tool(server, "open_metric_lab")
 
-    with patch.object(metric_lab_module, "get_metric_catalog", return_value=[]):
+    with patch.object(
+        metric_lab_module,
+        "build_metric_catalog",
+        return_value=_fake_catalog_result([]),
+    ):
         result = fn()
 
     assert result.isError is True
@@ -336,7 +350,11 @@ def test_load_metric_lab_metric_swaps_dataset_in_place():
     ]
 
     open_fn = _get_tool(server, "open_metric_lab")
-    with patch.object(metric_lab_module, "get_metric_catalog", return_value=fake_catalog):
+    with patch.object(
+        metric_lab_module,
+        "build_metric_catalog",
+        return_value=_fake_catalog_result(fake_catalog),
+    ):
         opened = open_fn()
     view_id = opened.structuredContent["view_id"]
 
@@ -367,11 +385,11 @@ def test_load_metric_lab_metric_surfaces_compiler_error():
     server = _build_server(total=60)
 
     open_fn = _get_tool(server, "open_metric_lab")
-    with patch.object(metric_lab_module, "get_metric_catalog", return_value=[
+    with patch.object(metric_lab_module, "build_metric_catalog", return_value=_fake_catalog_result([
         {"name": "x", "label": "x", "description": "", "module": "m",
          "root_model": "r", "quality_tier": "approved", "unit": "",
          "allowed_dimensions": [], "default_dimensions": []},
-    ]):
+    ])):
         opened = open_fn()
     view_id = opened.structuredContent["view_id"]
 

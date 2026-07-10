@@ -296,7 +296,13 @@ def _recommended_action(
 
 
 def _top_metrics(routing: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-    """Compact metric hits from the routing accepted list (executable=True)."""
+    """Compact metric hits from the routing accepted list (executable=True).
+
+    When NOTHING cleared the acceptance bars, fall back to the routing's
+    `low_confidence` best-3 — flagged `low_confidence: true` — so a
+    near-miss query surfaces its closest metrics instead of a dead end.
+    The route itself is unchanged (still coverage-gap; gates untouched).
+    """
     out: list[dict[str, Any]] = []
     for _score, name, metric in routing.get("accepted", [])[: max(1, limit)]:
         out.append(
@@ -306,6 +312,16 @@ def _top_metrics(routing: dict[str, Any], limit: int) -> list[dict[str, Any]]:
                 "executable": True,
             }
         )
+    if not out:
+        for _score, name, metric in routing.get("low_confidence", [])[: max(1, limit)]:
+            out.append(
+                {
+                    "name": name,
+                    "label": metric.get("label", "") or name,
+                    "executable": True,
+                    "low_confidence": True,
+                }
+            )
     return out
 
 

@@ -334,3 +334,60 @@ def test_route_is_shared_by_find_and_preflight(semantic_ready):
     assert routing["status"] == "ok"
     assert routing["route"] == "semantic_ready"
     assert routing["recommended_metrics"][0] == "transaction_count"
+
+
+# ---------------------------------------------------------------------------
+# Acceptance-cliff fix: two bars + low-confidence fallback (CS-2 item 4)
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_match_two_acceptance_bars():
+    """score>=30 stands alone; score in [20,30) needs >=2-token overlap;
+    below 20 never qualifies (short of a strong phrase match)."""
+    import cerebro_mcp.tools.semantic.semantic as sem
+
+    no_overlap = {"all_synonyms": [], "search_blob": "zzz qqq"}
+    overlapping = {"all_synonyms": [], "search_blob": "bridge net flow weekly"}
+
+    q = "bridge net flow"
+    # High score needs no overlap any more (was the cliff).
+    assert sem._is_preflight_ready_match(q, no_overlap, 30) is True
+    assert sem._is_preflight_ready_match(q, no_overlap, 29) is False
+    # Mid score + overlap>=2 clears the second bar.
+    assert sem._is_preflight_ready_match(q, overlapping, 25) is True
+    assert sem._is_preflight_ready_match(q, overlapping, 20) is True
+    # Below the second bar overlap does not help.
+    assert sem._is_preflight_ready_match(q, overlapping, 19) is False
+
+
+def test_route_low_confidence_surfaces_best_matches(semantic_ready, monkeypatch):
+    """Nothing clears the bars -> route stays coverage-gap (gates untouched)
+    but the best-3 scored metrics ride along as `low_confidence`."""
+    semantic_tools, _snapshot = semantic_ready
+    monkeypatch.setattr(
+        semantic_tools, "score_metric", lambda q, m, token_idf=None: 10
+    )
+
+    routing = semantic_tools._route("zzz unknown thing", "answer")
+    assert routing["route"] == "semantic_coverage_gap"
+    assert routing["accepted"] == []
+    assert routing["low_confidence"], "below-bar best matches must surface"
+    assert routing["low_confidence"][0][1] == "transaction_count"
+
+
+def test_find_flags_low_confidence_metrics(semantic_ready, monkeypatch):
+    """find surfaces the closest metrics flagged low_confidence instead of an
+    empty top_metrics, while the recommended action stays raw discovery."""
+    from cerebro_mcp.tools.semantic.find import build_find_response
+
+    semantic_tools, _snapshot = semantic_ready
+    monkeypatch.setattr(
+        semantic_tools, "score_metric", lambda q, m, token_idf=None: 10
+    )
+    mcp = _mcp_with_find("find-low-confidence-test")
+
+    payload = build_find_response(mcp, "zzz unknown thing", "answer", 8)
+    assert payload["route"] == "semantic_coverage_gap"
+    assert payload["recommended_action"]["tool"] == "discover_models"
+    assert payload["top_metrics"], "closest metrics should surface"
+    assert all(m.get("low_confidence") is True for m in payload["top_metrics"])

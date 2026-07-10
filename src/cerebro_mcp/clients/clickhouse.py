@@ -204,12 +204,28 @@ class ClickHouseManager:
                 # unreachable host used to burn ~180s of retries per query and,
                 # via the old synchronous dispatch, freeze the whole server.
                 query_retries=0,
-                settings={
-                    "readonly": 1,
-                    "max_execution_time": settings.effective_query_timeout_seconds,
-                },
+                settings=self._session_settings(),
             )
         return clients[database]
+
+    @staticmethod
+    def _session_settings() -> dict:
+        """Session-level query guards applied to every connection.
+
+        ``max_memory_usage`` fails one greedy query fast instead of letting
+        it exhaust the shared instance — most dbt models are VIEWS, so a
+        single SELECT can execute an aggregation over a huge table
+        (observed: 10.8 GiB MEMORY_LIMIT_EXCEEDED on ClickHouse Cloud).
+        """
+        out: dict = {
+            "readonly": 1,
+            "max_execution_time": settings.effective_query_timeout_seconds,
+        }
+        if settings.CLICKHOUSE_MAX_QUERY_MEMORY_GB > 0:
+            out["max_memory_usage"] = int(
+                settings.CLICKHOUSE_MAX_QUERY_MEMORY_GB * 2**30
+            )
+        return out
 
     def _validate_database(self, database: str) -> None:
         valid, err = validate_identifier(database)

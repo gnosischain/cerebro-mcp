@@ -2,7 +2,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import time
 from typing import Any, Optional
 
@@ -12,11 +11,15 @@ import requests
 from cerebro_mcp.loaders.artifacts import local_artifact_candidates
 from cerebro_mcp.config import settings
 from cerebro_mcp.semantic.bm25 import (
-    BM25Index,
     ColumnBM25Index,
-    build_bm25_indices_from_manifest_data,
+    build_column_bm25_from_manifest_data,
 )
 from cerebro_mcp.semantic.index import rrf_fuse
+from cerebro_mcp.semantic.search import (
+    FieldDoc,
+    ModelSearchIndex,
+    tokenize as search_tokenize,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +48,12 @@ class ManifestLoader:
         self._search_index: dict[str, str] = {}
         self._tests_by_model: dict[str, list[dict]] = {}
         self._owner_index: dict[str, list[str]] = {}
-        # Phase 1: BM25 search + networkx lineage. Built once per manifest
+        # Phase 1: model search + networkx lineage. Built once per manifest
         # reload by `_build_indexes_internal` and swapped atomically with
-        # the rest of the indexes.
-        self._bm25_models: BM25Index = BM25Index([])
+        # the rest of the indexes. Models rank through the canonical
+        # field-weighted index (semantic/search.py) shared with
+        # catalog_search / the Metric Lab.
+        self._model_search: ModelSearchIndex = ModelSearchIndex.from_field_docs([])
         self._bm25_columns: ColumnBM25Index = ColumnBM25Index([])
         self._lineage_graph: nx.DiGraph = nx.DiGraph()
         self._unique_id_by_name: dict[str, str] = {}
@@ -222,6 +227,7 @@ class ManifestLoader:
         tests_by_model: dict[str, list[dict]] = {}
         owner_index: dict[str, list[str]] = {}
         internal_only_names: set[str] = set()
+        field_docs: list[FieldDoc] = []
 
         for key, node in data.get("nodes", {}).items():
             resource_type = node.get("resource_type")
@@ -259,6 +265,7 @@ class ManifestLoader:
                 meta = _meta
 
                 path = node.get("path", "")
+                module = ""
                 if "/" in path:
                     module = path.split("/")[0].lower()
                     module_index.setdefault(module, []).append(name)
@@ -294,6 +301,26 @@ class ManifestLoader:
                     f"{name.lower()} {desc.lower()} {tags_str.lower()}"
                     f" {owner.lower()} {column_text.lower()}"
                     f" {path_tokens.lower()} {inference_notes.lower()}"
+                )
+
+                # Field-split doc for the canonical ModelSearchIndex — same
+                # name/aux/body layout as its snapshot constructor, so the
+                # manifest surface ranks like every other search surface.
+                cols_dict = node.get("columns") or {}
+                col_names_text = " ".join(cols_dict.keys())
+                col_desc_text = " ".join(
+                    (col_meta or {}).get("description", "") or ""
+                    for col_meta in cols_dict.values()
+                )
+                field_docs.append(
+                    FieldDoc(
+                        name=name,
+                        name_text=f"{name} {name.replace('_', ' ')}",
+                        aux_text=f"{tags_str} {col_names_text} {owner} {module}",
+                        body_text=(
+                            f"{desc} {col_desc_text} {path_tokens} {inference_notes}"
+                        ),
+                    )
                 )
 
             elif resource_type == "test":
@@ -359,12 +386,12 @@ class ManifestLoader:
             len(module_index),
         )
 
-        # --- Phase 1: BM25 indices over models + columns --------------------
+        # --- Phase 1: search indices over models + columns ------------------
         # Pure data — picklable, safe to rebuild in a worker process if Phase 4
-        # later offloads manifest parsing.
-        bm25_models, bm25_columns = build_bm25_indices_from_manifest_data(
-            models, search_index
-        )
+        # later offloads manifest parsing. Models go through the canonical
+        # field-weighted index; columns keep the scoped-schema BM25.
+        model_search = ModelSearchIndex.from_field_docs(field_docs)
+        bm25_columns = build_column_bm25_from_manifest_data(models)
 
         # --- Phase 1: networkx lineage DAG ---------------------------------
         # Built from the dbt-emitted parent_map / child_map. Nodes are the
@@ -407,7 +434,7 @@ class ManifestLoader:
             "search_index": search_index,
             "tests_by_model": tests_by_model,
             "owner_index": owner_index,
-            "bm25_models": bm25_models,
+            "model_search": model_search,
             "bm25_columns": bm25_columns,
             "lineage_graph": lineage_graph,
             "unique_id_by_name": unique_id_by_name,
@@ -427,7 +454,9 @@ class ManifestLoader:
         # Phase 1 additions — fall back to empty indices for older callers
         # that may have hand-built an indexes dict (none in tree today, but
         # `.get` keeps tests forward-compatible).
-        self._bm25_models = indexes.get("bm25_models", BM25Index([]))
+        self._model_search = indexes.get(
+            "model_search", ModelSearchIndex.from_field_docs([])
+        )
         self._bm25_columns = indexes.get("bm25_columns", ColumnBM25Index([]))
         self._lineage_graph = indexes.get("lineage_graph", nx.DiGraph())
         self._unique_id_by_name = indexes.get("unique_id_by_name", {})
@@ -514,15 +543,23 @@ class ManifestLoader:
                     break
             return results
 
-        # ---- Phase 1: hybrid search (token-overlap + BM25 fused via RRF) ----
+        # ---- Phase 1: hybrid search (token-overlap + field-weighted BM25,
+        # fused via RRF) ------------------------------------------------------
         #
         # The legacy token-overlap scorer is kept because it carries hand-tuned
         # behavior (substring match, short-token fallback, stable alphabetical
-        # tie-break). BM25 adds proper IDF weighting so that distinctive tokens
-        # (e.g. "trades", "tvl") dominate noise tokens (e.g. "daily", "by").
-        # We fuse the two ranked lists with RRF; items present in both rise.
-        tokens = re.split(r"[\s_]+", query.lower())
-        tokens = [t for t in tokens if len(t) >= 3]
+        # tie-break). The other leg is the canonical ModelSearchIndex
+        # (semantic/search.py): field-weighted BM25 + name bonuses + fuzzy —
+        # the same ranking catalog_search and the Metric Lab see. We fuse the
+        # two ranked lists with RRF; items present in both rise. The
+        # field-weighted leg goes FIRST so exact rank-swap ties resolve toward
+        # the higher-precision signal.
+        #
+        # Tokenization goes through the shared tokenizer (plural-strip
+        # stemming, symmetric with the index); the substring scan then skips
+        # sub-3-char tokens — as substrings they only produce noise ("tx" hits
+        # "context") while the BM25 leg already matches them as whole words.
+        tokens = [t for t in search_tokenize(query) if len(t) >= 3]
         if not tokens:
             tokens = [query.lower()]
 
@@ -535,15 +572,15 @@ class ManifestLoader:
         token_scored.sort(key=lambda x: (-x[0], x[1]))
         token_ranking = [name for _, name in token_scored]
 
-        # BM25 ranks the entire model corpus; restrict to the candidates
-        # surviving the tag/module filters before fusion.
-        bm25_ranking_full = self._bm25_models.ranking(query, top_k=200)
-        bm25_ranking = [n for n in bm25_ranking_full if n in candidates]
+        # The canonical index ranks the entire model corpus; restrict to the
+        # candidates surviving the tag/module filters before fusion.
+        ranked_full = [h.name for h in self._model_search.search(query, limit=200)]
+        ranked = [n for n in ranked_full if n in candidates]
 
-        if not token_ranking and not bm25_ranking:
+        if not token_ranking and not ranked:
             return []
 
-        fused = rrf_fuse([token_ranking, bm25_ranking], top_k=limit)
+        fused = rrf_fuse([ranked, token_ranking], top_k=limit)
         results: list[dict[str, Any]] = []
         for name, _score in fused:
             node = self._models.get(name)

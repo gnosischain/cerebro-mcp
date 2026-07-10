@@ -287,6 +287,30 @@ PREVIEW_ROW_CAP = 1_000
 HARD_TOTAL_LIMIT = 1_000_000_000
 
 
+def _friendly_query_error(exc: Exception) -> str:
+    """Rewrite gnarly ClickHouse failures into actionable messages.
+
+    MEMORY_LIMIT_EXCEEDED (code 241) is the big one: most dbt models are
+    views, so loading one executes its full aggregation — when that trips
+    the per-query cap, tell the user how to narrow instead of dumping the
+    raw allocator trace.
+    """
+    from cerebro_mcp.config import settings as _settings
+
+    text = str(exc)
+    if "MEMORY_LIMIT_EXCEEDED" in text or "Code: 241" in text or "code: 241" in text:
+        cap = _settings.CLICKHOUSE_MAX_QUERY_MEMORY_GB
+        cap_txt = f"{cap:g} GiB" if cap > 0 else "the server's"
+        return (
+            "This model is too heavy to load whole — it is a view that "
+            "aggregates a large table and exceeded the "
+            f"{cap_txt} per-query memory cap. Load it with a shorter time "
+            "window or a lower row limit. "
+            f"(ClickHouse: {text[:200]})"
+        )
+    return text
+
+
 class MiniAppQueryError(RuntimeError):
     """Raised when the user-supplied query cannot be executed at all.
 
@@ -384,7 +408,7 @@ def load_bounded_dataset(
         total = int(count_result.rows[0][0]) if count_result.rows else 0
     except Exception as exc:
         logger.warning("mini_app count failed: %s", exc)
-        raise MiniAppQueryError(str(exc)) from exc
+        raise MiniAppQueryError(_friendly_query_error(exc)) from exc
 
     # 3. exact path — if count succeeded the query is valid, so any failure
     # here is unexpected and should also surface as an error.
@@ -399,7 +423,7 @@ def load_bounded_dataset(
             )
         except Exception as exc:
             logger.warning("mini_app exact load failed: %s", exc)
-            raise MiniAppQueryError(str(exc)) from exc
+            raise MiniAppQueryError(_friendly_query_error(exc)) from exc
         dataset = _finalize_dataset(
             sql=sql,
             database=database,
@@ -477,7 +501,7 @@ def _load_preview_only(
         # No fallback left — surface the ClickHouse error directly so the
         # launcher can translate it into an isError=True CallToolResult.
         logger.error("mini_app preview load failed: %s", exc)
-        raise MiniAppQueryError(str(exc)) from exc
+        raise MiniAppQueryError(_friendly_query_error(exc)) from exc
 
     warning = (
         "Preview only; full sampling unavailable. "

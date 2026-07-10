@@ -135,6 +135,12 @@ class Settings(BaseSettings):
     CLICKHOUSE_CONNECT_TIMEOUT: int = 30
     CLICKHOUSE_SEND_RECEIVE_TIMEOUT: int = 300
     CLICKHOUSE_QUERY_TIMEOUT_SECONDS: Optional[int] = None
+    # Per-query memory ceiling (GiB). Most dbt models are VIEWS — a single
+    # SELECT can execute an aggregation over a huge table; without this cap
+    # one query can exhaust the shared ClickHouse Cloud instance (observed:
+    # 10.8 GiB MEMORY_LIMIT_EXCEEDED taking the whole node to its limit).
+    # 0 disables the cap.
+    CLICKHOUSE_MAX_QUERY_MEMORY_GB: float = 4.0
     QUERY_TIMEOUT_SECONDS: int = 30
     MAX_QUERY_LENGTH: int = 10000
     TOOL_RESULT_MAX_ROWS: int = 200

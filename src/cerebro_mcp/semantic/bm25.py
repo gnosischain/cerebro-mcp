@@ -133,21 +133,19 @@ class ColumnBM25Index:
         return bool(self._by_model.get(model_name))
 
 
-def build_bm25_indices_from_manifest_data(
+def build_column_bm25_from_manifest_data(
     models: dict[str, dict],
-    search_blobs: dict[str, str],
-) -> tuple[BM25Index, ColumnBM25Index]:
-    """Construct both indices from manifest internals.
+) -> ColumnBM25Index:
+    """Construct the column-scoped index from manifest internals.
 
-    `models` is the parsed dbt model node dict (from manifest.json).
-    `search_blobs` is the precomputed `name + desc + tags + owner` per model
-    (already built by `ManifestLoader._build_indexes_internal`).
+    `models` is the parsed dbt model node dict (from manifest.json). The
+    model-level index that used to be built alongside this moved to the
+    canonical field-weighted `semantic.search.ModelSearchIndex` — only the
+    column index (used by the SQL compiler's scoped-schema block) still
+    lives here.
     """
-    model_docs: list[BM25Doc] = []
     column_docs: list[ColumnDoc] = []
     for model_name, node in models.items():
-        blob = search_blobs.get(model_name, model_name.lower())
-        model_docs.append(BM25Doc(model_name=model_name, text=blob))
         for col_name, col_meta in (node.get("columns") or {}).items():
             data_type = (col_meta or {}).get("data_type", "") or ""
             description = (col_meta or {}).get("description", "") or ""
@@ -158,4 +156,20 @@ def build_bm25_indices_from_manifest_data(
                     text=f"{col_name} {data_type} {description}",
                 )
             )
-    return BM25Index(model_docs), ColumnBM25Index(column_docs)
+    return ColumnBM25Index(column_docs)
+
+
+def build_bm25_indices_from_manifest_data(
+    models: dict[str, dict],
+    search_blobs: dict[str, str],
+) -> tuple[BM25Index, ColumnBM25Index]:
+    """Back-compat wrapper: model BM25 over precomputed blobs + column index.
+
+    The manifest loader no longer uses the model half (it ranks models via
+    `semantic.search.ModelSearchIndex`); kept for any external caller.
+    """
+    model_docs = [
+        BM25Doc(model_name=name, text=search_blobs.get(name, name.lower()))
+        for name in models
+    ]
+    return BM25Index(model_docs), build_column_bm25_from_manifest_data(models)

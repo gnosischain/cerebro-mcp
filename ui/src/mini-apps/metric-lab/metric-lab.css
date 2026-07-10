@@ -1,0 +1,866 @@
+/* Metric Lab app styles — .mlab-* prefix (`.ml-*` belongs to model-lineage).
+   Token-driven: colors/typography come from themes/tokens.css vars. */
+
+.mlab-root {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mlab-subbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.mlab-subbar .ma-search {
+  flex: 1;
+  max-width: 560px;
+}
+
+/* ---------- shared bits ---------- */
+
+.mlab-subhead {
+  margin: 10px 0 6px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.mlab-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 4px 0;
+}
+
+.mlab-dim {
+  color: var(--text-muted);
+}
+
+.mlab-empty {
+  padding: 28px;
+  text-align: center;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+
+.mlab-error {
+  color: var(--error);
+  font-size: 12.5px;
+}
+
+.mlab-hl {
+  background: color-mix(in srgb, var(--primary) 28%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.mlab-toggle {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mlab-toggle:hover:not(:disabled) {
+  border-color: var(--primary);
+}
+.mlab-toggle.is-on,
+.mlab-toggle.is-primary {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.mlab-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.mlab-loadmore {
+  align-self: center;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--primary);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+/* pills */
+.mlab-kind {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+.mlab-kind--metric {
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  color: var(--primary);
+}
+.mlab-kind--model {
+  background: color-mix(in srgb, #a855f7 15%, transparent);
+  color: #a855f7;
+}
+.mlab-tier {
+  font-size: 10px;
+  font-weight: 650;
+  border-radius: 5px;
+  padding: 2px 6px;
+  text-transform: lowercase;
+}
+.mlab-tier--approved {
+  background: color-mix(in srgb, #10b981 14%, transparent);
+  color: #059669;
+}
+.mlab-tier--candidate {
+  background: color-mix(in srgb, #f59e0b 16%, transparent);
+  color: #b45309;
+}
+.mlab-tier--unknown,
+.mlab-tier--untiered {
+  background: color-mix(in srgb, #64748b 12%, transparent);
+  color: var(--text-muted);
+}
+.mlab-unit {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.mlab-locked {
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--error);
+  border: 1px solid color-mix(in srgb, var(--error) 45%, transparent);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* ---------- browse landing ---------- */
+
+.mlab-browse {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mlab-stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.mlab-stat {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--surface-1);
+}
+.mlab-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.mlab-stat-label {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.mlab-sector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+.mlab-sector-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-1);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.mlab-sector-card:hover {
+  border-color: var(--primary);
+  transform: translateY(-1px);
+}
+.mlab-sector-name {
+  font-size: 14px;
+  font-weight: 650;
+  text-transform: capitalize;
+}
+.mlab-sector-count {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ---------- results ---------- */
+
+.mlab-browse-wrap {
+  position: relative;
+}
+
+.mlab-results {
+  display: grid;
+  grid-template-columns: 230px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 860px) {
+  .mlab-results {
+    grid-template-columns: 1fr;
+  }
+  /* In the stacked layout the sidebar must NOT stick — a sticky element in a
+     single-column grid slides down over the result cards while scrolling.
+     NOTE: this block precedes the `.mlab-facets` base rule (which sets
+     sticky), so the override needs the extra specificity to win. */
+  .mlab-results .mlab-facets {
+    position: static;
+  }
+}
+
+.mlab-facets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: sticky;
+  top: 8px;
+  min-width: 0;
+}
+.mlab-facets h4 {
+  margin: 8px 0 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+/* The shared .seg is inline-flex and does NOT wrap — inside the 230px rail
+   the badge ("Candidate 44") overflowed the border. Make rail segs
+   full-width, wrappable, and let buttons shrink. */
+.mlab-facets .seg {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
+}
+.mlab-facets .seg__btn {
+  flex: 1 1 auto;
+  justify-content: center;
+  min-width: 0;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+.mlab-facets .seg__badge {
+  flex: none;
+  padding: 0 5px;
+}
+
+.mlab-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.mlab-result-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.mlab-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--surface-1);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.mlab-card.is-locked {
+  opacity: 0.7;
+}
+.mlab-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.mlab-card-title {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mlab-card-title:hover {
+  color: var(--primary);
+  text-decoration: underline;
+}
+.mlab-card-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+.mlab-card-name {
+  font-size: 11px;
+  text-transform: none;
+  opacity: 0.8;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+/* Exact DB names are the primary identity — mono, wrap anywhere */
+.mlab-card-title--mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: -0.01em;
+}
+.mlab-card-label {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-transform: none;
+  font-style: italic;
+}
+.mlab-basket-label--mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.mlab-detail-title--mono {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+.mlab-detail-label {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: -4px;
+}
+/* dbt tag chips — clickable on cards, static in the detail panel */
+.mlab-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.mlab-tag {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.mlab-tag:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.mlab-tag--static {
+  cursor: default;
+}
+.mlab-tag--static:hover {
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+/* dbt layer pill — the primary classifier of every catalog entry */
+.mlab-layer {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 5px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.mlab-layer--api {
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  color: var(--primary);
+}
+.mlab-layer--fct {
+  background: color-mix(in srgb, #10b981 14%, transparent);
+  color: #059669;
+}
+.mlab-layer--int {
+  background: color-mix(in srgb, #f59e0b 15%, transparent);
+  color: #b45309;
+}
+.mlab-layer--stg {
+  background: color-mix(in srgb, #a855f7 14%, transparent);
+  color: #a855f7;
+}
+.mlab-layer--source {
+  background: color-mix(in srgb, #64748b 14%, transparent);
+  color: var(--text-muted);
+}
+.mlab-facet-hint {
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.mlab-facet-hint code {
+  font-size: 10px;
+}
+/* time-series pill: instantly marks entries that can plot over time */
+.mlab-ts {
+  font-size: 10px;
+  font-weight: 650;
+  border-radius: 5px;
+  padding: 1px 6px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
+  white-space: nowrap;
+}
+.mlab-ts--scalar {
+  background: color-mix(in srgb, #64748b 12%, transparent);
+  color: var(--text-muted);
+}
+.mlab-card-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-primary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.mlab-card-cols {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.mlab-card-cols code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.mlab-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---------- detail drawer ---------- */
+
+.mlab-detail {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 92vw);
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.18);
+  padding: 16px 18px 24px;
+  overflow-y: auto;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mlab-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mlab-detail-head > div {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.mlab-close {
+  background: none;
+  border: none;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+.mlab-detail-title {
+  margin: 0;
+  font-size: 18px;
+}
+.mlab-detail-name {
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+.mlab-candidate-note {
+  margin: 0;
+  font-size: 12.5px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, #f59e0b 12%, transparent);
+  color: #92400e;
+}
+.mlab-detail-desc {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.mlab-detail-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 14px;
+  margin: 0;
+}
+.mlab-detail-meta dt {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.mlab-detail-meta dd {
+  margin: 1px 0 0;
+  font-size: 12.5px;
+  word-break: break-word;
+}
+.mlab-detail-block h4 {
+  margin: 6px 0 4px;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.mlab-dim-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mlab-dimchip {
+  font-size: 11.5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+.mlab-dimchip.is-default {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.mlab-detail-cols {
+  max-height: 260px;
+  overflow-y: auto;
+}
+.mlab-detail-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+/* ---------- query builder ---------- */
+
+.mlab-builder {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface-1);
+}
+.mlab-builder-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.mlab-basket {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.mlab-basket-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 8px 3px 10px;
+  font-size: 12.5px;
+  max-width: 100%;
+  min-width: 0;
+}
+/* Scaffolded metric names get very long — ellipsize inside the chip
+   instead of overflowing it. Full name stays in the title tooltip. */
+.mlab-basket-label {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mlab-basket-chip.is-anchor {
+  border-color: var(--primary);
+}
+.mlab-anchor-star {
+  color: var(--primary);
+  font-size: 11px;
+}
+.mlab-basket-x {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-muted);
+  padding: 0 2px;
+}
+.mlab-builder-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mlab-dirty {
+  font-size: 11.5px;
+  color: #b45309;
+}
+.mlab-builder-dims {
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+}
+.mlab-builder-config {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mlab-builder-error {
+  border-top: 1px dashed var(--border);
+  padding-top: 6px;
+}
+
+/* ---------- workspace ---------- */
+
+.mlab-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mlab-suggestions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mlab-suggestion-chip {
+  border: 1px dashed var(--primary);
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 7%, transparent);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.mlab-suggestion-chip:hover {
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.mlab-context {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+}
+.mlab-context dt {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.mlab-context dd {
+  margin: 1px 0 0;
+  font-size: 12.5px;
+  word-break: break-word;
+}
+
+.mlab-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mlab-controls-fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mlab-field {
+  gap: 6px;
+}
+.mlab-field select,
+.mlab-field input {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 12.5px;
+  outline: none;
+  max-width: 180px;
+}
+.mlab-field input[type="number"] {
+  width: 80px;
+}
+.mlab-field-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.mlab-swap {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  border-radius: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.mlab-chart-host .chart-card {
+  margin: 0;
+}
+.mlab-chart-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+
+/* ---------- table tab ---------- */
+
+.mlab-table-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mlab-table-scroll {
+  max-height: 520px;
+  overflow: auto;
+}
+.mlab-table-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
+}
+.mlab-table-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ---------- analysis ---------- */
+
+.mlab-analysis {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mlab-analysis-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+/* chart card: controls + plot as one bordered unit */
+.mlab-chartcard {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-1);
+  padding: 10px 12px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mlab-chartcard .mlab-controls {
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--border);
+}
+.mlab-chartcard .chart-card {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+.mlab-corr td.mlab-corr-cell {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  min-width: 48px;
+}
+.mlab-corr .mlab-corr-rowlabel {
+  white-space: nowrap;
+  font-size: 12px;
+}
+.mlab-corr .mlab-corr-colnum {
+  text-align: center;
+  color: var(--text-muted);
+}
+.mlab-corr-num {
+  display: inline-block;
+  min-width: 18px;
+  margin-right: 8px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.mlab-corr-cell.is-clickable {
+  cursor: pointer;
+}
+.mlab-corr-cell.is-clickable:hover {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.mlab-drill {
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mlab-drill-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mlab-drill-stats {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}

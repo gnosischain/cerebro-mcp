@@ -215,15 +215,18 @@ export const CONTRACT_EXPLORER_HELP: HelpContent = {
 export const METRIC_LAB_HELP: HelpContent = {
   title: "Metric Lab",
   intro:
-    "Build and compare metrics over the semantic layer — pick a metric, slice by dimensions, and chart it without writing SQL.",
+    "Explore every dbt model in the database under its exact name — load one, chart its columns, and correlate them.",
   sections: [
     {
       heading: "What you're looking at",
       body: (
         <p>
-          A metric is a curated, governed measure (volume, TVL, active users,
-          revenue, …). The KPI row summarises the current selection; the chart
-          shows it over time or broken down by a dimension.
+          Every dbt model and source, by its real database name. Layer pills
+          show where it sits in the pipeline (<strong>api</strong> = final
+          metrics models, <strong>fct</strong> / <strong>int</strong> /{" "}
+          <strong>stg</strong> = upstream, <strong>source</strong> = raw
+          tables); <em>time series</em> vs <em>snapshot</em> tells you whether
+          it has a date column.
         </p>
       ),
     },
@@ -232,16 +235,29 @@ export const METRIC_LAB_HELP: HelpContent = {
       body: (
         <ul>
           <li>
-            <strong>Pick a metric</strong> (or open from SQL / from existing
-            metrics) to seed the lab.
+            <strong>Browse or search</strong> — pick a sector, filter by layer
+            or dbt tag, and open <strong>Details</strong> for the full
+            description, column schema, and qualified relation name.
           </li>
           <li>
-            <strong>Slice</strong> by a dimension to compare series, and adjust
-            the time grain/range.
+            <strong>Load</strong> a model (nothing queries until you press
+            Run). <strong>Aggregate</strong> mode runs{" "}
+            <code>agg(Y) GROUP BY X</code> in ClickHouse — the correct way to
+            chart big per-entity tables (balances per avatar, transfers per
+            address); <strong>Raw rows</strong> samples the newest rows for
+            inspection. Use <strong>Window</strong> to bound heavy views.
           </li>
           <li>
-            <strong>Update chart</strong> re-runs the query; results reflect the
-            governed metric definition, not ad-hoc SQL.
+            <strong>Chart</strong>: pick type and X/Y columns, a{" "}
+            <strong>Y2</strong> for a second axis, or a{" "}
+            <strong>Series</strong> column for multi-series and heatmaps.
+            Scatter supports a <strong>Color</strong> column for a third value.
+          </li>
+          <li>
+            <strong>Correlate</strong>: the Analysis section below the chart
+            has summary stats and the Pearson/Spearman matrix over all numeric
+            columns — click any cell to drill into that pair with a fitted
+            line. Add a second model to compare two tables on twin axes.
           </li>
         </ul>
       ),
