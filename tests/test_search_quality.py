@@ -17,20 +17,17 @@ breaks a pair, update the pair in the SAME change set with a note.
 
 from __future__ import annotations
 
-import gzip
-import json
-from pathlib import Path
-
 import pytest
 
-from cerebro_mcp.loaders.manifest import ManifestLoader
-from cerebro_mcp.models.semantic import SemanticSnapshot
 from cerebro_mcp.semantic.search import (
     ModelSearchIndex,
     reset_search_cache_for_tests,
 )
-
-FIXTURE = Path(__file__).parent / "fixtures" / "search_corpus.json.gz"
+from tests.eval.corpus_fixtures import (
+    build_manifest_loader,
+    build_snapshot,
+    load_search_corpus,
+)
 
 # (query, expected model) — expected must be a REAL model name from the
 # recorded corpus. Mix of: plain-language asks, column-name asks, exact-name
@@ -79,52 +76,14 @@ GOLDEN: list[tuple[str, str]] = [
 TOP_K = 5
 
 
-def _load_corpus() -> dict[str, dict]:
-    with gzip.open(FIXTURE, "rt", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _build_snapshot(corpus: dict[str, dict]) -> SemanticSnapshot:
-    models = {}
-    for name, m in corpus.items():
-        models[name] = {
-            "name": name,
-            "description": m["description"],
-            "tags": list(m["tags"]),
-            "module": m["module"],
-            "owner": m["owner"],
-            "path": m["path"],
-            "materialized": "table",
-            "semantic_status": "approved",
-            "quality_tier": "approved",
-            "relation_name": f"`dbt`.`{name}`",
-            "columns": {c: {"data_type": t} for c, t in m["columns"].items()},
-        }
-    return SemanticSnapshot(
-        registry_hash="golden-corpus-1",
-        manifest_hash="",
-        catalog_hash="",
-        docs_hash="",
-        graph={"adjacency": {}},
-        vertex_ids={},
-        synonym_index={},
-        dimension_index={},
-        metrics={},
-        models=models,
-        relationships=[],
-        docs_index={},
-        loaded_at=0.0,
-    )
-
-
 @pytest.fixture(scope="module")
 def corpus() -> dict[str, dict]:
-    return _load_corpus()
+    return load_search_corpus()
 
 
 @pytest.fixture(scope="module")
-def snapshot(corpus) -> SemanticSnapshot:
-    return _build_snapshot(corpus)
+def snapshot(corpus):
+    return build_snapshot(corpus)
 
 
 @pytest.fixture(autouse=True)
@@ -215,33 +174,8 @@ def test_metric_lab_catalog_hits_at_5(snapshot, monkeypatch):
 
 
 @pytest.fixture(scope="module")
-def manifest_loader(corpus) -> ManifestLoader:
-    nodes = {}
-    for name, m in corpus.items():
-        uid = f"model.gnosis_dbt.{name}"
-        nodes[uid] = {
-            "resource_type": "model",
-            "unique_id": uid,
-            "name": name,
-            "description": m["description"],
-            "schema": "dbt",
-            "alias": name,
-            "path": m["path"] or f"{m['module']}/{name}.sql",
-            "tags": list(m["tags"]),
-            "config": {"materialized": "table", "meta": {"owner": m["owner"]}},
-            "columns": {
-                c: {"data_type": t, "description": ""}
-                for c, t in m["columns"].items()
-            },
-            "depends_on": {"nodes": []},
-        }
-    loader = ManifestLoader()
-    indexes = loader._build_indexes_internal(
-        {"nodes": nodes, "sources": {}, "parent_map": {}, "child_map": {}}
-    )
-    loader._apply_indexes(indexes)
-    loader._loaded = True
-    return loader
+def manifest_loader(corpus):
+    return build_manifest_loader(corpus)
 
 
 def test_manifest_search_models_hits_at_5(manifest_loader):

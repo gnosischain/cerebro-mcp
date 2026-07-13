@@ -1969,6 +1969,17 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         agent_role: str = "",
         detail: str = "full",
     ) -> AnalyticsPreflightResult | str:
+        """Route an analytics question to the right workflow before charting or reporting.
+
+        Required gate before `generate_chart` / `generate_charts` /
+        `generate_report`: classifies the query's semantic coverage into a
+        route (`semantic_ready`, `hybrid_ready`, or `semantic_coverage_gap`),
+        returns the matched metrics and topics, and starts a fresh analysis
+        cycle. `mode` is one of `answer`, `chart`, or `report`;
+        `detail="slim"` returns just the route and top matches. Plain
+        answer-mode questions do not need preflight — use `find` and go
+        straight to `query_metrics`.
+        """
         role = _resolve_agent_role(agent_role)
         normalized_mode = normalize(mode) or "answer"
         if normalized_mode not in {"answer", "chart", "report"}:
@@ -2198,6 +2209,14 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
 
     @mcp.tool()
     def get_metric_details(metric_name: str, agent_role: str = "") -> MetricDetailsResult | str:
+        """Get the full definition of one governed metric: dimensions, grains, lineage, docs.
+
+        Resolves the metric by name or alias and returns its allowed
+        dimensions, supported time grains, root model, owner, and quality
+        tier. Candidate-tier metrics come back with a PROVISIONAL banner
+        explaining the `allow_candidate=true` escape hatch on
+        `query_metrics` / `explain_metric_query`.
+        """
         role = _resolve_agent_role(agent_role)
         try:
             state.record_semantic_tool_call("get_metric_details")
@@ -2251,6 +2270,13 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         allow_candidate: bool = False,
         explain_context: bool = False,
     ) -> MetricQueryExplanation | str:
+        """Show the planner's plan and compiled ClickHouse SQL without executing it.
+
+        Takes the same arguments as `query_metrics` and returns the resolved
+        metrics, dimension bindings, join path, and the exact SQL the
+        semantic compiler would run — use it to inspect or debug a metric
+        query before spending a real one, or to lift the SQL into a chart.
+        """
         # See `query_metrics` for the `allow_candidate` semantics.
         role = _resolve_agent_role(agent_role)
         try:
@@ -2369,6 +2395,17 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
         allow_candidate: bool = False,
         explain_context: bool = False,
     ) -> SemanticQueryResult | str:
+        """Execute governed metrics through the semantic layer and return result rows.
+
+        The preferred way to answer metric questions: resolves metric names
+        and aliases, plans dimension bindings and joins, compiles ClickHouse
+        SQL, and executes with semantic provenance and auto-repair.
+        `dimensions` / `filters` / `order_by` / `limit` shape the result;
+        `persist_result` with a `research_project_id` snapshots it as
+        research evidence. `allow_candidate=true` is an authoring/testing
+        escape hatch for candidate-tier metrics — never use it for
+        production dashboards.
+        """
         # `allow_candidate=True` is an authoring/testing escape hatch that
         # lets you run a metric whose quality_tier is still "candidate" so
         # long as its root model is approved and at least one dimension is
@@ -2484,6 +2521,13 @@ def register_semantic_tools(mcp, ch: ClickHouseManager, research_store: Research
     if _clickhouse_bundle_is_valid():
         @mcp.tool()
         def get_clickhouse_query_rules(agent_role: str = "") -> str:
+            """Return the ClickHouse query-writing rules for raw-SQL fallback work.
+
+            Serves the compiled best-practice rule bundle (dialect
+            constraints, join and aggregation guidance, performance
+            guardrails) to follow when the semantic layer does not cover a
+            topic and raw `execute_query` SQL is required.
+            """
             role = _resolve_agent_role(agent_role)
             try:
                 observe_semantic_tool_call(

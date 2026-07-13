@@ -70,10 +70,13 @@ def test_datasource_from_settings_not_llm():
 def test_target_format_is_numeric_enum():
     # Grafana ClickHouse plugin: format is numeric (TimeSeries=0, Table=1).
     # Emitting the string "time_series" => "invalid format value" at query time.
+    # Since 24dc207 EVERY target is table (1): the plugin rejects format 0 with
+    # an unmarshal error, and timeseries panels build their series from the
+    # returned table columns anyway (see _FORMAT_TABLE in grafana/compiler.py).
     out = compile_grafana_dashboard(_full_dashboard())
     by_title = {p["title"]: p for p in out["panels"]}
-    assert by_title["DAU"]["targets"][0]["format"] == 0
-    assert by_title["DAU"]["targets"][0]["queryType"] == "timeseries"
+    assert by_title["DAU"]["targets"][0]["format"] == 1
+    assert by_title["DAU"]["targets"][0]["queryType"] == "table"
     assert by_title["Users"]["targets"][0]["format"] == 1
     assert by_title["Top users"]["targets"][0]["format"] == 1
     for p in _data_panels(out):

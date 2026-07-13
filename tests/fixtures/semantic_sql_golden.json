@@ -1,0 +1,259 @@
+{
+  "semantic.sqlgolden.candidate_allow_week": {
+    "params": {
+      "allow_candidate": true,
+      "dimensions": [
+        "week"
+      ],
+      "filters": [],
+      "force_qualified": false,
+      "limit": 100,
+      "metrics": [
+        "annual_rolling_fees_total_value"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "SELECT\n  week AS week,\n  sum(annual_rolling_fees_total) AS annual_rolling_fees_total_value\nFROM `dbt`.`api_revenue_active_users_cohorts_weekly` AS b1_root\nGROUP BY week\nORDER BY week ASC\nLIMIT 100",
+    "sql_norm_hash": "e1e01ebc4636aa3320c2f8cdfde7b498ee6c8eabf3a66aded38cf326ac25febb"
+  },
+  "semantic.sqlgolden.enriched_validator_labels": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "validator_index"
+      ],
+      "filters": [],
+      "force_qualified": false,
+      "limit": 50,
+      "metrics": [
+        "GBCDeposit_deposists_daily__amount_value"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "WITH\nbranch_1 AS (\n  SELECT\n    b1_root_j1.validator_index AS validator_index,\n    sum(amount) AS GBCDeposit_deposists_daily__amount_value\n  FROM `dbt`.`int_GBCDeposit_deposists_daily` AS b1_root\n  LEFT JOIN `dbt`.`int_consensus_validators_labels` AS b1_root_j1 ON b1_root.withdrawal_credentials = b1_root_j1.withdrawal_credentials\n  GROUP BY b1_root_j1.validator_index\n)\nSELECT\n  validator_index,\n  GBCDeposit_deposists_daily__amount_value\nFROM branch_1\nORDER BY validator_index ASC\nLIMIT 50",
+    "sql_norm_hash": "b7fc698d9ddeb993bb7e95b3c22d67e7e474bbcda9c5902ecaedd85956c88cdf"
+  },
+  "semantic.sqlgolden.micro_enriched_sector": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "day",
+        "sector_name"
+      ],
+      "filters": [],
+      "force_qualified": false,
+      "limit": 100,
+      "metrics": [
+        "bench_txs"
+      ],
+      "order_by": [],
+      "snapshot": "micro"
+    },
+    "sql": "WITH\nbranch_1 AS (\n  SELECT\n    day AS day,\n    b1_root_j1.sector_name AS sector_name,\n    sum(txs) AS bench_txs\n  FROM `dbt`.`api_bench_txs_daily` AS b1_root\n  LEFT JOIN `dbt`.`dim_bench_sectors` AS b1_root_j1 ON b1_root.sector_id = b1_root_j1.sector_id\n  GROUP BY day, b1_root_j1.sector_name\n)\nSELECT\n  day,\n  sector_name,\n  bench_txs\nFROM branch_1\nORDER BY day DESC\nLIMIT 100",
+    "sql_norm_hash": "bde42677bc80054243094fcda68d8dcdebf7feaf1da2e777419434cd970c1d70"
+  },
+  "semantic.sqlgolden.micro_ratio_day": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "day"
+      ],
+      "filters": [],
+      "force_qualified": false,
+      "limit": 100,
+      "metrics": [
+        "bench_fee_per_tx"
+      ],
+      "order_by": [],
+      "snapshot": "micro"
+    },
+    "sql": "WITH\nbranch_1 AS (\n  SELECT\n    day AS day,\n    sum(fees_usd) AS bench_fees,\n    sum(txs) AS bench_txs\n  FROM `dbt`.`api_bench_txs_daily` AS b1_root\n  GROUP BY day\n)\nSELECT\n  day,\n  bench_fees,\n  bench_txs,\n  branch_1.bench_fees / nullIf(branch_1.bench_txs, 0) AS bench_fee_per_tx\nFROM branch_1\nORDER BY day DESC\nLIMIT 100",
+    "sql_norm_hash": "8d27e7fc4c856bc48829905a95b2a93294b68a9522b07d3c6eba575694b18780"
+  },
+  "semantic.sqlgolden.multi_branch_0dim": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [],
+      "filters": [],
+      "force_qualified": false,
+      "limit": 1,
+      "metrics": [
+        "bridge_flow_netflow_daily",
+        "GBCDeposit_deposists_daily__amount_value"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "WITH\nbranch_1 AS (\n  SELECT\n    sum(net_usd) AS bridge_flow_netflow_daily\n  FROM `dbt`.`int_bridges_flows_daily` AS b1_root\n),\nbranch_2 AS (\n  SELECT\n    sum(amount) AS GBCDeposit_deposists_daily__amount_value\n  FROM `dbt`.`int_GBCDeposit_deposists_daily` AS b2_root\n)\nSELECT\n  branch_1.bridge_flow_netflow_daily AS bridge_flow_netflow_daily,\n  branch_2.GBCDeposit_deposists_daily__amount_value AS GBCDeposit_deposists_daily__amount_value\nFROM branch_1\nCROSS JOIN branch_2\nORDER BY bridge_flow_netflow_daily DESC\nLIMIT 1",
+    "sql_norm_hash": "17e70e9204475bea5c337e02cbff4ee6bd5282e2bebbd33715b8060bb5eeb3ec"
+  },
+  "semantic.sqlgolden.multi_branch_date": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "date"
+      ],
+      "filters": [],
+      "force_qualified": false,
+      "limit": 100,
+      "metrics": [
+        "bridge_flow_netflow_daily",
+        "GBCDeposit_deposists_daily__amount_value"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "WITH\nbranch_1 AS (\n  SELECT\n    date AS date,\n    sum(net_usd) AS bridge_flow_netflow_daily\n  FROM `dbt`.`int_bridges_flows_daily` AS b1_root\n  GROUP BY date\n),\nbranch_2 AS (\n  SELECT\n    date AS date,\n    sum(amount) AS GBCDeposit_deposists_daily__amount_value\n  FROM `dbt`.`int_GBCDeposit_deposists_daily` AS b2_root\n  GROUP BY date\n),\nkeys AS (\n  SELECT date FROM branch_1\n  UNION DISTINCT\n  SELECT date FROM branch_2\n)\nSELECT\n  keys.date AS date,\n  branch_1.bridge_flow_netflow_daily AS bridge_flow_netflow_daily,\n  branch_2.GBCDeposit_deposists_daily__amount_value AS GBCDeposit_deposists_daily__amount_value\nFROM keys\nLEFT JOIN branch_1 ON keys.date = branch_1.date\nLEFT JOIN branch_2 ON keys.date = branch_2.date\nORDER BY date ASC\nLIMIT 100",
+    "sql_norm_hash": "6d65e8795178053be810897e368fd2a0bea3b78274579950bf640e5af0105249"
+  },
+  "semantic.sqlgolden.single_0dim_weekly_netflow": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [],
+      "filters": [],
+      "force_qualified": false,
+      "limit": 10,
+      "metrics": [
+        "bridge_netflow_weekly_by_bridge"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "SELECT\n  sum(netflow_usd_week) AS bridge_netflow_weekly_by_bridge\nFROM `dbt`.`fct_bridges_netflow_weekly_by_bridge` AS b1_root\nORDER BY bridge_netflow_weekly_by_bridge DESC\nLIMIT 10",
+    "sql_norm_hash": "74d89d1a87cab75680c1803345791249001a29e6b1a440d29079163b5c6b8f9a"
+  },
+  "semantic.sqlgolden.single_1dim_week_ordered": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "week"
+      ],
+      "filters": [],
+      "force_qualified": false,
+      "limit": 52,
+      "metrics": [
+        "bridge_netflow_weekly_by_bridge"
+      ],
+      "order_by": [
+        "week DESC"
+      ],
+      "snapshot": "fixture"
+    },
+    "sql": "SELECT\n  week AS week,\n  sum(netflow_usd_week) AS bridge_netflow_weekly_by_bridge\nFROM `dbt`.`fct_bridges_netflow_weekly_by_bridge` AS b1_root\nGROUP BY week\nORDER BY week DESC\nLIMIT 52",
+    "sql_norm_hash": "72c096b6d86c53f2256a30b062cd0844fdbfa110b0d6f91eecfd864ffdf14005"
+  },
+  "semantic.sqlgolden.single_2dim_daily_netflow": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "date",
+        "bridge"
+      ],
+      "filters": [],
+      "force_qualified": false,
+      "limit": 100,
+      "metrics": [
+        "bridge_flow_netflow_daily"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "SELECT\n  date AS date,\n  bridge AS bridge,\n  sum(net_usd) AS bridge_flow_netflow_daily\nFROM `dbt`.`int_bridges_flows_daily` AS b1_root\nGROUP BY date, bridge\nORDER BY date ASC\nLIMIT 100",
+    "sql_norm_hash": "832f53d2d45b5fc4c74f578308c31d4f23a6ffd0002071511141e3004d35fa89"
+  },
+  "semantic.sqlgolden.single_2dim_where_filter": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "date",
+        "bridge"
+      ],
+      "filters": [
+        {
+          "field": "bridge",
+          "op": "=",
+          "value": "xdai_bridge"
+        }
+      ],
+      "force_qualified": false,
+      "limit": 100,
+      "metrics": [
+        "bridge_flow_netflow_daily"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "SELECT\n  date AS date,\n  bridge AS bridge,\n  sum(net_usd) AS bridge_flow_netflow_daily\nFROM `dbt`.`int_bridges_flows_daily` AS b1_root\nWHERE bridge = 'xdai_bridge'\nGROUP BY date, bridge\nORDER BY date ASC\nLIMIT 100",
+    "sql_norm_hash": "049a58575476c2cdf069bc07c04a0ac005f642099c4ca5c7e1060ca062acc66e"
+  },
+  "semantic.sqlgolden.single_force_qualified": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "date",
+        "bridge"
+      ],
+      "filters": [],
+      "force_qualified": true,
+      "limit": 100,
+      "metrics": [
+        "bridge_flow_netflow_daily"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "SELECT\n  b1_root.date AS date,\n  b1_root.bridge AS bridge,\n  sum(b1_root.net_usd) AS bridge_flow_netflow_daily\nFROM `dbt`.`int_bridges_flows_daily` AS b1_root\nGROUP BY date, bridge\nORDER BY date ASC\nLIMIT 100",
+    "sql_norm_hash": "5c4c1e47145fe915dc6432a44acbb977cf99da4242157cb7dfa151dd7dd098bc"
+  },
+  "semantic.sqlgolden.single_metric_having": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "bridge"
+      ],
+      "filters": [
+        {
+          "field": "bridge_flow_netflow_daily",
+          "op": ">",
+          "value": 0
+        }
+      ],
+      "force_qualified": false,
+      "limit": 100,
+      "metrics": [
+        "bridge_flow_netflow_daily"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "WITH\nbranch_1 AS (\n  SELECT\n    bridge AS bridge,\n    sum(net_usd) AS bridge_flow_netflow_daily\n  FROM `dbt`.`int_bridges_flows_daily` AS b1_root\n  GROUP BY bridge\n  HAVING bridge_flow_netflow_daily > 0\n)\nSELECT\n  bridge,\n  bridge_flow_netflow_daily\nFROM branch_1\nORDER BY bridge ASC\nLIMIT 100",
+    "sql_norm_hash": "9e75d0c3ff4c0f77963f905eef39b125040f7cc3479672656e53d0ddd68cef7e"
+  },
+  "semantic.sqlgolden.single_token_neq_filter": {
+    "params": {
+      "allow_candidate": false,
+      "dimensions": [
+        "date",
+        "token"
+      ],
+      "filters": [
+        {
+          "field": "token",
+          "op": "!=",
+          "value": ""
+        }
+      ],
+      "force_qualified": false,
+      "limit": 100,
+      "metrics": [
+        "bridges_token_netflow_daily_by_bridge__value_value"
+      ],
+      "order_by": [],
+      "snapshot": "fixture"
+    },
+    "sql": "SELECT\n  date AS date,\n  token AS token,\n  sum(value) AS bridges_token_netflow_daily_by_bridge__value_value\nFROM `dbt`.`api_bridges_token_netflow_daily_by_bridge` AS b1_root\nWHERE token != ''\nGROUP BY date, token\nORDER BY date ASC\nLIMIT 100",
+    "sql_norm_hash": "53379e178fbc9eb86783c56384dea0b0f02b0600c0bf73907fc5b835de586c4d"
+  }
+}

@@ -60,3 +60,35 @@ dev:
 
 test:
 	pytest tests/ -q
+
+# ---- benchmarks (run via python -m, NEVER pytest — see benchmarks/README.md) ----
+
+bench-check:              ## regression gate: pytest + deterministic correctness suites (no ClickHouse). The CI + pre-push gate.
+	uv run pytest tests/ -q
+	uv run python -m benchmarks.run --suite search
+	uv run python -m benchmarks.run --suite workflows
+	uv run python -m benchmarks.run --suite semantic
+
+bench-latency:            ## per-tool latency, deterministic fake ClickHouse (laptop-safe)
+	uv run python -m benchmarks.run --suite latency
+
+bench-latency-real:       ## per-tool latency against real ClickHouse
+	CEREBRO_EVAL_CLICKHOUSE=1 uv run python -m benchmarks.run --suite latency
+
+bench-workflows:          ## scripted SOP workflows (gate compliance + call/char cost)
+	uv run python -m benchmarks.run --suite workflows
+
+bench-search:             ## search/routing quality (hit@k, MRR, route correctness)
+	uv run python -m benchmarks.run --suite search
+
+bench-semantic:           ## semantic layer (runtime, routing cache, planner, SQL goldens, E2E, coverage)
+	uv run python -m benchmarks.run --suite semantic
+
+bench-load:               ## SSE load/concurrency sweep (spawns a local server; needs real ClickHouse)
+	CEREBRO_EVAL_CLICKHOUSE=1 uv run python -m benchmarks.run --suite load
+
+bench-compare:            ## make bench-compare BASE=results/a.json CAND=results/b.json
+	uv run python -m benchmarks.compare $(BASE) $(CAND)
+
+bench-report:             ## regenerate the HTML dashboard from all result files
+	uv run python -m benchmarks.report

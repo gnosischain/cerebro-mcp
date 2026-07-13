@@ -39,6 +39,8 @@ _VALID_ROLES = {
     "grafana_architect",
     # On-chain incident forensics via the bulk RPC scan toolkit
     "chain_forensics",
+    # Deep-research workflow lead (multi-phase research projects + peer review)
+    "gnosis_research_analyst",
 }
 
 
@@ -67,7 +69,10 @@ def register_agent_tools(mcp):
                 ('mmm_analyst', 'mmm_causal_reviewer', 'mmm_simulator'),
                 a unified MMM+MTA measurement agent
                 ('mta_analyst', 'unified_causal_reviewer',
-                'unified_allocator'),
+                'unified_allocator'), the deep-research lead
+                ('gnosis_research_analyst'), the Grafana dashboard
+                architect ('grafana_architect'), the on-chain forensics
+                analyst ('chain_forensics'),
                 or the top-level dispatcher ('cerebro_dispatcher').
         """
         if role not in _VALID_ROLES:

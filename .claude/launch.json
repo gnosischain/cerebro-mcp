@@ -81,6 +81,13 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "5192"],
       "port": 5192
+    },
+    {
+      "name": "bench-report",
+      "cwd": "benchmarks/results",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "5193"],
+      "port": 5193
     }
   ]
 }

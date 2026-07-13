@@ -47,9 +47,6 @@
 .dc-layout--gov { grid-template-columns: 1fr 1fr; }
 /* Doc-coverage gets full width in a multi-col grid so all domains show at once. */
 .dc-cov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 20px; }
-/* Observability: the "needs attention" / failures column (first child) gets the
- * WIDE column — incidents are the signal, the all-green run log is secondary. */
-.dc-layout--obs { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); }
 /* Sticks BELOW the sticky topbar (top: ~topbar height) so facet labels don't
  * clip under the search bar on scroll. */
 .dc-sidebar { display: flex; flex-direction: column; gap: 18px; position: sticky; top: 64px; max-height: calc(100vh - 80px); overflow-y: auto; }
@@ -366,7 +363,7 @@ button.dc-row:hover { border-color: var(--border-hover); background: var(--surfa
   .dc-domain-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
-  .dc-layout, .dc-layout--gov, .dc-layout--obs { grid-template-columns: 1fr; }
+  .dc-layout, .dc-layout--gov { grid-template-columns: 1fr; }
   .dc-sidebar { position: static; }
   .dc-relations { grid-template-columns: 1fr; }
   .dc-domain-grid { grid-template-columns: 1fr; }

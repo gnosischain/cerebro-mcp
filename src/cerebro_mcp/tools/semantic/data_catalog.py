@@ -910,7 +910,9 @@ _MODEL_RUN_SQL = (
     "SELECT countIf(s='success') AS ok, countIf(s IN ('fail','error')) AS failed, "
     "countIf(s IN ('skipped','skip')) AS skipped, count() AS total, "
     "toString(max(g)) AS as_of FROM (SELECT unique_id, argMax(lower(status), generated_at) AS s, "
-    "max(generated_at) AS g FROM elementary.model_run_results GROUP BY unique_id)"
+    "max(generated_at) AS g FROM elementary.model_run_results "
+    "WHERE unique_id IN (SELECT unique_id FROM elementary.dbt_models) "
+    "GROUP BY unique_id)"
 )
 
 
@@ -947,18 +949,45 @@ def _catalog_observability_impl(ch) -> dict[str, Any]:
         tr = t.rows[0] if t.rows else [0, 0, 0]
         out["tests"] = {"failing": tr[0], "warning": tr[1], "total": tr[2]}
 
+        # Non-success models joined to the current manifest (dbt_models) so ghosts
+        # of deleted models drop out, then split by the production tag: real cron
+        # failures (needs_attention) vs. downstream skips (skipped_downstream) vs.
+        # dev/WIP/non-cron noise (inactive). Replaces a flat LIMIT 25 list that
+        # mixed all three and made the header undercount the true total. tags is a
+        # String holding a JSON array, so parse with JSONExtract before has().
         na = run_structured_query(
             ch,
-            "SELECT name, s, toString(g) FROM (SELECT name, argMax(status, generated_at) AS s, "
-            "max(generated_at) AS g FROM elementary.model_run_results GROUP BY name) "
-            "WHERE s != 'success' "
-            "ORDER BY multiIf(lower(s) IN ('error','fail'), 0, lower(s) = 'skipped', 2, 1) ASC, g DESC "
-            "LIMIT 25",
-            database="dbt", requested_max_rows=25,
+            "SELECT r.name, r.s, toString(r.g), "
+            "has(JSONExtract(dm.tags, 'Array(String)'), 'production') AS is_prod "
+            "FROM (SELECT name, argMax(status, generated_at) AS s, max(generated_at) AS g "
+            "      FROM elementary.model_run_results GROUP BY name) AS r "
+            "INNER JOIN elementary.dbt_models AS dm ON dm.name = r.name "
+            "WHERE r.s != 'success' "
+            "ORDER BY multiIf(lower(r.s) IN ('error','fail'), 0, lower(r.s) = 'skipped', 2, 1) ASC, r.g DESC "
+            "LIMIT 500",
+            database="dbt", requested_max_rows=500,
         )
-        out["needs_attention"] = [
-            {"name": r[0], "status": r[1], "completed_at": r[2]} for r in na.rows
-        ]
+        errors: list[dict[str, Any]] = []
+        skipped_downstream: list[dict[str, Any]] = []
+        inactive: list[dict[str, Any]] = []
+        for r in na.rows:
+            row = {"name": r[0], "status": r[1], "completed_at": r[2]}
+            status = str(r[1] or "").lower()
+            if not r[3]:
+                inactive.append(row)
+            elif status in ("skipped", "skip"):
+                skipped_downstream.append(row)
+            else:
+                errors.append(row)
+        out["needs_attention"] = errors
+        out["skipped_downstream"] = skipped_downstream
+        out["inactive"] = inactive
+        out["counts"] = {
+            "errors": len(errors),
+            "skipped": len(skipped_downstream),
+            "inactive": len(inactive),
+            "total": len(errors) + len(skipped_downstream) + len(inactive),
+        }
 
         # Latest run PER MODEL (argMax), then the 15 most-recent DISTINCT models —
         # otherwise microbatch models log many slices per run and 15 raw rows

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Opt-in pre-push gate: runs the same deterministic regression check CI runs.
+# Enable with:  git config core.hooksPath .githooks
+# Disable with: git config --unset core.hooksPath
+#
+# Deliberately runs only the fast, machine-independent correctness suites
+# (pytest + search/workflows/semantic) — never latency (see benchmarks/README.md).
+set -euo pipefail
+
+echo "[pre-push] running make bench-check ..."
+if ! make bench-check; then
+  echo "[pre-push] bench-check failed — push aborted. Fix the regression or run 'git push --no-verify' to override."
+  exit 1
+fi
+echo "[pre-push] bench-check passed."

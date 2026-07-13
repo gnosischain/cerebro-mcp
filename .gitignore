@@ -12,6 +12,8 @@ build/
 .mypy_cache/
 .cerebro/
 reports/
+benchmarks/results/*
+!benchmarks/results/.gitkeep
 ui/node_modules/
 ui/dist/
 src/cerebro_mcp/static/report.html

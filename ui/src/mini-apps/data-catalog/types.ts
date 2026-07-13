@@ -218,13 +218,25 @@ export interface TestResults {
   counts?: Record<string, number>;
 }
 
+export interface RunRow {
+  name: string;
+  status: string;
+  completed_at: string;
+}
+
 export interface CatalogObservability {
   available: boolean;
   reason?: string;
   as_of?: string;
   models?: { ok: number; failed: number; skipped?: number; total: number };
   tests?: { failing: number; warning: number; total: number };
-  needs_attention?: Array<{ name: string; status: string; completed_at: string }>;
+  // Production models whose latest run errored/failed — the actionable failures.
+  needs_attention?: RunRow[];
+  // Production models skipped because an upstream errored — downstream fallout.
+  skipped_downstream?: RunRow[];
+  // Non-production (dev/WIP/not-in-cron) models with a non-success latest status.
+  inactive?: RunRow[];
+  counts?: { errors: number; skipped: number; inactive: number; total: number };
   recent_runs?: Array<{ name: string; status: string; completed_at: string; execution_time: number | null }>;
 }
 

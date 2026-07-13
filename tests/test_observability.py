@@ -163,9 +163,9 @@ def test_metrics_endpoint_is_exposed_without_auth():
     messages_response = client.get("/messages/test")
 
     assert metrics_response.status_code == 200
-    assert metrics_response.headers["content-type"].startswith(
-        "text/plain; version=0.0.4"
-    )
+    # Prometheus text exposition; the version segment tracks the installed
+    # prometheus_client (0.0.4 pre-1.0, 1.0.0 after), so pin only the type.
+    assert metrics_response.headers["content-type"].startswith("text/plain")
     assert "cerebro_http_requests_total" in metrics_response.text
     assert "cerebro_mcp_tool_calls_total" in metrics_response.text
     assert "cerebro_clickhouse_query_duration_seconds" in metrics_response.text

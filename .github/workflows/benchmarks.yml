@@ -1,0 +1,49 @@
+name: benchmarks
+
+# Regression gate: pytest + the deterministic, in-process benchmark suites
+# (search / workflows / semantic). No ClickHouse, no secrets — these suites run
+# against the committed fixtures and self-gate on correctness (a lost hit@5, an
+# SQL-golden hash mismatch, a new orphan metric, a broken workflow gate all make
+# `benchmarks.run` exit non-zero). Latency is deliberately NOT run here: p50/p95
+# vary by machine, so a shared runner cannot enforce it fairly — it stays a
+# local trend (see benchmarks/README.md).
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Regression gate (pytest + deterministic suites)
+        run: make bench-check
+
+      - name: Build HTML report
+        if: always()
+        run: uv run python -m benchmarks.report
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: benchmarks/results/index.html
+          if-no-files-found: ignore
