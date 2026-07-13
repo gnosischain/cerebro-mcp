@@ -9,12 +9,26 @@ from unittest.mock import MagicMock, patch
 import pytest
 from mcp.types import CallToolResult
 
+import importlib.resources
+
 import cerebro_mcp.tools.visualization.charts as viz
 import cerebro_mcp.tools.analytics.query as query_mod
 import cerebro_mcp.tools.analytics.dbt as dbt_mod
 import cerebro_mcp.tools.governance.session_state as session_state_mod
 from cerebro_mcp.tools.governance.session_state import state
 from cerebro_mcp.models.tool import QueryResult
+
+# The Vite build artifact (make build-ui-report -> static/report.html) is
+# gitignored; a few tests assert on markup that only exists inside that built
+# bundle. Skip them when it is absent (a source checkout / CI without a UI
+# build) — report generation itself degrades to a minimal shell either way.
+_REPORT_BUNDLE_PRESENT = (
+    importlib.resources.files("cerebro_mcp").joinpath("static/report.html").is_file()
+)
+_needs_report_bundle = pytest.mark.skipif(
+    not _REPORT_BUNDLE_PRESENT,
+    reason="asserts on built UI bundle markup; run `make build-ui-report`",
+)
 
 
 def _tool_text(result):
@@ -351,6 +365,7 @@ class TestGenerateReport:
         assert pie["title"] == {}
         assert pie["legend"]["type"] == "scroll"
 
+    @_needs_report_bundle
     def test_chart_html_includes_chart_title_div(self, tmp_path, monkeypatch):
         """Report HTML renders chart titles as HTML divs."""
         from mcp.server.fastmcp import FastMCP

@@ -14,11 +14,9 @@ from cerebro_mcp.semantic.bm25 import (
     ColumnBM25Index,
     build_column_bm25_from_manifest_data,
 )
-from cerebro_mcp.semantic.index import rrf_fuse
 from cerebro_mcp.semantic.search import (
     FieldDoc,
     ModelSearchIndex,
-    tokenize as search_tokenize,
 )
 
 logger = logging.getLogger(__name__)
@@ -543,47 +541,28 @@ class ManifestLoader:
                     break
             return results
 
-        # ---- Phase 1: hybrid search (token-overlap + field-weighted BM25,
-        # fused via RRF) ------------------------------------------------------
+        # ---- Rank through the canonical ModelSearchIndex ---------------------
         #
-        # The legacy token-overlap scorer is kept because it carries hand-tuned
-        # behavior (substring match, short-token fallback, stable alphabetical
-        # tie-break). The other leg is the canonical ModelSearchIndex
-        # (semantic/search.py): field-weighted BM25 + name bonuses + fuzzy —
-        # the same ranking catalog_search and the Metric Lab see. We fuse the
-        # two ranked lists with RRF; items present in both rise. The
-        # field-weighted leg goes FIRST so exact rank-swap ties resolve toward
-        # the higher-precision signal.
+        # One ranking backend for every model-search surface (catalog_search,
+        # Metric Lab, find.top_models, here): field-weighted BM25 + name bonuses
+        # + fuzzy. When a module/tag filter is active we pass the surviving
+        # candidate set INTO the index so it scores only those rows instead of
+        # ranking the whole corpus and discarding non-matches (faster, and the
+        # module case never dilutes ranking with off-scope models). An
+        # unfiltered query scores the full corpus (the fast default).
         #
-        # Tokenization goes through the shared tokenizer (plural-strip
-        # stemming, symmetric with the index); the substring scan then skips
-        # sub-3-char tokens — as substrings they only produce noise ("tx" hits
-        # "context") while the BM25 leg already matches them as whole words.
-        tokens = [t for t in search_tokenize(query) if len(t) >= 3]
-        if not tokens:
-            tokens = [query.lower()]
+        # The previous implementation fused this leg with a legacy substring
+        # token-overlap leg via reciprocal-rank fusion; RRF discards the
+        # field-weighted BM25 *scores* and ranks on position alone, which
+        # diluted precision (manifest_search lagged the other surfaces on hit@1).
+        # Ranking straight through the index makes this surface identical to the
+        # others by construction.
+        cand = None if (not module and not tags) else candidates
+        ranked = self._model_search.search(query, limit=limit, candidates=cand)
 
-        token_scored: list[tuple[int, str]] = []
-        for name in candidates:
-            searchable = self._search_index.get(name, "")
-            hits = sum(1 for t in tokens if t in searchable)
-            if hits > 0:
-                token_scored.append((hits, name))
-        token_scored.sort(key=lambda x: (-x[0], x[1]))
-        token_ranking = [name for _, name in token_scored]
-
-        # The canonical index ranks the entire model corpus; restrict to the
-        # candidates surviving the tag/module filters before fusion.
-        ranked_full = [h.name for h in self._model_search.search(query, limit=200)]
-        ranked = [n for n in ranked_full if n in candidates]
-
-        if not token_ranking and not ranked:
-            return []
-
-        fused = rrf_fuse([ranked, token_ranking], top_k=limit)
         results: list[dict[str, Any]] = []
-        for name, _score in fused:
-            node = self._models.get(name)
+        for hit in ranked:
+            node = self._models.get(hit.name)
             if node is None:
                 continue
             results.append(self._model_summary(node))

@@ -7,6 +7,7 @@ automatic reasoning/performance analysis across MCP sessions.
 import atexit
 import json
 import logging
+import queue
 import re
 import threading
 import time
@@ -80,6 +81,19 @@ _retention_days: int = max(0, settings.THINKING_LOG_RETENTION_DAYS)
 _lock = threading.Lock()
 _log_dir = Path(settings.THINKING_LOG_DIR)
 _last_prune_check_ts: float = 0.0
+
+# --- Background persistence writer (SSE server only) ---------------------
+# When enabled, per-step trace persistence (the O(N) session-summary recompute
+# + whole-file rewrite) and the per-call security audit run on this single
+# consumer thread instead of synchronously on the asyncio event loop. That
+# keeps a tool call's response O(1) on the loop, so concurrent SSE sessions no
+# longer serialize behind each other's disk/JSON work. Tests and the in-process
+# bench never start the writer, so they keep the exact synchronous path.
+_writer_queue: "queue.Queue[Any]" = queue.Queue()
+_writer_thread: threading.Thread | None = None
+_async_writer_enabled: bool = False
+_writer_lock = threading.Lock()
+_WRITER_STOP = object()
 
 _REDACTED_VALUE = "***REDACTED***"
 _SENSITIVE_KEY_MARKERS = {
@@ -202,6 +216,114 @@ def _save_session(session: SessionTrace) -> None:
     filepath = _session_filepath(session.session_id)
     data = asdict(session)
     filepath.write_text(json.dumps(data, indent=2, default=str))
+
+
+# --- Background writer implementation ------------------------------------
+
+
+def _run_assess(kwargs: dict[str, Any]) -> None:
+    """Run the security audit for one tool call (off the hot path)."""
+    try:
+        from cerebro_mcp.security import assess_tool_call as _assess
+
+        _assess(**kwargs)
+    except Exception:
+        logger.debug("Security assessment failed for %s", kwargs.get("tool_name"), exc_info=True)
+
+
+def _enqueue_assess(kwargs: dict[str, Any]) -> None:
+    """Offload the security audit to the writer thread, or run it inline when
+    the async writer is not running (tests / in-process bench / stdio)."""
+    if _async_writer_enabled:
+        _writer_queue.put(("assess", kwargs))
+    else:
+        _run_assess(kwargs)
+
+
+def _persist_session(session: SessionTrace) -> None:
+    """Recompute the summary and rewrite the session file OFF the event loop.
+
+    Snapshots the step list under the lock (a cheap reference copy), then does
+    the O(N) summary + JSON serialization WITHOUT holding the lock, so the event
+    loop's next ``_record_step`` append never waits on the whole-file rewrite.
+    """
+    with _lock:
+        snapshot_steps = list(session.steps)
+        session_id = session.session_id
+        started_at = session.started_at
+        user_prompt = session.user_prompt
+        reports_emitted = session.reports_emitted
+    snap = SessionTrace(
+        session_id=session_id,
+        started_at=started_at,
+        user_prompt=user_prompt,
+        steps=snapshot_steps,
+        reports_emitted=reports_emitted,
+    )
+    snap.summary = _compute_session_summary(snap)
+    session.summary = snap.summary  # publish for in-memory readers
+    _save_session(snap)
+
+
+def _writer_loop() -> None:
+    """Single-consumer loop: runs security audits promptly and coalesces
+    session persists into one summary+save per debounce window."""
+    debounce = max(0.05, float(settings.THINKING_PERSIST_DEBOUNCE_SECONDS))
+    pending: SessionTrace | None = None
+    last_save = 0.0
+    stopping = False
+    while True:
+        try:
+            item = _writer_queue.get(timeout=debounce)
+        except queue.Empty:
+            item = None
+        if item is _WRITER_STOP:
+            stopping = True
+        elif isinstance(item, tuple):
+            kind, payload = item
+            if kind == "assess":
+                _run_assess(payload)
+            elif kind == "persist":
+                pending = payload
+        now = time.monotonic()
+        if pending is not None and (stopping or (now - last_save) >= debounce):
+            try:
+                _persist_session(pending)
+            except Exception:
+                logger.debug("Background session persist failed", exc_info=True)
+            pending = None
+            last_save = now
+        if stopping and _writer_queue.empty():
+            break
+
+
+def start_async_writer() -> None:
+    """Start the background persistence thread (idempotent). Called by the SSE
+    server before serving; no-op when THINKING_ASYNC_PERSIST is off."""
+    global _writer_thread, _async_writer_enabled
+    if not settings.THINKING_ASYNC_PERSIST:
+        return
+    with _writer_lock:
+        if _writer_thread is not None and _writer_thread.is_alive():
+            return
+        _async_writer_enabled = True
+        _writer_thread = threading.Thread(
+            target=_writer_loop, name="cerebro-trace-writer", daemon=True
+        )
+        _writer_thread.start()
+
+
+def stop_async_writer(timeout: float = 5.0) -> None:
+    """Signal the writer to drain + flush, then join (idempotent)."""
+    global _writer_thread, _async_writer_enabled
+    with _writer_lock:
+        thread = _writer_thread
+        if thread is None:
+            return
+        _async_writer_enabled = False
+        _writer_queue.put(_WRITER_STOP)
+        _writer_thread = None
+    thread.join(timeout=timeout)
 
 
 def _maybe_prune_old_sessions_unlocked(force: bool = False) -> None:
@@ -359,7 +481,17 @@ def _summarize_payload(value: Any, max_chars: int = 240) -> str:
 
 
 def _record_step(entry: ReasoningStep) -> int | None:
-    """Append a reasoning step and persist session state."""
+    """Append a reasoning step and persist session state.
+
+    Two paths, selected by whether the background writer is running:
+
+    * Async (SSE server): append O(1) under the lock, then hand the summary
+      recompute + whole-file rewrite to the writer thread. The event loop is
+      never blocked on disk/JSON work, so concurrent sessions don't serialize.
+    * Sync (tests / in-process bench / stdio / shutdown): the original
+      behavior — recompute the summary and rewrite the file inline — so those
+      callers (and every existing test) see byte-identical persistence.
+    """
     global _current_session
 
     with _lock:
@@ -368,12 +500,20 @@ def _record_step(entry: ReasoningStep) -> int | None:
 
         entry.step_number = len(_current_session.steps) + 1
         _current_session.steps.append(entry)
-        _current_session.summary = _compute_session_summary(_current_session)
 
-        # Save after each step for crash safety
-        _maybe_prune_old_sessions_unlocked()
-        _save_session(_current_session)
-        return entry.step_number
+        if not _async_writer_enabled:
+            _current_session.summary = _compute_session_summary(_current_session)
+            # Save after each step for crash safety
+            _maybe_prune_old_sessions_unlocked()
+            _save_session(_current_session)
+            return entry.step_number
+
+        session = _current_session
+        step_number = entry.step_number
+
+    # Async path: enqueue the (debounced) persist off the lock and the loop.
+    _writer_queue.put(("persist", session))
+    return step_number
 
 
 def record_trace_event(
@@ -643,18 +783,16 @@ def _install_tool_manager_tracing(mcp) -> None:
                 success=False,
             )
             # Security audit (fire-and-forget, never blocks tool execution)
-            try:
-                from cerebro_mcp.security import assess_tool_call as _assess
-                _assess(
-                    tool_name=name,
-                    arguments=arguments,
-                    result=None,
-                    success=False,
-                    duration_ms=elapsed_ms,
-                    error=str(exc),
-                )
-            except Exception:
-                logger.debug("Security assessment failed for %s", name, exc_info=True)
+            _enqueue_assess(
+                {
+                    "tool_name": name,
+                    "arguments": arguments,
+                    "result": None,
+                    "success": False,
+                    "duration_ms": elapsed_ms,
+                    "error": str(exc),
+                }
+            )
             raise
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -680,18 +818,16 @@ def _install_tool_manager_tracing(mcp) -> None:
             success=extracted_error is None,
         )
         # Security audit (fire-and-forget, never blocks tool execution)
-        try:
-            from cerebro_mcp.security import assess_tool_call as _assess
-            _assess(
-                tool_name=name,
-                arguments=arguments,
-                result=result,
-                success=extracted_error is None,
-                duration_ms=elapsed_ms,
-                error=extracted_error,
-            )
-        except Exception:
-            logger.debug("Security assessment failed for %s", name, exc_info=True)
+        _enqueue_assess(
+            {
+                "tool_name": name,
+                "arguments": arguments,
+                "result": result,
+                "success": extracted_error is None,
+                "duration_ms": elapsed_ms,
+                "error": extracted_error,
+            }
+        )
         return result
 
     setattr(

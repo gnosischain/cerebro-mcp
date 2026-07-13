@@ -133,6 +133,9 @@ class ModelSearchIndex:
         self._docs: list[FieldDoc] = list(docs)
         self._names = [d.name for d in self._docs]
         self._names_lower = [n.lower() for n in self._names]
+        # name -> row index, so a candidate set (module/tag-filtered search)
+        # maps to the rows to score without a full-corpus scan.
+        self._cand_index = {name: i for i, name in enumerate(self._names)}
         self._name_leg = _FieldBM25([d.name_text for d in self._docs])
         self._aux_leg = _FieldBM25([d.aux_text for d in self._docs])
         self._body_leg = _FieldBM25([d.body_text for d in self._docs])
@@ -155,7 +158,15 @@ class ModelSearchIndex:
         *,
         limit: int = 50,
         include_column_matches: bool = False,
+        candidates: set[str] | None = None,
     ) -> list[ModelHit]:
+        """Rank models for ``query``.
+
+        ``candidates`` (a set of model names) scopes scoring — and the fuzzy
+        fallback — to just those rows, so a module/tag-filtered search skips
+        the full-corpus loop instead of ranking everything then discarding
+        non-matches. ``None`` scores the whole corpus (the fast default path).
+        """
         q = (query or "").strip()
         if not q or not self._docs:
             return []
@@ -166,8 +177,16 @@ class ModelSearchIndex:
         aux_scores = self._aux_leg.scores(q_tokens)
         body_scores = self._body_leg.scores(q_tokens)
 
+        if candidates is None:
+            indices: Iterable[int] = range(len(self._names))
+        else:
+            indices = sorted(
+                self._cand_index[n] for n in candidates if n in self._cand_index
+            )
+
         hits: list[ModelHit] = []
-        for i, name in enumerate(self._names):
+        for i in indices:
+            name = self._names[i]
             n = name_scores[i] if name_scores else 0.0
             a = aux_scores[i] if aux_scores else 0.0
             b = body_scores[i] if body_scores else 0.0
@@ -196,13 +215,19 @@ class ModelSearchIndex:
 
         # Fuzzy fallback: uniform typo tolerance when lexical matching is weak.
         if not hits or hits[0].score < _FUZZY_SCORE_FLOOR:
+            if candidates is None:
+                fuzzy_pool = self._names_lower
+            else:
+                fuzzy_pool = [self._names_lower[i] for i in indices]
             close = difflib.get_close_matches(
-                q_lower, self._names_lower, n=limit, cutoff=_FUZZY_RATIO
+                q_lower, fuzzy_pool, n=limit, cutoff=_FUZZY_RATIO
             )
             existing = {h.name for h in hits}
             for match in close:
                 name = self._names[self._names_lower.index(match)]
                 if name in existing:
+                    continue
+                if candidates is not None and name not in candidates:
                     continue
                 ratio = difflib.SequenceMatcher(None, q_lower, match).ratio()
                 hits.append(

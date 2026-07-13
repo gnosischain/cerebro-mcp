@@ -626,6 +626,13 @@ def _run_sse_with_auth():
     log_event(logger, "auth_middleware_enabled", enabled=bool(auth_token))
     starlette_app = build_sse_app(auth_token)
 
+    # Move trace persistence + the security audit off the single event loop, so
+    # concurrent SSE sessions don't serialize behind each other's per-call
+    # disk/JSON bookkeeping. No-op unless THINKING_ASYNC_PERSIST is on.
+    from cerebro_mcp.tools.governance import reasoning as _reasoning
+
+    _reasoning.start_async_writer()
+
     async def _serve():
         host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
         port = int(os.environ.get("FASTMCP_PORT", "8000"))
@@ -645,7 +652,10 @@ def _run_sse_with_auth():
         server = uvicorn.Server(config)
         await server.serve()
 
-    anyio.run(_serve)
+    try:
+        anyio.run(_serve)
+    finally:
+        _reasoning.stop_async_writer()
 
 
 if __name__ == "__main__":

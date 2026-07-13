@@ -293,6 +293,13 @@ class Settings(BaseSettings):
     THINKING_ALWAYS_ON: bool = True
     THINKING_LOG_DIR: str = ".cerebro/logs"
     THINKING_LOG_RETENTION_DAYS: int = 30
+    # When on (SSE server only), trace persistence + the security audit run on a
+    # background thread instead of synchronously on the event loop, so a tool
+    # call's response never blocks on the O(N) session-summary + whole-file
+    # rewrite. Set False for the legacy synchronous behavior (instant rollback).
+    THINKING_ASYNC_PERSIST: bool = True
+    # Coalescing window for the background writer's materialized session_*.json.
+    THINKING_PERSIST_DEBOUNCE_SECONDS: float = 1.0
 
     # Databases accessible via the MCP server
     ALLOWED_DATABASES: list[str] = [

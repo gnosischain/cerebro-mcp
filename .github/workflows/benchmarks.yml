@@ -21,14 +21,22 @@ concurrency:
 jobs:
   gate:
     runs-on: ubuntu-latest
+    env:
+      # RPC routing tests only check that an archive URL is CONFIGURED (they use
+      # fakes, never dial it); a dummy value keeps them hermetic in CI.
+      GNOSIS_ARCHIVE_RPC_URL: http://localhost:8545
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+      # Install uv via its official script rather than a marketplace action so
+      # only first-party actions/* need resolving (the astral-sh/setup-uv action
+      # was the only non-actions/* dependency; dropping it shrinks the surface
+      # for transient "Failed to resolve action download info" GitHub incidents).
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: uv sync --extra dev

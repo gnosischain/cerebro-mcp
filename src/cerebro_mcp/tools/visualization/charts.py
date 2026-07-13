@@ -77,16 +77,37 @@ _SEMANTIC_DIMENSION_ALIASES = {
 # --- Bundled React UI (Vite single-file build) ---
 _BUNDLED_REPORT_HTML: str | None = None
 
+# Minimal shell used when the Vite build artifact (`make build-ui-report` ->
+# static/report.html) is absent — e.g. a source checkout or CI that hasn't run
+# the UI build. Report generation still embeds its data (as a <script> before
+# </body>), so a report degrades gracefully instead of crashing with
+# FileNotFoundError.
+_FALLBACK_REPORT_HTML = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    "<title>Cerebro Report</title></head><body><div id=\"root\">"
+    "<noscript>Cerebro report — interactive UI bundle not built "
+    "(run <code>make build-ui-report</code>). The report data is embedded below."
+    "</noscript></div></body></html>"
+)
+
 
 def _get_report_html() -> str:
-    """Load the Vite-built single-file React app from the static package."""
+    """Load the Vite-built single-file React app from the static package.
+
+    Falls back to a minimal shell when the build artifact is missing so the
+    server (and the test suite) works without a UI build.
+    """
     global _BUNDLED_REPORT_HTML
     if _BUNDLED_REPORT_HTML is None:
-        _BUNDLED_REPORT_HTML = (
-            importlib.resources.files("cerebro_mcp")
-            .joinpath("static/report.html")
-            .read_text("utf-8")
-        )
+        try:
+            _BUNDLED_REPORT_HTML = (
+                importlib.resources.files("cerebro_mcp")
+                .joinpath("static/report.html")
+                .read_text("utf-8")
+            )
+        except (FileNotFoundError, OSError):
+            _BUNDLED_REPORT_HTML = _FALLBACK_REPORT_HTML
     return _BUNDLED_REPORT_HTML
 
 # ECharts color palettes matching metrics-dashboard

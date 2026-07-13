@@ -618,3 +618,50 @@ def test_analysis_path_hybrid_when_route_is_hybrid_ready(tmp_path):
     summary = data["summary"]
     assert summary["analysis_path"] == "hybrid"
     assert summary["semantic_route_last"] == "hybrid_ready"
+
+
+def test_async_writer_persists_every_step_and_matches_sync_summary(tmp_path, monkeypatch):
+    """The SSE-only background writer persists every step and produces a
+    session summary byte-identical to the synchronous recompute — so moving
+    persistence off the event loop never changes what gets recorded."""
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(reasoning.settings, "THINKING_ASYNC_PERSIST", True)
+    monkeypatch.setattr(reasoning.settings, "THINKING_PERSIST_DEBOUNCE_SECONDS", 0.05)
+
+    def _mkstep(action: str = "execute_query") -> reasoning.ReasoningStep:
+        return reasoning.ReasoningStep(
+            step_number=0,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            step="auto_tool_call",
+            content="x",
+            action=action,
+            duration_ms=5,
+            success=True,
+            event_kind="tool_call",
+            tool_name=action,
+        )
+
+    reasoning.start_async_writer()
+    try:
+        assert reasoning._async_writer_enabled is True
+        for _ in range(25):
+            reasoning._record_step(_mkstep())
+    finally:
+        reasoning.stop_async_writer()  # drains + final flush + joins the thread
+    assert reasoning._async_writer_enabled is False
+
+    files = _session_files(tmp_path / ".cerebro" / "logs")
+    assert len(files) == 1
+    data = json.loads(files[0].read_text())
+    assert len(data["steps"]) == 25, "background writer dropped steps"
+    assert data["summary"]["total_steps"] == 25
+    assert data["summary"]["actions"].get("execute_query") == 25
+
+    # Parity: the async-produced summary equals a fresh synchronous recompute.
+    snap = reasoning.SessionTrace(
+        session_id="parity",
+        started_at=data["started_at"],
+        steps=[reasoning.ReasoningStep(**s) for s in data["steps"]],
+    )
+    assert data["summary"] == reasoning._compute_session_summary(snap)
