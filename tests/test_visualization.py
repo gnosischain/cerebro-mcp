@@ -59,9 +59,12 @@ def reset_visualization_state(monkeypatch):
     monkeypatch.setitem(viz._LAST_VISUAL, "report_id", None)
     monkeypatch.setitem(viz._LAST_VISUAL, "created_at", None)
 
-    # Query nudge state
+    # Query nudge state. Reset the cooldown to -inf (not 0.0): the nudge check
+    # compares against time.monotonic(), whose baseline is small on a
+    # freshly-booted host (e.g. a CI runner), so 0.0 would leave the cooldown
+    # active and suppress the nudge the tests expect.
     monkeypatch.setattr(query_mod, "_query_count", 0)
-    monkeypatch.setattr(query_mod, "_last_nudge_time", 0.0)
+    monkeypatch.setattr(query_mod, "_last_nudge_time", float("-inf"))
     state.reset()
 
     # The deployed env may set SEMANTIC_ENABLED=True; force to False as the

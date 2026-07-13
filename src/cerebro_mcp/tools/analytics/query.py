@@ -15,9 +15,13 @@ from cerebro_mcp.runtime.tool_output import (
     truncate_sql as _truncate_sql,
 )
 
-# Session query counter and nudge state for report workflow
+# Session query counter and nudge state for report workflow.
+# _last_nudge_time is compared against time.monotonic(); initialize to -inf so
+# the first nudge always fires regardless of the machine's monotonic baseline
+# (a fresh/low-uptime host has a small monotonic() and 0.0 would suppress the
+# first nudge for the first _NUDGE_COOLDOWN seconds of uptime).
 _query_count = 0
-_last_nudge_time: float = 0.0
+_last_nudge_time: float = float("-inf")
 _NUDGE_COOLDOWN = 300  # seconds between nudges (5 min)
 
 

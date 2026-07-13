@@ -83,7 +83,7 @@ _BUNDLED_REPORT_HTML: str | None = None
 # </body>), so a report degrades gracefully instead of crashing with
 # FileNotFoundError.
 _FALLBACK_REPORT_HTML = (
-    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width, initial-scale=1">'
     "<title>Cerebro Report</title></head><body><div id=\"root\">"
     "<noscript>Cerebro report — interactive UI bundle not built "
