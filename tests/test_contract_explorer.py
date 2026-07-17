@@ -369,3 +369,221 @@ def test_project_abi_separates_read_write_events_and_sorts():
     bal = next(f for f in proj["read_functions"] if f["name"] == "balanceOf")
     assert bal["signature"] == "balanceOf(address)"
     assert bal["inputs"] == [{"name": "owner", "type": "address"}]
+
+
+# ---------------------------------------------------------------------------
+# On-chain proxy probe (Safe masterCopy / EIP-1967 / EIP-1167)
+# ---------------------------------------------------------------------------
+
+SAFE_PROXY = "0x295bA5c775969c6310Fa040A02C1BEC066a84967"
+SAFE_SINGLETON = "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762"
+# GnosisSafeProxy: verified, but constructor + fallback only — no functions.
+SAFE_PROXY_ABI = [
+    {"type": "constructor", "stateMutability": "nonpayable",
+     "inputs": [{"name": "_singleton", "type": "address"}]},
+    {"type": "fallback", "stateMutability": "payable"},
+]
+SAFE_IMPL_ABI = [
+    {"type": "function", "name": "getOwners", "inputs": [],
+     "outputs": [{"name": "", "type": "address[]"}], "stateMutability": "view"},
+    {"type": "function", "name": "getThreshold", "inputs": [],
+     "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view"},
+]
+
+
+def _make_ch_for_safe():
+    """No dbt row for the proxy; the singleton is seeded under its own address."""
+    ch = MagicMock()
+
+    def _rows(sql, db, cache_key, parameters=None):
+        addr = (parameters or {}).get("addr", "").lower()
+        if addr == SAFE_SINGLETON.lower():
+            return {"rows": [[
+                SAFE_SINGLETON.lower(), "", json.dumps(SAFE_IMPL_ABI),
+                "GnosisSafe_v1_4_1L2", "blockscout-seed",
+            ]]}
+        return {"rows": []}
+
+    ch.execute_raw_cached.side_effect = _rows
+    return ch
+
+
+def _safe_proxy_blockscout(address):
+    # Blockscout does NOT recognise the slot-0 masterCopy pattern:
+    # implementations is empty even though the contract is a proxy.
+    assert address.lower() == SAFE_PROXY.lower()
+    return {"name": "GnosisSafeProxy", "abi": SAFE_PROXY_ABI, "implementations": []}
+
+
+def test_open_safe_proxy_resolves_singleton_via_onchain_probe():
+    ch = _make_ch_for_safe()
+    server = _build_server(ch)
+    with patch.object(abi_resolver, "_fetch_blockscout", _safe_proxy_blockscout), \
+         patch.object(abi_resolver, "_detect_implementation_onchain",
+                      return_value=SAFE_SINGLETON) as probe:
+        res = _tool(server, "open_contract_explorer")(address=SAFE_PROXY)
+    probe.assert_called_once_with(SAFE_PROXY)
+    vs = res.structuredContent["view_state"]
+    assert vs["address"] == SAFE_PROXY  # calls still target the proxy
+    assert vs["implementation_address"] == SAFE_SINGLETON
+    assert vs["contract_name"] == "GnosisSafe_v1_4_1L2"
+    read_names = [f["name"] for f in vs["read_functions"]]
+    assert {"getOwners", "getThreshold"}.issubset(read_names)
+
+
+def test_open_safe_proxy_keeps_proxy_abi_when_probe_finds_nothing():
+    ch = _make_ch_for_safe()
+    server = _build_server(ch)
+    with patch.object(abi_resolver, "_fetch_blockscout", _safe_proxy_blockscout), \
+         patch.object(abi_resolver, "_detect_implementation_onchain",
+                      return_value=""):
+        res = _tool(server, "open_contract_explorer")(address=SAFE_PROXY)
+    vs = res.structuredContent["view_state"]
+    assert vs["contract_name"] == "GnosisSafeProxy"
+    assert vs["implementation_address"] == ""
+    assert vs["read_functions"] == []
+
+
+def test_probe_not_called_for_contracts_with_functions():
+    ch = _make_ch_for_wxdai()
+    server = _build_server(ch)
+    with patch.object(abi_resolver, "_detect_implementation_onchain") as probe:
+        _tool(server, "open_contract_explorer")(address=WXDAI_ADDR)
+    probe.assert_not_called()
+
+
+def test_probe_not_called_for_target_proxy():
+    ch = _make_ch_for_safe()
+    server = _build_server(ch)
+    with patch.object(abi_resolver, "_fetch_blockscout", _safe_proxy_blockscout), \
+         patch.object(abi_resolver, "_detect_implementation_onchain") as probe:
+        res = _tool(server, "open_contract_explorer")(
+            address=SAFE_PROXY, target="proxy"
+        )
+    probe.assert_not_called()
+    assert res.structuredContent["view_state"]["contract_name"] == "GnosisSafeProxy"
+
+
+# --- _detect_implementation_onchain unit tests (fake RPC) -------------------
+
+class _FakeEth:
+    def __init__(self, codes=None, storage=None):
+        self._codes = {k.lower(): v for k, v in (codes or {}).items()}
+        self._storage = {(a.lower(), s): v for (a, s), v in (storage or {}).items()}
+
+    def get_code(self, address):
+        return self._codes.get(address.lower(), b"")
+
+    def get_storage_at(self, address, slot):
+        return self._storage.get((address.lower(), slot), b"\x00" * 32)
+
+
+class _FakeRpcManager:
+    def __init__(self, eth):
+        self.standard = MagicMock(eth=eth)
+
+    def retry(self, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+
+def _word(address):
+    return bytes.fromhex(address[2:]).rjust(32, b"\x00")
+
+
+def test_detect_finds_safe_mastercopy_in_slot0(monkeypatch):
+    eth = _FakeEth(
+        codes={SAFE_PROXY: b"\x60\x80", SAFE_SINGLETON: b"\x01"},
+        storage={(SAFE_PROXY, 0): _word(SAFE_SINGLETON)},
+    )
+    monkeypatch.setattr(abi_resolver, "rpc_manager", _FakeRpcManager(eth))
+    assert abi_resolver._detect_implementation_onchain(SAFE_PROXY) == SAFE_SINGLETON
+
+
+def test_detect_prefers_eip1967_slot(monkeypatch):
+    eth = _FakeEth(
+        codes={SAFE_PROXY: b"\x60\x80", EURE_IMPL: b"\x01", SAFE_SINGLETON: b"\x01"},
+        storage={
+            (SAFE_PROXY, abi_resolver._EIP1967_IMPL_SLOT): _word(EURE_IMPL),
+            (SAFE_PROXY, 0): _word(SAFE_SINGLETON),
+        },
+    )
+    monkeypatch.setattr(abi_resolver, "rpc_manager", _FakeRpcManager(eth))
+    assert abi_resolver._detect_implementation_onchain(SAFE_PROXY) == EURE_IMPL
+
+
+def test_detect_reads_eip1167_bytecode(monkeypatch):
+    clone = "0x" + "cd" * 20
+    code = (
+        abi_resolver._EIP1167_PREFIX
+        + bytes.fromhex(EURE_IMPL[2:])
+        + abi_resolver._EIP1167_SUFFIX
+    )
+    eth = _FakeEth(codes={clone: code})
+    monkeypatch.setattr(abi_resolver, "rpc_manager", _FakeRpcManager(eth))
+    assert abi_resolver._detect_implementation_onchain(clone) == EURE_IMPL
+
+
+def test_detect_rejects_slot0_value_that_is_not_a_contract(monkeypatch):
+    # Slot 0 holds something address-shaped but with no code behind it —
+    # ordinary storage, not a masterCopy pointer.
+    eth = _FakeEth(
+        codes={SAFE_PROXY: b"\x60\x80"},
+        storage={(SAFE_PROXY, 0): _word("0x" + "ab" * 20)},
+    )
+    monkeypatch.setattr(abi_resolver, "rpc_manager", _FakeRpcManager(eth))
+    assert abi_resolver._detect_implementation_onchain(SAFE_PROXY) == ""
+
+
+def test_detect_returns_empty_when_rpc_unavailable(monkeypatch):
+    class _DeadRpc:
+        @property
+        def standard(self):
+            raise RuntimeError("no RPC configured")
+
+        def retry(self, fn, *args, **kwargs):
+            raise RuntimeError("no RPC configured")
+
+    monkeypatch.setattr(abi_resolver, "rpc_manager", _DeadRpc())
+    assert abi_resolver._detect_implementation_onchain(SAFE_PROXY) == ""
+
+
+def test_probe_upgrades_events_only_seed_to_blockscout_abi():
+    """The dbt seed for Safe singletons is a decoding stub (events + setup,
+    no view/pure functions) — the probe must fetch the full ABI from
+    Blockscout instead of serving a read-less contract page."""
+    stub_abi = [
+        {"type": "event", "name": "ExecutionSuccess", "inputs": []},
+        {"type": "function", "name": "setup", "inputs": [],
+         "outputs": [], "stateMutability": "nonpayable"},
+    ]
+    ch = MagicMock()
+
+    def _rows(sql, db, cache_key, parameters=None):
+        addr = (parameters or {}).get("addr", "").lower()
+        if addr == SAFE_SINGLETON.lower():
+            return {"rows": [[
+                SAFE_SINGLETON.lower(), "", json.dumps(stub_abi),
+                "GnosisSafe_v1_4_1L2", "safe-global/safe-smart-account",
+            ]]}
+        return {"rows": []}
+
+    ch.execute_raw_cached.side_effect = _rows
+
+    def _blockscout(address):
+        if address.lower() == SAFE_PROXY.lower():
+            return {"name": "GnosisSafeProxy", "abi": SAFE_PROXY_ABI,
+                    "implementations": []}
+        assert address.lower() == SAFE_SINGLETON.lower()
+        return {"name": "GnosisSafeL2", "abi": SAFE_IMPL_ABI,
+                "implementations": []}
+
+    server = _build_server(ch)
+    with patch.object(abi_resolver, "_fetch_blockscout", _blockscout), \
+         patch.object(abi_resolver, "_detect_implementation_onchain",
+                      return_value=SAFE_SINGLETON):
+        res = _tool(server, "open_contract_explorer")(address=SAFE_PROXY)
+    vs = res.structuredContent["view_state"]
+    assert vs["implementation_address"] == SAFE_SINGLETON
+    read_names = [f["name"] for f in vs["read_functions"]]
+    assert {"getOwners", "getThreshold"}.issubset(read_names)
+    assert vs["abi_source"] == "blockscout"

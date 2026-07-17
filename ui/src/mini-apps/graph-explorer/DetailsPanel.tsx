@@ -1,46 +1,33 @@
-import type { MiniAppPayload } from "../shared/miniAppTypes";
+// Right-hand inspector: selected node (roles, evidence, neighbors), selected
+// edge (weights, evidence), semantic provenance, and suggested next hops.
+// All rows arrive PRE-PARSED through model/parseRows — this panel never
+// parses dataset rows itself. (No "Ask" button by design — removed in WS10.)
+
+import { shortId } from "./model/parseRows";
 import type {
   AddressRoles,
+  EvidenceRow,
   GraphEdgeRow,
-  GraphExplorerState,
   GraphNodeRow,
+  HopSuggestion,
   ProfileCard,
 } from "./types";
 
 interface Props {
-  view: MiniAppPayload<GraphExplorerState>;
+  nodes: GraphNodeRow[];
+  edges: GraphEdgeRow[];
+  selectedNodeId: string;
+  selectedEdgeId: string;
+  seedNodeId: string;
+  nodeRoles: Record<string, AddressRoles>;
+  catalog: ProfileCard[];
+  suggestions: HopSuggestion[];
+  nodeEvidence: EvidenceRow[];
+  edgeEvidence: EvidenceRow[];
   onExpand: (nodeId: string) => void;
   onRecenter: (nodeId: string) => void;
   onApplyHop: (profileId: string) => void;
   onSelectNode: (nodeId: string) => void;
-}
-
-function shortId(id: string): string {
-  if (id.startsWith("0x") && id.length > 16) {
-    return `${id.slice(0, 8)}…${id.slice(-6)}`;
-  }
-  return id.length > 22 ? `${id.slice(0, 20)}…` : id;
-}
-
-function parseNodeRows(rows: unknown[][] | undefined): GraphNodeRow[] {
-  return (rows ?? []).map((r) => ({
-    id: String(r[0] ?? ""),
-    kind: String(r[1] ?? "address"),
-    label: String(r[2] ?? ""),
-    profiles: Array.isArray(r[3]) ? (r[3] as string[]) : [],
-  }));
-}
-
-function parseEdgeRows(rows: unknown[][] | undefined): GraphEdgeRow[] {
-  return (rows ?? []).map((r) => ({
-    id: String(r[0] ?? ""),
-    source: String(r[1] ?? ""),
-    target: String(r[2] ?? ""),
-    profile: String(r[3] ?? ""),
-    weight: Number(r[4] ?? 0),
-    edge_count: Number(r[5] ?? 0),
-    directed: Boolean(r[6]),
-  }));
 }
 
 const ROLE_LABELS: Array<[keyof AddressRoles, string]> = [
@@ -66,29 +53,38 @@ const ROLE_DETAILS: Array<[keyof AddressRoles, string]> = [
   ["dune_project", "Dune project"],
 ];
 
-function parseEvidenceRows(
-  rows: unknown[][] | undefined,
-): Array<{ column: string; value: string }> {
-  return (rows ?? []).map((r) => ({
-    column: String(r[1] ?? ""),
-    value: String(r[2] ?? ""),
-  }));
-}
-
-export function DetailsPanel({ view, onExpand, onRecenter, onApplyHop, onSelectNode }: Props) {
-  const state = (view.view_state || {}) as GraphExplorerState;
-  const nodes = parseNodeRows(view.datasets?.nodes?.preview_rows);
-  const edges = parseEdgeRows(view.datasets?.edges?.preview_rows);
+export function DetailsPanel({
+  nodes,
+  edges,
+  selectedNodeId,
+  selectedEdgeId,
+  seedNodeId,
+  nodeRoles,
+  catalog,
+  suggestions,
+  nodeEvidence,
+  edgeEvidence,
+  onExpand,
+  onRecenter,
+  onApplyHop,
+  onSelectNode,
+}: Props) {
   const selectedNode =
-    nodes.find((n) => n.id === state.selected_node_id) ||
-    nodes.find((n) => n.id === state.seed_node?.id);
-  const selectedEdge = edges.find((e) => e.id === state.selected_edge_id);
+    nodes.find((n) => n.id === selectedNodeId) ||
+    nodes.find((n) => n.id === seedNodeId);
+  const selectedEdge = edges.find((e) => e.id === selectedEdgeId);
 
   // Neighbors of the selected node, derived from the loaded edge list. Each is
   // clickable (select) with an inline expand, so the panel doubles as a
   // navigation aid for the canvas.
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
-  const neighbors: Array<{ id: string; kind: string; label: string; profile: string; dir: "in" | "out" }> = [];
+  const neighbors: Array<{
+    id: string;
+    kind: string;
+    label: string;
+    profile: string;
+    dir: "in" | "out";
+  }> = [];
   if (selectedNode) {
     const seen = new Set<string>();
     for (const e of edges) {
@@ -110,23 +106,10 @@ export function DetailsPanel({ view, onExpand, onRecenter, onApplyHop, onSelectN
     }
   }
 
-  const roles =
-    selectedNode && state.node_roles
-      ? state.node_roles[selectedNode.id]
-      : undefined;
-
-  const nodeEvidence = parseEvidenceRows(
-    view.datasets?.node_evidence?.preview_rows,
-  );
-  const edgeEvidence = parseEvidenceRows(
-    view.datasets?.edge_evidence?.preview_rows,
-  );
-
+  const roles = selectedNode ? nodeRoles[selectedNode.id] : undefined;
   const catalogByProfile: Record<string, ProfileCard> = Object.fromEntries(
-    (state.catalog || []).map((p) => [p.profile, p]),
+    catalog.map((p) => [p.profile, p]),
   );
-
-  const suggestions = state.suggested_next_hops || [];
 
   return (
     <aside className="ge-details">
@@ -280,7 +263,8 @@ export function DetailsPanel({ view, onExpand, onRecenter, onApplyHop, onSelectN
           <h3>Semantic</h3>
           {(() => {
             const profile =
-              catalogByProfile[selectedNode.profiles[0]] || Object.values(catalogByProfile)[0];
+              catalogByProfile[selectedNode.profiles[0]] ||
+              Object.values(catalogByProfile)[0];
             if (!profile) return null;
             return (
               <dl className="ge-kv">

@@ -553,3 +553,28 @@ def test_elementary_tools_degrade_when_unavailable(monkeypatch):
     assert dc._catalog_run_state_impl(object(), "m")["available"] is False
     assert dc._catalog_test_results_impl(object(), "m")["available"] is False
     assert dc._catalog_health_impl(object())["available"] is False
+
+
+def test_scaffolded_measure_wrappers_excluded_from_index(snap, monkeypatch):
+    """Auto-scaffolded per-measure wrappers (measure == name, `*_value`) are
+    catalog noise — the same data is already surfaced as the model + columns.
+    Deliberately authored metrics (distinct measure) stay."""
+    snap.metrics["execution_lending_aave_balance_cohorts_daily__holders_in_bucket_value"] = {
+        "label": "Execution Lending Aave Balance Cohorts Daily - Holders In Bucket",
+        "description": "",
+        "module": "execution",
+        "quality_tier": "approved",
+        "semantic_status": "approved",
+        "root_model": "execution_lending_aave_balance_cohorts_daily",
+        # the scaffold giveaway: the measure IS the metric itself
+        "measure": "execution_lending_aave_balance_cohorts_daily__holders_in_bucket_value",
+        "question_synonyms": [],
+    }
+    dc._INDEX_CACHE.clear()
+    r = dc.catalog_search("holders in bucket", entity_types=["metric"], limit=50)
+    names = [h["name"] for h in r["hits"]]
+    assert all("holders_in_bucket_value" not in n for n in names)
+    # the curated metric from the fixture is still indexed
+    r2 = dc.catalog_search("bridge net flow", entity_types=["metric"], limit=50)
+    assert any(h["name"] == "bridges_netflow_weekly__value" for h in r2["hits"])
+    dc._INDEX_CACHE.clear()

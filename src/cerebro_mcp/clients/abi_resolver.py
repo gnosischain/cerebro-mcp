@@ -12,6 +12,13 @@ and the implementation ABI are stored under the proxy's ``contract_address``,
 distinguished by ``implementation_address`` (empty for the proxy row, set to
 the implementation's address for the impl row). The implementation is *not*
 keyed under its own ``contract_address``.
+
+When neither source knows the implementation but the resolved ABI has no
+callable functions (the signature of a bare delegating proxy — e.g.
+``GnosisSafeProxy``, whose masterCopy lives in storage slot 0 where
+Blockscout reports ``implementations: []``), the resolver probes the chain
+directly: EIP-1967 implementation slot, EIP-1167 minimal-proxy bytecode,
+then slot 0.
 """
 from __future__ import annotations
 
@@ -24,6 +31,7 @@ import requests
 from web3 import Web3
 
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.clients.web3 import rpc_manager
 from cerebro_mcp.config import settings
 
 
@@ -96,6 +104,20 @@ def resolve_abi(
     record = _resolve_from_clickhouse(ch, checksum, target)
     if record is None:
         record = _resolve_from_blockscout(checksum, target)
+
+    # Neither source knew this was a proxy, yet the ABI has no callable
+    # surface (constructor/fallback only) — a bare delegating proxy whose
+    # implementation pointer neither source tracks (Safe masterCopy in
+    # slot 0, unverified EIP-1967/1167 shells). Probe the chain and resolve
+    # the implementation's ABI instead; calls still target the proxy.
+    if (
+        target in ("auto", "implementation")
+        and not record.implementation_address
+        and record.abi
+        and not _abi_has_functions(record.abi)
+    ):
+        record = _resolve_proxy_implementation(ch, checksum, record) or record
+
     if not record.abi:
         raise ValueError(f"ABI not found for {checksum}")
 
@@ -216,4 +238,111 @@ def _resolve_from_blockscout(address: str, target: str) -> AbiRecord:
         contract_name=body.get("name") or "",
         abi=body.get("abi") or [],
         source="blockscout",
+    )
+
+
+# ---------------------------------------------------------------------------
+# On-chain proxy probe (last-resort implementation detection)
+# ---------------------------------------------------------------------------
+
+#: EIP-1967: keccak256("eip1967.proxy.implementation") - 1
+_EIP1967_IMPL_SLOT = (
+    "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+)
+
+#: EIP-1167 minimal-proxy runtime bytecode, split around the embedded address.
+_EIP1167_PREFIX = bytes.fromhex("363d3d373d3d3d363d73")
+_EIP1167_SUFFIX = bytes.fromhex("5af43d82803e903d91602b57fd5bf3")
+
+
+def _abi_has_functions(abi: list[dict[str, Any]] | None) -> bool:
+    return any(item.get("type") == "function" for item in abi or [])
+
+
+def _abi_has_read_functions(abi: list[dict[str, Any]] | None) -> bool:
+    return any(
+        item.get("type") == "function"
+        and item.get("stateMutability") in ("view", "pure")
+        for item in abi or []
+    )
+
+
+def _address_from_word(raw: bytes) -> str:
+    """Checksum address from the last 20 bytes of a storage word ('' if zero)."""
+    word = bytes(raw).rjust(32, b"\x00")[-20:]
+    if word == b"\x00" * 20:
+        return ""
+    return Web3.to_checksum_address(word)
+
+
+def _detect_implementation_onchain(address: str) -> str:
+    """Find a delegating proxy's implementation the way block explorers do.
+
+    Order: EIP-1167 bytecode, EIP-1967 implementation slot, then storage
+    slot 0 (the Safe ``masterCopy`` convention — Blockscout labels these
+    "Custom" with ``implementations: []``). Slot values must point at a
+    deployed contract to count, so ordinary storage that merely looks like
+    an address is rejected. Returns "" when nothing qualifies or the RPC is
+    unavailable; only ever called for function-less ABIs, so it can never
+    shadow a real contract's own ABI.
+    """
+    try:
+        w3 = rpc_manager.standard
+        code = bytes(rpc_manager.retry(w3.eth.get_code, address))
+        i = code.find(_EIP1167_PREFIX)
+        if i != -1:
+            start = i + len(_EIP1167_PREFIX)
+            end = start + 20
+            if code[end:end + len(_EIP1167_SUFFIX)] == _EIP1167_SUFFIX:
+                impl = _address_from_word(code[start:end])
+                if impl:
+                    return impl
+        for slot in (_EIP1967_IMPL_SLOT, 0):
+            raw = rpc_manager.retry(w3.eth.get_storage_at, address, slot)
+            impl = _address_from_word(raw)
+            if (
+                impl
+                and impl.lower() != address.lower()
+                and bytes(rpc_manager.retry(w3.eth.get_code, impl))
+            ):
+                return impl
+    except Exception:  # noqa: BLE001 — RPC down/misconfigured: keep the proxy ABI
+        return ""
+    return ""
+
+
+def _resolve_proxy_implementation(
+    ch: ClickHouseManager,
+    proxy: str,
+    proxy_record: AbiRecord,
+) -> AbiRecord | None:
+    """Resolve the ABI of an on-chain-detected implementation for ``proxy``.
+
+    The returned record keeps the PROXY as ``contract_address`` — view calls
+    must hit the proxy so the delegatecalled storage is read.
+    """
+    impl = _detect_implementation_onchain(proxy)
+    if not impl:
+        return None
+    # target="proxy" fetches the implementation's OWN ABI without another hop.
+    impl_record = _resolve_from_clickhouse(ch, impl, "proxy")
+    # dbt seeds are often decoding stubs (events + a write fn or two, e.g.
+    # the Safe singletons). A contract page needs the read surface — upgrade
+    # to Blockscout when the seeded ABI has no view/pure functions, keeping
+    # the stub only if Blockscout can't do better.
+    if impl_record is None or not _abi_has_read_functions(impl_record.abi):
+        try:
+            bs_record = _resolve_from_blockscout(impl, "proxy")
+        except Exception:  # noqa: BLE001 — unverified impl
+            bs_record = None
+        if bs_record is not None and _abi_has_functions(bs_record.abi):
+            impl_record = bs_record
+    if impl_record is None or not _abi_has_functions(impl_record.abi):
+        return None
+    return AbiRecord(
+        contract_address=proxy,
+        implementation_address=impl,
+        contract_name=impl_record.contract_name or proxy_record.contract_name,
+        abi=impl_record.abi,
+        source=impl_record.source,
     )

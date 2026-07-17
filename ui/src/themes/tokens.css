@@ -228,10 +228,12 @@
   --accent-soft: rgba(8, 145, 178, 0.12);
   --accent-softer: rgba(8, 145, 178, 0.06);
 
-  /* Status */
-  --success: #059669;
-  --warning: #b45309;
-  --error: #dc2626;
+  /* Status — one shade darker than the raw brand hues: 10-11px badge text
+   * renders on subtle same-hue tints over white, where #059669/#dc2626 only
+   * reach ~3.3-4.5:1. These clear WCAG 4.5:1 with margin. */
+  --success: #047857;
+  --warning: #92400e;
+  --error: #b91c1c;
 
   /* Semantic surface/state tokens (white paper) — dark-enough text + subtle
    * fills so contrast holds (≥4.5:1) without relying on a dark backdrop. */

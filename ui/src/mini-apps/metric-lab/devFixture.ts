@@ -1,5 +1,6 @@
-// Dev-mode fixtures. Select with ?demo=loaded | ?demo=multi | ?demo=dual
-// (plain page = empty browse mode). Only used when import.meta.env.DEV.
+// Dev-mode fixtures. Select with ?demo=loaded | ?demo=multi | ?demo=dual |
+// ?demo=grid (plain page = empty browse mode). Only used when
+// import.meta.env.DEV.
 
 import type { MiniAppPayload } from "../shared/miniAppTypes";
 import type { MetricCatalogEntry, MetricLabState } from "./types";
@@ -288,10 +289,96 @@ function loadedDual(): MiniAppPayload<MetricLabState> {
   };
 }
 
+/** 3-metric date-joined wide table + a 2-panel grid — exercises yFields,
+ * dataset_revisions, and the panel workspace end to end. */
+function loadedGrid(): MiniAppPayload<MetricLabState> {
+  const GPAY = DAYS.map((_, i) =>
+    Math.round(40_000 + i * 350 + noise(i, 3) * 8_000),
+  );
+  const metricCols = [
+    "api_execution_transactions_daily",
+    "api_bridges_flows_daily",
+    "api_gnosis_pay_daily",
+  ];
+  return {
+    type: "INITIAL_LOAD",
+    view_id: "dev-view-grid",
+    app_id: APP_ID,
+    title: "Metric Lab",
+    status: "ready",
+    summary_cards: [
+      { label: "Rows loaded", value: String(DAYS.length), tone: "neutral" },
+      { label: "Mode", value: "Join (day)", tone: "positive" },
+      { label: "Models", value: "3", tone: "neutral" },
+    ],
+    datasets: {
+      primary: {
+        key: "primary",
+        title: "3-model date join",
+        sql: "SELECT date, max(m0) AS `api_execution_transactions_daily`, max(m1) AS `api_bridges_flows_daily`, max(m2) AS `api_gnosis_pay_daily` FROM (...) GROUP BY date ORDER BY date ASC LIMIT 50000",
+        database: "dbt",
+        columns: [
+          { name: "date", type: "Date" },
+          { name: metricCols[0], type: "Float64" },
+          { name: metricCols[1], type: "Float64" },
+          { name: metricCols[2], type: "Float64" },
+        ],
+        stats: { row_count: DAYS.length, rows_returned: DAYS.length, mode: "exact_bounded", warnings: [] },
+        preview_rows: DAYS.map((d, i) => [d, TX[i], BRIDGE[i], GPAY[i]]),
+      },
+    },
+    view_state: {
+      ...emptyState(),
+      mode: "loaded",
+      selected_metric: metricCols[0],
+      selected_metrics: metricCols,
+      load_mode: "join",
+      aggregate_config: {
+        grain: "day",
+        specs: metricCols.map((m) => ({ model: m, y: "", agg: "sum" })),
+      },
+      charts: [
+        {
+          id: "c1",
+          datasetKey: "primary",
+          xField: "date",
+          yField: metricCols[0],
+          y2Field: metricCols[1],
+          yFields: metricCols,
+          chartType: "line",
+          aggregation: "sum",
+          groupBy: "",
+        },
+        {
+          id: "c2",
+          datasetKey: "primary",
+          xField: metricCols[0],
+          yField: metricCols[1],
+          yFields: [metricCols[1]],
+          chartType: "scatter",
+          aggregation: "sum",
+          groupBy: "",
+          colorBy: metricCols[2],
+        },
+      ],
+      chart: { xField: "date", yField: metricCols[0], chartType: "line", aggregation: "sum", groupBy: "" },
+      dataset_revisions: { primary: 1 },
+      analytics_disabled: false,
+      dataset_mode: "exact_bounded",
+      metric_fields: metricCols,
+      chart_suggestions: [
+        { chartType: "scatter", xField: metricCols[0], yField: metricCols[1], reason: "correlation" },
+      ],
+    },
+    warnings: [],
+  };
+}
+
 export function buildMockPayload(): MiniAppPayload<MetricLabState> {
   const mode = demoMode();
   if (mode === "loaded" || mode === "multi") return loadedSingle();
   if (mode === "dual") return loadedDual();
+  if (mode === "grid") return loadedGrid();
   return {
     type: "INITIAL_LOAD",
     view_id: "dev-view",

@@ -6,14 +6,14 @@ import { useMemo } from "react";
 import type { EChartsOption } from "echarts";
 import { ChartCard } from "../../components/ChartCard";
 import { NumberDisplay } from "../../components/NumberDisplay";
-import type { ChartConfig } from "./types";
+import { effectiveYFields, type ChartConfig } from "./types";
 import {
   aggregateRows,
   buildCartesianOption,
   buildCategoryScatterOption,
   buildHeatmapOption,
+  buildMultiAxisOption,
   buildPieOption,
-  buildTwoAxisOption,
   buildXYScatterOption,
   type MergedDual,
 } from "./chartOptions";
@@ -71,24 +71,25 @@ export function ChartPanel({
       case "bar": {
         // Dual api_* tables → merged two-axis chart (their own titles).
         if (mergedDual) {
-          return buildTwoAxisOption(
+          return buildMultiAxisOption(
             mergedDual.rows,
             mergedDual.columns,
             mergedDual.xField,
-            mergedDual.metricColumns[0] ?? "",
-            mergedDual.metricColumns[1] ?? "",
+            mergedDual.metricColumns,
             config.chartType,
             sortAsc,
           );
         }
-        // Explicit right axis takes precedence over series grouping.
-        if (config.y2Field && config.y2Field !== config.yField) {
-          return buildTwoAxisOption(
+        // Several value columns (multi-Y aggregate / N-model join / explicit
+        // Y2) take precedence over series grouping: [0] left, [1] right,
+        // rest left.
+        const yFields = effectiveYFields(config);
+        if (yFields.length > 1) {
+          return buildMultiAxisOption(
             rows,
             columns,
             config.xField,
-            config.yField,
-            config.y2Field,
+            yFields,
             config.chartType,
             sortAsc,
           );

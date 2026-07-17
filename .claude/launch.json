@@ -2,92 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "report",
-      "cwd": "ui",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5178"],
-      "port": 5178,
-      "env": {
-        "CEREBRO_UI_ENTRY": "report"
-      }
-    },
-    {
-      "name": "graph-explorer",
-      "cwd": "ui",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5179"],
-      "port": 5179,
-      "env": {
-        "CEREBRO_UI_ENTRY": "graphExplorer"
-      }
-    },
-    {
-      "name": "metric-lab",
-      "cwd": "ui",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5180"],
-      "port": 5180,
-      "env": {
-        "CEREBRO_UI_ENTRY": "metricLab"
-      }
-    },
-    {
-      "name": "portfolio",
-      "cwd": "ui",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5181"],
-      "port": 5181,
-      "env": {
-        "CEREBRO_UI_ENTRY": "portfolio"
-      }
-    },
-    {
-      "name": "contract-explorer",
-      "cwd": "ui",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5182"],
-      "port": 5182,
-      "env": {
-        "CEREBRO_UI_ENTRY": "contractExplorer"
-      }
-    },
-    {
-      "name": "model-lineage",
-      "cwd": "ui",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5183"],
-      "port": 5183,
-      "env": {
-        "CEREBRO_UI_ENTRY": "modelLineage"
-      }
-    },
-    {
-      "name": "case-study-smoke",
-      "cwd": ".scratch/case_study_smoke",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "5190"],
-      "port": 5190
-    },
-    {
-      "name": "incident-report",
-      "cwd": "scripts/incident_gpay_2026_05/output",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "5191"],
-      "port": 5191
-    },
-    {
-      "name": "report-dist",
-      "cwd": "ui/dist",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "5192"],
-      "port": 5192
-    },
-    {
-      "name": "bench-report",
-      "cwd": "benchmarks/results",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "5193"],
-      "port": 5193
+      "name": "cerebro-sse-preview",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "MCP_AUTH_TOKEN=dev",
+        "FASTMCP_PORT=8021",
+        ".venv/bin/cerebro-mcp",
+        "--sse"
+      ],
+      "port": 8021,
+      "autoPort": false
     }
   ]
 }

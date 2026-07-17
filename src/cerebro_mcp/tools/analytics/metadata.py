@@ -1058,12 +1058,13 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
 | `open_metric_lab` | Open interactive metric explorer with catalog picker |
 | `open_metric_lab_from_sql` | Load a custom SQL dataset into Metric Lab |
 | `open_metric_lab_from_metrics` | Load a semantic metric into Metric Lab |
-| `load_metric_lab_metric` | Swap metrics in an open Metric Lab view |
-| `update_metric_lab_chart` | Change chart type, axes, or aggregation |
-| `open_graph_explorer` | Open the cross-sector semantic Graph Explorer (Circles trust, Safe/GPay ownership, transfers, LP, validators, bridges, labels) |
-| `load_graph_explorer_seed` | Seed a 1-hop subgraph around an address; auto-detects profiles via address_roles_current |
-| `expand_graph_explorer_node` | Expand a node by one hop (max 2 hops per session) |
-| `update_graph_explorer_focus` | Change selection, relation filters, layout, or time window |
+| `load_metric_lab_metric` | Swap metrics in an open Metric Lab view (2-8 models join on date in aggregate mode) |
+| `update_metric_lab_chart` | Change a chart panel's type, axes, or aggregation (optional chart_id) |
+| `open_report_studio` | Browse/preview/manage the report archive; compose reports from chart records |
+| `open_graph_explorer` | Open the two-mode Graph Explorer — Atlas (browse/sample the semantic graph catalog) and Investigate (seed an address) |
+| `load_graph_explorer_seed` | Seed a 1-hop Investigate subgraph around an address; auto-detects profiles via address_roles_current |
+| `expand_graph_explorer_node` | Expand a node by N hops (default 1; capped at 50 hops per session) |
+| `update_graph_explorer_focus` | Change selection, mode, profile filters, layout, or time window (no refetch) |
 
 ### Custom Query Tools
 | Tool | Description |

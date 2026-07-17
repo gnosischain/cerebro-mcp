@@ -59,6 +59,10 @@ _RO = frozenset({RiskClass.READ_ONLY})
 _SW = frozenset({RiskClass.SERVER_STATE_WRITE})
 _WS = frozenset({RiskClass.WORKSPACE_WRITE, RiskClass.SUBPROCESS})
 _AO = frozenset({RiskClass.APP_ONLY})
+# App-only tools that also mutate durable server state (report files) or
+# persisted view layout — the app-only marking is VISIBILITY, this class is
+# what audit/telemetry key on.
+_AO_SW = frozenset({RiskClass.APP_ONLY, RiskClass.SERVER_STATE_WRITE})
 _EW = frozenset({RiskClass.EXTERNAL_WRITE})
 
 TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
@@ -122,6 +126,7 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "open_metric_lab_from_metrics": _RO,
     "load_metric_lab_metric": _RO,
     "update_metric_lab_chart": _RO,
+    "open_report_studio": _RO,
     "open_contract_explorer": _RO,
     "load_contract_explorer_address": _RO,
     "contract_explorer_call_function": _RO,
@@ -129,6 +134,16 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "load_graph_explorer_seed": _RO,
     "expand_graph_explorer_node": _RO,
     "update_graph_explorer_focus": _RO,
+    # dev-only apps (registered only when DEV_MINI_APPS_ENABLED)
+    "open_portfolio": _RO,
+    "load_portfolio_address": _RO,
+    "navigate_portfolio_relation": _RO,
+    "load_portfolio_section": _RO,
+    "update_portfolio_focus": _RO,
+    "open_model_lineage": _RO,
+    "expand_model_lineage_node": _RO,
+    "set_model_lineage_filters": _RO,
+    "load_column_lineage": _RO,
     # custom query tools (parameterized, read-only SQL)
     # — dynamically registered; defaults to _RO via get_risk_classes()
     # research read
@@ -184,6 +199,24 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     # ── app_only ─────────────────────────────────────────────────────
     "get_mini_app_rows": _AO,
     "get_mini_app_state": _AO,
+    # metric lab (frontend-only helpers)
+    "search_metric_catalog": _AO,
+    "get_metric_catalog_entry": _AO,
+    "run_metric_lab_sql": _AO,          # read-only query + ephemeral view state
+    "set_metric_lab_charts": _AO_SW,
+    # graph explorer (frontend-only helpers)
+    "load_graph_atlas_sample": _AO,     # read-only sample queries into view datasets
+    "set_graph_explorer_view": _AO_SW,  # persists the two-mode view layout
+    # report studio
+    "list_report_archive": _AO,
+    "get_report_archive_entry": _AO,
+    "get_report_export_info": _AO,
+    "list_session_charts": _AO,
+    "get_session_chart": _AO,
+    "delete_report_archive_entry": _AO_SW,
+    "rename_report_archive_entry": _AO_SW,
+    "create_studio_chart": _AO_SW,   # registers a chart record (read-only SQL)
+    "compose_report": _AO_SW,
 
     # ── web3 / contract explorer (read-only RPC) ─────────────────────
     "contract_explore": _RO,

@@ -1,4 +1,4 @@
-.PHONY: build-ui build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-contract-explorer build-ui-model-lineage install dev test serve-catalog
+.PHONY: build-ui build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio install dev test serve-catalog
 
 # Serve the mini-apps over HTTP so they open in a browser (Data Catalog at
 # /app/data_catalog). Reuses .env for ClickHouse/SEMANTIC config — the only
@@ -15,7 +15,7 @@ serve-catalog:
 # server is enough for the app's new bundle to take effect. The top-level
 # build-ui target simply fans out to all per-app targets.
 
-build-ui: build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-contract-explorer build-ui-model-lineage
+build-ui: build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio
 
 build-ui-report:
 	cd ui && npm ci && CEREBRO_UI_ENTRY=report npm run build
@@ -24,6 +24,10 @@ build-ui-report:
 build-ui-metric-lab:
 	cd ui && CEREBRO_UI_ENTRY=metricLab npm run build
 	cp ui/dist/metric-lab.html src/cerebro_mcp/static/metric_lab.html
+
+build-ui-report-studio:
+	cd ui && CEREBRO_UI_ENTRY=reportStudio npm run build
+	cp ui/dist/report-studio.html src/cerebro_mcp/static/report_studio.html
 
 build-ui-portfolio:
 	cd ui && CEREBRO_UI_ENTRY=portfolio npm run build

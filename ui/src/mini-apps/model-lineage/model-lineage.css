@@ -354,25 +354,28 @@
 
 /* ------------------------------------------------------------------ React Flow chrome */
 
-/* Theme the zoom controls (default React Flow ships light buttons). */
-.ml-canvas .react-flow__controls {
+/* Theme the zoom controls (default React Flow ships light buttons).
+ * Scoped to .mini-app-scope, NOT .ml-canvas — the data catalog's Lineage tab
+ * mounts the same LineageGraph inside .dc-lineage-canvas and was still
+ * getting the stock white buttons in dark mode. */
+.mini-app-scope .react-flow__controls {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   border-radius: 8px;
   overflow: hidden;
 }
 
-.ml-canvas .react-flow__controls-button {
-  background: var(--surface, #1e293b);
-  border-bottom: 1px solid var(--border, #334155);
-  color: var(--text-primary, #e2e8f0);
-  fill: var(--text-primary, #e2e8f0);
+.mini-app-scope .react-flow__controls-button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  fill: var(--text-primary);
 }
 
-.ml-canvas .react-flow__controls-button:hover {
-  background: var(--bg, #0f172a);
+.mini-app-scope .react-flow__controls-button:hover {
+  background: var(--surface-2);
 }
 
-.ml-canvas .react-flow__controls-button svg {
+.mini-app-scope .react-flow__controls-button svg {
   fill: currentColor;
 }
 

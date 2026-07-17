@@ -58,9 +58,9 @@ from cerebro_mcp.tools.visualization.mini_apps import (
 from cerebro_mcp.tools.visualization.web_apps import register_web_app_routes
 from cerebro_mcp.tools.web3.contract_explorer import register_contract_explorer_tools
 from cerebro_mcp.tools.visualization.metric_lab import register_metric_lab_tools
-from cerebro_mcp.tools.visualization.portfolio import register_portfolio_tools
+from cerebro_mcp.tools.visualization.report_studio import register_report_studio_tools
 from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_tools
-from cerebro_mcp.tools.analytics.model_lineage_app import register_model_lineage_tools
+from cerebro_mcp.tools.visualization.dev_apps import register_dev_mini_apps
 from cerebro_mcp.tools.semantic.data_catalog import register_data_catalog_tools
 from cerebro_mcp.tools.semantic.find import register_find_tool
 from cerebro_mcp.tools.analytics.list_unifier import register_list_tool
@@ -355,10 +355,12 @@ if settings.RPC_SCAN_ENABLED:
 register_mini_app_infra(mcp, ch)
 register_contract_explorer_tools(mcp, ch)
 register_metric_lab_tools(mcp, ch)
-register_portfolio_tools(mcp, ch)
 register_graph_explorer_tools(mcp, ch)
-register_model_lineage_tools(mcp, ch)
 register_data_catalog_tools(mcp, ch)
+register_report_studio_tools(mcp, ch)
+# Dev-only apps (portfolio, model lineage) — absent unless
+# DEV_MINI_APPS_ENABLED (see tools/visualization/dev_apps.py).
+register_dev_mini_apps(mcp, ch)
 
 # Standalone web-app delivery: serve the mini-apps as plain browser URLs
 # (GET /app/{id}) with HTTP tool dispatch (POST /app/{id}/api/tool/{tool}).

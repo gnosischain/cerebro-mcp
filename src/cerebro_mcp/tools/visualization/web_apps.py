@@ -42,10 +42,19 @@ class WebAppConfig:
     app_id: str
     open_tool: str
     html_loader: Callable[[], str]
+    # Tool names this app may dispatch via POST /app/{app_id}/api/tool/{name}.
+    # The registry is process-global; without this set any app iframe could
+    # invoke any other app's tools (app-only metadata is visibility, NOT
+    # authorization).
+    allowed_tools: frozenset[str] = frozenset()
 
 
 # app_id -> WebAppConfig
 WEB_APP_CONFIGS: dict[str, WebAppConfig] = {}
+
+# Shared mini-app infrastructure tools every app may call (row hydration /
+# view state), registered via register_mini_app_tools rather than per-app.
+_SHARED_INFRA_TOOLS = frozenset({"get_mini_app_rows", "get_mini_app_state"})
 
 # Query-param aliases → candidate open-tool parameter names. The first param
 # that actually exists on the open tool's signature wins.
@@ -65,7 +74,10 @@ def register_web_app(
     safe to call once per process boot.
     """
     WEB_APP_CONFIGS[app_id] = WebAppConfig(
-        app_id=app_id, open_tool=open_tool, html_loader=html_loader
+        app_id=app_id,
+        open_tool=open_tool,
+        html_loader=html_loader,
+        allowed_tools=frozenset(tools) | _SHARED_INFRA_TOOLS,
     )
     MINI_APP_TOOL_REGISTRY.update(tools)
 
@@ -189,10 +201,14 @@ def _inject_payload(
     token_line = (
         f"window.__MINI_APP_TOKEN__={json.dumps(token)};" if token else ""
     )
+    # Registered-app list: the chrome filters its cross-app tabs on this so
+    # tabs for unregistered (e.g. dev-only) apps never render in standalone
+    # mode. Dev (`npm run dev`) has no injection and keeps the static list.
+    apps_line = f"window.__MINI_APP_APPS__={json.dumps(sorted(WEB_APP_CONFIGS))};"
     snippet = (
         f'<script id="mini-app-data" type="application/json">{safe_json}</script>'
         f"<script>window.__MINI_APP_API__={json.dumps(api_base)};"
-        f"{token_line}</script>"
+        f"{apps_line}{token_line}</script>"
     )
     lower = html.lower()
     idx = lower.find("<script")
@@ -290,8 +306,14 @@ async def dispatch_app_tool(request: Request) -> JSONResponse:
 
     app_id = request.path_params["app_id"]
     tool_name = request.path_params["tool_name"]
-    if app_id not in WEB_APP_CONFIGS:
+    config = WEB_APP_CONFIGS.get(app_id)
+    if config is None:
         return JSONResponse({"error": f"Unknown app: {app_id}"}, status_code=404)
+    if tool_name not in config.allowed_tools:
+        return JSONResponse(
+            {"error": f"Tool '{tool_name}' is not available for app '{app_id}'"},
+            status_code=404,
+        )
 
     fn = MINI_APP_TOOL_REGISTRY.get(tool_name)
     if fn is None:

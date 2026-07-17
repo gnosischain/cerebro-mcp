@@ -48,6 +48,7 @@ def _make_snapshot() -> SemanticSnapshot:
             "columns": {
                 "date": {"data_type": "Date"},
                 "tx_count": {"data_type": "UInt64"},
+                "gas_used": {"data_type": "UInt64"},
             },
         },
         "fct_bridges_kpis_snapshot": {
@@ -510,3 +511,872 @@ def test_memory_error_rewritten_friendly():
 
     plain = mini_apps._friendly_query_error(ValueError("syntax error"))
     assert plain == "syntax error"
+
+
+# ---------------------------------------------------------------------------
+# Type-aware time-column detection (Phase 0)
+# ---------------------------------------------------------------------------
+
+
+def test_unwrap_ch_type_strips_wrappers():
+    assert metric_lab_module._unwrap_ch_type("Nullable(DateTime64(3))") == "DateTime64(3)"
+    assert metric_lab_module._unwrap_ch_type("LowCardinality(Nullable(Date))") == "Date"
+    assert metric_lab_module._unwrap_ch_type("String") == "String"
+    assert metric_lab_module._unwrap_ch_type("") == ""
+
+
+@pytest.mark.parametrize(
+    ("ch_type", "expected"),
+    [
+        ("Date", True),
+        ("Date32", True),
+        ("DateTime", True),
+        ("DateTime64(3, 'UTC')", True),
+        ("Nullable(DateTime64(3))", True),
+        ("LowCardinality(Nullable(Date))", True),
+        ("String", False),
+        ("UInt64", False),
+        ("Decimal(38, 18)", False),
+    ],
+)
+def test_is_time_type(ch_type, expected):
+    assert metric_lab_module._is_time_type(ch_type) is expected
+
+
+def test_time_column_prefers_typed_and_hinted():
+    model_def = {
+        "columns": {
+            "block_timestamp": {"data_type": "DateTime64(3)"},
+            "date": {"data_type": "Date"},
+            "value": {"data_type": "Float64"},
+        }
+    }
+    # "date" is typed AND hinted -> wins over the merely-typed block_timestamp.
+    assert metric_lab_module._time_column(model_def) == "date"
+
+
+def test_time_column_finds_typed_without_name_hint():
+    # block_timestamp misses _TIME_COLUMN_HINTS but is DateTime64-typed.
+    model_def = {
+        "columns": {
+            "block_timestamp": {"data_type": "DateTime64(3)"},
+            "value": {"data_type": "Float64"},
+        }
+    }
+    assert metric_lab_module._time_column(model_def) == "block_timestamp"
+
+
+def test_time_column_falls_back_to_untyped_hint():
+    # No data_type info at all -> name hints still work.
+    model_def = {"columns": {"date": {}, "value": {}}}
+    assert metric_lab_module._time_column(model_def) == "date"
+
+
+def test_time_column_list_shape_and_created_at():
+    model_def = {
+        "columns": [
+            {"name": "created_at", "data_type": "Nullable(DateTime)"},
+            {"name": "amount", "data_type": "UInt64"},
+        ]
+    }
+    assert metric_lab_module._time_column(model_def) == "created_at"
+
+
+def test_time_column_empty_model():
+    assert metric_lab_module._time_column({}) == ""
+    assert metric_lab_module._time_column({"columns": {}}) == ""
+
+
+def test_column_type_lookup():
+    model_def = {"columns": {"a": {"data_type": "UInt8"}}}
+    assert metric_lab_module._column_type(model_def, "a") == "UInt8"
+    assert metric_lab_module._column_type(model_def, "missing") == ""
+
+
+# ---------------------------------------------------------------------------
+# A1: time grain, multi-Y, column projection
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_sql_multi_ys():
+    sql, params = _aggregate_load_sql(
+        _PANEL_MODEL, "m", x="date", y="", agg="sum",
+        ys=["balance", "balance_demurraged"],
+    )
+    assert "sum(`balance`) AS `sum_balance`" in sql
+    assert "sum(`balance_demurraged`) AS `sum_balance_demurraged`" in sql
+    assert sql.index("sum(`balance`)") < sql.index("sum(`balance_demurraged`)")
+    assert "GROUP BY `date`" in sql
+    assert params is None
+
+
+def test_aggregate_sql_ys_rejections():
+    with pytest.raises(ValueError, match="either y or ys"):
+        _aggregate_load_sql(
+            _PANEL_MODEL, "m", x="date", y="avatar", agg="sum",
+            ys=["balance", "balance_demurraged"],
+        )
+    with pytest.raises(ValueError, match="Duplicate columns in ys"):
+        _aggregate_load_sql(
+            _PANEL_MODEL, "m", x="date", y="", agg="sum",
+            ys=["balance", "balance"],
+        )
+    with pytest.raises(ValueError, match="count.*takes no measure list"):
+        _aggregate_load_sql(
+            _PANEL_MODEL, "m", x="date", y="", agg="count",
+            ys=["balance", "balance_demurraged"],
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _aggregate_load_sql(
+            _PANEL_MODEL, "m", x="date", y="", agg="sum",
+            ys=["balance", "balance_demurraged"], series="token_address",
+        )
+    with pytest.raises(ValueError, match="y \\(or ys\\) is required"):
+        _aggregate_load_sql(_PANEL_MODEL, "m", x="date", y="", agg="sum")
+    with pytest.raises(ValueError, match="not a column"):
+        _aggregate_load_sql(
+            _PANEL_MODEL, "m", x="date", y="", agg="sum", ys=["nope"]
+        )
+
+
+def test_aggregate_sql_ys_matching_y_is_allowed():
+    # y mirroring ys[0] (a lenient client sends both) must not be rejected.
+    sql, _ = _aggregate_load_sql(
+        _PANEL_MODEL, "m", x="date", y="balance", agg="sum",
+        ys=["balance", "balance_demurraged"],
+    )
+    assert "sum(`balance_demurraged`)" in sql
+
+
+def test_aggregate_sql_grain_buckets_and_aliases():
+    sql, _ = _aggregate_load_sql(
+        _PANEL_MODEL, "m", x="date", y="balance", agg="sum", grain="week"
+    )
+    assert "toStartOfWeek(`date`, 1) AS `date`" in sql
+    # GROUP BY uses the expression, not the alias
+    assert "GROUP BY toStartOfWeek(`date`, 1)" in sql
+    assert "ORDER BY `date` ASC" in sql
+    sql, _ = _aggregate_load_sql(
+        _PANEL_MODEL, "m", x="date", y="balance", agg="sum", grain="month"
+    )
+    assert "toStartOfMonth(`date`) AS `date`" in sql
+    sql, _ = _aggregate_load_sql(
+        _PANEL_MODEL, "m", x="date", y="balance", agg="sum", grain="day"
+    )
+    assert "toDate(`date`) AS `date`" in sql
+
+
+def test_aggregate_sql_grain_rejections():
+    with pytest.raises(ValueError, match="grain must be one of"):
+        _aggregate_load_sql(
+            _PANEL_MODEL, "m", x="date", y="balance", agg="sum", grain="year"
+        )
+    with pytest.raises(ValueError, match="date/time x column"):
+        _aggregate_load_sql(
+            _PANEL_MODEL, "m", x="token_address", y="balance", agg="sum",
+            grain="week",
+        )
+
+
+def test_aggregate_sql_grain_accepts_typed_non_hinted_column():
+    model = {
+        "relation_name": "`dbt`.`fct_events`",
+        "columns": {
+            "block_timestamp": {"data_type": "DateTime64(3)"},
+            "value": {"data_type": "Float64"},
+        },
+    }
+    sql, _ = _aggregate_load_sql(
+        model, "m", x="block_timestamp", y="value", agg="sum", grain="day"
+    )
+    assert "toDate(`block_timestamp`) AS `block_timestamp`" in sql
+
+
+def test_aggregate_sql_topn_never_orders_by_alias():
+    # The top-N subselect must rank on the bare measure expression — an
+    # `AS`-suffixed expression inside ORDER BY is invalid SQL.
+    sql, _ = _aggregate_load_sql(
+        _PANEL_MODEL, "m", x="date", y="balance", agg="sum",
+        series="token_address",
+    )
+    import re as _re
+
+    for order_by in _re.findall(r"ORDER BY ([^)]+?)(?: DESC| ASC)", sql):
+        assert " AS " not in order_by, sql
+
+
+def test_model_load_sql_projection_order_preserved():
+    sql = _model_load_sql(
+        _PANEL_MODEL, "m", limit=100, columns=["balance", "avatar", "date"]
+    )
+    assert sql.startswith("SELECT `balance`, `avatar`, `date` FROM")
+    assert "ORDER BY `date` DESC" in sql
+    assert sql.endswith("LIMIT 100")
+
+
+def test_model_load_sql_projection_rejections():
+    with pytest.raises(ValueError, match="Duplicate columns"):
+        _model_load_sql(_PANEL_MODEL, "m", limit=10, columns=["date", "date"])
+    with pytest.raises(ValueError, match="Not columns of m"):
+        _model_load_sql(_PANEL_MODEL, "m", limit=10, columns=["nope"])
+
+
+def test_model_load_sql_projection_without_date_col_skips_order():
+    sql = _model_load_sql(_PANEL_MODEL, "m", limit=10, columns=["balance"])
+    assert "ORDER BY" not in sql
+
+
+def test_model_load_sql_empty_projection_selects_all():
+    sql = _model_load_sql(_PANEL_MODEL, "m", limit=10, columns=[])
+    assert sql.startswith("SELECT * FROM")
+
+
+# ---------------------------------------------------------------------------
+# A1 end-to-end: multi-Y defaults, grain, projection, stale-secondary removal
+# ---------------------------------------------------------------------------
+
+
+class ColsStubCH:
+    """Stub that answers with a caller-defined column shape."""
+
+    def __init__(self, columns, total=30):
+        self.columns = columns
+        self.total = total
+
+    def run_query(self, sql, database="dbt", requested_max_rows=100,
+                  audience="tool", fetch_mode="auto", parameters=None):
+        if sql.startswith("SELECT count()"):
+            return ExecutedQuery(
+                sql=sql, executed_sql=sql, database=database, columns=["c"],
+                rows=[[self.total]], row_count=1, elapsed_seconds=0.0,
+                fetch_mode="rows", warnings=[],
+            )
+        n = min(requested_max_rows, self.total)
+        rows = [
+            [f"2026-04-{(i % 28) + 1:02d}"] + [i] * (len(self.columns) - 1)
+            for i in range(n)
+        ]
+        return ExecutedQuery(
+            sql=sql, executed_sql=sql, database=database,
+            columns=list(self.columns), rows=rows, row_count=n,
+            elapsed_seconds=0.0, fetch_mode="rows", warnings=[],
+        )
+
+
+def _build_server_with(ch):
+    server = FastMCP("test-catalog")
+    mini_apps.register_mini_app_infra(server, ch)
+    register_metric_lab_tools(server, ch)
+    return server
+
+
+def test_multi_y_load_emits_yfields(snapshot_ready):
+    server = _build_server_with(
+        ColsStubCH(["date", "sum_tx_count", "sum_gas_used"])
+    )
+    open_fn = _get_tool(server, "open_metric_lab")
+    view_id = open_fn().structuredContent["view_id"]
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+    result = load_fn(
+        view_id=view_id,
+        metric="api_execution_transactions_daily",
+        mode="aggregate",
+        x="date",
+        agg="sum",
+        ys=["tx_count", "gas_used"],
+    )
+    sc = result.structuredContent
+    assert not result.isError, result.content
+    panel = sc["view_state"]["charts"][0]
+    assert panel["yFields"] == ["sum_tx_count", "sum_gas_used"]
+    assert panel["yField"] == "sum_tx_count"
+    assert panel["y2Field"] == "sum_gas_used"
+    assert panel["id"] == "c1"
+    assert panel["datasetKey"] == "primary"
+    # legacy `chart` is the SCALAR projection of charts[0]
+    legacy = sc["view_state"]["chart"]
+    assert set(legacy) == {"xField", "yField", "chartType", "aggregation", "groupBy"}
+    assert legacy["yField"] == "sum_tx_count"
+    assert sc["view_state"]["aggregate_config"]["ys"] == ["tx_count", "gas_used"]
+
+
+def test_grain_load_flows_to_sql_and_config(snapshot_ready):
+    server = _build_server_with(ColsStubCH(["date", "sum_tx_count"]))
+    open_fn = _get_tool(server, "open_metric_lab")
+    view_id = open_fn().structuredContent["view_id"]
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+    result = load_fn(
+        view_id=view_id,
+        metric="api_execution_transactions_daily",
+        mode="aggregate",
+        x="date",
+        y="tx_count",
+        agg="sum",
+        grain="week",
+    )
+    sc = result.structuredContent
+    assert not result.isError, result.content
+    assert "toStartOfWeek(`date`, 1)" in sc["datasets"]["primary"]["sql"]
+    assert sc["view_state"]["aggregate_config"]["grain"] == "week"
+
+
+def test_raw_projection_load_flows_to_sql_and_config(snapshot_ready):
+    server = _build_server_with(ColsStubCH(["date", "tx_count"]))
+    open_fn = _get_tool(server, "open_metric_lab")
+    view_id = open_fn().structuredContent["view_id"]
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+    result = load_fn(
+        view_id=view_id,
+        metric="api_execution_transactions_daily",
+        columns=["date", "tx_count"],
+    )
+    sc = result.structuredContent
+    assert not result.isError, result.content
+    assert sc["datasets"]["primary"]["sql"].startswith(
+        "SELECT `date`, `tx_count` FROM"
+    )
+    assert sc["view_state"]["raw_config"]["columns"] == ["date", "tx_count"]
+
+    bad = load_fn(
+        view_id=view_id,
+        metric="api_execution_transactions_daily",
+        columns=["nope"],
+    )
+    assert bad.isError
+    assert "Not columns" in bad.content[0].text
+
+
+def test_solo_load_after_dual_removes_stale_secondary(snapshot_ready):
+    server = _build_server()
+    open_fn = _get_tool(server, "open_metric_lab")
+    view_id = open_fn().structuredContent["view_id"]
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+
+    dual = load_fn(
+        view_id=view_id,
+        metric=["api_execution_transactions_daily", "int_gbc_deposits_daily"],
+    )
+    assert set(dual.structuredContent["datasets"]) == {"primary", "secondary"}
+    record = mini_apps.get_view(view_id)
+    assert set(record.datasets) == {"primary", "secondary"}
+
+    solo = load_fn(view_id=view_id, metric="api_execution_transactions_daily")
+    assert set(solo.structuredContent["datasets"]) == {"primary"}
+    record = mini_apps.get_view(view_id)
+    assert set(record.datasets) == {"primary"}
+    assert "secondary" not in record.dataset_revisions
+    # Exact state replacement: no stale dual leftovers in view_state.
+    assert record.view_state["selected_metrics"] == [
+        "api_execution_transactions_daily"
+    ]
+
+
+# ---------------------------------------------------------------------------
+# A2: N-model date-grain join
+# ---------------------------------------------------------------------------
+
+
+_JOIN_MODELS = {
+    "api_a_daily": {
+        "relation_name": "`dbt`.`api_a_daily`",
+        "columns": {
+            "date": {"data_type": "Date"},
+            "volume": {"data_type": "Float64"},
+            "label": {"data_type": "String"},
+        },
+    },
+    "api_b_daily": {
+        "relation_name": "`dbt`.`api_b_daily`",
+        "columns": {
+            "block_timestamp": {"data_type": "DateTime64(3)"},
+            "users": {"data_type": "UInt64"},
+        },
+    },
+    "api_no_date": {
+        "relation_name": "`dbt`.`api_no_date`",
+        "columns": {"bridge": {"data_type": "String"}, "tvl": {"data_type": "Float64"}},
+    },
+    "api_no_numeric": {
+        "relation_name": "`dbt`.`api_no_numeric`",
+        "columns": {"date": {"data_type": "Date"}, "label": {"data_type": "String"}},
+    },
+}
+
+
+def test_multi_metric_join_sql_shape():
+    specs = [
+        {"model": "api_a_daily", "y": "volume", "agg": "sum"},
+        {"model": "api_b_daily", "y": "users", "agg": "avg"},
+    ]
+    sql = metric_lab_module._multi_metric_join_sql(
+        _JOIN_MODELS, specs, grain="week", window_days=90
+    )
+    # value columns aliased to MODEL NAMES; NULL-safe union collapsed by max()
+    assert "max(m0) AS `api_a_daily`" in sql
+    assert "max(m1) AS `api_b_daily`" in sql
+    assert "sum(`volume`) AS m0, NULL AS m1" in sql
+    assert "NULL AS m0, avg(`users`) AS m1" in sql
+    # each branch buckets ITS OWN date column with the shared grain
+    assert "toStartOfWeek(`date`, 1) AS date" in sql
+    assert "toStartOfWeek(`block_timestamp`, 1) AS date" in sql
+    assert sql.count("today() - 90") == 2
+    assert " UNION ALL " in sql
+    assert sql.startswith("SELECT date, max(m0)")
+    assert "GROUP BY date ORDER BY date ASC" in sql
+
+
+def test_multi_metric_join_sql_default_y_and_agg():
+    specs = [
+        {"model": "api_a_daily", "y": "", "agg": ""},
+        {"model": "api_b_daily", "y": "", "agg": ""},
+    ]
+    sql = metric_lab_module._multi_metric_join_sql(_JOIN_MODELS, specs)
+    # defaults: first numeric column, sum
+    assert "sum(`volume`)" in sql
+    assert "sum(`users`)" in sql
+
+
+def test_multi_metric_join_sql_rejections():
+    ok = {"model": "api_a_daily", "y": "volume", "agg": "sum"}
+    with pytest.raises(ValueError, match="Duplicate models"):
+        metric_lab_module._multi_metric_join_sql(_JOIN_MODELS, [ok, dict(ok)])
+    with pytest.raises(ValueError, match="no date/time column"):
+        metric_lab_module._multi_metric_join_sql(
+            _JOIN_MODELS,
+            [ok, {"model": "api_no_date", "y": "tvl", "agg": "sum"}],
+        )
+    with pytest.raises(ValueError, match="no numeric column"):
+        metric_lab_module._multi_metric_join_sql(
+            _JOIN_MODELS,
+            [ok, {"model": "api_no_numeric", "y": "", "agg": "sum"}],
+        )
+    with pytest.raises(ValueError, match="not a column"):
+        metric_lab_module._multi_metric_join_sql(
+            _JOIN_MODELS,
+            [ok, {"model": "api_b_daily", "y": "nope", "agg": "sum"}],
+        )
+    with pytest.raises(ValueError, match="not supported for joins"):
+        metric_lab_module._multi_metric_join_sql(
+            _JOIN_MODELS,
+            [ok, {"model": "api_b_daily", "y": "users", "agg": "count"}],
+        )
+    with pytest.raises(ValueError, match="grain must be one of"):
+        metric_lab_module._multi_metric_join_sql(_JOIN_MODELS, [ok], grain="year")
+
+
+def test_resolve_join_specs_contract():
+    specs = metric_lab_module._resolve_join_specs(
+        ["api_a_daily", "api_b_daily"],
+        {"api_b_daily": {"y": "users", "agg": "avg"}},
+    )
+    # metrics defines identity + order; join_specs is per-model config
+    assert [s["model"] for s in specs] == ["api_a_daily", "api_b_daily"]
+    assert specs[0] == {"model": "api_a_daily", "y": "", "agg": "sum"}
+    assert specs[1] == {"model": "api_b_daily", "y": "users", "agg": "avg"}
+
+    with pytest.raises(ValueError, match="unselected models"):
+        metric_lab_module._resolve_join_specs(
+            ["api_a_daily"], {"api_b_daily": {"y": "users"}}
+        )
+    with pytest.raises(ValueError, match="must be an object"):
+        metric_lab_module._resolve_join_specs(
+            ["api_a_daily"], {"api_a_daily": "sum"}
+        )
+
+
+def test_join_load_end_to_end(snapshot_ready):
+    """3 models + mode=aggregate -> ONE wide primary dataset, yFields =
+    model aliases, correlate suggestion, join routing."""
+    cols = [
+        "date",
+        "api_execution_transactions_daily",
+        "int_gbc_deposits_daily",
+        "consensus.blocks",
+    ]
+    server = _build_server_with(ColsStubCH(cols))
+    open_fn = _get_tool(server, "open_metric_lab")
+    view_id = open_fn().structuredContent["view_id"]
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+    result = load_fn(
+        view_id=view_id,
+        metric=[
+            "api_execution_transactions_daily",
+            "int_gbc_deposits_daily",
+            "consensus.blocks",
+        ],
+        mode="aggregate",
+        grain="day",
+        join_specs={"consensus.blocks": {"y": "slot", "agg": "max"}},
+    )
+    assert not result.isError, result.content
+    sc = result.structuredContent
+    assert set(sc["datasets"]) == {"primary"}
+    sql = sc["datasets"]["primary"]["sql"]
+    assert "max(m0) AS `api_execution_transactions_daily`" in sql
+    assert "max(`slot`)" in sql
+    panel = sc["view_state"]["charts"][0]
+    assert panel["xField"] == "date"
+    assert panel["yFields"] == cols[1:]
+    assert panel["chartType"] == "line"
+    legacy = sc["view_state"]["chart"]
+    assert set(legacy) == {"xField", "yField", "chartType", "aggregation", "groupBy"}
+    assert sc["view_state"]["load_mode"] == "join"
+    assert sc["view_state"]["metric_fields"] == cols[1:]
+    # 3 aligned value columns -> correlation scatter suggestion
+    assert any(
+        s["reason"] == "correlation" for s in sc["view_state"]["chart_suggestions"]
+    )
+    record = mini_apps.get_view(view_id)
+    assert set(record.datasets) == {"primary"}
+
+
+def test_join_routing_rejections(snapshot_ready):
+    server = _build_server()
+    open_fn = _get_tool(server, "open_metric_lab")
+    view_id = open_fn().structuredContent["view_id"]
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+
+    dup = load_fn(
+        view_id=view_id,
+        metric=["api_execution_transactions_daily", "api_execution_transactions_daily"],
+        mode="aggregate",
+    )
+    assert dup.isError and "Duplicate model" in dup.content[0].text
+
+    over_cap = load_fn(
+        view_id=view_id,
+        metric=[f"api_fake_{i}" for i in range(9)],
+        mode="aggregate",
+    )
+    assert over_cap.isError and "At most 8" in over_cap.content[0].text
+
+    raw_three = load_fn(
+        view_id=view_id,
+        metric=[
+            "api_execution_transactions_daily",
+            "int_gbc_deposits_daily",
+            "consensus.blocks",
+        ],
+        mode="raw",
+    )
+    assert raw_three.isError
+    assert "aggregate" in raw_three.content[0].text
+
+    mixed = load_fn(
+        view_id=view_id,
+        metric=["api_execution_transactions_daily", "avatar_count_value"],
+        mode="aggregate",
+    )
+    assert mixed.isError and "Cannot mix" in mixed.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# A3: chart-panel grid (charts[], update by chart_id, bulk persist)
+# ---------------------------------------------------------------------------
+
+
+def _open_and_load(server, metric="api_execution_transactions_daily"):
+    open_fn = _get_tool(server, "open_metric_lab")
+    view_id = open_fn().structuredContent["view_id"]
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+    result = load_fn(view_id=view_id, metric=metric)
+    assert not result.isError, result.content
+    return view_id, result.structuredContent
+
+
+def test_initial_load_emits_panels_and_revisions(snapshot_ready):
+    server = _build_server()
+    view_id, sc = _open_and_load(server)
+    panels = sc["view_state"]["charts"]
+    assert len(panels) == 1
+    assert panels[0]["id"] == "c1"
+    assert panels[0]["datasetKey"] == "primary"
+    assert sc["view_state"]["dataset_revisions"] == {"primary": 1}
+    # reload bumps the revision
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+    sc2 = load_fn(
+        view_id=view_id, metric="api_execution_transactions_daily", limit=500
+    ).structuredContent
+    assert sc2["view_state"]["dataset_revisions"] == {"primary": 2}
+
+
+def test_update_chart_by_panel_id(snapshot_ready):
+    server = _build_server()
+    view_id, sc = _open_and_load(server)
+    update_fn = _get_tool(server, "update_metric_lab_chart")
+
+    # legacy call (no chart_id) patches charts[0] AND the scalar chart
+    result = update_fn(
+        view_id=view_id, x_field="date", y_field="tx_count", chart_type="bar"
+    )
+    assert not result.isError, result.content
+    patch = result.structuredContent["patch"]
+    assert patch["chart"]["chartType"] == "bar"
+    assert patch["charts"][0]["chartType"] == "bar"
+    assert patch["charts"][0]["yFields"] == ["tx_count"]
+
+    # unknown panel id -> error listing valid ids
+    bad = update_fn(
+        view_id=view_id, x_field="date", y_field="tx_count",
+        chart_type="line", chart_id="nope",
+    )
+    assert bad.isError
+    assert "c1" in bad.content[0].text
+
+    # explicit id patches the matching panel
+    ok = update_fn(
+        view_id=view_id, x_field="date", y_field="tx_count",
+        chart_type="line", chart_id="c1",
+    )
+    assert not ok.isError
+    assert ok.structuredContent["patch"]["charts"][0]["chartType"] == "line"
+
+
+def test_set_metric_lab_charts_validates_and_persists(snapshot_ready):
+    server = _build_server()
+    view_id, sc = _open_and_load(server)
+    set_fn = _get_tool(server, "set_metric_lab_charts")
+
+    panels = [
+        {
+            "id": "c1", "datasetKey": "primary", "xField": "date",
+            "yField": "tx_count", "chartType": "line", "aggregation": "sum",
+            "groupBy": "", "title": "Tx count",
+        },
+        {
+            "id": "c2", "datasetKey": "primary", "xField": "date",
+            "yFields": ["tx_count", "tx_count"],  # dupes -> canonicalized
+            "yField": "", "chartType": "bar", "aggregation": "avg",
+            "groupBy": "", "sortDir": "desc", "trendline": True,
+        },
+    ]
+    result = set_fn(view_id=view_id, charts=panels)
+    assert not result.isError, result.content
+    saved = result.structuredContent["patch"]["charts"]
+    assert [p["id"] for p in saved] == ["c1", "c2"]
+    assert saved[1]["yFields"] == ["tx_count"]  # deduped
+    assert saved[1]["yField"] == "tx_count"     # mirror re-derived
+    assert result.structuredContent["patch"]["chart"]["yField"] == "tx_count"
+
+    record = mini_apps.get_view(view_id)
+    assert [p["id"] for p in record.view_state["charts"]] == ["c1", "c2"]
+
+
+def test_set_metric_lab_charts_rejections(snapshot_ready):
+    server = _build_server()
+    view_id, _ = _open_and_load(server)
+    set_fn = _get_tool(server, "set_metric_lab_charts")
+    base = {
+        "id": "c1", "datasetKey": "primary", "xField": "date",
+        "yField": "tx_count", "chartType": "line", "aggregation": "sum",
+        "groupBy": "",
+    }
+
+    empty = set_fn(view_id=view_id, charts=[])
+    assert empty.isError and "non-empty" in empty.content[0].text
+
+    over = set_fn(
+        view_id=view_id,
+        charts=[{**base, "id": f"c{i}"} for i in range(13)],
+    )
+    assert over.isError and "At most 12" in over.content[0].text
+
+    dup = set_fn(view_id=view_id, charts=[base, dict(base)])
+    assert dup.isError and "Duplicate panel id" in dup.content[0].text
+
+    bad_id = set_fn(view_id=view_id, charts=[{**base, "id": "x" * 20}])
+    assert bad_id.isError and "invalid" in bad_id.content[0].text
+
+    bad_ds = set_fn(view_id=view_id, charts=[{**base, "datasetKey": "nope"}])
+    assert bad_ds.isError and "does not reference" in bad_ds.content[0].text
+
+    bad_field = set_fn(view_id=view_id, charts=[{**base, "xField": "typo"}])
+    assert bad_field.isError and "not a column" in bad_field.content[0].text
+
+    bad_title = set_fn(view_id=view_id, charts=[{**base, "title": "x" * 201}])
+    assert bad_title.isError and "title" in bad_title.content[0].text
+
+    wrong_view = set_fn(view_id="nope", charts=[base])
+    assert wrong_view.isError
+
+
+def test_set_metric_lab_charts_hidden_from_model(snapshot_ready):
+    server = _build_server()
+    assert "set_metric_lab_charts" in web_apps.MINI_APP_TOOL_REGISTRY
+    assert "set_metric_lab_charts" in mini_apps.get_app_only_tool_names()
+    names = [t.name for t in asyncio.run(server.list_tools())]
+    assert "set_metric_lab_charts" not in names
+
+
+def test_update_chart_rejects_wrong_app_view(snapshot_ready):
+    server = _build_server()
+    foreign_view = mini_apps.create_view("data_catalog", "other app")
+    update_fn = _get_tool(server, "update_metric_lab_chart")
+    result = update_fn(
+        view_id=foreign_view, x_field="a", y_field="b", chart_type="line"
+    )
+    assert result.isError
+
+
+def test_dual_load_emits_two_panels(snapshot_ready):
+    server = _build_server()
+    open_fn = _get_tool(server, "open_metric_lab")
+    view_id = open_fn().structuredContent["view_id"]
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+    result = load_fn(
+        view_id=view_id,
+        metric=["api_execution_transactions_daily", "int_gbc_deposits_daily"],
+        mode="raw",
+    )
+    assert not result.isError, result.content
+    sc = result.structuredContent
+    panels = sc["view_state"]["charts"]
+    assert [p["datasetKey"] for p in panels] == ["primary", "secondary"]
+    assert [p["id"] for p in panels] == ["c1", "c2"]
+    assert sc["view_state"]["dataset_revisions"] == {"primary": 1, "secondary": 1}
+
+
+# ---------------------------------------------------------------------------
+# A4: SQL editor (run_metric_lab_sql)
+# ---------------------------------------------------------------------------
+
+
+class FailingCH(ColsStubCH):
+    def run_query(self, sql, database="dbt", *args, **kwargs):
+        raise RuntimeError("Syntax error: failed at position 1")
+
+
+def test_run_sql_registered_and_hidden(snapshot_ready):
+    server = _build_server()
+    assert "run_metric_lab_sql" in web_apps.MINI_APP_TOOL_REGISTRY
+    assert "run_metric_lab_sql" in mini_apps.get_app_only_tool_names()
+    names = [t.name for t in asyncio.run(server.list_tools())]
+    assert "run_metric_lab_sql" not in names
+
+
+def test_run_sql_rejects_non_nestable_and_writes(snapshot_ready):
+    server = _build_server()
+    view_id, _ = _open_and_load(server)
+    run_fn = _get_tool(server, "run_metric_lab_sql")
+
+    for bad in ("SHOW TABLES", "DESCRIBE t", "INSERT INTO t VALUES (1)", "DROP TABLE t"):
+        result = run_fn(view_id=view_id, sql=bad)
+        assert result.isError, bad
+        assert "SELECT or WITH" in result.content[0].text
+
+    unknown_ds = run_fn(view_id=view_id, sql="SELECT 1", dataset_key="nope")
+    assert unknown_ds.isError and "Unknown dataset" in unknown_ds.content[0].text
+
+    wrong_view = run_fn(view_id="nope", sql="SELECT 1")
+    assert wrong_view.isError
+
+    foreign = mini_apps.create_view("data_catalog", "other")
+    wrong_app = run_fn(view_id=foreign, sql="SELECT 1")
+    assert wrong_app.isError
+
+
+def test_run_sql_rejects_edited_sql_with_placeholders(snapshot_ready):
+    server = _build_server()
+    view_id, _ = _open_and_load(server)
+    run_fn = _get_tool(server, "run_metric_lab_sql")
+    result = run_fn(
+        view_id=view_id,
+        sql="SELECT * FROM t WHERE col = {flt:String}",
+    )
+    assert result.isError
+    assert "placeholders" in result.content[0].text
+
+
+def test_run_sql_broken_sql_surfaces_error(snapshot_ready):
+    server = FastMCP("test-catalog")
+    ch = StubCH()
+    mini_apps.register_mini_app_infra(server, ch)
+    register_metric_lab_tools(server, ch)
+    view_id, _ = _open_and_load(server)
+    # swap in a CH that raises AFTER load succeeded
+    ch.__class__ = FailingCH
+    run_fn = _get_tool(server, "run_metric_lab_sql")
+    result = run_fn(view_id=view_id, sql="SELECT broken FROM nowhere")
+    assert result.isError
+    assert "Syntax error" in result.content[0].text
+    # nothing mutated: the prior dataset + state survive
+    record = mini_apps.get_view(view_id)
+    assert record.dataset_revisions == {"primary": 1}
+
+
+def test_run_sql_replaces_only_target_dataset_and_repairs_panels(snapshot_ready):
+    server = _build_server()
+    open_fn = _get_tool(server, "open_metric_lab")
+    view_id = open_fn().structuredContent["view_id"]
+    load_fn = _get_tool(server, "load_metric_lab_metric")
+    dual = load_fn(
+        view_id=view_id,
+        metric=["api_execution_transactions_daily", "int_gbc_deposits_daily"],
+        mode="raw",
+    )
+    assert not dual.isError
+
+    run_fn = _get_tool(server, "run_metric_lab_sql")
+    result = run_fn(
+        view_id=view_id,
+        sql="SELECT date, amount FROM `dbt`.`int_gbc_deposits_daily` LIMIT 50",
+        dataset_key="secondary",
+    )
+    assert not result.isError, result.content
+    sc = result.structuredContent
+    # both datasets still present; only secondary's revision bumped
+    assert set(sc["datasets"]) == {"primary", "secondary"}
+    assert sc["view_state"]["dataset_revisions"] == {"primary": 1, "secondary": 2}
+    # per-dataset provenance recorded
+    assert sc["view_state"]["provenance"]["secondary"]["source"] == "editor_sql"
+    # panels preserved (2 from the dual load)
+    assert [p["id"] for p in sc["view_state"]["charts"]] == ["c1", "c2"]
+    record = mini_apps.get_view(view_id)
+    assert record.dataset_revisions == {"primary": 1, "secondary": 2}
+
+
+def test_run_sql_force_refresh_bypasses_cache(snapshot_ready):
+    calls = {"n": 0}
+
+    class CountingCH(StubCH):
+        def run_query(self, sql, database="dbt", *args, **kwargs):
+            calls["n"] += 1
+            return super().run_query(sql, database, *args, **kwargs)
+
+    server = FastMCP("test-catalog")
+    ch = CountingCH()
+    mini_apps.register_mini_app_infra(server, ch)
+    register_metric_lab_tools(server, ch)
+    view_id, sc = _open_and_load(server)
+    run_fn = _get_tool(server, "run_metric_lab_sql")
+    sql = sc["datasets"]["primary"]["sql"]
+
+    before = calls["n"]
+    first = run_fn(view_id=view_id, sql=sql)
+    assert not first.isError
+    after_first = calls["n"]
+    assert after_first > before  # cache was NOT served
+
+    second = run_fn(view_id=view_id, sql=sql)
+    assert not second.isError
+    assert calls["n"] > after_first  # rerun hits ClickHouse again
+
+
+def test_load_bounded_dataset_force_refresh_flag():
+    calls = {"n": 0}
+
+    class CountingCH(StubCH):
+        def run_query(self, sql, database="dbt", *args, **kwargs):
+            calls["n"] += 1
+            return super().run_query(sql, database, *args, **kwargs)
+
+    ch = CountingCH()
+    ds1 = mini_apps.load_bounded_dataset(ch, "SELECT 1", database="dbt")
+    n1 = calls["n"]
+    ds2 = mini_apps.load_bounded_dataset(ch, "SELECT 1", database="dbt")
+    assert calls["n"] == n1  # cache hit
+    ds3 = mini_apps.load_bounded_dataset(
+        ch, "SELECT 1", database="dbt", force_refresh=True
+    )
+    assert calls["n"] > n1  # bypassed
+    assert ds1.columns == ds2.columns == ds3.columns

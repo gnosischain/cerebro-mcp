@@ -39,11 +39,11 @@ body { overflow: hidden; }
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 12px;
+  padding: 3px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   flex: 0 0 auto;
-  min-height: 36px;
+  min-height: 30px;
 }
 .ge-topbar-left {
   display: flex;
@@ -234,7 +234,7 @@ body { overflow: hidden; }
   flex: 0 0 auto;
   overflow-x: auto;
   scrollbar-width: thin;
-  padding: 6px 10px;
+  padding: 3px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-translucent);
   white-space: nowrap;
@@ -471,10 +471,10 @@ body { overflow: hidden; }
   border-color: var(--accent-border);
 }
 .ge-graph-search.miss {
-  border-color: var(--danger, #ef4444);
+  border-color: var(--error);
 }
 .ge-graph-search.miss input::placeholder {
-  color: var(--danger, #ef4444);
+  color: var(--error);
 }
 .ge-label-mode {
   display: flex;
@@ -804,13 +804,13 @@ body { overflow: hidden; }
 }
 .ge-catalog-seed-row input:focus { border-color: var(--primary); }
 .ge-catalog-seed.needs-address {
-  border-color: var(--danger, #ef4444);
+  border-color: var(--error);
 }
 .ge-catalog-seed.needs-address .ge-catalog-seed-row input {
-  border-color: var(--danger, #ef4444);
+  border-color: var(--error);
 }
 .ge-catalog-seed.needs-address .ge-catalog-seed-hint {
-  color: var(--danger, #ef4444);
+  color: var(--error);
 }
 .ge-catalog-seed-row .ge-btn.primary {
   height: auto;
@@ -938,7 +938,7 @@ body { overflow: hidden; }
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 14px;
+  padding: 4px 12px;
   flex: 0 0 auto;
   border-bottom: 1px solid var(--border);
   background: var(--surface-translucent);
@@ -988,6 +988,229 @@ body { overflow: hidden; }
   color: var(--text);
   font-weight: 600;
 }
+
+/* ======= Mode bar (Atlas | Investigate) ======= */
+.ge-modebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex: 0 0 auto;
+}
+.ge-modebar .ge-title { margin-right: auto; }
+
+/* Sync-failure banner (bulk view-state persistence). */
+.ge-sync-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 12px;
+  background: var(--error-bg);
+  color: var(--error);
+  font-size: 0.76rem;
+  border-bottom: 1px solid var(--error);
+  flex: 0 0 auto;
+}
+
+/* Status-filter trim note (some active profiles hidden from the canvas). */
+.ge-status-filter-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 12px;
+  background: var(--warning-bg);
+  border-top: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+/* ======= Atlas mode: left rail + canvas ======= */
+.ge-atlas-body {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+.ge-atlas-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 10px;
+  border-right: 1px solid var(--border);
+  background: var(--surface-translucent);
+  overflow: hidden;
+}
+.ge-atlas-rail .ge-catalog-seed { padding: 8px 10px; }
+.ge-atlas-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.ge-atlas-filter input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--surface-translucent);
+  border: 1px solid var(--border);
+  color: inherit;
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  outline: none;
+}
+.ge-atlas-filter input:focus { border-color: var(--primary); }
+.ge-atlas-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-translucent);
+  padding: 4px 0 8px;
+}
+.ge-atlas-group + .ge-atlas-group { margin-top: 6px; }
+.ge-atlas-group-head {
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 6px 10px 2px;
+}
+.ge-atlas-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.ge-atlas-item:hover {
+  background: var(--accent-softer);
+  color: var(--text-primary);
+}
+.ge-atlas-item input[type="checkbox"] {
+  accent-color: var(--primary);
+  margin: 0;
+  flex: 0 0 auto;
+}
+.ge-atlas-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Selected-node popover in Atlas mode — promote to Investigate. */
+.ge-atlas-popover {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+  font-size: 0.76rem;
+}
+.ge-atlas-popover-id {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: var(--text-secondary);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .ge-atlas-body { grid-template-columns: 220px 1fr; }
+}
+
+/* ======= Investigate empty state (no seed) ======= */
+.ge-empty-investigate {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.ge-empty-card {
+  width: min(440px, 100%);
+  padding: 20px 22px;
+  border: 1px solid var(--accent-border);
+  border-radius: 12px;
+  background: linear-gradient(
+    180deg,
+    var(--accent-bg) 0%,
+    var(--surface-translucent) 100%
+  );
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ge-empty-card h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+.ge-empty-card p {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+.ge-empty-card input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-hover);
+  color: var(--text-primary);
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.82rem;
+  outline: none;
+}
+.ge-empty-card input:focus { border-color: var(--primary); }
+.ge-empty-atlas-link {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  color: var(--accent-text);
+  font-size: 0.76rem;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* Expand-depth stepper (FilterBar). */
+.ge-stepper { gap: 2px; }
+.ge-stepper-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  width: 16px;
+  height: 18px;
+  padding: 0;
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.ge-stepper-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--surface-translucent-strong);
+}
+.ge-stepper-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* ======= Status bar + warnings ======= */
 .ge-statusbar {

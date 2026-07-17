@@ -1,46 +1,52 @@
-import type { GraphExplorerState, StatusFilter } from "./types";
+// Investigate-mode topbar: window / max-neighbors (debounced refetch by the
+// parent), layout toggle, semantic-status filter, expand-depth stepper (reads
+// the SERVER-published limits — no compile-time hop cap), and the explicit
+// "+ Expand" button. Expansion happens ONLY on explicit action (this button
+// or a canvas double-click) — never silently on stepper change (WS10-F).
+
+import type { GraphLayout, Limits, StatusFilter } from "./types";
 
 interface Props {
-  view: GraphExplorerState;
-  onFocus: (patch: Partial<GraphExplorerState>) => void;
-  onReset: () => void;
+  windowDays: number;
+  maxNeighbors: number;
+  layout: GraphLayout;
+  statusFilter: StatusFilter;
+  expandDepth: number;
+  limits: Limits;
+  /** "selected node" or "seed" — surfaced on the expand button. */
+  expandTarget: string;
+  canExpand: boolean;
   detailsOpen: boolean;
+  onWindowChange: (days: number) => void;
+  onMaxNeighborsChange: (value: number) => void;
+  onLayoutChange: (layout: GraphLayout) => void;
+  onStatusFilterChange: (filter: StatusFilter) => void;
+  onExpandDepthChange: (depth: number) => void;
+  onExpand: () => void;
   onToggleDetails: () => void;
-  /** BFS expansion from the selected node (or seed). `hops` = frontier rounds. */
-  onExpand: (hops: number) => void;
-  isSampleMode: boolean;
-  /** Depth applied when the user clicks the expand button. */
-  bfsHops: number;
-  onBfsHopsChange: (next: number) => void;
 }
 
-/**
- * Single-row compact topbar. Design goals:
- *   - Every control carries its own visible affordance (no mystery numbers).
- *   - Two two-value toggles (layout, status) use segmented controls — clearer
- *     than dropdowns at tiny sizes, and no extra click to discover options.
- *   - Numeric inputs are self-labeled pills with inline units.
- *   - Right-side actions collapse to icons when cramped.
- */
 export function FilterBar({
-  view, onFocus, onReset, detailsOpen, onToggleDetails, onExpand, isSampleMode,
-  bfsHops, onBfsHopsChange,
+  windowDays,
+  maxNeighbors,
+  layout,
+  statusFilter,
+  expandDepth,
+  limits,
+  expandTarget,
+  canExpand,
+  detailsOpen,
+  onWindowChange,
+  onMaxNeighborsChange,
+  onLayoutChange,
+  onStatusFilterChange,
+  onExpandDepthChange,
+  onExpand,
+  onToggleDetails,
 }: Props) {
-  // The expand button operates on the selected node when there is one, else the
-  // seed — surfaced in the label/title so the target is never a mystery.
-  const expandTarget = view.selected_node_id ? "selected node" : "seed";
-  const canExpand = Boolean(view.selected_node_id || view.seed_node?.id);
+  const maxHops = Math.max(1, limits.max_hops);
   return (
     <header className="ge-topbar">
-      <div className="ge-topbar-left">
-        <span className="ge-title">Graph</span>
-        {isSampleMode ? (
-          <span className="ge-sample-tag" title="Sample preview — click any node to seed from it.">
-            sample · {view.relation_types[0] ?? "profile"}
-          </span>
-        ) : null}
-      </div>
-
       <div className="ge-topbar-filters">
         <label className="ge-pill" title="Time window (days)">
           <span className="ge-pill-icon" aria-hidden>🕑</span>
@@ -48,10 +54,8 @@ export function FilterBar({
             type="number"
             min={1}
             max={3650}
-            value={view.transfer_window_days}
-            onChange={(e) =>
-              onFocus({ transfer_window_days: Math.max(1, Number(e.target.value) || 0) })
-            }
+            value={windowDays}
+            onChange={(e) => onWindowChange(Math.max(1, Number(e.target.value) || 0))}
           />
           <span className="ge-pill-unit">d</span>
         </label>
@@ -62,9 +66,9 @@ export function FilterBar({
             type="number"
             min={1}
             max={2000}
-            value={view.max_neighbors}
+            value={maxNeighbors}
             onChange={(e) =>
-              onFocus({ max_neighbors: Math.max(1, Number(e.target.value) || 0) })
+              onMaxNeighborsChange(Math.max(1, Number(e.target.value) || 0))
             }
           />
         </label>
@@ -72,16 +76,16 @@ export function FilterBar({
         <div className="ge-segment" role="tablist" aria-label="Layout">
           <button
             type="button"
-            className={view.layout === "force" ? "active" : ""}
-            onClick={() => onFocus({ layout: "force" })}
+            className={layout === "force" ? "active" : ""}
+            onClick={() => onLayoutChange("force")}
             title="Force layout"
           >
             Force
           </button>
           <button
             type="button"
-            className={view.layout === "circular" ? "active" : ""}
-            onClick={() => onFocus({ layout: "circular" })}
+            className={layout === "circular" ? "active" : ""}
+            onClick={() => onLayoutChange("circular")}
             title="Circular layout"
           >
             Circle
@@ -91,8 +95,8 @@ export function FilterBar({
         <div className="ge-segment ge-segment-status" role="tablist" aria-label="Semantic status">
           <button
             type="button"
-            className={view.semantic_status_filter === "all" ? "active" : ""}
-            onClick={() => onFocus({ semantic_status_filter: "all" as StatusFilter })}
+            className={statusFilter === "all" ? "active" : ""}
+            onClick={() => onStatusFilterChange("all")}
             title="Show all profiles"
           >
             All
@@ -100,10 +104,8 @@ export function FilterBar({
           <button
             type="button"
             aria-label="Show approved profiles only"
-            className={
-              "appr " + (view.semantic_status_filter === "approved" ? "active" : "")
-            }
-            onClick={() => onFocus({ semantic_status_filter: "approved" as StatusFilter })}
+            className={"appr " + (statusFilter === "approved" ? "active" : "")}
+            onClick={() => onStatusFilterChange("approved")}
             title="Approved only"
           >
             <span className="ge-dot ge-dot-approved" aria-hidden />
@@ -112,10 +114,8 @@ export function FilterBar({
           <button
             type="button"
             aria-label="Show candidate profiles only"
-            className={
-              "cand " + (view.semantic_status_filter === "candidate" ? "active" : "")
-            }
-            onClick={() => onFocus({ semantic_status_filter: "candidate" as StatusFilter })}
+            className={"cand " + (statusFilter === "candidate" ? "active" : "")}
+            onClick={() => onStatusFilterChange("candidate")}
             title="Candidate only"
           >
             <span className="ge-dot ge-dot-candidate" aria-hidden />
@@ -125,23 +125,44 @@ export function FilterBar({
       </div>
 
       <div className="ge-topbar-right">
-        <label className="ge-pill" title="BFS depth — how many frontier rounds the expand button (and double-click) add">
-          <span className="ge-pill-icon" aria-hidden>⇢</span>
+        <div
+          className="ge-pill ge-stepper"
+          title={`BFS depth — how many frontier rounds the expand button (and double-click) add. Server cap: ${maxHops}.`}
+        >
+          <button
+            type="button"
+            className="ge-stepper-btn"
+            onClick={() => onExpandDepthChange(expandDepth - 1)}
+            disabled={expandDepth <= 1}
+            aria-label="Decrease expand depth"
+          >
+            −
+          </button>
           <input
             type="number"
             min={1}
-            max={50}
-            value={bfsHops}
-            onChange={(e) => onBfsHopsChange(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
+            max={maxHops}
+            value={expandDepth}
+            onChange={(e) => onExpandDepthChange(Number(e.target.value) || 1)}
+            aria-label="Expand depth (hops)"
             style={{ width: 28 }}
           />
+          <button
+            type="button"
+            className="ge-stepper-btn"
+            onClick={() => onExpandDepthChange(expandDepth + 1)}
+            disabled={expandDepth >= maxHops}
+            aria-label="Increase expand depth"
+          >
+            +
+          </button>
           <span className="ge-pill-unit">hop</span>
-        </label>
+        </div>
         <button
           type="button"
           className="ge-btn primary ge-expand-btn"
-          onClick={() => onExpand(bfsHops)}
-          title={`Expand the ${expandTarget} by ${bfsHops} hop${bfsHops === 1 ? "" : "s"} (BFS frontier rounds)`}
+          onClick={onExpand}
+          title={`Expand the ${expandTarget} by ${expandDepth} hop${expandDepth === 1 ? "" : "s"} (BFS frontier rounds)`}
           disabled={!canExpand}
         >
           + Expand {expandTarget}
@@ -154,14 +175,6 @@ export function FilterBar({
           aria-pressed={detailsOpen}
         >
           ⓘ
-        </button>
-        <button
-          type="button"
-          className="ge-icon-btn"
-          onClick={onReset}
-          title="Back to catalog"
-        >
-          ↺
         </button>
       </div>
     </header>

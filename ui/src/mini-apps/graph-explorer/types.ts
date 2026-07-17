@@ -1,5 +1,14 @@
+// Graph Explorer wire + local types (view_state v2).
+//
+// The server (src/cerebro_mcp/tools/semantic/graph_explorer/state.py) is the
+// single source of truth for limits — they arrive in view_state["limits"].
+// There is deliberately NO compile-time MAX_HOPS mirror here; every clamp and
+// counter reads the published limits.
+
 export type SemanticStatus = "approved" | "candidate" | "docs_only";
 export type StatusFilter = "all" | "approved" | "candidate";
+export type GraphMode = "atlas" | "investigate";
+export type GraphLayout = "force" | "circular";
 
 export interface ProfileCard {
   profile: string;
@@ -20,6 +29,36 @@ export interface ProfileCard {
 export interface SeedNode {
   id: string;
   kind: string;
+}
+
+/** Server-published limits/defaults (view_state["limits"]). */
+export interface Limits {
+  max_hops: number;
+  bfs_node_cap: number;
+  default_expand_depth: number;
+  ui_default_window_days: number;
+  ui_default_max_neighbors: number;
+  atlas_sample_size: number;
+}
+
+export interface AtlasState {
+  selected_profiles: string[];
+  /** PER PROFILE sample size for load_graph_atlas_sample. */
+  sample_size: number;
+  window_days: number;
+}
+
+export interface InvestigateState {
+  seed: SeedNode;
+  active_profiles: string[];
+  window_days: number;
+  max_neighbors: number;
+  hops_used: number;
+}
+
+export interface SelectionState {
+  node_id: string;
+  edge_id: string;
 }
 
 export interface HopSuggestion {
@@ -48,25 +87,26 @@ export interface AddressRoles {
   dune_project?: string | null;
 }
 
-export interface GraphExplorerState {
+/** view_state v2 — per-mode namespaces sharing one canvas. */
+export interface GraphExplorerViewState {
   title: string;
+  mode: GraphMode;
   catalog: ProfileCard[];
-  selected_profiles: string[];
-  seed_node: SeedNode;
-  selected_node_id: string;
-  selected_edge_id: string;
-  relation_types: string[];
-  layout: "force" | "circular";
-  transfer_window_days: number;
-  max_neighbors: number;
-  hops: number;
+  limits: Limits;
+  atlas: AtlasState;
+  investigate: InvestigateState;
+  /** Cleared on mode switch by the server. */
+  selection: SelectionState;
+  layout: GraphLayout;
   semantic_status_filter: StatusFilter;
-  suggested_next_hops: HopSuggestion[];
   node_roles: Record<string, AddressRoles>;
+  suggested_next_hops: HopSuggestion[];
   warnings: string[];
-  /** "seed" = seeded from a real node, "sample" = previewing a profile without a seed. */
-  mode?: "seed" | "sample";
+  /** Present on EVERY dataset-bearing payload; keys hydration + adoption. */
+  dataset_revisions?: Record<string, number>;
 }
+
+// ---- Parsed dataset row models --------------------------------------------
 
 export interface GraphNodeRow {
   id: string;
@@ -83,4 +123,9 @@ export interface GraphEdgeRow {
   weight: number;
   edge_count: number;
   directed: boolean;
+}
+
+export interface EvidenceRow {
+  column: string;
+  value: string;
 }

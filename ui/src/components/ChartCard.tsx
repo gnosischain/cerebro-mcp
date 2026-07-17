@@ -19,7 +19,28 @@ interface Props {
   hideId?: boolean;
 }
 
-function buildDataViewTable(opt: EChartsOption): string {
+/** Palette for the dataView popup + its injected table. ECharts renders the
+ * panel with a WHITE background by default while the table inherits the
+ * page's (dark-theme) light text — unreadable. Both must be themed. */
+function dataViewPalette(isDark: boolean) {
+  return {
+    background: isDark ? "#12161c" : "#ffffff",
+    text: isDark ? "#e6e9ee" : "#111418",
+    headBorder: isDark ? "rgba(255,255,255,0.28)" : "#ddd",
+    rowBorder: isDark ? "rgba(255,255,255,0.12)" : "#eee",
+    textarea: isDark ? "#1a1f26" : "#f4f6f8",
+    textareaBorder: isDark ? "rgba(255,255,255,0.12)" : "rgba(15,23,42,0.18)",
+    button: isDark ? "#67e8f9" : "#0891b2",
+    buttonText: isDark ? "#0b0e12" : "#ffffff",
+  };
+}
+
+function buildDataViewTable(opt: EChartsOption, isDark: boolean): string {
+  const pal = dataViewPalette(isDark);
+  const th = (align: string) =>
+    `padding:6px 10px;text-align:${align};border-bottom:2px solid ${pal.headBorder};font-weight:600;color:${pal.text}`;
+  const td = (extra = "") =>
+    `padding:4px 10px;border-bottom:1px solid ${pal.rowBorder};color:${pal.text}${extra}`;
   const xAxisRaw = opt.xAxis;
   const xAxis = (Array.isArray(xAxisRaw) ? xAxisRaw[0] : xAxisRaw) as
     | { data?: string[]; name?: string }
@@ -38,37 +59,37 @@ function buildDataViewTable(opt: EChartsOption): string {
         '<table style="width:100%;border-collapse:collapse;font-size:13px">';
       html +=
         "<thead><tr>" +
-        '<th style="padding:6px 10px;text-align:left;border-bottom:2px solid #ddd;font-weight:600">Name</th>' +
-        '<th style="padding:6px 10px;text-align:right;border-bottom:2px solid #ddd;font-weight:600">Value</th>' +
+        `<th style="${th("left")}">Name</th>` +
+        `<th style="${th("right")}">Value</th>` +
         "</tr></thead><tbody>";
       for (const item of pieData) {
         html +=
           "<tr>" +
-          `<td style="padding:4px 10px;border-bottom:1px solid #eee">${item.name ?? ""}</td>` +
-          `<td style="padding:4px 10px;text-align:right;border-bottom:1px solid #eee;font-family:monospace">${item.value ?? ""}</td>` +
+          `<td style="${td()}">${item.name ?? ""}</td>` +
+          `<td style="${td(";text-align:right;font-family:monospace")}">${item.value ?? ""}</td>` +
           "</tr>";
       }
       html += "</tbody></table>";
       return html;
     }
-    return "<p>No tabular data available</p>";
+    return `<p style="color:${pal.text}">No tabular data available</p>`;
   }
 
   let html =
     '<table style="width:100%;border-collapse:collapse;font-size:13px">';
   html += "<thead><tr>";
-  html += `<th style="padding:6px 10px;text-align:left;border-bottom:2px solid #ddd;font-weight:600">${xAxis?.name ?? ""}</th>`;
+  html += `<th style="${th("left")}">${xAxis?.name ?? ""}</th>`;
   for (const s of series) {
-    html += `<th style="padding:6px 10px;text-align:right;border-bottom:2px solid #ddd;font-weight:600">${s.name ?? ""}</th>`;
+    html += `<th style="${th("right")}">${s.name ?? ""}</th>`;
   }
   html += "</tr></thead><tbody>";
 
   for (let i = 0; i < xAxis.data.length; i++) {
     html += "<tr>";
-    html += `<td style="padding:4px 10px;border-bottom:1px solid #eee">${xAxis.data[i]}</td>`;
+    html += `<td style="${td()}">${xAxis.data[i]}</td>`;
     for (const s of series) {
       const val = s.data?.[i] ?? "";
-      html += `<td style="padding:4px 10px;text-align:right;border-bottom:1px solid #eee;font-family:monospace">${val}</td>`;
+      html += `<td style="${td(";text-align:right;font-family:monospace")}">${val}</td>`;
     }
     html += "</tr>";
   }
@@ -139,8 +160,17 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId }: Prop
           title: "View data",
           lang: ["Data view", "Close", "Refresh"],
           readOnly: true,
+          // The popup panel does NOT inherit the ECharts theme — leave any
+          // of these unset and dark mode gets a white panel with the page's
+          // light text (unreadable).
+          backgroundColor: dataViewPalette(isDark).background,
+          textareaColor: dataViewPalette(isDark).textarea,
+          textareaBorderColor: dataViewPalette(isDark).textareaBorder,
+          textColor: dataViewPalette(isDark).text,
+          buttonColor: dataViewPalette(isDark).button,
+          buttonTextColor: dataViewPalette(isDark).buttonText,
           optionToContent: (o: unknown) =>
-            buildDataViewTable(o as EChartsOption),
+            buildDataViewTable(o as EChartsOption, isDark),
         },
       },
       iconStyle: {

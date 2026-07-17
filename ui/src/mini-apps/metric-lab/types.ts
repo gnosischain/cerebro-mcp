@@ -36,16 +36,55 @@ export const AGGREGATIONS: Aggregation[] = [
 
 export interface ChartConfig {
   xField: string;
+  /** Normalized mirror of yFields[0] — kept for legacy payloads/consumers. */
   yField: string;
   chartType: ChartType;
   aggregation: Aggregation;
   groupBy: string;
-  /** Secondary (right) y-axis column for line/bar — frontend-local, not
-   * synced to the server chart state. */
+  /** AUTHORITATIVE plotted value columns (deduped, max MAX_Y_FIELDS).
+   * Rendering: [0] left axis, [1] right axis, rest left axis. When absent,
+   * derive from yField/y2Field via normalizeChartConfig. */
+  yFields?: string[];
+  /** Normalized mirror of yFields[1]. */
   y2Field?: string;
   /** Color-encoding column for scatter (numeric → gradient, categorical →
-   * colored groups) — frontend-local. */
+   * colored groups). */
   colorBy?: string;
+}
+
+/** One panel of the chart-grid workspace. `view_state.chart` is only the
+ * LEGACY SCALAR PROJECTION of charts[0] ({xField,yField,chartType,
+ * aggregation,groupBy}) — charts[] is the source of truth. */
+export interface ChartPanelConfig extends ChartConfig {
+  /** Unique per view; /^[A-Za-z0-9_-]{1,16}$/. */
+  id: string;
+  /** Must reference an existing dataset key of the view. */
+  datasetKey: string;
+  /** <= 200 chars. */
+  title?: string;
+  sortDir?: "asc" | "desc";
+  trendline?: boolean;
+}
+
+export const MAX_CHART_PANELS = 12;
+export const MAX_Y_FIELDS = 8;
+
+/** Normalize a chart config: `yFields` wins when present, else it is derived
+ * from the legacy yField/y2Field pair; mirrors are re-synced from it. */
+export function normalizeChartConfig<T extends ChartConfig>(c: T): T {
+  const raw = c.yFields?.length
+    ? c.yFields
+    : [c.yField, ...(c.y2Field ? [c.y2Field] : [])];
+  const yFields = raw
+    .filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .slice(0, MAX_Y_FIELDS);
+  return { ...c, yFields, yField: yFields[0] ?? "", y2Field: yFields[1] };
+}
+
+/** Plotted value columns of a config, after normalization rules. */
+export function effectiveYFields(c: ChartConfig): string[] {
+  return normalizeChartConfig(c).yFields ?? [];
 }
 
 export interface CatalogColumn {
@@ -133,7 +172,13 @@ export interface MetricLabState {
   selected_dimensions: string[];
   selected_limit: number;
   selected_order_by: string[];
+  /** Legacy scalar projection of charts[0] — charts[] is authoritative. */
   chart: ChartConfig;
+  /** The chart-panel grid (source of truth; may be absent on old payloads). */
+  charts?: ChartPanelConfig[];
+  /** Per-dataset revision counters — bumped on every attach/replace; the
+   * frontend keys hydration and panel adoption on these. */
+  dataset_revisions?: Record<string, number>;
   sort?: { field: string; direction: "asc" | "desc" };
   filters?: unknown[];
   analytics_disabled: boolean;
@@ -143,8 +188,14 @@ export interface MetricLabState {
   metric_fields?: string[];
   chart_suggestions?: ChartSuggestion[];
   unvalidated_metrics?: string[];
-  load_mode?: LoadMode;
+  /** "join" = N-model date-joined wide table (server-side). */
+  load_mode?: LoadMode | "join";
   aggregate_config?: Record<string, unknown>;
+  raw_config?: Record<string, unknown>;
+  /** Databases the SQL editor may target (settings.ALLOWED_DATABASES). */
+  allowed_databases?: string[];
+  /** Per-dataset provenance, e.g. {secondary: {source: "editor_sql"}}. */
+  provenance?: Record<string, Record<string, unknown>>;
 }
 
 /** Draft query the user assembles in the browse view (basket + config).
@@ -152,11 +203,22 @@ export interface MetricLabState {
  * submits it via load_metric_lab_metric. */
 export type LoadMode = "aggregate" | "raw";
 export type AggFn = "sum" | "avg" | "min" | "max" | "median" | "count" | "uniq";
+/** Time-bucket for aggregate mode ("" = group by the raw column).
+ * NOT the same thing as LoadMode "raw". */
+export type Grain = "" | "day" | "week" | "month";
 
 export const AGG_FNS: AggFn[] = ["sum", "avg", "min", "max", "median", "count", "uniq"];
+export const GRAINS: { value: Grain; label: string }[] = [
+  { value: "", label: "Raw dates" },
+  { value: "day", label: "Day" },
+  { value: "week", label: "Week" },
+  { value: "month", label: "Month" },
+];
 
 export interface QuerySpec {
-  /** Model names (max 2 — primary + secondary compare; compare is raw-only). */
+  /** Model names. 2-8 models in aggregate mode join on date into ONE wide
+   * table (one value column per model); exactly 2 in raw mode load as the
+   * legacy primary + secondary dual compare. */
   metrics: string[];
   dimensions: string[];
   limit: number;
@@ -166,10 +228,21 @@ export interface QuerySpec {
    * correct way to chart big per-entity panels. "raw" samples rows. */
   mode: LoadMode;
   aggX: string;
+  /** Legacy single measure — mirrors aggYs[0]; aggYs is authoritative. */
   aggY: string;
+  /** Measure columns (all aggregated with aggFn). Multi-select is mutually
+   * exclusive with aggSeries and with aggFn "count". */
+  aggYs: string[];
   aggFn: AggFn;
+  /** Day/week/month rollup of aggX ("" = no bucketing). */
+  grain: Grain;
   aggSeries: string;
   aggTopN: number;
+  /** Raw-mode column projection ([] = all columns). */
+  columns: string[];
+  /** Multi-model joins — per-model measure/agg overrides keyed by model
+   * name (server defaults: first numeric column, sum). */
+  joinSpecs: Record<string, { y: string; agg: AggFn }>;
   filterCol: string;
   filterOp: "=" | "!=";
   filterValue: string;
@@ -185,9 +258,13 @@ export const DEFAULT_QUERY_SPEC: QuerySpec = {
   mode: "raw",
   aggX: "",
   aggY: "",
+  aggYs: [],
   aggFn: "sum",
+  grain: "",
   aggSeries: "",
   aggTopN: 8,
+  columns: [],
+  joinSpecs: {},
   filterCol: "",
   filterOp: "=",
   filterValue: "",

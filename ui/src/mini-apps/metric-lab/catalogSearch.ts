@@ -16,18 +16,47 @@ export interface CatalogFilterState {
 
 const TIME_HINTS = new Set(["date", "day", "week", "month", "ts", "timestamp", "block_date"]);
 
+const TIME_TYPES = ["Date", "Date32", "DateTime", "DateTime64"];
+
+/** Strip Nullable(...) / LowCardinality(...) wrappers — mirror of the
+ * backend's `_unwrap_ch_type`. */
+export function unwrapChType(t: string): string {
+  let out = t ?? "";
+  while (/^(Nullable|LowCardinality)\(.*\)$/.test(out)) {
+    out = out.slice(out.indexOf("(") + 1, -1);
+  }
+  return out;
+}
+
+export function isTimeType(t?: string): boolean {
+  const unwrapped = unwrapChType(t ?? "");
+  return TIME_TYPES.some((p) => unwrapped.startsWith(p));
+}
+
 /** Client-side twin of the backend's `_entry_is_timeseries`: can this entry
  * plot over time? */
 export function entryIsTimeseries(e: MetricCatalogEntry): boolean {
   if (e.supported_time_grains && e.supported_time_grains.length > 0) return true;
   if ((e.allowed_dimensions ?? []).some((d) => TIME_HINTS.has(d.toLowerCase()))) return true;
-  if ((e.columns ?? []).some((c) => TIME_HINTS.has(c.name.toLowerCase()))) return true;
+  if ((e.columns ?? []).some((c) => TIME_HINTS.has(c.name.toLowerCase()) || isTimeType(c.type)))
+    return true;
   return false;
 }
 
-/** First time-like COLUMN of a model — the default X for an aggregate load. */
+/** Best time COLUMN of a model — the default X for an aggregate load.
+ * Same priority as the backend's `_time_column`: typed AND name-hinted >
+ * any time-typed column > untyped name hint. */
 export function timeColumn(e: MetricCatalogEntry): string | null {
-  return (e.columns ?? []).find((c) => TIME_HINTS.has(c.name.toLowerCase()))?.name ?? null;
+  const cols = e.columns ?? [];
+  const typed = cols.filter((c) => isTimeType(c.type)).map((c) => c.name);
+  const hinted = cols
+    .filter((c) => TIME_HINTS.has(c.name.toLowerCase()))
+    .map((c) => c.name);
+  for (const name of hinted) {
+    if (typed.includes(name)) return name;
+  }
+  if (typed.length > 0) return typed[0];
+  return hinted[0] ?? null;
 }
 
 const NUMERIC_TYPE_HINTS = ["int", "float", "decimal", "double", "uint", "number"];

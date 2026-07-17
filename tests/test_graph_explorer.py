@@ -309,7 +309,8 @@ def test_load_seed_with_explicit_profile(fake_snapshot):
     node_ids = {row[0] for row in nodes}
     assert AVATAR in node_ids
     assert TRUSTEE in node_ids
-    assert sc["view_state"]["selected_profiles"] == ["circles_trust"]
+    assert sc["view_state"]["mode"] == "investigate"
+    assert sc["view_state"]["investigate"]["active_profiles"] == ["circles_trust"]
     # `suggested_next_hops` returns CROSS-sector pivots only — same-kind
     # profiles (circles_avatar -> circles_avatar) are intentionally filtered
     # out because they describe in-sector expansion, not a pivot. The
@@ -356,7 +357,7 @@ def test_load_seed_auto_detects_via_roles(fake_snapshot):
         {"view_id": view_id, "seed_node_id": OWNER},
     )
     sc = result.structuredContent
-    selected = set(sc["view_state"]["selected_profiles"])
+    selected = set(sc["view_state"]["investigate"]["active_profiles"])
     assert "safe_ownership" in selected
     assert "lp_in_pool" in selected
     # The explicitly supplied transfer fallback should NOT be in the selection
@@ -365,11 +366,50 @@ def test_load_seed_auto_detects_via_roles(fake_snapshot):
 
 def test_expand_node_caps_at_max_hops(fake_snapshot, monkeypatch):
     """Expand calls beyond MAX_HOPS are rejected with a "Max X hops reached"
-    error. Patches MAX_HOPS to 2 so the test stays cheap; the production
-    default is higher (currently 20)."""
+    error. Only expands that actually GREW the graph consume hops, so the
+    stub's edge list is grown between calls. Patches MAX_HOPS to 2 so the
+    test stays cheap; the production default is higher."""
     import cerebro_mcp.tools.semantic.graph_explorer as ge
-    monkeypatch.setattr(ge, "MAX_HOPS", 2)
+    # Limits live in the constants submodule; tools read them attribute-style
+    # precisely so this patch takes effect.
+    monkeypatch.setattr(ge.constants, "MAX_HOPS", 2)
 
+    trust_rows = [[AVATAR, TRUSTEE, 1.0, 1]]
+    ch = StubCH(edge_rows={
+        "api_execution_circles_v2_trust_relations_current": trust_rows,
+    })
+    server = _server(ch)
+    opened = _call_tool(server, "open_graph_explorer", {})
+    view_id = opened.structuredContent["view_id"]
+    _call_tool(
+        server,
+        "load_graph_explorer_seed",
+        {"view_id": view_id, "seed_node_id": AVATAR, "seed_model": "circles_trust"},
+    )
+    # A new edge appears on chain — this expand gains a node, consuming a hop
+    # and reaching the (patched) cap of 2.
+    trust_rows.append([TRUSTEE, OWNER, 1.0, 1])
+    grew = _call_tool(
+        server,
+        "expand_graph_explorer_node",
+        {"view_id": view_id, "node_id": TRUSTEE, "relation_types": ["circles_trust"]},
+    )
+    assert grew.isError is False
+    assert grew.structuredContent["view_state"]["investigate"]["hops_used"] == 2
+    result = _call_tool(
+        server,
+        "expand_graph_explorer_node",
+        {"view_id": view_id, "node_id": OWNER, "relation_types": ["circles_trust"]},
+    )
+    # Next call is rejected once MAX_HOPS is reached.
+    assert result.isError is True
+    text = result.content[0].text
+    assert "Max 2 hops" in text or "Max" in text
+
+
+def test_expand_zero_gain_keeps_hops_and_warns(fake_snapshot):
+    """A no-op expand must not consume a hop, and must TELL the user nothing
+    was found instead of silently reporting success."""
     ch = StubCH(edge_rows={
         "api_execution_circles_v2_trust_relations_current": [
             [AVATAR, TRUSTEE, 1.0, 1],
@@ -383,20 +423,51 @@ def test_expand_node_caps_at_max_hops(fake_snapshot, monkeypatch):
         "load_graph_explorer_seed",
         {"view_id": view_id, "seed_node_id": AVATAR, "seed_model": "circles_trust"},
     )
-    _call_tool(
-        server,
-        "expand_graph_explorer_node",
-        {"view_id": view_id, "node_id": TRUSTEE, "relation_types": ["circles_trust"]},
-    )
     result = _call_tool(
         server,
         "expand_graph_explorer_node",
         {"view_id": view_id, "node_id": TRUSTEE, "relation_types": ["circles_trust"]},
     )
-    # Third call is rejected once MAX_HOPS is reached.
-    assert result.isError is True
-    text = result.content[0].text
-    assert "Max 2 hops" in text or "Max" in text
+    assert result.isError is False
+    vs = result.structuredContent["view_state"]
+    assert vs["investigate"]["hops_used"] == 1  # unchanged
+    assert any("no new nodes or edges" in w.lower() for w in vs["warnings"])
+    assert "nothing new" in result.content[0].text
+
+
+def test_expand_seed_advances_frontier_not_reload(fake_snapshot):
+    """Expanding the SEED again is a frontier round: the canvas leaves (not
+    the seed itself) are queried, so hop-2 neighborhoods actually load."""
+    trust_rows = [[AVATAR, TRUSTEE, 1.0, 1]]
+    ch = RecordingStubCH(edge_rows={
+        "api_execution_circles_v2_trust_relations_current": trust_rows,
+    })
+    server = _server(ch)
+    opened = _call_tool(server, "open_graph_explorer", {})
+    view_id = opened.structuredContent["view_id"]
+    _call_tool(
+        server,
+        "load_graph_explorer_seed",
+        {"view_id": view_id, "seed_node_id": AVATAR, "seed_model": "circles_trust"},
+    )
+    trust_rows.append([TRUSTEE, OWNER, 1.0, 1])
+    ch.calls.clear()
+    result = _call_tool(
+        server,
+        "expand_graph_explorer_node",
+        {"view_id": view_id, "node_id": AVATAR, "relation_types": ["circles_trust"]},
+    )
+    assert result.isError is False
+    vs = result.structuredContent["view_state"]
+    # The frontier round queried the LEAF (trustee), not the already-expanded
+    # seed, and the seed+leaf are now both recorded as expanded.
+    seed_id_params = [c["seed_ids"] for c in ch.calls]
+    assert any(TRUSTEE in ids for ids in seed_id_params)
+    assert all(AVATAR not in ids for ids in seed_id_params)
+    assert set(vs["investigate"]["expanded_ids"]) >= {AVATAR, TRUSTEE}
+    assert vs["investigate"]["hops_used"] == 2
+    node_ids = {r[0] for r in result.structuredContent["datasets"]["nodes"]["preview_rows"]}
+    assert OWNER in node_ids
 
 
 def test_unknown_view_returns_error(fake_snapshot):
@@ -423,7 +494,7 @@ def test_update_focus_returns_patch(fake_snapshot):
     sc = result.structuredContent
     assert sc["type"] == "PATCH_VIEW_STATE"
     assert sc["patch"]["view_state"]["layout"] == "circular"
-    assert sc["patch"]["view_state"]["max_neighbors"] == 50
+    assert sc["patch"]["view_state"]["investigate"]["max_neighbors"] == 50
 
 
 def test_edge_query_failure_reports_warning(fake_snapshot):
@@ -636,3 +707,576 @@ def test_merge_graph_directed_keeps_both_directions():
         {"id": "p:B->A", "source": "B", "target": "A", "profile": "p", "weight": 2.0, "edge_count": 1, "directed": True},
     ])
     assert len(edges) == 2
+
+
+# ---------------------------------------------------------------------------
+# Characterization goldens for explore_neighborhood (G1b BFS-unification gate)
+#
+# These pin the CURRENT observable contract — output dict shape, node/edge
+# ordering, canonical edge collapse, truncation, defaults, and the per-hop
+# query pattern (one batched query per profile with the WHOLE frontier).
+# The unified bfs_expand implementation must pass them UNCHANGED.
+# ---------------------------------------------------------------------------
+
+
+class RecordingStubCH(StubCH):
+    """StubCH that logs every neighbors-query (relation, seed_ids, lim)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls: list[dict[str, Any]] = []
+
+    def run_query(self, sql, database="dbt", requested_max_rows=100,
+                  audience="tool", fetch_mode="auto", parameters=None):
+        params = parameters or {}
+        if "seed_ids" in params:
+            relation = next(
+                (t for t in self.edge_rows if t in sql),
+                next((t for t in (
+                    "api_execution_circles_v2_trust_relations_current",
+                    "int_execution_safes_current_owners",
+                    "int_execution_pools_dex_liquidity_events",
+                ) if t in sql), "?"),
+            )
+            self.calls.append(
+                {
+                    "relation": relation,
+                    "seed_ids": sorted(params["seed_ids"]),
+                    "lim": params.get("lim"),
+                }
+            )
+        return super().run_query(
+            sql, database, requested_max_rows, audience, fetch_mode, parameters
+        )
+
+
+TRUST_TABLE = "api_execution_circles_v2_trust_relations_current"
+SAFES_TABLE = "int_execution_safes_current_owners"
+POOLS_TABLE = "int_execution_pools_dex_liquidity_events"
+
+
+def test_characterization_explore_two_hops_full_output(fake_snapshot):
+    """Golden: full output dict of a 2-hop walk over the whole catalog."""
+    ch = RecordingStubCH(
+        edge_rows={
+            TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]],
+            SAFES_TABLE: [[OWNER, SAFE, 2.0, 2]],
+        }
+    )
+    server = _server(ch)
+    result = _call_tool(
+        server, "explore_neighborhood", {"seed_ids": [AVATAR], "hops": 2}
+    )
+
+    assert result == {
+        "seed_ids": [AVATAR],
+        "nodes": [
+            # Seed first (kind stays "" — profile provenance merged in).
+            {"id": AVATAR, "kind": "", "label": f"{AVATAR[:6]}…{AVATAR[-4:]}",
+             "profiles": ["circles_trust"]},
+            {"id": TRUSTEE, "kind": "circles_avatar",
+             "label": f"{TRUSTEE[:6]}…{TRUSTEE[-4:]}", "profiles": ["circles_trust"]},
+            {"id": OWNER, "kind": "address", "label": f"{OWNER[:6]}…{OWNER[-4:]}",
+             "profiles": ["safe_ownership"]},
+            {"id": SAFE, "kind": "safe", "label": f"{SAFE[:6]}…{SAFE[-4:]}",
+             "profiles": ["safe_ownership"]},
+        ],
+        "edges": [
+            {"id": f"circles_trust:{AVATAR}->{TRUSTEE}", "source": AVATAR,
+             "target": TRUSTEE, "profile": "circles_trust", "weight": 1.0,
+             "edge_count": 1, "directed": True},
+            {"id": f"safe_ownership:{OWNER}->{SAFE}", "source": OWNER,
+             "target": SAFE, "profile": "safe_ownership", "weight": 2.0,
+             "edge_count": 2, "directed": True},
+        ],
+        "profiles_used": ["circles_trust", "safe_ownership"],
+        "hops_requested": 2,
+        "hops_completed": 2,
+        "node_count": 4,
+        "edge_count": 2,
+        "truncated": False,
+        "max_nodes": 250,
+        "warnings": [],
+    }
+
+
+def test_characterization_explore_query_pattern(fake_snapshot):
+    """Golden: ONE batched query per profile per hop with the WHOLE frontier
+    (never per-node), and the caller's direction/limit pass straight through."""
+    ch = RecordingStubCH(
+        edge_rows={
+            TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]],
+            SAFES_TABLE: [[OWNER, SAFE, 2.0, 2]],
+        }
+    )
+    server = _server(ch)
+    _call_tool(
+        server,
+        "explore_neighborhood",
+        {"seed_ids": [AVATAR], "hops": 2, "max_nodes": 50},
+    )
+    # Hop 1: 3 profiles x frontier [AVATAR]. Hop 2: 3 profiles x the whole
+    # new frontier (TRUSTEE/OWNER/SAFE) — one call each, batched.
+    assert len(ch.calls) == 6
+    hop1, hop2 = ch.calls[:3], ch.calls[3:]
+    assert all(c["seed_ids"] == [AVATAR] for c in hop1)
+    expected_frontier = sorted([TRUSTEE, OWNER, SAFE])
+    assert all(c["seed_ids"] == expected_frontier for c in hop2)
+    assert all(c["lim"] == 50 for c in ch.calls)
+    # Each hop touches every selected profile exactly once (order is the
+    # catalog's discovery order — pin the SET, not the sequence).
+    assert sorted(c["relation"] for c in hop1) == sorted(
+        [TRUST_TABLE, SAFES_TABLE, POOLS_TABLE]
+    )
+
+
+def test_characterization_explore_truncation_and_flags(fake_snapshot):
+    """Golden: max_nodes cap sets truncated=True and stops the walk."""
+    ch = RecordingStubCH(
+        edge_rows={
+            TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]],
+            SAFES_TABLE: [[OWNER, SAFE, 2.0, 2]],
+        }
+    )
+    server = _server(ch)
+    result = _call_tool(
+        server,
+        "explore_neighborhood",
+        {"seed_ids": [AVATAR], "hops": 3, "max_nodes": 3},
+    )
+    assert result["truncated"] is True
+    assert result["node_count"] == 3
+    assert result["hops_completed"] == 1  # cap hit ends the walk after hop 1
+
+
+def test_characterization_explore_profile_filter_and_unknown(fake_snapshot):
+    """Golden: explicit profiles restrict the walk; unknown ids are skipped."""
+    ch = RecordingStubCH(
+        edge_rows={
+            TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]],
+            SAFES_TABLE: [[OWNER, SAFE, 2.0, 2]],
+        }
+    )
+    server = _server(ch)
+    result = _call_tool(
+        server,
+        "explore_neighborhood",
+        {"seed_ids": [AVATAR], "profiles": ["circles_trust", "nope"], "hops": 1},
+    )
+    assert result["profiles_used"] == ["circles_trust"]
+    assert {n["id"] for n in result["nodes"]} == {AVATAR, TRUSTEE}
+    assert [c["relation"] for c in ch.calls] == [TRUST_TABLE]  # only the chosen profile
+
+
+def test_characterization_explore_mcp_schema_defaults(fake_snapshot):
+    """Golden: the registered MCP schema keeps the PUBLIC defaults
+    (window_days=365, max_nodes=250, hops=1, direction='both')."""
+    import asyncio
+
+    server = _server(StubCH())
+    tool = next(
+        t for t in asyncio.run(server.list_tools()) if t.name == "explore_neighborhood"
+    )
+    props = tool.inputSchema["properties"]
+    assert props["window_days"]["default"] == 365
+    assert props["max_nodes"]["default"] == 250
+    assert props["hops"]["default"] == 1
+    assert props["direction"]["default"] == "both"
+    assert tool.inputSchema.get("required") == ["seed_ids"]
+
+
+# ---------------------------------------------------------------------------
+# G1b: unified bfs_expand — kind-partitioned batching (expand mode)
+# ---------------------------------------------------------------------------
+
+
+def test_bfs_expand_kind_partitioned_batching(fake_snapshot):
+    """Expand mode: ONE batched query per (kind group, compatible profile) —
+    and unknown-kind entries query all chosen profiles."""
+    from cerebro_mcp.tools.semantic.graph_explorer.traverse import bfs_expand
+
+    ch = RecordingStubCH(
+        edge_rows={
+            TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]],
+            SAFES_TABLE: [[OWNER, SAFE, 2.0, 2]],
+        }
+    )
+    profiles = list(graph_profiles.discover_profiles())
+
+    # Known kind: only kind-compatible profiles queried for that group.
+    result = bfs_expand(
+        ch,
+        frontier=[(AVATAR, "circles_avatar")],
+        chosen_profiles=profiles,
+        auto_direction=True,
+        kind_partition=True,
+        hops=1,
+        window_days=90,
+        per_query_limit=25,
+        node_cap=1000,
+        per_hop_budget=100,
+    )
+    assert [c["relation"] for c in ch.calls] == [TRUST_TABLE]
+    assert ch.calls[0]["seed_ids"] == [AVATAR]
+    assert result.profiles_used == {"circles_trust"}
+    assert {n for n in result.nodes} == {AVATAR, TRUSTEE}
+
+    # Unknown kind: ALL chosen profiles queried for the "" group.
+    ch2 = RecordingStubCH(edge_rows={TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]]})
+    bfs_expand(
+        ch2,
+        frontier=[("0x0000000000000000000000000000000000000abc", "")],
+        chosen_profiles=profiles,
+        auto_direction=True,
+        kind_partition=True,
+        hops=1,
+        window_days=90,
+        per_query_limit=25,
+        node_cap=1000,
+        per_hop_budget=100,
+    )
+    assert sorted(c["relation"] for c in ch2.calls) == sorted(
+        [TRUST_TABLE, SAFES_TABLE, POOLS_TABLE]
+    )
+
+
+def test_bfs_expand_batches_same_kind_frontier(fake_snapshot):
+    """Two same-kind frontier nodes land in ONE query (the old expand issued
+    one query per node)."""
+    from cerebro_mcp.tools.semantic.graph_explorer.traverse import bfs_expand
+
+    ch = RecordingStubCH(edge_rows={TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]]})
+    profiles = list(graph_profiles.discover_profiles())
+    bfs_expand(
+        ch,
+        frontier=[(AVATAR, "circles_avatar"), (TRUSTEE, "circles_avatar")],
+        chosen_profiles=profiles,
+        auto_direction=True,
+        kind_partition=True,
+        hops=1,
+        window_days=90,
+        per_query_limit=25,
+        node_cap=1000,
+        per_hop_budget=100,
+    )
+    trust_calls = [c for c in ch.calls if c["relation"] == TRUST_TABLE]
+    assert len(trust_calls) == 1
+    assert trust_calls[0]["seed_ids"] == sorted([AVATAR, TRUSTEE])
+
+
+def test_bfs_expand_budget_truncation(fake_snapshot):
+    """Budget mode: hitting the per-hop budget with frontier remaining sets
+    truncated_at_hop (drives the user-facing cap warning)."""
+    from cerebro_mcp.tools.semantic.graph_explorer.traverse import bfs_expand
+
+    # Many neighbours from one profile.
+    rows = [[AVATAR, f"0x{i:040x}", 1.0, 1] for i in range(1, 30)]
+    ch = StubCH(edge_rows={TRUST_TABLE: rows})
+    profiles = list(graph_profiles.discover_profiles())
+    result = bfs_expand(
+        ch,
+        frontier=[(AVATAR, "circles_avatar")],
+        chosen_profiles=profiles,
+        auto_direction=True,
+        kind_partition=True,
+        hops=3,
+        window_days=90,
+        per_query_limit=100,
+        node_cap=1000,
+        per_hop_budget=5,
+    )
+    assert result.truncated_at_hop == 1
+    assert result.truncated is True
+    # Progress was still made before declaring truncation.
+    assert len(result.nodes) >= 5
+
+
+def test_bfs_expand_seeds_from_existing_graph(fake_snapshot):
+    """initial_nodes/initial_edges pre-seed the accumulators (the UI expand
+    path feeds the datasets already on canvas) — undirected reciprocals sum
+    into pre-existing canonical rows."""
+    from cerebro_mcp.tools.semantic.graph_explorer.traverse import bfs_expand
+
+    ch = StubCH(edge_rows={TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]]})
+    profiles = list(graph_profiles.discover_profiles())
+    existing_nodes = {
+        AVATAR: {"id": AVATAR, "kind": "circles_avatar", "label": "a", "profiles": []}
+    }
+    result = bfs_expand(
+        ch,
+        frontier=[(AVATAR, "circles_avatar")],
+        chosen_profiles=profiles,
+        auto_direction=True,
+        kind_partition=True,
+        hops=1,
+        window_days=90,
+        per_query_limit=25,
+        node_cap=1000,
+        per_hop_budget=100,
+        initial_nodes=existing_nodes,
+    )
+    # Existing node kept; its profile provenance merged in.
+    assert result.nodes[AVATAR]["profiles"] == ["circles_trust"]
+    assert TRUSTEE in result.nodes
+
+
+# ---------------------------------------------------------------------------
+# view_state v2: modes, limits, atlas sampling, bulk view patch
+# ---------------------------------------------------------------------------
+
+
+def test_open_emits_v2_state_and_limits(fake_snapshot):
+    server = _server(StubCH())
+    result = _call_tool(server, "open_graph_explorer", {})
+    vs = result.structuredContent["view_state"]
+    assert vs["mode"] == "atlas"
+    assert vs["limits"]["max_hops"] == 50
+    assert vs["limits"]["default_expand_depth"] == 1
+    assert vs["limits"]["ui_default_window_days"] == 90
+    assert vs["limits"]["ui_default_max_neighbors"] == 100
+    assert vs["selection"] == {"node_id": "", "edge_id": ""}
+    assert "dataset_revisions" in vs
+    # Both dataset pairs exist from the start.
+    assert {"nodes", "edges", "atlas_nodes", "atlas_edges"} <= set(
+        result.structuredContent["datasets"]
+    )
+
+
+def test_atlas_sample_replace_semantics(fake_snapshot):
+    """Deselecting a profile and re-requesting leaves NO stale edges."""
+    ch = StubCH(
+        edge_rows={
+            TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]],
+            SAFES_TABLE: [[OWNER, SAFE, 2.0, 2]],
+        }
+    )
+    server = _server(ch)
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent["view_id"]
+
+    both = _call_tool(
+        server,
+        "load_graph_atlas_sample",
+        {"view_id": view_id, "profiles": ["circles_trust", "safe_ownership"]},
+    )
+    sc = both.structuredContent
+    assert sc["view_state"]["mode"] == "atlas"
+    assert sc["view_state"]["atlas"]["selected_profiles"] == [
+        "circles_trust", "safe_ownership",
+    ]
+    assert len(sc["datasets"]["atlas_edges"]["preview_rows"]) == 2
+
+    # REPLACE: re-request with only one profile -> the other's edges gone.
+    one = _call_tool(
+        server,
+        "load_graph_atlas_sample",
+        {"view_id": view_id, "profiles": ["circles_trust"]},
+    )
+    rows = one.structuredContent["datasets"]["atlas_edges"]["preview_rows"]
+    assert len(rows) == 1
+    assert rows[0][3] == "circles_trust"
+
+    unknown = _call_tool(
+        server, "load_graph_atlas_sample", {"view_id": view_id, "profiles": ["nope"]}
+    )
+    assert unknown.isError
+
+
+def test_investigate_load_preserves_atlas_datasets(fake_snapshot):
+    ch = StubCH(
+        edge_rows={
+            TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]],
+            SAFES_TABLE: [[OWNER, SAFE, 2.0, 2]],
+        },
+        roles={AVATAR: [0, 0, 0, "", 1, "human", 0, 0, 0, "", 0, 0, 0, 0, ""]},
+    )
+    server = _server(ch)
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent["view_id"]
+    _call_tool(
+        server,
+        "load_graph_atlas_sample",
+        {"view_id": view_id, "profiles": ["safe_ownership"]},
+    )
+    result = _call_tool(
+        server,
+        "load_graph_explorer_seed",
+        {"view_id": view_id, "seed_node_id": AVATAR},
+    )
+    sc = result.structuredContent
+    assert sc["view_state"]["mode"] == "investigate"
+    # Atlas datasets survive the investigate load (per-key attach).
+    assert len(sc["datasets"]["atlas_edges"]["preview_rows"]) == 1
+    assert len(sc["datasets"]["edges"]["preview_rows"]) == 1
+    # Revisions cover both pairs.
+    revs = sc["view_state"]["dataset_revisions"]
+    assert revs["atlas_edges"] >= 1 and revs["edges"] >= 1
+
+
+def test_legacy_sample_mode_lands_in_atlas(fake_snapshot):
+    """The agent-compat no-seed + seed_model form now loads the atlas pair."""
+    ch = StubCH(edge_rows={TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]]})
+    server = _server(ch)
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent["view_id"]
+    result = _call_tool(
+        server,
+        "load_graph_explorer_seed",
+        {"view_id": view_id, "seed_node_id": "", "seed_model": "circles_trust"},
+    )
+    sc = result.structuredContent
+    assert sc["view_state"]["mode"] == "atlas"
+    assert len(sc["datasets"]["atlas_edges"]["preview_rows"]) == 1
+
+
+def test_set_graph_explorer_view_schema(fake_snapshot):
+    server = _server(StubCH())
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent["view_id"]
+    set_fn = _call_tool
+
+    ok = set_fn(
+        server,
+        "set_graph_explorer_view",
+        {"view_id": view_id, "patch": {"layout": "circular",
+                                        "investigate": {"window_days": 30}}},
+    )
+    assert not ok.isError
+    assert ok.structuredContent["patch"]["view_state"]["layout"] == "circular"
+
+    bad_key = set_fn(
+        server, "set_graph_explorer_view",
+        {"view_id": view_id, "patch": {"hops": 3}},
+    )
+    assert bad_key.isError and "Unknown view-state key" in bad_key.content[0].text
+
+    bad_nested = set_fn(
+        server, "set_graph_explorer_view",
+        {"view_id": view_id, "patch": {"investigate": {"seed": {}}}},
+    )
+    assert bad_nested.isError
+
+    bad_mode = set_fn(
+        server, "set_graph_explorer_view",
+        {"view_id": view_id, "patch": {"mode": "banana"}},
+    )
+    assert bad_mode.isError
+
+    # Mode switch clears selection.
+    _call_tool(
+        server, "update_graph_explorer_focus",
+        {"view_id": view_id, "selected_node_id": AVATAR},
+    )
+    switched = set_fn(
+        server, "set_graph_explorer_view",
+        {"view_id": view_id, "patch": {"mode": "investigate"}},
+    )
+    assert switched.structuredContent["patch"]["view_state"]["selection"] == {
+        "node_id": "", "edge_id": "",
+    }
+
+
+def test_mode_switch_via_focus_clears_selection(fake_snapshot):
+    server = _server(StubCH())
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent["view_id"]
+    _call_tool(
+        server, "update_graph_explorer_focus",
+        {"view_id": view_id, "selected_node_id": AVATAR},
+    )
+    result = _call_tool(
+        server, "update_graph_explorer_focus",
+        {"view_id": view_id, "mode": "investigate"},
+    )
+    vs_patch = result.structuredContent["patch"]["view_state"]
+    assert vs_patch["mode"] == "investigate"
+    assert vs_patch["selection"] == {"node_id": "", "edge_id": ""}
+
+
+def test_new_graph_app_tools_hidden_from_model(fake_snapshot):
+    import asyncio as _asyncio
+
+    from cerebro_mcp.tools.visualization import web_apps as _web_apps
+
+    server = FastMCP("graph-vis-test")
+    mini_apps.register_mini_app_infra(server, None)
+    register_graph_explorer_tools(server, StubCH())
+    names = [t.name for t in _asyncio.run(server.list_tools())]
+    assert "load_graph_atlas_sample" not in names
+    assert "set_graph_explorer_view" not in names
+    assert "open_graph_explorer" in names
+    cfg = _web_apps.WEB_APP_CONFIGS["graph_explorer"]
+    assert {"load_graph_atlas_sample", "set_graph_explorer_view"} <= cfg.allowed_tools
+
+
+def test_seed_normalizes_checksummed_address(fake_snapshot):
+    """A checksummed (mixed-case) seed must match lowercase on-chain data —
+    regression for 0x295bA5c… returning 1 node / 0 edges."""
+    ch = RecordingStubCH(edge_rows={TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]]})
+    server = _server(ch)
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent["view_id"]
+    checksummed = AVATAR[:2] + AVATAR[2:].upper()
+    result = _call_tool(
+        server,
+        "load_graph_explorer_seed",
+        {"view_id": view_id, "seed_node_id": checksummed,
+         "relation_types": ["circles_trust"]},
+    )
+    assert not result.isError
+    sc = result.structuredContent
+    # seed stored lowercase + the SQL received the lowercase id
+    assert sc["view_state"]["investigate"]["seed"]["id"] == AVATAR
+    assert all(c["seed_ids"] == [AVATAR] for c in ch.calls)
+    assert len(sc["datasets"]["edges"]["preview_rows"]) == 1
+
+
+def test_expand_normalizes_checksummed_node(fake_snapshot):
+    ch = RecordingStubCH(edge_rows={TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]]})
+    server = _server(ch)
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent["view_id"]
+    _call_tool(
+        server, "load_graph_explorer_seed",
+        {"view_id": view_id, "seed_node_id": AVATAR,
+         "relation_types": ["circles_trust"]},
+    )
+    ch.calls.clear()
+    checksummed = TRUSTEE[:2] + TRUSTEE[2:].upper()
+    result = _call_tool(
+        server, "expand_graph_explorer_node",
+        {"view_id": view_id, "node_id": checksummed},
+    )
+    assert not result.isError
+    assert all(c["seed_ids"] == [TRUSTEE] for c in ch.calls if c["seed_ids"])
+
+
+def test_budget_truncated_round_consumes_only_fetched_groups(fake_snapshot):
+    """When the per-hop budget stops a frontier round mid-way, the SKIPPED
+    groups must not be reported as expanded — otherwise the next Expand
+    strands them forever (the 'Expand again to continue' promise)."""
+    from cerebro_mcp.tools.semantic.graph_explorer.traverse import bfs_expand
+
+    def fake_fetch(ch, profile, *, seed_ids, direction, window_days, limit):
+        nodes, edges = [], []
+        for sid in seed_ids:
+            nid = f"{sid}_n"
+            nodes.append({"id": nid, "kind": "address", "label": "",
+                          "profiles": [profile.profile]})
+            edges.append({"id": f"{profile.profile}:{sid}->{nid}", "source": sid,
+                          "target": nid, "profile": profile.profile,
+                          "weight": 1.0, "edge_count": 1, "directed": True})
+        return nodes, edges, []
+
+    profs = {p.profile: p for p in fake_snapshot.graph_profiles}
+    res = bfs_expand(
+        None,
+        frontier=[("0xa1", "circles_avatar"), ("0xs1", "address")],
+        chosen_profiles=[profs["circles_trust"], profs["safe_ownership"]],
+        direction="both",
+        auto_direction=True,
+        kind_partition=True,
+        hops=1,
+        window_days=90,
+        per_query_limit=10,
+        node_cap=100,
+        per_hop_budget=1,
+        fetch=fake_fetch,
+    )
+    assert res.truncated_at_hop == 1
+    # Only the first kind group's fetch ran before the budget tripped; the
+    # second group stays expandable for the next round.
+    assert res.expanded_frontier == {"0xa1"}

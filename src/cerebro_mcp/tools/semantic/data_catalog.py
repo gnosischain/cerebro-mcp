@@ -149,6 +149,14 @@ class _CatalogIndex:
         self.model_search = ModelSearchIndex.for_snapshot(snap)
 
         for name, metric in (getattr(snap, "metrics", {}) or {}).items():
+            # Skip the auto-scaffolded per-measure wrappers (e.g.
+            # `execution_lending_aave_balance_cohorts_daily__holders_in_bucket_value`):
+            # a bare pass-through whose measure IS itself. They are 1:1 noise —
+            # the catalog already surfaces the same data as the model + its
+            # columns. Deliberately authored metrics keep distinct measure
+            # names (bridge_flow_netflow_daily, apy_value, …) and stay.
+            if name.endswith("_value") and metric.get("measure") == name:
+                continue
             module = metric.get("module", "") or ""
             label = metric.get("label", "") or name
             synonyms = list(metric.get("question_synonyms", []) or [])

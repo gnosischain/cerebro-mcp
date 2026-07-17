@@ -1,8 +1,7 @@
-import { useMemo, useRef } from "react";
-import { FilterChips, type ChipOption } from "../shared/FilterChips";
-import { SegmentedControl } from "../shared/SegmentedControl";
+import { useMemo, useRef, useState } from "react";
+import type { ChipOption } from "../shared/FilterChips";
 import { WarningBanner } from "../shared/WarningBanner";
-import { TierBadge, TypeIcon, TypeBadge, Tags, StatusDot, SkeletonRows } from "./components";
+import { TierBadge, TypeIcon, Tags, StatusDot, SkeletonRows } from "./components";
 import type {
   CatalogFilters,
   CatalogHit,
@@ -26,18 +25,76 @@ interface Props {
   onLoadMore: () => void;
 }
 
-const TIER_SEGMENTS = [
-  { value: "all", label: "All" },
-  { value: "approved", label: "Approved" },
-  { value: "candidate", label: "Candidate" },
-  { value: "docs_only", label: "Docs" },
-] as const;
+const TIER_LABELS: Record<string, string> = {
+  approved: "Approved",
+  candidate: "Candidate",
+  docs_only: "Docs only",
+};
 
 function facetOptions<T extends string>(facet: Record<string, number>, max = 100): ChipOption<T>[] {
   return Object.entries(facet)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, max)
     .map(([value, count]) => ({ value: value as T, label: value, count }));
+}
+
+/** Compact vertical facet — one row per value (label left, count right),
+ * selected rows tinted, long tails behind a "Show all" toggle. Replaces the
+ * wrapping chip clouds that made the sidebar sprawl. Single-select facets
+ * (`multi=false`) deselect on re-click; no dedicated "All" row needed. */
+function FacetList<T extends string>({
+  title,
+  options,
+  selected,
+  onChange,
+  multi = false,
+  visible = 8,
+}: {
+  title: string;
+  options: ChipOption<T>[];
+  selected: T[];
+  onChange: (next: T[]) => void;
+  multi?: boolean;
+  visible?: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (options.length === 0) return null;
+  // Selected values always stay visible, even from the collapsed tail.
+  const head = options.slice(0, visible);
+  const tail = options.slice(visible).filter((o) => selected.includes(o.value));
+  const shown = expanded ? options : [...head, ...tail];
+  const hidden = options.length - shown.length;
+  const toggle = (v: T) => {
+    if (multi) onChange(selected.includes(v) ? selected.filter((x) => x !== v) : [...selected, v]);
+    else onChange(selected.includes(v) ? [] : [v]);
+  };
+  return (
+    <div className="dc-facet">
+      <span className="dc-facet-title">{title}</span>
+      <div className="dc-facet-list" role="group" aria-label={title}>
+        {shown.map((opt) => {
+          const on = selected.includes(opt.value);
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              className={`dc-facet-row${on ? " is-on" : ""}`}
+              aria-pressed={on}
+              onClick={() => toggle(opt.value)}
+            >
+              <span className="dc-facet-label" title={opt.label}>{opt.label}</span>
+              {opt.count != null && <span className="dc-facet-count">{opt.count.toLocaleString()}</span>}
+            </button>
+          );
+        })}
+        {(hidden > 0 || expanded) && (
+          <button type="button" className="dc-facet-more" onClick={() => setExpanded(!expanded)}>
+            {expanded ? "Show less" : `Show all (${options.length})`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // A domain with no approved models is UNCURATED, not unhealthy — so it's a
@@ -70,22 +127,36 @@ function Highlight({ text, query }: { text: string; query: string }) {
   );
 }
 
-function ResultCard({ hit, query, onOpen }: { hit: CatalogHit; query: string; onOpen: () => void }) {
+function ResultCard({
+  hit,
+  query,
+  activeModule,
+  onOpen,
+}: {
+  hit: CatalogHit;
+  query: string;
+  activeModule: string;
+  onOpen: () => void;
+}) {
+  // Noise control: the icon + left border already encode the entity type, so
+  // no per-card type badge; tags that repeat the module say nothing new; when
+  // a module filter is active every card would carry the same module badge.
+  const tags = hit.tags.filter((t) => t !== hit.module);
+  const showModule = !!hit.module && hit.module !== activeModule;
   return (
     <button className={`dc-card dc-card--${hit.type}`} type="button" onClick={onOpen}>
       <TypeIcon type={hit.type} />
       <span className="dc-card-body">
         <span className="dc-card-title-row">
           <span className="dc-card-title"><Highlight text={hit.title} query={query} /></span>
-          <TypeBadge type={hit.type} />
           {hit.tier && <TierBadge tier={hit.tier} />}
         </span>
         {hit.fqn && <span className="dc-card-fqn">{hit.fqn}</span>}
         {hit.description && <span className="dc-card-desc">{hit.description}</span>}
-        {hit.tags.length > 0 && <Tags tags={hit.tags} />}
+        {tags.length > 0 && <Tags tags={tags} max={3} />}
       </span>
       <span className="dc-card-meta">
-        {hit.module && <span className="dc-badge">{hit.module}</span>}
+        {showModule && <span className="dc-badge">{hit.module}</span>}
         {hit.owner && <span className="dc-card-fqn">{hit.owner}</span>}
       </span>
     </button>
@@ -254,13 +325,14 @@ export function ExploreSection({
   const moduleOptions = useMemo<ChipOption<string>[]>(() => facetOptions(facets?.module ?? {}, 30), [facets]);
   const ownerOptions = useMemo<ChipOption<string>[]>(() => facetOptions(facets?.owner ?? {}, 20), [facets]);
   const tagOptions = useMemo<ChipOption<string>[]>(() => facetOptions(facets?.tags ?? {}, 18), [facets]);
-  // Wire live tier facet counts into the segmented control labels.
+  // Fixed tier order (not count-sorted) with live facet counts.
   const tierFacet = facets?.tier ?? {};
-  const tierSegments = useMemo(
-    () => TIER_SEGMENTS.map((s) =>
-      s.value === "all" ? { value: s.value, label: s.label }
-        : { value: s.value, label: tierFacet[s.value] != null ? `${s.label} (${tierFacet[s.value]})` : s.label },
-    ),
+  const tierOptions = useMemo<ChipOption<string>[]>(
+    () => Object.entries(TIER_LABELS).map(([value, label]) => ({
+      value,
+      label,
+      count: tierFacet[value] ?? 0,
+    })),
     [tierFacet],
   );
 
@@ -287,60 +359,38 @@ export function ExploreSection({
       ) : (
         <div className="dc-layout">
           <aside className="dc-sidebar">
-            <div className="dc-facet">
-              <span className="dc-facet-title">Quality tier</span>
-              <SegmentedControl
-                options={tierSegments}
-                value={filters.tier}
-                onChange={(tier) => onFiltersChange({ ...filters, tier })}
-                ariaLabel="Filter by quality tier"
-                size="sm"
-              />
-            </div>
-            {typeOptions.length > 0 && (
-              <div className="dc-facet">
-                <span className="dc-facet-title">Entity type</span>
-                <FilterChips<EntityType>
-                  options={typeOptions}
-                  selected={filters.entityTypes}
-                  onChange={(entityTypes) => onFiltersChange({ ...filters, entityTypes })}
-                  allowAllToggle
-                />
-              </div>
-            )}
-            {moduleOptions.length > 0 && (
-              <div className="dc-facet">
-                <span className="dc-facet-title">Module (one)</span>
-                <FilterChips<string>
-                  options={moduleOptions}
-                  selected={filters.module ? [filters.module] : []}
-                  onChange={(next) => onFiltersChange({ ...filters, module: next.length ? next[next.length - 1] : "" })}
-                  allowAllToggle={false}
-                />
-              </div>
-            )}
-            {ownerOptions.length > 0 && (
-              <div className="dc-facet">
-                <span className="dc-facet-title">Owner (one)</span>
-                <FilterChips<string>
-                  options={ownerOptions}
-                  selected={filters.owner ? [filters.owner] : []}
-                  onChange={(next) => onFiltersChange({ ...filters, owner: next.length ? next[next.length - 1] : "" })}
-                  allowAllToggle={false}
-                />
-              </div>
-            )}
-            {tagOptions.length > 0 && (
-              <div className="dc-facet">
-                <span className="dc-facet-title">Tags (match all)</span>
-                <FilterChips<string>
-                  options={tagOptions}
-                  selected={filters.tags}
-                  onChange={(tags) => onFiltersChange({ ...filters, tags })}
-                  allowAllToggle={false}
-                />
-              </div>
-            )}
+            <FacetList<string>
+              title="Quality tier"
+              options={tierOptions}
+              selected={filters.tier && filters.tier !== "all" ? [filters.tier] : []}
+              onChange={(next) => onFiltersChange({ ...filters, tier: next[0] ?? "all" })}
+            />
+            <FacetList<EntityType>
+              title="Entity type"
+              options={typeOptions}
+              selected={filters.entityTypes}
+              onChange={(entityTypes) => onFiltersChange({ ...filters, entityTypes })}
+              multi
+            />
+            <FacetList<string>
+              title="Module"
+              options={moduleOptions}
+              selected={filters.module ? [filters.module] : []}
+              onChange={(next) => onFiltersChange({ ...filters, module: next[0] ?? "" })}
+            />
+            <FacetList<string>
+              title="Owner"
+              options={ownerOptions}
+              selected={filters.owner ? [filters.owner] : []}
+              onChange={(next) => onFiltersChange({ ...filters, owner: next[0] ?? "" })}
+            />
+            <FacetList<string>
+              title="Tags"
+              options={tagOptions}
+              selected={filters.tags}
+              onChange={(tags) => onFiltersChange({ ...filters, tags })}
+              multi
+            />
           </aside>
 
           <main>
@@ -416,7 +466,13 @@ export function ExploreSection({
               <>
                 <div className="dc-results">
                   {hits.map((hit) => (
-                    <ResultCard key={hit.id} hit={hit} query={query} onOpen={() => onOpenEntity(hit.name, hit.type)} />
+                    <ResultCard
+                      key={hit.id}
+                      hit={hit}
+                      query={query}
+                      activeModule={filters.module}
+                      onOpen={() => onOpenEntity(hit.name, hit.type)}
+                    />
                   ))}
                 </div>
                 {result && result.total > hits.length && (

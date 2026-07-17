@@ -44,6 +44,18 @@ def registered():
     return mcp
 
 
+def _inject_tool(app_id: str, name: str, fn) -> None:
+    """Register an ad-hoc tool AND allow it for `app_id` (dispatch is scoped
+    per app, so registry membership alone no longer suffices)."""
+    import dataclasses
+
+    web_apps.MINI_APP_TOOL_REGISTRY[name] = fn
+    cfg = web_apps.WEB_APP_CONFIGS[app_id]
+    web_apps.WEB_APP_CONFIGS[app_id] = dataclasses.replace(
+        cfg, allowed_tools=cfg.allowed_tools | {name}
+    )
+
+
 def test_register_web_app_populates_registry(registered):
     assert "model_lineage" in web_apps.WEB_APP_CONFIGS
     cfg = web_apps.WEB_APP_CONFIGS["model_lineage"]
@@ -107,7 +119,7 @@ async def test_dispatch_serializes_dates(registered):
             isError=False,
         )
 
-    web_apps.MINI_APP_TOOL_REGISTRY["_date_tool"] = _date_tool
+    _inject_tool("model_lineage", "_date_tool", _date_tool)
     req = FakeRequest(
         path_params={"app_id": "model_lineage", "tool_name": "_date_tool"},
         body={"arguments": {}},
@@ -130,7 +142,7 @@ async def test_dispatch_plain_dict_tool_is_wrapped(registered):
     def _plain_tool():
         return {"count": 2, "results": [{"id": "profile:circles_trust"}]}
 
-    web_apps.MINI_APP_TOOL_REGISTRY["_plain_tool"] = _plain_tool
+    _inject_tool("model_lineage", "_plain_tool", _plain_tool)
     req = FakeRequest(
         path_params={"app_id": "model_lineage", "tool_name": "_plain_tool"},
         body={"arguments": {}},
@@ -153,7 +165,7 @@ async def test_dispatch_plain_dict_with_datetime_is_serialized(registered):
     def _dt_tool():
         return {"as_of": dt.datetime(2026, 5, 12, 23, 6, 48), "rows": [[dt.date(2026, 5, 12), 1]]}
 
-    web_apps.MINI_APP_TOOL_REGISTRY["_dt_tool"] = _dt_tool
+    _inject_tool("model_lineage", "_dt_tool", _dt_tool)
     req = FakeRequest(
         path_params={"app_id": "model_lineage", "tool_name": "_dt_tool"},
         body={"arguments": {}},
@@ -173,3 +185,29 @@ async def test_dispatch_unknown_tool_404(registered):
     )
     resp = await web_apps.dispatch_app_tool(req)
     assert resp.status_code == 404
+
+
+def test_register_web_app_records_allowed_tools(registered):
+    cfg = web_apps.WEB_APP_CONFIGS["model_lineage"]
+    assert "open_model_lineage" in cfg.allowed_tools
+    # Shared infra tools are allowed for every app.
+    assert web_apps._SHARED_INFRA_TOOLS <= cfg.allowed_tools
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cross_app_tool_404(registered):
+    """A tool registered for one app must NOT be dispatchable through another
+    app's endpoint — the registry is global, the allow-list is per app."""
+
+    def _other_app_tool():
+        return {"ok": True}
+
+    # Registered globally, but NOT allowed for model_lineage.
+    web_apps.MINI_APP_TOOL_REGISTRY["_other_app_tool"] = _other_app_tool
+    req = FakeRequest(
+        path_params={"app_id": "model_lineage", "tool_name": "_other_app_tool"},
+        body={"arguments": {}},
+    )
+    resp = await web_apps.dispatch_app_tool(req)
+    assert resp.status_code == 404
+    assert "not available" in json.loads(resp.body.decode())["error"]

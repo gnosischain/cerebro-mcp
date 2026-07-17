@@ -103,6 +103,10 @@ class ViewRecord:
     expires_at: datetime
     view_state: dict[str, Any] = field(default_factory=dict)
     datasets: dict[str, CachedDataset] = field(default_factory=dict)
+    # Monotonic per-dataset-key revision, bumped on every attach/replace.
+    # Frontends key hydration / draft reseeding on this — NOT on SQL text,
+    # which stays identical across param changes and forced reruns.
+    dataset_revisions: dict[str, int] = field(default_factory=dict)
 
 
 _views: dict[str, ViewRecord] = {}
@@ -167,6 +171,22 @@ def patch_view_state(view_id: str, patch: dict[str, Any]) -> ViewRecord | None:
         return record
 
 
+def set_view_state(view_id: str, state: dict[str, Any]) -> ViewRecord | None:
+    """EXACT view-state replacement (INITIAL_LOAD semantics).
+
+    ``patch_view_state`` deep-merges, so stale keys (a cleared
+    aggregate_config, a removed dataset's provenance) would survive a
+    reload. INITIAL_LOAD-emitting paths must use this instead.
+    """
+    with _views_lock:
+        record = _views.get(view_id)
+        if record is None:
+            return None
+        record.view_state = dict(state)
+        _touch_view_locked(record)
+        return record
+
+
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
     for key, value in overlay.items():
@@ -187,6 +207,7 @@ def attach_dataset(view_id: str, key: str, dataset: CachedDataset) -> None:
         if record is None:
             raise KeyError(f"Unknown view_id: {view_id}")
         record.datasets[key] = dataset
+        record.dataset_revisions[key] = record.dataset_revisions.get(key, 0) + 1
         _touch_view_locked(record)
 
 
@@ -199,6 +220,9 @@ def replace_view_datasets(
         if record is None:
             raise KeyError(f"Unknown view_id: {view_id}")
         record.datasets = dict(datasets)
+        record.dataset_revisions = {
+            key: record.dataset_revisions.get(key, 0) + 1 for key in datasets
+        }
         _touch_view_locked(record)
 
 
@@ -380,11 +404,14 @@ def load_bounded_dataset(
     sql: str,
     database: str = "dbt",
     parameters: dict[str, Any] | None = None,
+    force_refresh: bool = False,
 ) -> CachedDataset:
     """Return a ``CachedDataset`` sized via the dataset-mode rules.
 
     Algorithm:
-      1. Cache hit on any (sql, db, params, mode) → return immediately.
+      1. Cache hit on any (sql, db, params, mode) → return immediately
+         (skipped with ``force_refresh=True`` — an explicit user rerun must
+         actually hit ClickHouse; the fresh result still refills the cache).
       2. Cheap ``count()`` over the wrapped subquery.
       3. ``count <= SAMPLE_TARGET`` → ``exact_bounded``.
       4. Otherwise try deterministic hash-bucket sampling, with one retry
@@ -395,10 +422,11 @@ def load_bounded_dataset(
     cache = get_cache()
 
     # 1. cache check across all modes
-    for mode in ("exact_bounded", "random_sample", "preview_only"):
-        hit = cache.get(make_cache_key(sql, database, parameters, mode))
-        if hit is not None:
-            return hit
+    if not force_refresh:
+        for mode in ("exact_bounded", "random_sample", "preview_only"):
+            hit = cache.get(make_cache_key(sql, database, parameters, mode))
+            if hit is not None:
+                return hit
 
     # 2. count — a failure here means the user's SQL is broken; propagate.
     try:

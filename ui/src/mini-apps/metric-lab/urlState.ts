@@ -25,6 +25,11 @@ export interface UrlState {
   x: string;
   y: string;
   agg: string;
+  /** Aggregate-mode extras: multi-Y measures, time grain. */
+  ys: string[];
+  grain: string;
+  /** Raw-mode column projection. */
+  cols: string[];
   series: string;
   topn: number;
   fcol: string;
@@ -50,6 +55,9 @@ const URL_KEYS = [
   "x",
   "y",
   "agg",
+  "ys",
+  "grain",
+  "cols",
   "series",
   "topn",
   "fcol",
@@ -75,6 +83,9 @@ export const DEFAULT_URL_STATE: UrlState = {
   x: "",
   y: "",
   agg: "sum",
+  ys: [],
+  grain: "",
+  cols: [],
   series: "",
   topn: 8,
   fcol: "",
@@ -102,6 +113,9 @@ export function readUrl(): UrlState {
     x: p.get("x") || "",
     y: p.get("y") || "",
     agg: p.get("agg") || "sum",
+    ys: (p.get("ys") || "").split(",").filter(Boolean),
+    grain: p.get("grain") || "",
+    cols: (p.get("cols") || "").split(",").filter(Boolean),
     series: p.get("series") || "",
     topn: Number(p.get("topn")) || 8,
     fcol: p.get("fcol") || "",
@@ -130,6 +144,9 @@ export function writeUrl(s: UrlState, push: boolean): void {
   if (s.x) p.set("x", s.x);
   if (s.y) p.set("y", s.y);
   if (s.agg && s.agg !== "sum") p.set("agg", s.agg);
+  if (s.ys.length) p.set("ys", s.ys.join(","));
+  if (s.grain) p.set("grain", s.grain);
+  if (s.cols.length) p.set("cols", s.cols.join(","));
   if (s.series) p.set("series", s.series);
   if (s.topn && s.topn !== 8) p.set("topn", String(s.topn));
   if (s.fcol) p.set("fcol", s.fcol);

@@ -1,565 +1,315 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { MiniAppPayload } from "../shared/miniAppTypes";
+// Graph Explorer shell — two modes, one canvas.
+//
+//   ATLAS        browse the semantic profile catalog; sample profile unions
+//                (atlas_nodes/atlas_edges, REPLACE semantics).
+//   INVESTIGATE  bounded subgraph around a seed (nodes/edges) with explicit
+//                BFS expansion.
+//
+// Both dataset pairs stay attached to the view; switching modes only flips
+// which pair the canvas renders — it never refetches. Local state lives in
+// the graphReducer (adopted from view_state v2, bulk-synced back via
+// set_graph_explorer_view); selection changes additionally go through
+// update_graph_explorer_focus so the server refreshes evidence + roles.
+
+import { useEffect, useMemo, useRef } from "react";
+import { GRAPH_EXPLORER_HELP } from "../shared/helpContent";
+import { MaHelpButton } from "../shared/HelpDialog";
+import { MiniAppChrome } from "../shared/MiniAppChrome";
+import { useHydratedDatasets } from "../shared/useHydratedDatasets";
 import { useMiniApp } from "../shared/useMiniApp";
 import { WarningBanner } from "../shared/WarningBanner";
-import { MiniAppChrome } from "../shared/MiniAppChrome";
-import { MaHelpButton } from "../shared/HelpDialog";
-import { GRAPH_EXPLORER_HELP } from "../shared/helpContent";
-import { shortAddr } from "../../utils/format";
-import { CatalogScreen } from "./CatalogScreen";
-import { DetailsPanel } from "./DetailsPanel";
-import { FilterBar } from "./FilterBar";
-import { CosmosGraph } from "./CosmosGraph";
-import type { GraphExplorerState, ProfileCard } from "./types";
+import { ModeSwitch } from "./ModeSwitch";
+import { buildMockPayload } from "./devFixture";
+import { AtlasView } from "./modes/AtlasView";
+import { InvestigateView, type RefetchOverrides } from "./modes/InvestigateView";
+import { useGraphSync } from "./state/useGraphSync";
+import type { GraphExplorerViewState, GraphMode } from "./types";
+import { readUrl, writeUrl } from "./urlState";
 
 const APP_ID = "graph_explorer";
+/** Graph node/edge datasets are row-hungry; hydrate up to 20k rows each
+ * (evidence/metrics datasets are tiny and never approach the cap). */
+const GRAPH_ROW_CAP = 20_000;
 
-// Mirror of the backend cap in tools/semantic/graph_explorer.py (MAX_HOPS).
-// Used only for the compact seed-line counter display.
-const MAX_HOPS = 50;
-
-const EMPTY_STATE: GraphExplorerState = {
-  title: "Graph Explorer",
-  catalog: [],
-  selected_profiles: [],
-  seed_node: { id: "", kind: "" },
-  selected_node_id: "",
-  selected_edge_id: "",
-  relation_types: [],
-  layout: "force",
-  transfer_window_days: 90,
-  max_neighbors: 25,
-  hops: 0,
-  semantic_status_filter: "all",
-  suggested_next_hops: [],
-  node_roles: {},
-  warnings: [],
-};
-
-// Dev-only fixture used when the mini-app runs in Vite without an MCP host.
-// Production reads the real payload from <script id="mini-app-data">; this is
-// never seen in the bundled build when the host injects data.
-const DEV_CATALOG: ProfileCard[] = [
-  { profile: "circles_trust", model_name: "execution_circles_v2_trust_relations_current", module: "Circles", description: "Circles v2 trust graph", source_kind: "circles_avatar", target_kind: "circles_avatar", semantic_status: "approved", quality_tier: "approved", question_synonyms: ["trust graph"], semantic_source_file: "", time_aware: true },
-  { profile: "circles_avatar_balances", model_name: "fct_execution_circles_v2_avatar_balances_latest", module: "Circles", description: "Avatar holds CRC token", source_kind: "circles_avatar", target_kind: "token", semantic_status: "approved", quality_tier: "approved", question_synonyms: [], semantic_source_file: "", time_aware: false },
-  { profile: "safe_ownership", model_name: "int_execution_safes_current_owners", module: "safe", description: "Who owns each Safe", source_kind: "address", target_kind: "safe", semantic_status: "candidate", quality_tier: "candidate", question_synonyms: ["safe owners"], semantic_source_file: "", time_aware: false },
-  { profile: "gpay_ownership", model_name: "int_execution_gpay_wallet_owners", module: "gpay", description: "GPay wallet owners", source_kind: "address", target_kind: "gpay_wallet", semantic_status: "candidate", quality_tier: "candidate", question_synonyms: [], semantic_source_file: "", time_aware: true },
-  { profile: "token_transfers", model_name: "int_execution_transfers_whitelisted_daily", module: "transfers", description: "Whitelisted ERC20 transfers", source_kind: "address", target_kind: "address", semantic_status: "candidate", quality_tier: "candidate", question_synonyms: [], semantic_source_file: "", time_aware: true },
-  { profile: "lp_in_pool", model_name: "int_execution_pools_dex_liquidity_events", module: "pools", description: "LP provider → pool", source_kind: "address", target_kind: "pool", semantic_status: "approved", quality_tier: "approved", question_synonyms: [], semantic_source_file: "", time_aware: true },
-  { profile: "pool_contains_token", model_name: "int_execution_pools_dex_liquidity_events", module: "pools", description: "Pool contains token", source_kind: "pool", target_kind: "token", semantic_status: "approved", quality_tier: "approved", question_synonyms: [], semantic_source_file: "", time_aware: false },
-  { profile: "deposit_to_validator", model_name: "int_GBCDeposit_deposists_daily", module: "GBCDeposit", description: "Deposit → validator", source_kind: "address", target_kind: "validator", semantic_status: "approved", quality_tier: "approved", question_synonyms: [], semantic_source_file: "", time_aware: true },
-  { profile: "bridge_user_flows", model_name: "int_execution_bridges_address_flows_daily", module: "bridges", description: "User ↔ bridge", source_kind: "address", target_kind: "bridge", semantic_status: "candidate", quality_tier: "candidate", question_synonyms: [], semantic_source_file: "", time_aware: true },
-];
-
-const DEV_NODES: unknown[][] = [
-  ["0xaaa", "address", "0xaaa…1", ["token_transfers", "safe_ownership"]],
-  ["0xbbb", "safe", "0xbbb…2", ["safe_ownership"]],
-  ["0xccc", "circles_avatar", "0xccc…3", ["circles_trust", "circles_avatar_balances"]],
-  ["0xddd", "token", "0xddd…4 CRC", ["circles_avatar_balances", "token_transfers"]],
-  ["0xeee", "pool", "0xeee…5 B-V2", ["lp_in_pool", "pool_contains_token"]],
-  ["0xfff", "address", "0xfff…6", ["lp_in_pool", "token_transfers"]],
-  ["0x111", "validator", "validator #4096", ["deposit_to_validator"]],
-  ["0x222", "address", "0x222…8", ["token_transfers", "gpay_ownership"]],
-  ["0x333", "gpay_wallet", "0x333…9", ["gpay_ownership"]],
-  ["0x444", "bridge", "0x444…a xDai", ["bridge_user_flows"]],
-  ["0x555", "address", "0x555…b", ["token_transfers"]],
-  ["0x666", "token", "0x666…c USDC", ["token_transfers", "pool_contains_token"]],
-];
-
-const DEV_EDGES: unknown[][] = [
-  ["e1", "0xaaa", "0xbbb", "safe_ownership", 1, 1, true],
-  ["e2", "0xaaa", "0xddd", "token_transfers", 1500, 12, true],
-  ["e3", "0xccc", "0xddd", "circles_avatar_balances", 820, 1, true],
-  ["e4", "0xccc", "0xaaa", "circles_trust", 1, 1, true],
-  ["e5", "0xfff", "0xeee", "lp_in_pool", 50000, 3, true],
-  ["e6", "0xeee", "0xddd", "pool_contains_token", 1, 1, false],
-  ["e7", "0x111", "0x111", "deposit_to_validator", 32, 1, true],
-  ["e8", "0x222", "0x333", "gpay_ownership", 1, 1, true],
-  ["e9", "0x222", "0x444", "bridge_user_flows", 2500, 5, true],
-  ["e10", "0x333", "0xddd", "token_transfers", 300, 2, true],
-  ["e11", "0xbbb", "0xeee", "token_transfers", 4200, 7, true],
-  ["e12", "0x555", "0xaaa", "token_transfers", 180, 4, true],
-  ["e13", "0xeee", "0x666", "pool_contains_token", 1, 1, false],
-  ["e14", "0xfff", "0x666", "token_transfers", 9800, 20, true],
-];
-
-// Dev-only: `sessionStorage.ge_force_empty = '1'` shows the catalog/empty state
-// even when the seeded mock fixture is defined, so we can iterate on both screens
-// without editing source each time.
-// `sessionStorage.ge_force_sample = '1'` shows sample mode (no seed, edges loaded).
-const DEV_FORCE_EMPTY =
-  typeof window !== "undefined" && window.sessionStorage?.getItem("ge_force_empty") === "1";
-const DEV_FORCE_SAMPLE =
-  typeof window !== "undefined" && window.sessionStorage?.getItem("ge_force_sample") === "1";
-
-const MOCK_PAYLOAD: MiniAppPayload<GraphExplorerState> = {
-  type: "INITIAL_LOAD",
-  view_id: "dev-view",
-  app_id: APP_ID,
-  title: "Graph Explorer",
-  status: "ready",
-  summary_cards: [],
-  datasets: {
-    nodes: {
-      name: "nodes",
-      columns: [{ name: "id" }, { name: "kind" }, { name: "label" }, { name: "profiles" }] as unknown as never,
-      preview_rows: DEV_NODES,
-      page_token: "",
-    } as never,
-    edges: {
-      name: "edges",
-      columns: [
-        { name: "id" }, { name: "source" }, { name: "target" },
-        { name: "profile" }, { name: "weight" }, { name: "edge_count" }, { name: "directed" },
-      ] as unknown as never,
-      preview_rows: DEV_EDGES,
-      page_token: "",
-    } as never,
-  },
-  view_state: DEV_FORCE_EMPTY
-    ? { ...EMPTY_STATE, catalog: DEV_CATALOG }
-    : DEV_FORCE_SAMPLE
-    ? {
-        ...EMPTY_STATE,
-        catalog: DEV_CATALOG,
-        mode: "sample",
-        selected_profiles: ["gpay_ownership"],
-        relation_types: ["gpay_ownership"],
-      }
-    : {
-    ...EMPTY_STATE,
-    catalog: DEV_CATALOG,
-    seed_node: { id: "0xaaa", kind: "address" },
-    selected_node_id: "0xccc",
-    selected_profiles: [
-      "circles_trust", "circles_avatar_balances", "safe_ownership",
-      "token_transfers", "lp_in_pool", "pool_contains_token",
-    ],
-    relation_types: [
-      "circles_trust", "circles_avatar_balances", "safe_ownership",
-      "token_transfers", "lp_in_pool", "pool_contains_token",
-    ],
-    hops: 1,
-    node_roles: {
-      "0xaaa": { is_safe: 0, is_gpay_wallet: 0, is_ga_user: 0, is_circles_avatar: 0, is_safe_owner: 1, is_lp_provider: 0, has_dune_label: 1, dune_project: "GnosisDAO" } as never,
-      "0xccc": { is_safe: 0, is_circles_avatar: 1, circles_avatar_type: "Human", is_safe_owner: 0, has_dune_label: 0 } as never,
-    },
-    suggested_next_hops: [
-      { profile: "bridge_user_flows", label: "Bridge flows", rationale: "addr ↔ bridge", quality_tier: "candidate" },
-    ],
-  },
-  warnings: [],
-};
-
-const SECTOR_LABELS: Record<string, string> = {
-  Circles: "Circles",
-  circles: "Circles",
-  gpay: "GPay",
-  safe: "Safe",
-  transfers: "Transfers",
-  pools: "Pools",
-  yields: "Yields",
-  consensus: "Staking",
-  GBCDeposit: "Staking",
-  bridges: "Bridges",
-  crawlers_data: "Labels",
-  shared: "Shared",
-};
-
-function sectorOf(module: string): string {
-  return SECTOR_LABELS[module] ?? module ?? "Other";
-}
-
-function groupProfilesBySector(
-  profiles: ProfileCard[],
-): Array<[string, ProfileCard[]]> {
-  const out: Record<string, ProfileCard[]> = {};
-  for (const profile of profiles) {
-    const sector = sectorOf(profile.module);
-    (out[sector] ||= []).push(profile);
-  }
-  return Object.entries(out).sort(([a], [b]) => a.localeCompare(b));
-}
+const MOCK_PAYLOAD = buildMockPayload();
 
 export default function GraphExplorerApp() {
-  const { view, callTool } =
-    useMiniApp<GraphExplorerState>({ appId: APP_ID, mockPayload: MOCK_PAYLOAD });
+  const { view, callTool, fetchRows, updateModelContext } =
+    useMiniApp<GraphExplorerViewState>({ appId: APP_ID, mockPayload: MOCK_PAYLOAD });
 
-  // Optimistic view-only overrides. Chip toggle, layout change, and status
-  // filter are pure-UI operations — they don't need a backend round-trip to
-  // take effect. We apply locally, then fire-and-forget the server update
-  // so the persisted view reflects the user's choice.
-  const [optimistic, setOptimistic] = useState<Partial<GraphExplorerState>>({});
-  // Clear any optimistic override as soon as the server echoes the same
-  // field back via view.view_state, so stale overrides never outlive the truth.
-  useEffect(() => {
-    if (!view) return;
-    setOptimistic((cur) => {
-      const base = view.view_state as GraphExplorerState | undefined;
-      if (!base) return cur;
-      let next = cur;
-      for (const key of Object.keys(cur) as (keyof GraphExplorerState)[]) {
-        if (JSON.stringify(cur[key]) === JSON.stringify(base[key])) {
-          if (next === cur) next = { ...cur };
-          delete (next as Partial<GraphExplorerState>)[key];
-        }
-      }
-      return next;
-    });
-  }, [view]);
-
-  const baseState = (view?.view_state ?? EMPTY_STATE) as GraphExplorerState;
-  const state = useMemo<GraphExplorerState>(
-    () => ({ ...baseState, ...optimistic }),
-    [baseState, optimistic],
+  const server = view?.view_state;
+  const revisions = (server?.dataset_revisions ?? {}) as Record<string, number>;
+  const datasets = useHydratedDatasets(
+    view?.view_id,
+    view?.datasets,
+    revisions,
+    fetchRows,
+    GRAPH_ROW_CAP,
   );
-  const sectors = useMemo(() => groupProfilesBySector(state.catalog || []), [state.catalog]);
-  // Show the graph screen whenever we have a real seed OR sample edges loaded.
-  const edgesLoaded = (view?.datasets?.edges?.preview_rows?.length ?? 0) > 0;
-  const hasSubgraph = Boolean(state.seed_node?.id) || edgesLoaded;
-  const isEmpty = !hasSubgraph;
-  const isSampleMode = !state.seed_node?.id && edgesLoaded;
 
-  // Details panel: open by default on wide viewports, closed on narrow
-  // (overlay style) so the graph canvas owns the entire visible area.
-  const [detailsOpen, setDetailsOpen] = useState<boolean>(() =>
-    typeof window === "undefined" ? true : window.innerWidth > 900,
-  );
-  // When a node is selected on narrow viewports, auto-open the overlay.
-  useEffect(() => {
-    if (!state.selected_node_id) return;
-    if (typeof window !== "undefined" && window.innerWidth <= 900) {
-      setDetailsOpen(true);
-    }
-  }, [state.selected_node_id]);
+  // Adoption / re-hydration key: per-dataset revisions (NOT SQL text).
+  const revisionsKey = `${view?.view_id ?? ""}|${Object.entries(revisions)
+    .map(([k, v]) => `${k}:${v}`)
+    .sort()
+    .join(",")}`;
+  const { state, dispatch, syncError, retrySync, nextRequestId, isCurrent } =
+    useGraphSync(view?.view_id, server, revisionsKey, callTool);
 
-  // How many BFS hops each expand action performs (expand button, double-click,
-  // neighbor "+"). Local UI state so it survives view patches without a server
-  // round-trip on every change. Changing it does NOT auto-expand — expansion is
-  // always an explicit click (the silent debounced auto-expand was unintuitive).
-  const [bfsHops, setBfsHops] = useState(3);
-
-  const onSeed = (profileId: string | null, nodeId: string) => {
-    if (!view?.view_id) return;
-    void callTool("load_graph_explorer_seed", {
-      view_id: view.view_id,
-      seed_node_id: nodeId,
-      seed_model: profileId ?? "",
-      relation_types: profileId ? [profileId] : [],
-      hops: 1,
-      transfer_window_days: state.transfer_window_days,
-      max_neighbors: state.max_neighbors,
-    }).catch((err) => {
-      console.error("[graph_explorer] seed failed", err);
-    });
-  };
-
-  /**
-   * Reload the subgraph around the CURRENT seed with fresh filters.
-   * Used when the user changes window/max/relation_types and expects the
-   * backend to re-query with those settings.
-   */
-  const refetch = (overrides: Partial<GraphExplorerState> = {}) => {
-    if (!view?.view_id || !state.seed_node?.id) return;
-    const merged = { ...state, ...overrides };
-    void callTool("load_graph_explorer_seed", {
-      view_id: view.view_id,
-      seed_node_id: state.seed_node.id,
-      seed_model: "",
-      relation_types: merged.relation_types,
-      // Preserve the echoed depth instead of hardcoding 1 — re-querying for a
-      // window/max-neighbors change should not visually collapse the hop
-      // counter back to 1. (Backend only stores hops here; BFS depth still
-      // comes from expand_graph_explorer_node.)
-      hops: Math.max(1, Math.min(Number(merged.hops) || 1, MAX_HOPS)),
-      transfer_window_days: merged.transfer_window_days,
-      max_neighbors: merged.max_neighbors,
-    }).catch((err) => console.error("[graph_explorer] refetch failed", err));
-  };
-
-  // Expand `nodeId` by `hops` BFS frontier rounds. When hops is omitted (the
-  // double-click and neighbor "+" paths), it uses the current hop count so all
-  // expansion entry points respect the same control.
-  const onExpand = (nodeId: string, hops?: number) => {
-    if (!view?.view_id || !nodeId) return;
-    void callTool("expand_graph_explorer_node", {
-      view_id: view.view_id,
-      node_id: nodeId,
-      relation_types: state.relation_types,
-      direction: "both",
-      hops: Math.max(1, Math.min(hops ?? bfsHops, MAX_HOPS)),
-    }).catch((err) => console.error("[graph_explorer] expand failed", err));
-  };
-
-  // Debounce window/max-neighbors refetches so typing doesn't spam the server.
-  const refetchTimerRef = useRef<number | null>(null);
-  const scheduleRefetch = (overrides: Partial<GraphExplorerState>) => {
-    if (refetchTimerRef.current) window.clearTimeout(refetchTimerRef.current);
-    refetchTimerRef.current = window.setTimeout(() => {
-      refetch(overrides);
-      refetchTimerRef.current = null;
-    }, 600);
-  };
-
-  const onFocus = (patch: Partial<GraphExplorerState>) => {
-    // 1. Optimistic local merge — immediate visual feedback.
-    setOptimistic((cur) => ({ ...cur, ...patch }));
-
-    if (!view?.view_id) return;
-
-    // 2. Pure view-only changes: persist via update_graph_explorer_focus (no refetch).
-    const viewOnly: Record<string, unknown> = { view_id: view.view_id };
-    if (patch.selected_node_id) viewOnly.selected_node_id = patch.selected_node_id;
-    if (patch.selected_edge_id) viewOnly.selected_edge_id = patch.selected_edge_id;
-    if (patch.layout) viewOnly.layout = patch.layout;
-    if (patch.semantic_status_filter)
-      viewOnly.semantic_status_filter = patch.semantic_status_filter;
-    if (Object.keys(viewOnly).length > 1) {
-      void callTool("update_graph_explorer_focus", viewOnly).catch((err) => {
-        // Stage-1 polish: surface optimistic-sync failures to the console
-        // instead of swallowing silently (audit flagged stale optimistic
-        // state lingering after a rejected server update).
-        console.warn("[graph-explorer] focus sync failed", err);
-      });
-    }
-
-    // 3. Data-affecting changes: refetch the subgraph.
-    // relation_types change → refetch if we added a profile whose edges aren't
-    // already loaded (removing is just a client filter — no refetch needed).
-    if (patch.relation_types && state.seed_node?.id) {
-      const existing = new Set(state.selected_profiles || state.relation_types);
-      const adding = patch.relation_types.some((p) => !existing.has(p));
-      if (adding) {
-        refetch({ relation_types: patch.relation_types });
-      } else {
-        // shrinking — just persist the choice
-        void callTool("update_graph_explorer_focus", {
-          view_id: view.view_id,
-          relation_types: patch.relation_types,
-        }).catch((err) => {
-        // Stage-1 polish: surface optimistic-sync failures to the console
-        // instead of swallowing silently (audit flagged stale optimistic
-        // state lingering after a rejected server update).
-        console.warn("[graph-explorer] focus sync failed", err);
-      });
-      }
-    }
-    if (patch.transfer_window_days !== undefined) {
-      scheduleRefetch({ transfer_window_days: patch.transfer_window_days });
-    }
-    if (patch.max_neighbors !== undefined) {
-      scheduleRefetch({ max_neighbors: patch.max_neighbors });
-    }
-  };
-
-  const toggleProfile = (profileId: string) => {
-    const current = new Set(state.relation_types);
-    const wasActive = current.has(profileId);
-    if (wasActive) current.delete(profileId);
-    else current.add(profileId);
-    onFocus({ relation_types: Array.from(current) });
-
-    // UX bug 7 fix — when activating a profile, warn the user if the profile's
-    // source_kind is incompatible with the current seed (e.g. selecting a
-    // pool-sourced profile on an address seed). Without this hint the user
-    // sees the chip light up but the graph doesn't grow and it looks broken.
-    if (!wasActive && state.seed_node?.id && state.seed_node.kind) {
-      const catalog = state.catalog || [];
-      const prof = catalog.find((p) => p.profile === profileId);
-      if (prof && prof.source_kind !== state.seed_node.kind && prof.target_kind !== state.seed_node.kind) {
-        const msg = `Heads up: "${profileId}" connects ${prof.source_kind} → ${prof.target_kind}, ` +
-          `but your seed is ${state.seed_node.kind}. This profile likely returns no new edges from this seed.`;
-        // Attach as a warning so the WarningBanner picks it up.
-        setOptimistic((cur) => ({
-          ...cur,
-          warnings: [...(state.warnings || []), msg],
-        }));
-      }
-    }
-  };
-
-  // Expand the CURRENTLY SELECTED node (or the seed if nothing is selected) by
-  // `hops` BFS frontier rounds. This is what the toolbar expand button drives,
-  // so "select a node, hit expand" deepens the graph from where the user is
-  // looking — consistent with double-click and the neighbor "+".
-  const onExpandTarget = (hops: number = bfsHops) => {
-    const target = state.selected_node_id || state.seed_node?.id;
-    if (!target) return;
-    onExpand(target, Math.max(1, hops));
-  };
-
-  // Changing the hop count only updates the count — expansion is an explicit
-  // click (expand button, double-click, or neighbor "+").
-  const onBfsHopsChange = (next: number) => setBfsHops(next);
-
-  const onReset = () => {
-    if (!view?.view_id) return;
-    void callTool("open_graph_explorer", {}).catch((err) =>
-      console.error("[graph_explorer] reset failed", err),
+  const viewId = view?.view_id ?? "";
+  const focusCall = (args: Record<string, unknown>) => {
+    if (!viewId) return;
+    callTool("update_graph_explorer_focus", { view_id: viewId, ...args }).catch(
+      (err) => console.warn("[graph_explorer] focus sync failed", err),
     );
   };
 
-  if (!view) return <MiniAppChrome activeTabId="graph" rightSlot={<MaHelpButton content={GRAPH_EXPLORER_HELP} />}><div className="ma-empty">Loading Graph Explorer…</div></MiniAppChrome>;
+  // Selection flow: local dispatch (instant) + focus tool (server refreshes
+  // evidence/roles; the PATCH echo applies via useMiniApp).
+  const onSelectNode = (id: string) => {
+    dispatch({ type: "SELECT_NODE", id });
+    if (id) focusCall({ selected_node_id: id });
+  };
+  const onSelectEdge = (id: string) => {
+    dispatch({ type: "SELECT_EDGE", id });
+    if (id) focusCall({ selected_edge_id: id });
+  };
+  const onClearSelection = () => dispatch({ type: "SELECT_NODE", id: "" });
 
-  const activeSet = new Set(state.relation_types);
-  const statusFilter = state.semantic_status_filter;
+  const onModeChange = (mode: GraphMode) => {
+    dispatch({ type: "SET_MODE", mode });
+    focusCall({ mode });
+  };
 
-  // UX bug 6 fix — when status filter is "approved" or "candidate", pass only
-  // the profiles that pass the status filter to the graph renderer. Previously
-  // the chip row filtered but the canvas kept showing candidate edges, which
-  // was misleading. Computed as a *view layer* so persisted state isn't
-  // mutated — user flipping filter back to "all" restores the full picture.
-  const catalogByProfile = new Map((state.catalog || []).map((p) => [p.profile, p]));
-  const effectiveRelationTypes =
-    statusFilter === "all"
-      ? state.relation_types
-      : state.relation_types.filter((id) => {
-          const p = catalogByProfile.get(id);
-          return !p || p.semantic_status === statusFilter;
-        });
-  const trimmedCount = state.relation_types.length - effectiveRelationTypes.length;
+  /** Seed a NEW investigate subgraph (empty relation_types → the server
+   * auto-detects applicable profiles from the address roles). */
+  const seedInvestigate = (nodeId: string) => {
+    if (!viewId || !nodeId) return;
+    const rid = nextRequestId();
+    callTool("load_graph_explorer_seed", {
+      view_id: viewId,
+      seed_node_id: nodeId,
+      seed_model: "",
+      relation_types: [],
+      hops: 1,
+      transfer_window_days: state.windowDays,
+      max_neighbors: state.maxNeighbors,
+    })
+      .then(() => {
+        if (isCurrent(rid)) dispatch({ type: "SET_MODE", mode: "investigate" });
+      })
+      .catch((err) => console.error("[graph_explorer] seed failed", err));
+  };
 
-  const nodeCount = view.datasets?.nodes?.preview_rows?.length ?? 0;
-  const edgeCount = view.datasets?.edges?.preview_rows?.length ?? 0;
-  const seedId = state.seed_node?.id ?? "";
-  const seedKind = state.seed_node?.kind ?? "";
+  /** Re-query the CURRENT seed with fresh filters (window/max/profile add).
+   * Preserves the echoed hop depth so the counter never collapses to 1. */
+  const refetchSeed = (overrides: RefetchOverrides) => {
+    const seedId = server?.investigate?.seed?.id;
+    if (!viewId || !seedId) return;
+    const hops = Math.max(
+      1,
+      Math.min(
+        Number(server?.investigate?.hops_used) || 1,
+        Math.max(1, state.limits.max_hops),
+      ),
+    );
+    nextRequestId(); // supersede any pending follow-up from older loads
+    callTool("load_graph_explorer_seed", {
+      view_id: viewId,
+      seed_node_id: seedId,
+      seed_model: "",
+      relation_types: overrides.profiles ?? state.investigateProfiles,
+      hops,
+      transfer_window_days: overrides.windowDays ?? state.windowDays,
+      max_neighbors: overrides.maxNeighbors ?? state.maxNeighbors,
+    }).catch((err) => console.error("[graph_explorer] refetch failed", err));
+  };
+
+  /** Explicit BFS expansion — exactly the stepper depth, never silent. */
+  const expandNode = (nodeId: string) => {
+    if (!viewId || !nodeId) return;
+    nextRequestId();
+    callTool("expand_graph_explorer_node", {
+      view_id: viewId,
+      node_id: nodeId,
+      relation_types: state.investigateProfiles,
+      direction: "both",
+      hops: state.expandDepth,
+    }).catch((err) => console.error("[graph_explorer] expand failed", err));
+  };
+
+  /** Atlas sample (REPLACE semantics; empty profile list clears the atlas). */
+  const loadSample = (profiles: string[]) => {
+    if (!viewId) return;
+    nextRequestId();
+    callTool("load_graph_atlas_sample", {
+      view_id: viewId,
+      profiles,
+      sample_size: state.atlasSampleSize,
+      window_days: state.windowDays,
+    }).catch((err) => console.error("[graph_explorer] atlas sample failed", err));
+  };
+
+  // ---- Deep links (boot: apply URL state the payload LACKS; then keep the
+  // URL in sync via replaceState — unmanaged params like ?token= preserved).
+  const urlBootDone = useRef(false);
+  useEffect(() => {
+    if (urlBootDone.current || !view || !server) return;
+    urlBootDone.current = true;
+    const u = readUrl();
+    if (u.depth) dispatch({ type: "SET_EXPAND_DEPTH", depth: u.depth });
+    if (u.layout === "force" || u.layout === "circular") {
+      dispatch({ type: "SET_LAYOUT", layout: u.layout });
+    }
+    if (u.status === "all" || u.status === "approved" || u.status === "candidate") {
+      dispatch({ type: "SET_STATUS_FILTER", filter: u.status });
+    }
+    if (u.window) dispatch({ type: "SET_WINDOW", days: u.window });
+    if (u.max) dispatch({ type: "SET_MAX_NEIGHBORS", value: u.max });
+    const serverSeed = server.investigate?.seed?.id ?? "";
+    if (u.seed && u.seed !== serverSeed) {
+      // Standalone /app?seed=… is mapped onto open_graph_explorer by the
+      // route — only load when the payload does NOT already reflect it.
+      seedInvestigate(u.seed);
+    } else if (
+      u.profiles.length &&
+      (u.mode === "atlas" || !u.mode) &&
+      !(server.atlas?.selected_profiles ?? []).length
+    ) {
+      dispatch({ type: "SET_ATLAS_PROFILES", profiles: u.profiles });
+      loadSample(u.profiles);
+    }
+    if (u.sel) onSelectNode(u.sel);
+    else if (u.esel) onSelectEdge(u.esel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, server]);
+
+  useEffect(() => {
+    if (!urlBootDone.current || typeof window === "undefined") return;
+    writeUrl({
+      mode: state.mode,
+      seed: server?.investigate?.seed?.id ?? "",
+      profiles:
+        state.mode === "atlas" ? state.atlasProfiles : state.investigateProfiles,
+      window: state.windowDays,
+      max: state.maxNeighbors,
+      sel: state.selection.nodeId,
+      esel: state.selection.edgeId,
+      status: state.statusFilter,
+      layout: state.layout,
+      depth: state.expandDepth,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    state.mode,
+    state.atlasProfiles,
+    state.investigateProfiles,
+    state.windowDays,
+    state.maxNeighbors,
+    state.selection,
+    state.statusFilter,
+    state.layout,
+    state.expandDepth,
+    server?.investigate?.seed?.id,
+  ]);
+
+  // ---- Model context (what the agent sees about this view) ----
+  const activePair = state.mode === "atlas" ? ["atlas_nodes", "atlas_edges"] : ["nodes", "edges"];
+  const nodeCount = datasets[activePair[0]]?.rows.length ?? 0;
+  const edgeCount = datasets[activePair[1]]?.rows.length ?? 0;
+  const activeProfiles = useMemo(
+    () => (state.mode === "atlas" ? state.atlasProfiles : state.investigateProfiles),
+    [state.mode, state.atlasProfiles, state.investigateProfiles],
+  );
+  useEffect(() => {
+    if (!view) return;
+    updateModelContext({
+      mode: state.mode,
+      seed: server?.investigate?.seed?.id || "none",
+      selected_node_id: state.selection.nodeId || "none",
+      selected_edge_id: state.selection.edgeId || "none",
+      active_profiles: activeProfiles.join(",") || "none",
+      node_count: nodeCount,
+      edge_count: edgeCount,
+      hops_used: server?.investigate?.hops_used ?? 0,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    state.mode,
+    state.selection.nodeId,
+    state.selection.edgeId,
+    activeProfiles,
+    nodeCount,
+    edgeCount,
+    server?.investigate?.seed?.id,
+    server?.investigate?.hops_used,
+  ]);
+
+  if (!view || !server) {
+    return (
+      <MiniAppChrome activeTabId="graph" rightSlot={<MaHelpButton content={GRAPH_EXPLORER_HELP} />}>
+        <div className="ma-empty">Loading Graph Explorer…</div>
+      </MiniAppChrome>
+    );
+  }
 
   return (
-    <MiniAppChrome activeTabId="graph" bodyClassName="ma-body--flush" rightSlot={<MaHelpButton content={GRAPH_EXPLORER_HELP} />}>
-    <div className="ge-shell">
-      <WarningBanner warnings={view.warnings ?? []} />
-      {isEmpty ? (
-        <CatalogScreen catalog={state.catalog || []} onSeed={onSeed} />
-      ) : (
-        <>
-          {seedId ? (
-            <div className="ge-seedline">
-              <span className="ge-seedline-label">Seed{seedKind ? ` · ${seedKind}` : ""}</span>
-              <span className="ge-seedline-addr" title={seedId}>
-                {seedId.startsWith("0x") ? shortAddr(seedId, 10, 8) : seedId}
-              </span>
-              <button
-                type="button"
-                className="ge-seedline-copy"
-                onClick={() => navigator.clipboard?.writeText(seedId)}
-                title="Copy seed id"
-              >
-                Copy
-              </button>
-              <span className="ge-seedline-stats">
-                <span><b>{nodeCount}</b> nodes</span>
-                <span><b>{edgeCount}</b> edges</span>
-                <span>hop <b>{state.hops}</b>/{MAX_HOPS}</span>
-                <span><b>{state.relation_types.length}</b>/{state.catalog?.length ?? 0} profiles</span>
-              </span>
-            </div>
-          ) : null}
-          <FilterBar
-            view={state}
-            onFocus={onFocus}
-            onReset={onReset}
-            detailsOpen={detailsOpen}
-            onToggleDetails={() => setDetailsOpen((v) => !v)}
-            onExpand={(hops) => onExpandTarget(hops)}
-            isSampleMode={isSampleMode}
-            bfsHops={bfsHops}
-            onBfsHopsChange={onBfsHopsChange}
-          />
-          {trimmedCount > 0 && (
-            <div
-              className="ge-status-filter-note"
-              title="Status filter hides some active profiles. Click 'All' to see them again."
-              style={{
-                fontSize: 11,
-                color: "var(--text-muted, #94a3b8)",
-                padding: "2px 12px",
-                background: "rgba(251, 191, 36, 0.08)",
-                borderTop: "1px solid rgba(251, 191, 36, 0.2)",
-              }}
-            >
-              Status filter ({statusFilter}) hides {trimmedCount} active
-              profile{trimmedCount === 1 ? "" : "s"} from the canvas. Switch to
-              "All" to restore.
-            </div>
-          )}
-          <nav className="ge-chip-strip" aria-label="Edge types">
-            <span
-              className="ge-chip-strip-caption"
-              title="Click a chip to add or remove that relationship type from the graph. The bold sector label toggles the whole group."
-            >
-              Edge types
-            </span>
-            {sectors.map(([sector, profiles]) => {
-              const visible = profiles.filter((p) =>
-                statusFilter === "all" ? true : p.semantic_status === statusFilter,
-              );
-              if (!visible.length) return null;
-              const ids = visible.map((p) => p.profile);
-              const allOn = ids.every((id) => activeSet.has(id));
-              return (
-                <div key={sector} className="ge-chip-group">
-                  <button
-                    type="button"
-                    className={`ge-chip-group-label ${allOn ? "all-on" : ""}`}
-                    onClick={() => {
-                      const next = new Set(state.relation_types);
-                      if (allOn) ids.forEach((id) => next.delete(id));
-                      else ids.forEach((id) => next.add(id));
-                      onFocus({ relation_types: Array.from(next) });
-                    }}
-                    title={`Toggle all ${visible.length} ${sector} profile(s)`}
-                  >
-                    {sector}
-                  </button>
-                  {visible.map((p) => {
-                    const active = activeSet.has(p.profile);
-                    return (
-                      <button
-                        key={p.profile}
-                        type="button"
-                        className={`ge-chip ${active ? "active" : ""} ${p.semantic_status}`}
-                        onClick={() => toggleProfile(p.profile)}
-                        title={`${p.profile} — ${p.description || ""}\n${p.source_kind} → ${p.target_kind}`}
-                      >
-                        <span className="ge-chip-dot" aria-hidden />
-                        <span className="ge-chip-name">{p.profile}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </nav>
-          <div className={`ge-body ${detailsOpen ? "details-open" : "details-closed"}`}>
-            <main className="ge-canvas">
-              <CosmosGraph
-                nodes={view.datasets?.nodes}
-                edges={view.datasets?.edges}
-                selectedNodeId={state.selected_node_id}
-                selectedEdgeId={state.selected_edge_id}
-                seedNodeId={state.seed_node?.id}
-                activeProfiles={effectiveRelationTypes}
-                layout={state.layout}
-                onSelectNode={(id) => onFocus({ selected_node_id: id })}
-                onSelectEdge={(id) => onFocus({ selected_edge_id: id })}
-                onExpandNode={onExpand}
-              />
-            </main>
-            <DetailsPanel
-              view={view}
-              onExpand={onExpand}
-              onSelectNode={(id) => onFocus({ selected_node_id: id })}
-              onRecenter={(id) => onSeed(null, id)}
-              onApplyHop={(profileId) => {
-                const current = new Set(state.relation_types);
-                current.add(profileId);
-                onFocus({ relation_types: Array.from(current) });
-              }}
-            />
+    <MiniAppChrome
+      activeTabId="graph"
+      bodyClassName="ma-body--flush"
+      rightSlot={<MaHelpButton content={GRAPH_EXPLORER_HELP} />}
+    >
+      <div className="ge-shell">
+        <WarningBanner warnings={view.warnings ?? []} />
+        {syncError ? (
+          <div className="ge-sync-error" role="alert">
+            <span>View sync failed: {syncError}</span>
+            <button type="button" className="ge-btn" onClick={retrySync}>
+              Retry
+            </button>
           </div>
-        </>
-      )}
-    </div>
+        ) : null}
+        {state.mode === "atlas" || !server.investigate?.seed?.id ? (
+          // Investigate-with-seed folds the mode switch into the seed row
+          // instead — one less full-width header bar above the canvas.
+          <div className="ge-modebar">
+            <span className="ge-title">Graph Explorer</span>
+            <ModeSwitch mode={state.mode} onChange={onModeChange} />
+          </div>
+        ) : null}
+        {state.mode === "atlas" ? (
+          <AtlasView
+            server={server}
+            local={state}
+            dispatch={dispatch}
+            atlasNodes={datasets.atlas_nodes}
+            atlasEdges={datasets.atlas_edges}
+            loadSample={loadSample}
+            seedInvestigate={seedInvestigate}
+            onSelectNode={onSelectNode}
+            onSelectEdge={onSelectEdge}
+            onClearSelection={onClearSelection}
+          />
+        ) : (
+          <InvestigateView
+            server={server}
+            local={state}
+            dispatch={dispatch}
+            modeSwitch={<ModeSwitch mode={state.mode} onChange={onModeChange} />}
+            nodes={datasets.nodes}
+            edges={datasets.edges}
+            nodeEvidence={datasets.node_evidence}
+            edgeEvidence={datasets.edge_evidence}
+            graphMetrics={datasets.graph_metrics}
+            refetchSeed={refetchSeed}
+            seedInvestigate={seedInvestigate}
+            expandNode={expandNode}
+            onSelectNode={onSelectNode}
+            onSelectEdge={onSelectEdge}
+            onClearSelection={onClearSelection}
+            onBrowseAtlas={() => onModeChange("atlas")}
+          />
+        )}
+      </div>
     </MiniAppChrome>
   );
 }

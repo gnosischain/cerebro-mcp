@@ -171,7 +171,10 @@ class Settings(BaseSettings):
     # the whole budget in one step.
     GRAPH_EXPLORER_SEED_NODE_CAP: int = 3000
     GRAPH_EXPLORER_BFS_NODE_CAP: int = 15000
-    GRAPH_EXPLORER_BFS_PER_HOP_BUDGET: int = 3000
+    # 10k: a single frontier round on a dense cluster (e.g. a whole Circles
+    # trust neighborhood) fits in one Expand instead of stopping at 3k; the
+    # global BFS_NODE_CAP still bounds total growth.
+    GRAPH_EXPLORER_BFS_PER_HOP_BUDGET: int = 10000
 
     # Phase 1: column-scoped schema injection. Tables narrower than the
     # threshold are injected verbatim into LLM prompts; wider tables are
@@ -257,6 +260,20 @@ class Settings(BaseSettings):
     # Report serving
     REPORT_SERVER_PORT: int = 0  # 0 = disabled; set to e.g. 8765 for HTTP serving
     REPORT_BASE_URL: str = ""   # Override full URL prefix for deployed setups
+    # Dev-only mini apps. Portfolio and Model Lineage are development/debug
+    # surfaces — OFF by default so normal deployments don't register their
+    # tools, serve their /app routes, or show their cross-app tabs. Set
+    # DEV_MINI_APPS_ENABLED=true locally to get them back.
+    DEV_MINI_APPS_ENABLED: bool = False
+
+    # Report Studio trust switch. The report directory and the chart-record
+    # registry are process-global with no per-user owner, so report
+    # delete/rename, the composer, AND chart-record reads
+    # (list_session_charts / get_session_chart / session_charts embedding)
+    # are a trusted single-user/local feature. Shared SSE deployments should
+    # set this to false: the gated tools then return a structured
+    # "disabled on this server" error and the UI hides those surfaces.
+    REPORT_STUDIO_ALLOW_MUTATIONS: bool = True
     # Auto-open every rendered visualization/report in the default browser.
     # OPT-IN (default off): "all plots/reports in-app unless asked". When
     # enabled it applies on local stdio only (never SSE — the browser would

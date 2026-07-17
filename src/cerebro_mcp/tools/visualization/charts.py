@@ -199,10 +199,57 @@ def _prune_report_cache() -> None:
         del _REPORT_CACHE[oldest]
 
 
+def forget_report(report_id: str) -> None:
+    """Drop a report from the in-memory cache (no-op if absent).
+
+    Called after a report file is deleted or renamed so the next
+    ``_resolve_report`` falls through to the fresh disk state.
+    """
+    with _REPORT_LOCK:
+        _REPORT_CACHE.pop(report_id, None)
+
+
 def get_chart_record(chart_id: str) -> dict | None:
     with _chart_lock:
+        # Prune on EVERY access so direct lookups (composer, thumbnails) see
+        # TTL-consistent state without requiring a prior list call.
+        _prune_chart_registry()
         chart = _chart_registry.get(chart_id)
-        return dict(chart) if chart else None
+        # Registry values don't carry their own key — inject it so consumers
+        # (composer picker, thumbnails) get a self-describing record.
+        return {"chart_id": chart_id, **chart} if chart else None
+
+
+_CHART_RECORD_SUMMARY_KEYS = (
+    "chart_id",
+    "title",
+    "chart_type",
+    "data_points",
+    "created_at",
+    "source",
+    "source_model",
+)
+
+
+def list_chart_records() -> list[dict]:
+    """Snapshot of the chart registry WITHOUT the heavy ECharts ``option``.
+
+    Used by the Report Studio composer picker; records are process-global
+    (no per-session owner) with a 2h TTL.
+    """
+    with _chart_lock:
+        _prune_chart_registry()
+        return [
+            {
+                "chart_id": cid,
+                **{
+                    k: v.get(k)
+                    for k in _CHART_RECORD_SUMMARY_KEYS
+                    if k != "chart_id"
+                },
+            }
+            for cid, v in _chart_registry.items()
+        ]
 
 
 # --- Report Helpers ---
@@ -222,6 +269,16 @@ _REPORT_FILENAME_GLOBS = (
 )
 
 
+def _slugify_title(title: str, fallback: str) -> str:
+    """First 3 words of title, lowercased, non-alnum stripped, hyphen-joined.
+
+    This is the lossy ``<slug>`` segment of report filenames — a title HINT,
+    not the full title (that lives in the embedded report-data JSON).
+    """
+    words = re.sub(r"[^a-zA-Z0-9 ]", "", title).split()[:3]
+    return "-".join(w.lower() for w in words) if words else fallback
+
+
 def _report_filename(report_id: str, title: str, kind: str = "report") -> str:
     """Build a durable report filename.
 
@@ -230,9 +287,7 @@ def _report_filename(report_id: str, title: str, kind: str = "report") -> str:
     kind="case_study" -> cerebro_case_study_<UTC>_<slug>_<full-id>.html
     """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    # Slug: first 3 words of title, lowercased, non-alpha stripped, joined by hyphen
-    words = re.sub(r"[^a-zA-Z0-9 ]", "", title).split()[:3]
-    slug = "-".join(w.lower() for w in words) if words else kind
+    slug = _slugify_title(title, kind)
     if kind == "research":
         prefix = "cerebro_research"
     elif kind == "case_study":
@@ -289,6 +344,115 @@ def _extract_report_id_from_path(path: Path) -> str:
     if len(parts) >= 5:
         return parts[-1]
     return name
+
+
+# --- Managed report resolution (Report Studio) ---
+# The legacy _find_report_on_disk interpolates refs into glob patterns and
+# substring-matches filenames — fine for the chat-facing open_report, unsafe
+# for mutations. Report Studio tools resolve through the strict path below.
+
+
+class ReportRefError(ValueError):
+    """A report reference failed to resolve (invalid, missing, or ambiguous)."""
+
+    def __init__(self, message: str, *, candidates: list[str] | None = None):
+        super().__init__(message)
+        self.candidates = candidates or []
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+_HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{8,32}$")
+
+
+def _is_managed_report_file(path: Path) -> bool:
+    """Read AND write guard for Report Studio: a regular, non-symlink file
+    inside the report directory whose filename parses to a canonical UUID.
+
+    Applied to listing and preview too — a symlink planted in the report dir
+    must never be readable (or deletable) through the studio.
+    """
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        report_dir = _get_report_dir().resolve()
+        if report_dir not in path.resolve().parents:
+            return False
+        return bool(_UUID_RE.match(_extract_report_id_from_path(path)))
+    except OSError:
+        return False
+
+
+def resolve_report_id(report_ref: str) -> tuple[str, Path]:
+    """Resolve a full UUID or 8+ hex-char prefix to ``(full_id, path)``.
+
+    Prefix comparison runs against parsed filename UUIDs (hyphens stripped)
+    — no glob interpolation, no substring matching. Raises ReportRefError,
+    with ``.candidates`` populated when the prefix is ambiguous.
+    """
+    ref = (report_ref or "").strip().lower()
+    needle = ref.replace("-", "")
+    if not _UUID_RE.match(ref) and not _HEX_PREFIX_RE.match(needle):
+        raise ReportRefError(
+            "report_ref must be a report UUID or at least 8 hex characters."
+        )
+    matches: list[tuple[str, Path]] = []
+    for path in _iter_report_files(_get_report_dir()):
+        if not _is_managed_report_file(path):
+            continue
+        rid = _extract_report_id_from_path(path)
+        if rid.replace("-", "").startswith(needle):
+            matches.append((rid, path))
+    if not matches:
+        raise ReportRefError(f"No report matches '{ref}'.")
+    if len(matches) > 1:
+        raise ReportRefError(
+            f"Ambiguous report reference '{ref}'.",
+            candidates=sorted(rid for rid, _ in matches),
+        )
+    return matches[0]
+
+
+# --- Report-data embedding + atomic file writes ---
+
+# THREE groups (open tag / JSON blob / close tag) — shared by extraction
+# (group 2) and in-place replacement (groups 1+3), so the two can never
+# drift apart.
+_REPORT_DATA_RE = re.compile(
+    r'(<script\s+id="report-data"\s+type="application/json">)(.*?)(</script>)',
+    re.DOTALL,
+)
+
+# Guards create/rename/delete of report FILES (the _REPORT_LOCK above only
+# guards the in-memory cache).
+_REPORT_FS_LOCK = threading.Lock()
+
+
+def _serialize_report_data(structured: dict) -> str:
+    """JSON for embedding inside ``<script id="report-data">``.
+
+    Escapes ``<`` as ``\\u003c`` so a ``</script>`` substring in a title or
+    SQL string cannot terminate the script element (mirrors the web_apps
+    payload injector). ``json.loads`` decodes the escape transparently, so
+    extraction round-trips.
+    """
+    return json.dumps(structured, default=str).replace("<", "\\u003c")
+
+
+def _atomic_write_report(path: Path, html: str) -> None:
+    """Write via a same-directory temp file + ``os.replace``.
+
+    A crash or partial write never leaves a truncated ``.html`` visible to
+    the archive (temp names don't match the report globs). Caller holds
+    ``_REPORT_FS_LOCK``.
+    """
+    tmp = path.with_name(path.name + f".tmp-{uuid.uuid4().hex[:8]}")
+    try:
+        tmp.write_text(html, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _report_kind_from_path(path: Path) -> str:
@@ -640,7 +804,8 @@ def create_report_artifact(
     else:
         kind = "report"
     report_path = report_dir / _report_filename(report_id, title, kind=kind)
-    report_path.write_text(html, encoding="utf-8")
+    with _REPORT_FS_LOCK:
+        _atomic_write_report(report_path, html)
 
     file_uri = _get_report_link(report_path)
     structured["file_uri"] = file_uri
@@ -1012,13 +1177,10 @@ def create_case_study_artifact(
 
 def _extract_structured_from_html(html: str) -> dict | None:
     """Try to extract embedded report data from standalone HTML."""
-    match = re.search(
-        r'<script\s+id="report-data"\s+type="application/json">(.*?)</script>',
-        html, re.DOTALL,
-    )
+    match = _REPORT_DATA_RE.search(html)
     if match:
         try:
-            return json.loads(match.group(1))
+            return json.loads(match.group(2))
         except (json.JSONDecodeError, ValueError):
             pass
     return None
@@ -2627,7 +2789,7 @@ def _build_standalone_html(
         data_dict["case_study_metadata"] = case_study_metadata
     if subtitle:
         data_dict["subtitle"] = subtitle
-    data = json.dumps(data_dict, default=str)
+    data = _serialize_report_data(data_dict)
 
     html = _get_report_html()
     data_tag = f'<script id="report-data" type="application/json">{data}</script>'
@@ -2713,95 +2875,48 @@ def list_reports_impl(limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-def register_visualization_tools(mcp, ch: ClickHouseManager):
-    """Register chart generation and report tools."""
+def _register_chart_from_dataset(
+    *,
+    columns: list[str],
+    rows: list[list],
+    sql: str,
+    database: str,
+    chart_type: str,
+    x_field: str,
+    y_field: str,
+    change_field: str,
+    series_field: str,
+    title: str,
+    elapsed_seconds: float,
+    source: str,
+    return_metadata_only: bool = False,
+    explain_context: bool = False,
+    record_session: bool = True,
+) -> str:
+    """Build ECharts spec from tabular data and register the chart.
 
-    def _register_chart_from_dataset(
-        *,
-        columns: list[str],
-        rows: list[list],
-        sql: str,
-        database: str,
-        chart_type: str,
-        x_field: str,
-        y_field: str,
-        change_field: str,
-        series_field: str,
-        title: str,
-        elapsed_seconds: float,
-        source: str,
-        return_metadata_only: bool = False,
-        explain_context: bool = False,
-    ) -> str:
-        """Build ECharts spec from tabular data and register the chart.
+    When return_metadata_only=True, returns only a compact metadata line
+    (chart ID, type, title, data points, query time) without the full
+    ECharts JSON or SQL echo. Used by batch chart tools.
 
-        When return_metadata_only=True, returns only a compact metadata line
-        (chart ID, type, title, data points, query time) without the full
-        ECharts JSON or SQL echo. Used by batch chart tools.
+    When explain_context=True, a "What this shows" rationale derived from
+    the dbt model/column docs is stored on the chart and shown on the card.
+    """
+    from cerebro_mcp.tools.governance.session_state import state
 
-        When explain_context=True, a "What this shows" rationale derived from
-        the dbt model/column docs is stored on the chart and shown on the card.
-        """
-        from cerebro_mcp.tools.governance.session_state import state
+    if chart_type not in CHART_BUILDERS:
+        supported = ", ".join(CHART_BUILDERS.keys())
+        return f"Error: Unknown chart type '{chart_type}'. Supported: {supported}"
 
-        if chart_type not in CHART_BUILDERS:
-            supported = ", ".join(CHART_BUILDERS.keys())
-            return f"Error: Unknown chart type '{chart_type}'. Supported: {supported}"
+    try:
+        if not rows:
+            return "Error: Query returned no data. Cannot generate chart."
 
-        try:
-            if not rows:
-                return "Error: Query returned no data. Cannot generate chart."
+        col_index = _build_col_index(columns)
 
-            col_index = _build_col_index(columns)
-
-            # Auto-detect fields if not specified
-            if chart_type == "numberDisplay":
-                y_field, change_field, number_display_error = _resolve_number_display_fields(
-                    columns=columns,
-                    rows=rows,
-                    x_field=x_field,
-                    y_field=y_field,
-                    change_field=change_field,
-                    series_field=series_field,
-                )
-                if number_display_error:
-                    return number_display_error
-            else:
-                if not x_field and columns:
-                    x_field = columns[0]
-                if not y_field and len(columns) > 1:
-                    y_field = columns[1]
-                if chart_type in {"line", "area", "bar"} and not y_field:
-                    available = ", ".join(columns)
-                    return (
-                        f"Error: `{chart_type}` charts require a dimension column and at least one "
-                        f"value column. This query returned columns: {available}. Use "
-                        "`numberDisplay` for a single aggregated metric or include a dimension such "
-                        "as `day`."
-                    )
-
-            # Validate fields exist
-            if x_field and x_field not in col_index:
-                available = ", ".join(columns)
-                return f"Error: x_field '{x_field}' not found in columns: {available}"
-            if y_field:
-                requested_y_fields = [field.strip() for field in y_field.split(",") if field.strip()]
-                missing_y_fields = [field for field in requested_y_fields if field not in col_index]
-                if missing_y_fields:
-                    available = ", ".join(columns)
-                    missing = ", ".join(missing_y_fields)
-                    return (
-                        f"Error: y_field '{missing}' not found in columns: {available}"
-                    )
-            if change_field and change_field not in col_index:
-                available = ", ".join(columns)
-                return f"Error: change_field '{change_field}' not found in columns: {available}"
-            if series_field and series_field not in col_index:
-                available = ", ".join(columns)
-                return f"Error: series_field '{series_field}' not found in columns: {available}"
-
-            shape_error, input_shape = _validate_chart_input_shape(
-                chart_type=chart_type,
+        # Auto-detect fields if not specified
+        if chart_type == "numberDisplay":
+            y_field, change_field, number_display_error = _resolve_number_display_fields(
                 columns=columns,
                 rows=rows,
                 x_field=x_field,
@@ -2809,105 +2924,220 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
                 change_field=change_field,
                 series_field=series_field,
             )
-            if shape_error:
-                return shape_error
-
-            builder = CHART_BUILDERS[chart_type]
-            if chart_type == "numberDisplay":
-                option = _build_number_display(
-                    rows,
-                    col_index,
-                    y_field,
-                    title,
-                    change_field,
+            if number_display_error:
+                return number_display_error
+        else:
+            if not x_field and columns:
+                x_field = columns[0]
+            if not y_field and len(columns) > 1:
+                y_field = columns[1]
+            if chart_type in {"line", "area", "bar"} and not y_field:
+                available = ", ".join(columns)
+                return (
+                    f"Error: `{chart_type}` charts require a dimension column and at least one "
+                    f"value column. This query returned columns: {available}. Use "
+                    "`numberDisplay` for a single aggregated metric or include a dimension such "
+                    "as `day`."
                 )
-            else:
-                option = builder(rows, col_index, x_field, y_field, series_field, title)
+
+        # Validate fields exist
+        if x_field and x_field not in col_index:
+            available = ", ".join(columns)
+            return f"Error: x_field '{x_field}' not found in columns: {available}"
+        if y_field:
+            requested_y_fields = [field.strip() for field in y_field.split(",") if field.strip()]
+            missing_y_fields = [field for field in requested_y_fields if field not in col_index]
+            if missing_y_fields:
+                available = ", ".join(columns)
+                missing = ", ".join(missing_y_fields)
+                return (
+                    f"Error: y_field '{missing}' not found in columns: {available}"
+                )
+        if change_field and change_field not in col_index:
+            available = ", ".join(columns)
+            return f"Error: change_field '{change_field}' not found in columns: {available}"
+        if series_field and series_field not in col_index:
+            available = ", ".join(columns)
+            return f"Error: series_field '{series_field}' not found in columns: {available}"
+
+        shape_error, input_shape = _validate_chart_input_shape(
+            chart_type=chart_type,
+            columns=columns,
+            rows=rows,
+            x_field=x_field,
+            y_field=y_field,
+            change_field=change_field,
+            series_field=series_field,
+        )
+        if shape_error:
+            return shape_error
+
+        builder = CHART_BUILDERS[chart_type]
+        if chart_type == "numberDisplay":
+            option = _build_number_display(
+                rows,
+                col_index,
+                y_field,
+                title,
+                change_field,
+            )
+        else:
+            option = builder(rows, col_index, x_field, y_field, series_field, title)
+        if record_session:
             state.record_generate_chart(chart_type, sql, series_field, source=source)
 
-            rationale = ""
-            if explain_context:
-                from cerebro_mcp.runtime.context_enrichment import (
-                    build_sql_context_block,
-                )
-
-                rationale = build_sql_context_block(sql, columns)
-
-            # Register chart in registry (with TTL tracking)
-            chart_id = _next_chart_id()
-            with _chart_lock:
-                _prune_chart_registry()
-                _chart_registry[chart_id] = {
-                    "option": option,
-                    "title": title or chart_type,
-                    "chart_type": chart_type,
-                    "data_points": len(rows),
-                    "created_at": datetime.now(),
-                    "sql": sql,
-                    "database": database,
-                    "series_field": series_field,
-                    "change_field": change_field,
-                    "input_shape": input_shape,
-                    "source": source,
-                    "source_model": _single_source_model(sql),
-                    "rationale": rationale,
-                }
-
-            # Metadata-only mode: compact single line for batch tool
-            if return_metadata_only:
-                series_tag = f" | series: {series_field}" if series_field else ""
-                return (
-                    f"OK|{chart_id}|{chart_type}|{title or chart_type}"
-                    f"|{len(rows)}|{elapsed_seconds}s{series_tag}"
-                )
-
-            output = json.dumps(option, default=str, indent=2)
-            metadata = (
-                f"\n\n---\n"
-                f"Chart ID: **{chart_id}** (use in reports with "
-                f"`{{{{chart:{chart_id}}}}}`) | "
-                f"Type: {chart_type} | "
-                f"Data points: {len(rows)} | "
-                f"Query time: {elapsed_seconds}s"
+        rationale = ""
+        if explain_context:
+            from cerebro_mcp.runtime.context_enrichment import (
+                build_sql_context_block,
             )
 
-            if rationale:
-                metadata += f"\n\n{rationale}"
+            rationale = build_sql_context_block(sql, columns)
 
-            metadata += f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
+        # Register chart in registry (with TTL tracking)
+        chart_id = _next_chart_id()
+        with _chart_lock:
+            _prune_chart_registry()
+            _chart_registry[chart_id] = {
+                "option": option,
+                "title": title or chart_type,
+                "chart_type": chart_type,
+                "data_points": len(rows),
+                "created_at": datetime.now(),
+                "sql": sql,
+                "database": database,
+                "series_field": series_field,
+                "change_field": change_field,
+                "input_shape": input_shape,
+                "source": source,
+                "source_model": _single_source_model(sql),
+                "rationale": rationale,
+            }
 
-            # Workflow next-step with registered charts summary
-            total_charts = len(_chart_registry)
-            chart_list = ", ".join(_chart_registry.keys())
-            metadata += (
-                f"\n\n**Registered charts ({total_charts}):** {chart_list}\n"
-                "**Next step:** When all charts are ready, call "
-                "`generate_report(title, content_markdown)` with "
-                "`{{chart:ID}}` placeholders to produce an interactive report."
-            )
-
-            return truncate_response(output + metadata)
-
-        except Exception as e:
-            error_msg = str(e)
-            if "UNKNOWN_IDENTIFIER" in error_msg or "Unknown expression" in error_msg:
-                return (
-                    f"Error: {error_msg}\n\n"
-                    "**Hint**: Wrong column name in the SQL query. "
-                    "Use `describe_table` to verify exact column names before writing SQL. "
-                    "Do NOT guess — most tables use generic names like `value`, `cnt`, `date`."
-                )
-            available = ", ".join(columns) if "columns" in locals() else ""
-            selected = (
-                f"chart_type={chart_type}, x_field={x_field or '<auto>'}, "
-                f"y_field={y_field or '<auto>'}, series_field={series_field or '<none>'}"
-            )
-            detail = error_msg or e.__class__.__name__
+        # Metadata-only mode: compact single line for batch tool
+        if return_metadata_only:
+            series_tag = f" | series: {series_field}" if series_field else ""
             return (
-                f"Error: Chart rendering failed ({e.__class__.__name__}): {detail}\n\n"
-                f"Context: {selected}\n"
-                f"Available columns: {available or '<unknown>'}"
+                f"OK|{chart_id}|{chart_type}|{title or chart_type}"
+                f"|{len(rows)}|{elapsed_seconds}s{series_tag}"
             )
+
+        output = json.dumps(option, default=str, indent=2)
+        metadata = (
+            f"\n\n---\n"
+            f"Chart ID: **{chart_id}** (use in reports with "
+            f"`{{{{chart:{chart_id}}}}}`) | "
+            f"Type: {chart_type} | "
+            f"Data points: {len(rows)} | "
+            f"Query time: {elapsed_seconds}s"
+        )
+
+        if rationale:
+            metadata += f"\n\n{rationale}"
+
+        metadata += f"\n\n### SQL\n```sql\n{_truncate_sql(sql)}\n```"
+
+        # Workflow next-step with registered charts summary
+        total_charts = len(_chart_registry)
+        chart_list = ", ".join(_chart_registry.keys())
+        metadata += (
+            f"\n\n**Registered charts ({total_charts}):** {chart_list}\n"
+            "**Next step:** When all charts are ready, call "
+            "`generate_report(title, content_markdown)` with "
+            "`{{chart:ID}}` placeholders to produce an interactive report."
+        )
+
+        return truncate_response(output + metadata)
+
+    except Exception as e:
+        error_msg = str(e)
+        if "UNKNOWN_IDENTIFIER" in error_msg or "Unknown expression" in error_msg:
+            return (
+                f"Error: {error_msg}\n\n"
+                "**Hint**: Wrong column name in the SQL query. "
+                "Use `describe_table` to verify exact column names before writing SQL. "
+                "Do NOT guess — most tables use generic names like `value`, `cnt`, `date`."
+            )
+        available = ", ".join(columns) if "columns" in locals() else ""
+        selected = (
+            f"chart_type={chart_type}, x_field={x_field or '<auto>'}, "
+            f"y_field={y_field or '<auto>'}, series_field={series_field or '<none>'}"
+        )
+        detail = error_msg or e.__class__.__name__
+        return (
+            f"Error: Chart rendering failed ({e.__class__.__name__}): {detail}\n\n"
+            f"Context: {selected}\n"
+            f"Available columns: {available or '<unknown>'}"
+        )
+
+
+def create_chart_record_from_sql(
+    ch: ClickHouseManager,
+    sql: str,
+    *,
+    database: str = "dbt",
+    chart_type: str = "line",
+    x_field: str = "",
+    y_field: str = "",
+    change_field: str = "",
+    series_field: str = "",
+    title: str = "",
+    max_rows: int = 500,
+    source: str = "report_studio",
+) -> dict:
+    """Execute SQL, build an ECharts spec, and register a chart record —
+    returning STRUCTURED data instead of the markdown the chat tools emit.
+
+    Used by the Report Studio composer (human-driven): does NOT record
+    agent session-state chart counters and bypasses the raw-chart gates by
+    construction. The SQL still runs through the full ClickHouse guard
+    stack (`ch.run_query`: validate_query, ALLOWED_DATABASES, readonly).
+
+    Returns ``{"ok": True, "chart_id", "chart_type", "title",
+    "data_points"}`` or ``{"ok": False, "error": ...}``.
+    """
+    try:
+        executed = ch.run_query(
+            sql,
+            database,
+            requested_max_rows=max(1, min(int(max_rows), 5000)),
+            audience="internal",
+        )
+    except Exception as exc:  # broken SQL / guard rejection
+        return {"ok": False, "error": str(exc)}
+    result = _register_chart_from_dataset(
+        columns=executed.columns,
+        rows=executed.rows,
+        sql=sql,
+        database=database,
+        chart_type=chart_type,
+        x_field=x_field,
+        y_field=y_field,
+        change_field=change_field,
+        series_field=series_field,
+        title=title,
+        elapsed_seconds=executed.elapsed_seconds,
+        source=source,
+        return_metadata_only=True,
+        record_session=False,
+    )
+    # Metadata-only mode returns "OK|<id>|<type>|<title>|<points>|<secs>…"
+    # on success and an "Error: …" string otherwise (same contract the
+    # batch chart tool parses).
+    if not result.startswith("OK|"):
+        return {"ok": False, "error": result.removeprefix("Error: ").strip()}
+    parts = result.split("|")
+    return {
+        "ok": True,
+        "chart_id": parts[1],
+        "chart_type": parts[2],
+        "title": parts[3],
+        "data_points": int(parts[4]) if parts[4].isdigit() else len(executed.rows),
+    }
+
+
+def register_visualization_tools(mcp, ch: ClickHouseManager):
+    """Register chart generation and report tools."""
 
     def _build_and_register_chart(
         sql: str,

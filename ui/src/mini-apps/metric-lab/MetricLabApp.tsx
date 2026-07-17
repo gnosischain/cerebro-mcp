@@ -30,8 +30,8 @@ import {
   type QuerySpec,
 } from "./types";
 import { readUrl, writeUrl, type UrlState } from "./urlState";
-import { useChartConfigSync } from "./useChartConfigSync";
-import { useHydratedRows } from "./useHydratedRows";
+import { useChartsSync } from "./useChartsSync";
+import { useHydratedDatasets } from "../shared/useHydratedDatasets";
 
 export default function MetricLabApp() {
   const mock = useMemo(
@@ -88,10 +88,13 @@ export default function MetricLabApp() {
     windowDays: seed.window,
     mode: (seed.mode as QuerySpec["mode"]) || "raw",
     aggX: seed.x,
-    aggY: seed.y,
+    aggY: seed.ys[0] ?? seed.y,
+    aggYs: seed.ys.length ? seed.ys : seed.y ? [seed.y] : [],
     aggFn: (seed.agg as QuerySpec["aggFn"]) || "sum",
+    grain: (seed.grain as QuerySpec["grain"]) || "",
     aggSeries: seed.series,
     aggTopN: seed.topn,
+    columns: seed.cols,
     filterCol: seed.fcol,
     filterOp: (seed.fop as QuerySpec["filterOp"]) || "=",
     filterValue: seed.fval,
@@ -112,19 +115,47 @@ export default function MetricLabApp() {
     adoptedViewRef.current = identity;
     setScreen("workspace");
     const metrics = (state.selected_metrics ?? []).filter(Boolean);
-    const aggCfg = (state.aggregate_config ?? {}) as Record<string, string | number>;
+    const aggCfg = (state.aggregate_config ?? {}) as Record<string, unknown>;
+    const rawCfg = (state.raw_config ?? {}) as Record<string, unknown>;
+    const adoptedYs = Array.isArray(aggCfg.ys)
+      ? (aggCfg.ys as string[]).filter(Boolean)
+      : [];
+    const adoptedY = String(aggCfg.y ?? spec.aggY);
+    // Join loads echo per-model specs — rehydrate the per-model rows.
+    const adoptedJoinSpecs: QuerySpec["joinSpecs"] = {};
+    if (state.load_mode === "join" && Array.isArray(aggCfg.specs)) {
+      for (const s of aggCfg.specs as { model?: string; y?: string; agg?: string }[]) {
+        if (s.model) {
+          adoptedJoinSpecs[s.model] = {
+            y: s.y ?? "",
+            agg: (s.agg as QuerySpec["aggFn"]) || "sum",
+          };
+        }
+      }
+    }
     const next: QuerySpec = {
       ...spec,
       metrics: metrics.length ? metrics : [state.selected_metric].filter(Boolean),
       dimensions: state.selected_dimensions ?? [],
       limit: state.selected_limit ?? 2000,
-      // Adopt the server's echo so agent-driven aggregate loads rehydrate
-      // the builder controls correctly.
-      mode: state.load_mode === "aggregate" ? "aggregate" : spec.mode,
+      // Adopt the server's echo so agent-driven aggregate/join loads
+      // rehydrate the builder controls correctly.
+      mode:
+        state.load_mode === "aggregate" || state.load_mode === "join"
+          ? "aggregate"
+          : spec.mode,
       aggX: String(aggCfg.x ?? spec.aggX),
-      aggY: String(aggCfg.y ?? spec.aggY),
+      aggY: adoptedYs[0] ?? adoptedY,
+      aggYs: adoptedYs.length ? adoptedYs : adoptedY ? [adoptedY] : [],
       aggFn: (aggCfg.agg as QuerySpec["aggFn"]) ?? spec.aggFn,
+      grain: (aggCfg.grain as QuerySpec["grain"]) ?? "",
       aggSeries: String(aggCfg.series ?? spec.aggSeries),
+      columns: Array.isArray(rawCfg.columns)
+        ? (rawCfg.columns as string[]).filter(Boolean)
+        : [],
+      joinSpecs: Object.keys(adoptedJoinSpecs).length
+        ? adoptedJoinSpecs
+        : spec.joinSpecs,
       orderByField: "",
       orderDir: "desc",
     };
@@ -155,6 +186,9 @@ export default function MetricLabApp() {
       x: spec.aggX,
       y: spec.aggY,
       agg: spec.aggFn,
+      ys: spec.aggYs.length > 1 ? spec.aggYs : [],
+      grain: spec.grain,
+      cols: spec.columns,
       series: spec.aggSeries,
       topn: spec.aggTopN,
       fcol: spec.filterCol,
@@ -187,10 +221,13 @@ export default function MetricLabApp() {
         windowDays: s.window,
         mode: (s.mode as QuerySpec["mode"]) || "raw",
         aggX: s.x,
-        aggY: s.y,
+        aggY: s.ys[0] ?? s.y,
+        aggYs: s.ys.length ? s.ys : s.y ? [s.y] : [],
         aggFn: (s.agg as QuerySpec["aggFn"]) || "sum",
+        grain: (s.grain as QuerySpec["grain"]) || "",
         aggSeries: s.series,
         aggTopN: s.topn,
+        columns: s.cols,
         filterCol: s.fcol,
         filterOp: (s.fop as QuerySpec["filterOp"]) || "=",
         filterValue: s.fval,
@@ -203,21 +240,33 @@ export default function MetricLabApp() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // ---- Hydration + chart config ----
-  const primaryDescriptor = view?.datasets?.primary;
-  const secondaryDescriptor = view?.datasets?.secondary;
-  const primary = useHydratedRows(view?.view_id, primaryDescriptor, fetchRows);
-  const secondaryHydrated = useHydratedRows(view?.view_id, secondaryDescriptor, fetchRows);
-  const secondary = secondaryDescriptor ? secondaryHydrated : null;
+  // ---- Hydration + chart-panel grid ----
+  const descriptors = view?.datasets ?? {};
+  const revisions = (state?.dataset_revisions ?? {}) as Record<string, number>;
+  const datasets = useHydratedDatasets(view?.view_id, descriptors, revisions, fetchRows);
+  const primary = datasets.primary ?? {
+    rows: [],
+    columns: [],
+    columnTypes: [],
+    hydrating: false,
+    truncated: false,
+  };
 
-  const datasetEpoch = `${view?.view_id ?? ""}|${primaryDescriptor?.sql ?? ""}`;
-  const [config, updateConfig] = useChartConfigSync(
+  // Adoption / re-hydration key: per-dataset revisions (NOT SQL text — a
+  // forced rerun or a param change keeps the SQL identical).
+  const revisionsKey = `${view?.view_id ?? ""}|${Object.entries(revisions)
+    .map(([k, v]) => `${k}:${v}`)
+    .sort()
+    .join(",")}`;
+  const { panels, dispatch: panelsDispatch, syncError, retrySync } = useChartsSync(
     view?.view_id,
+    state?.charts,
     state?.chart,
-    datasetEpoch,
+    revisionsKey,
     callTool,
     hasData,
   );
+  const firstPanel = panels[0];
 
   // ---- Model context (what the agent sees about this view) ----
   useEffect(() => {
@@ -226,14 +275,15 @@ export default function MetricLabApp() {
       mode: state.mode,
       screen,
       metrics: (state.selected_metrics ?? []).join(",") || state.selected_metric || "none",
-      chart_type: config.chartType,
-      x_field: config.xField,
-      y_field: config.yField,
-      group_by: config.groupBy || "none",
+      panels: panels.length,
+      chart_type: firstPanel?.chartType ?? "table",
+      x_field: firstPanel?.xField ?? "",
+      y_field: firstPanel?.yField ?? "",
+      group_by: firstPanel?.groupBy || "none",
       rows_loaded: primary.rows.length,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state?.mode, screen, config, primary.rows.length]);
+  }, [state?.mode, screen, panels, primary.rows.length]);
 
   // ---- Catalog lookups ----
   // Entries selected from SERVER search results are not in the embedded
@@ -280,6 +330,7 @@ export default function MetricLabApp() {
         mode: "aggregate",
         aggX: prev.aggX || t,
         aggY: prev.aggY || nums[0],
+        aggYs: prev.aggYs.length ? prev.aggYs : [prev.aggY || nums[0]],
       }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -301,7 +352,12 @@ export default function MetricLabApp() {
             next.mode = "aggregate";
             next.aggX = next.aggX || t;
             next.aggY = next.aggY || nums[0];
+            if (next.aggYs.length === 0) next.aggYs = [next.aggY];
           }
+        } else {
+          // Second+ pick: default to the date-join comparison.
+          next.mode = "aggregate";
+          if (!next.grain) next.grain = "day";
         }
         return next;
       });
@@ -315,26 +371,52 @@ export default function MetricLabApp() {
       setLoading(true);
       setRunError("");
       try {
-        const aggregate = specToRun.mode === "aggregate" && specToRun.metrics.length === 1;
+        const isMulti = specToRun.metrics.length > 1;
+        const aggregate = specToRun.mode === "aggregate" && !isMulti;
+        const join = specToRun.mode === "aggregate" && isMulti;
+        const measures = specToRun.aggYs.length
+          ? specToRun.aggYs
+          : specToRun.aggY
+            ? [specToRun.aggY]
+            : [];
+        // Only send per-model overrides the user actually set.
+        const joinSpecs = Object.fromEntries(
+          Object.entries(specToRun.joinSpecs).filter(
+            ([model, conf]) =>
+              specToRun.metrics.includes(model) &&
+              (conf.y || (conf.agg && conf.agg !== "sum")),
+          ),
+        );
         await callTool("load_metric_lab_metric", {
           view_id: view.view_id,
           metric:
             specToRun.metrics.length === 1 ? specToRun.metrics[0] : specToRun.metrics,
           limit: specToRun.limit,
           window_days: specToRun.windowDays,
-          mode: aggregate ? "aggregate" : "raw",
+          mode: specToRun.mode === "aggregate" ? "aggregate" : "raw",
           ...(aggregate
             ? {
                 x: specToRun.aggX,
-                y: specToRun.aggY,
+                // Single measure travels as legacy y; several as ys.
+                ...(measures.length > 1
+                  ? { ys: measures }
+                  : { y: measures[0] ?? "" }),
                 agg: specToRun.aggFn,
+                grain: specToRun.grain,
                 series: specToRun.aggSeries,
                 series_top_n: specToRun.aggTopN,
                 filter_col: specToRun.filterCol,
                 filter_op: specToRun.filterOp,
                 filter_value: specToRun.filterValue,
               }
-            : {}),
+            : join
+              ? {
+                  grain: specToRun.grain || "day",
+                  ...(Object.keys(joinSpecs).length ? { join_specs: joinSpecs } : {}),
+                }
+              : specToRun.columns.length && specToRun.metrics.length === 1
+                ? { columns: specToRun.columns }
+                : {}),
         });
         setLastRunSpec(JSON.stringify(specToRun));
         setScreen("workspace");
@@ -362,6 +444,7 @@ export default function MetricLabApp() {
         mode: aggregate ? "aggregate" : "raw",
         aggX: aggregate ? (t as string) : "",
         aggY: aggregate ? nums[0] : "",
+        aggYs: aggregate ? [nums[0]] : [],
       };
       setSpec(soloSpec);
       void runSpec(soloSpec);
@@ -459,13 +542,14 @@ export default function MetricLabApp() {
               <WorkspaceSection
                 state={state}
                 summaryCards={view.summary_cards ?? []}
-                primary={primary}
-                primaryDescriptor={primaryDescriptor}
-                secondary={secondary}
-                secondaryDescriptor={secondaryDescriptor}
-                config={config}
-                onConfigChange={updateConfig}
-                datasetEpoch={datasetEpoch}
+                datasets={datasets}
+                descriptors={descriptors}
+                panels={panels}
+                dispatch={panelsDispatch}
+                syncError={syncError}
+                onRetrySync={retrySync}
+                viewId={view.view_id}
+                callTool={callTool}
               />
             )}
 

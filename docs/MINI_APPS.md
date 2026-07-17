@@ -16,7 +16,7 @@ it, how to develop it, and how it talks to the backend.
 |--------------------|------------------------------------|--------------------------------------------------------------|-------------------------------|
 | Report Renderer    | `ui://cerebro/report`              | Interactive analytics reports from `generate_report`         | `generate_report`             |
 | Metric Lab         | `ui://cerebro/metric_lab`          | Build a metric from SQL or from the semantic registry        | `open_metric_lab*`            |
-| Portfolio          | `ui://cerebro/portfolio`           | Address-centric portfolio across Circles / GPay / yields     | `open_portfolio`              |
+| Portfolio (dev-only) | `ui://cerebro/portfolio`         | Address-centric portfolio across Circles / GPay / yields. Registered only when `DEV_MINI_APPS_ENABLED=true`. | `open_portfolio`              |
 | Graph Explorer     | `ui://cerebro/graph_explorer`      | Cross-sector semantic graph (Circles trust, Safe, pools, …)  | `open_graph_explorer`         |
 | Contract Explorer  | `ui://cerebro/contract_explorer`   | Per-contract: ABI, callable functions, view-call, tx decode  | `open_contract_explorer`      |
 
@@ -237,6 +237,11 @@ Used to draft metrics that can then be saved via `save_query` or promoted into a
 
 ## Portfolio
 
+> **Dev-only.** Portfolio (and Model Lineage) register only when
+> `DEV_MINI_APPS_ENABLED=true` — in the default deployment their tools are
+> absent, `/app/portfolio` / `/app/model_lineage` 404, and the cross-app
+> tabs hide (the chrome filters on the injected `__MINI_APP_APPS__` list).
+
 **Resource**: `ui://cerebro/portfolio`  
 **Source**: [`ui/src/mini-apps/portfolio/`](../ui/src/mini-apps/portfolio/)  
 **Tools**: `open_portfolio`, `load_portfolio_address`, `load_portfolio_section`, `update_portfolio_focus`, `navigate_portfolio_relation`
@@ -273,36 +278,67 @@ Standalone (non-mini-app) RPC tools — `contract_explore`, `contract_call_funct
 ## Graph Explorer
 
 **Resource**: `ui://cerebro/graph_explorer`  
-**Source**: [`ui/src/mini-apps/graph-explorer/`](../ui/src/mini-apps/graph-explorer/)  
-**Tools**: `open_graph_explorer`, `load_graph_explorer_seed`, `expand_graph_explorer_node`, `update_graph_explorer_focus`
+**Source**: [`ui/src/mini-apps/graph-explorer/`](../ui/src/mini-apps/graph-explorer/) (frontend) · [`src/cerebro_mcp/tools/semantic/graph_explorer/`](../src/cerebro_mcp/tools/semantic/graph_explorer/) (backend package)  
+**Agent tools**: `open_graph_explorer`, `load_graph_explorer_seed`, `expand_graph_explorer_node`, `update_graph_explorer_focus`  
+**App-only tools** (hidden from the model): `load_graph_atlas_sample`, `set_graph_explorer_view`
 
-Cross-sector force graph. Every graph-capable semantic model in `dbt-cerebro` contributes a **profile** (see `cerebro.graph` meta). Nodes come from the semantic registry; edges are fetched at query time.
+Cross-sector graph rendered with **cosmos.gl** (WebGL, `@cosmos.gl/graph`). Every
+graph-capable semantic model in `dbt-cerebro` contributes a **profile** (see
+`cerebro.graph` meta). Nodes come from the semantic registry; edges are fetched
+at query time.
 
-### Two screens
+### Two MODES, one canvas
 
-1. **Catalog (empty state)** — lists all graph profiles grouped by sector. The primary action is "Start from an address": paste any EVM address and the backend auto-detects which profiles apply via `int_execution_address_roles_current`.
-2. **Graph screen** — ECharts force graph centered on the seed. Topbar: window days, max neighbors per hop, layout toggle (Force / Circle), status filter (All / Approved / Candidate). Chip strip below: per-sector toggles for the active profiles. Side panel: node metadata, role badges, semantic provenance, suggested next hops across sectors.
+A segmented switch in the header flips between two modes; each keeps its own
+dataset pair (`nodes`/`edges` vs `atlas_nodes`/`atlas_edges`) so switching is
+instant and lossless.
 
-### What the buttons do
+1. **Atlas** (default) — browse the profile catalog grouped by sector in a
+   left rail. Checking profiles loads top-weight *sample* subgraphs
+   (REPLACE semantics — deselecting a profile removes its edges; sample size
+   is per profile). Clicking a sampled node offers **"Investigate → "** which
+   promotes it into a real seed. An address input at the top seeds directly.
+2. **Investigate** — seed an address/entity → bounded 1-hop subgraph with
+   role auto-detection via `int_execution_address_roles_current` → expand
+   hop-by-hop (explicit action only; default depth 1, stepper up to the
+   session cap) → inspect role badges, edge evidence, and suggested
+   cross-sector next hops in the details panel.
 
-| Control                     | Effect                                                                                                    |
-|-----------------------------|-----------------------------------------------------------------------------------------------------------|
-| `🕑 <N> d` window pill      | Debounced refetch — loads only edges whose `time_column` falls in the window.                             |
-| `◎ <N>` max pill            | Debounced refetch — caps neighbors per hop.                                                               |
-| `Force / Circle` segmented  | Client-side ECharts layout change. No backend call.                                                       |
-| `All / ● / ●` status        | Filters the chip strip to approved-only / candidate-only / all. Client + server.                          |
-| Chip click (profile in strip) | **Adds**: triggers a refetch with the new profile mixed in. **Removes**: client-side filter only.       |
-| `+` button                  | Expands the seed node by one hop (capped at `MAX_HOPS = 5`).                                              |
-| `ⓘ` button                  | Toggles the details panel. On narrow viewports the panel slides in as an overlay.                         |
-| `↺` button                  | Returns to the catalog screen.                                                                            |
-| `Ask` button                | Pushes the current view state into model context and sends a "summarize this subgraph" message.           |
-| Node click                  | Selects the node, populates details panel with role badges + semantic provenance.                         |
-| Node double-click           | Expands that node by one hop.                                                                             |
-| Node drag                   | Pins the node. Double-click to unpin.                                                                     |
-| Wheel / pinch               | Zoom. Click+drag background to pan.                                                                       |
-| Details → Expand            | Same as node double-click.                                                                                |
-| Details → Recenter          | Reseeds the graph from the selected node (fresh 1-hop subgraph).                                          |
-| Details → Copy              | Copies the node id to clipboard.                                                                          |
+### view_state v2 (server is the source of truth)
+
+```
+{ mode: "atlas"|"investigate", catalog, limits: {...},
+  atlas: { selected_profiles, sample_size, window_days },
+  investigate: { seed, active_profiles, window_days, max_neighbors, hops_used },
+  selection: { node_id, edge_id },     # cleared on mode switch
+  layout, semantic_status_filter, node_roles, suggested_next_hops,
+  warnings, dataset_revisions }
+```
+
+`limits` publishes the server constants (`max_hops`, `bfs_node_cap`,
+`default_expand_depth`, `ui_default_window_days`, `ui_default_max_neighbors`,
+`atlas_sample_size`) — the frontend derives every control from it and keeps
+no compile-time mirrors.
+
+### What the controls do
+
+| Control                     | Effect                                                                                       |
+|-----------------------------|----------------------------------------------------------------------------------------------|
+| `Atlas / Investigate`       | Mode switch — swaps which dataset pair the canvas renders; clears selection; never refetches. |
+| Atlas profile checkbox      | Debounced `load_graph_atlas_sample` with the full selection (REPLACE semantics).             |
+| Window / max pills          | Debounced refetch of the investigate subgraph.                                               |
+| `Force / Circle` segmented  | Client-side layout change. No backend call.                                                  |
+| `All / ● / ●` status        | Filters profiles by quality tier.                                                            |
+| Chip click (profile strip)  | **Adds**: refetch with the profile mixed in. **Removes**: client-side filter only.           |
+| Depth stepper + `+ Expand`  | Expands the selected node (else the seed) by the stepped depth (default **1**).              |
+| Node click                  | Selects; server refreshes role badges + evidence + suggested next hops.                      |
+| Node double-click           | Expands that node by the stepped depth.                                                      |
+| Play/Pause · Fit · Recenter · Focus · Labels · Legend | Canvas-local controls (ephemeral — reset on reload).               |
+| Details → Expand / Recenter / Copy | Same as before (Recenter reseeds from the selected node).                             |
+
+There is **no "Ask" button** — it was removed at user request (WS10). The app
+publishes passive model context (`mode`, seed, selection, profile set, node/
+edge counts, hops) via `updateModelContext` so the agent can see the view.
 
 ### Profiles (as of initial release)
 
@@ -342,9 +378,16 @@ Key cross-sector edges:
 
 ### Knobs
 
-- `MAX_HOPS = 5` in `src/cerebro_mcp/tools/graph_explorer.py` — change to allow deeper traversal.
-- `DEFAULT_WINDOW_DAYS = 90` — default time window.
-- `DEFAULT_MAX_NEIGHBORS = 25` — default per-hop cap.
+All in [`src/cerebro_mcp/tools/semantic/graph_explorer/constants.py`](../src/cerebro_mcp/tools/semantic/graph_explorer/constants.py) and published to the UI via `view_state["limits"]`:
+
+- `MAX_HOPS = 50` — session hop cap (deliberately raised in WS9, live-QA'd in WS10).
+- `DEFAULT_EXPAND_DEPTH = 1` — UI default hops per expand action.
+- `UI_DEFAULT_WINDOW_DAYS = 90` / `UI_DEFAULT_MAX_NEIGHBORS = 100` — UI load defaults.
+- `DEFAULT_ATLAS_SAMPLE = 150` — Atlas sample size per profile.
+- `DEFAULT_WINDOW_DAYS = 365` / `DEFAULT_MAX_NEIGHBORS = 250` — the PUBLIC
+  `explore_neighborhood`/`calculate_flow_efficiency` tool defaults (a pinned
+  contract; distinct from the UI defaults on purpose).
+- BFS caps `GRAPH_EXPLORER_BFS_NODE_CAP` (15000) / `GRAPH_EXPLORER_BFS_PER_HOP_BUDGET` (3000) — env-tunable settings.
 
 ---
 

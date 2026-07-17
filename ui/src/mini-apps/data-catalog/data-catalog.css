@@ -56,6 +56,27 @@
   text-transform: uppercase; color: var(--text-muted);
 }
 
+/* Vertical facet rows (label left, count right) — one scannable column instead
+ * of wrapping chip clouds. Selection = accent tint, matching the rail items. */
+.dc-facet-list { display: flex; flex-direction: column; gap: 1px; }
+.dc-facet-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; padding: 4px 8px; border: none; background: none; text-align: left;
+  border-radius: var(--radius-sm, 6px); font-size: 12.5px; color: var(--text-secondary);
+  cursor: pointer;
+}
+.dc-facet-row:hover { background: var(--surface-2); color: var(--text-primary); }
+.dc-facet-row.is-on { background: var(--accent-softer); color: var(--accent-text); font-weight: 500; }
+.dc-facet-row:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; }
+.dc-facet-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-facet-count { flex: 0 0 auto; font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.dc-facet-row.is-on .dc-facet-count { color: var(--accent-text); }
+.dc-facet-more {
+  align-self: flex-start; margin-top: 2px; padding: 2px 8px; border: none; background: none;
+  font-size: 11.5px; color: var(--accent-text); cursor: pointer;
+}
+.dc-facet-more:hover { text-decoration: underline; }
+
 .dc-section-title { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 4px 0 10px; }
 
 .dc-results-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
@@ -86,9 +107,9 @@
 .dc-stat--action:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 .dc-stat-label { font-size: 12.5px; color: var(--text-secondary); }
 .dc-stat-value { font-size: 23px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
-.dc-stat-value.is-ok { color: #0f7b53; }
-.dc-stat-value.is-warn { color: #9a6b00; }
-.dc-stat-value.is-bad { color: #b3261e; }
+.dc-stat-value.is-ok { color: var(--success); }
+.dc-stat-value.is-warn { color: var(--warning); }
+.dc-stat-value.is-bad { color: var(--error); }
 
 /* ---- Home dashboard layout ----------------------------------------------- */
 /* Full-width stacked bands (domains → products|metrics → glossary) — each band
@@ -160,11 +181,11 @@ button.dc-row:hover { border-color: var(--border-hover); background: var(--surfa
   letter-spacing: 0.03em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
   border: 1px solid var(--border); color: var(--text-secondary); background: var(--surface-2);
 }
-.dc-badge--approved { color: #0f7b53; border-color: #1aa06822; background: #1aa06814; }
-.dc-badge--candidate { color: #9a6b00; border-color: #d6920022; background: #d6920014; }
-.dc-badge--pass, .dc-badge--ok { color: #0f7b53; border-color: #1aa06822; background: #1aa06814; }
-.dc-badge--warn { color: #9a6b00; border-color: #d6920022; background: #d6920014; }
-.dc-badge--bad { color: #b3261e; border-color: #d11a0022; background: #d11a0014; }
+.dc-badge--approved { color: var(--success); border-color: var(--success-bg); background: var(--success-bg); }
+.dc-badge--candidate { color: var(--warning); border-color: var(--warning-bg); background: var(--warning-bg); }
+.dc-badge--pass, .dc-badge--ok { color: var(--success); border-color: var(--success-bg); background: var(--success-bg); }
+.dc-badge--warn { color: var(--warning); border-color: var(--warning-bg); background: var(--warning-bg); }
+.dc-badge--bad { color: var(--error); border-color: var(--error-bg); background: var(--error-bg); }
 .dc-badge--muted { color: var(--text-muted); }
 .dc-badge--docs_only { color: var(--text-muted); }
 .dc-badge--type { background: var(--accent-softer); color: var(--accent-text); border-color: transparent; }
@@ -321,7 +342,7 @@ button.dc-row:hover { border-color: var(--border-hover); background: var(--surfa
 
 .dc-stale-banner {
   display: flex; align-items: flex-start; gap: 10px; padding: 11px 14px; font-size: 13px;
-  border: 1px solid #d6920055; background: #d6920014; color: #9a6b00;
+  border: 1px solid var(--warning); background: var(--warning-bg); color: var(--warning);
   border-radius: var(--radius-base);
 }
 .dc-stale-banner strong { font-weight: 600; }

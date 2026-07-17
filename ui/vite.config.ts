@@ -25,6 +25,7 @@ const ENTRY_MAP: Record<string, { html: string; out: string }> = {
   contractExplorer: { html: "contract-explorer.html", out: "contract-explorer.html" },
   modelLineage:     { html: "model-lineage.html",    out: "model-lineage.html" },
   dataCatalog:      { html: "data-catalog.html",     out: "data-catalog.html" },
+  reportStudio:     { html: "report-studio.html",    out: "report-studio.html" },
 };
 
 const entryName = process.env.CEREBRO_UI_ENTRY ?? "report";

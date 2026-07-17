@@ -15,6 +15,13 @@ declare global {
      * can re-authenticate. Absent when the server runs without auth.
      */
     __MINI_APP_TOKEN__?: string;
+    /**
+     * Standalone web-app mode only. The app ids REGISTERED on this server —
+     * the chrome filters its cross-app tabs on this so dev-only apps
+     * (portfolio, model lineage) don't render dead tabs. Absent in dev and
+     * MCP-host mode.
+     */
+    __MINI_APP_APPS__?: string[];
   }
 }
 
@@ -44,6 +51,11 @@ export interface MiniAppHandle<TState> {
   ) => Promise<PageRowsResponse | null>;
   updateModelContext: (lines: Record<string, unknown>) => void;
   sendMessage: (text: string) => Promise<boolean>;
+  /** Open an external URL: window.open in standalone/dev mode; via the
+   * ext-apps openLink capability inside an MCP host (checked first — hosts
+   * without it return false so the caller can fall back to a copyable
+   * link). */
+  openLink: (url: string) => Promise<boolean>;
 }
 
 interface UseMiniAppOptions<TState> {
@@ -302,6 +314,33 @@ export function useMiniApp<TState = Record<string, unknown>>(
     }
   };
 
+  const openLink = async (url: string): Promise<boolean> => {
+    const app = appRef.current as
+      | {
+          getHostCapabilities?: () => { openLinks?: boolean } | undefined;
+          openLink?: (params: { url: string }) => Promise<unknown>;
+        }
+      | null;
+    // MCP host: only call openLink when the host declared the capability.
+    if (app?.openLink) {
+      try {
+        const caps = app.getHostCapabilities?.();
+        if (caps && caps.openLinks === false) return false;
+        await app.openLink({ url });
+        return true;
+      } catch (err) {
+        console.error("[useMiniApp] openLink failed", err);
+        return false;
+      }
+    }
+    // Standalone / dev: plain new tab.
+    if (typeof window !== "undefined") {
+      window.open(url, "_blank", "noopener");
+      return true;
+    }
+    return false;
+  };
+
   const fetchRows = async (
     viewId: string,
     datasetKey: string,
@@ -350,5 +389,6 @@ export function useMiniApp<TState = Record<string, unknown>>(
     fetchRows,
     updateModelContext,
     sendMessage,
+    openLink,
   };
 }

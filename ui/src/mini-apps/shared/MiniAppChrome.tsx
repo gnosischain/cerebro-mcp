@@ -20,6 +20,7 @@ export const DEFAULT_APP_TABS: MiniAppTab[] = [
   { id: "graph", label: "Graph", href: "/graph-explorer.html", appId: "graph_explorer" },
   { id: "lineage", label: "Lineage", href: "/model-lineage.html", appId: "model_lineage" },
   { id: "metric", label: "Metric Lab", href: "/metric-lab.html", appId: "metric_lab" },
+  { id: "reports", label: "Reports", href: "/report-studio.html", appId: "report_studio" },
 ];
 
 /** Resolve a tab's link. When the bundle is served standalone by our own
@@ -66,6 +67,19 @@ function isStandaloneContext(): boolean {
   }
 }
 
+/** Tabs available in this deployment: when the server injected its
+ * registered-app list (standalone-served mode), drop tabs whose app is not
+ * registered — dev-only apps (portfolio, model lineage) must not render dead
+ * 404 tabs. Dev (`npm run dev`) has no injection and keeps the static list. */
+function availableTabs(): MiniAppTab[] {
+  const registered =
+    typeof window !== "undefined" ? window.__MINI_APP_APPS__ : undefined;
+  if (!Array.isArray(registered)) return DEFAULT_APP_TABS;
+  return DEFAULT_APP_TABS.filter(
+    (tab) => !tab.appId || registered.includes(tab.appId),
+  );
+}
+
 export function MiniAppChrome({
   brand = "CEREBRO ◇ GNOSIS",
   tabs,
@@ -82,7 +96,7 @@ export function MiniAppChrome({
     tabs !== undefined
       ? tabs
       : isStandaloneContext()
-        ? DEFAULT_APP_TABS
+        ? availableTabs()
         : [];
 
   // Cross-app nav is a subordinate APP-SWITCHER (one control under the brand),
