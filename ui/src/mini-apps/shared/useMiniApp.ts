@@ -22,6 +22,14 @@ declare global {
      * MCP-host mode.
      */
     __MINI_APP_APPS__?: string[];
+    /** Build/source identity injected by the standalone app route. */
+    __MINI_APP_DIAGNOSTICS__?: {
+      app_commit?: string | null;
+      bundle_sha256?: string | null;
+      bundle_mtime?: string | null;
+      dbt_manifest_sha256?: string | null;
+      [key: string]: unknown;
+    };
   }
 }
 

@@ -429,6 +429,49 @@ def register_dbt_tools(mcp):
                 meta_parts.append(f"Full refresh: {fr_desc}")
             if meta_parts:
                 parts.append(f"**Meta:** {' | '.join(meta_parts)}\n")
+            if meta.get("inference_notes"):
+                parts.append(f"**Inference notes:** {meta['inference_notes']}\n")
+
+        # Engineering contract (agent-context artifact: resolved hazards +
+        # invariants). Concise here; the full packet is get_dbt_change_context.
+        try:
+            from cerebro_mcp.loaders.agent_context import agent_context
+
+            agent_context.maybe_refresh()
+            entry = (
+                agent_context.get_model(model_name) if agent_context.is_loaded else None
+            )
+            if entry and agent_context.is_stale_for(manifest) is not True:
+                contract = entry.get("contract") or {}
+                contract_lines = []
+                if contract.get("grain"):
+                    contract_lines.append(f"Grain: {contract['grain']}")
+                if contract.get("semantics"):
+                    contract_lines.append(f"Semantics: {contract['semantics']}")
+                hazards = contract.get("hazards") or []
+                if hazards:
+                    contract_lines.append(
+                        "Known hazards: "
+                        + "; ".join(
+                            f"{h.get('id')} [{h.get('status')}]" for h in hazards
+                        )
+                    )
+                invariants = contract.get("invariants") or []
+                for inv in invariants:
+                    text = inv.get("text") if isinstance(inv, dict) else str(inv)
+                    contract_lines.append(f"Invariant: {text}")
+                if contract.get("reprocess_runbook"):
+                    contract_lines.append(f"Reprocess: {contract['reprocess_runbook']}")
+                if contract_lines:
+                    parts.append(
+                        "\n## Engineering contract\n"
+                        + "\n".join(f"- {line}" for line in contract_lines)
+                        + "\n- Full change packet: `get_dbt_change_context(\""
+                        + model_name
+                        + "\")`\n"
+                    )
+        except Exception:
+            pass  # contract enrichment must never break model details
 
         # Columns
         if details["columns"]:

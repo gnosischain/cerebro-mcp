@@ -16,9 +16,17 @@ Package layout (behavior-neutral split of the former single module):
 
 from __future__ import annotations
 
+import hashlib
 import importlib.resources
+import os
+from pathlib import Path
+import subprocess
+import threading
+from datetime import datetime, timezone
+from typing import Any
 
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.loaders.manifest import manifest
 from cerebro_mcp.tools.visualization import mini_apps, web_apps
 
 from . import constants
@@ -31,30 +39,101 @@ from .constants import (  # re-exported for existing importers
     MAX_HOPS,
 )
 from .data_tools import register_data_tools
+from .flows import register_flows_tools
+from .transactions import register_transaction_tools
+from .timeline import register_timeline_tools
 from .traverse import canonical_edge_id as _canonical_edge_id
 from .traverse import merge_graph as _merge_graph
 from .ui_tools import register_ui_tools
 
 _BUNDLED_HTML: str | None = None
+_BUNDLED_HTML_SIGNATURE: tuple[int, int] | None = None
+_BUNDLED_HTML_SHA256: str | None = None
+_BUNDLED_HTML_MTIME: str | None = None
+_BUNDLE_LOCK = threading.Lock()
+_APP_COMMIT: str | None = None
+
+
+def _bundle_resource():
+    return importlib.resources.files("cerebro_mcp").joinpath(
+        "static/graph_explorer.html"
+    )
+
+
+def _iso_mtime(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def _app_commit() -> str:
+    """Best-effort build identity without requiring a Git checkout in prod."""
+    global _APP_COMMIT
+    configured = os.environ.get("CEREBRO_BUILD_COMMIT", "").strip()
+    if configured:
+        return configured
+    if _APP_COMMIT is not None:
+        return _APP_COMMIT
+    package_path = Path(__file__).resolve()
+    repo = next((p for p in package_path.parents if (p / ".git").exists()), None)
+    if repo is None:
+        _APP_COMMIT = "unknown"
+        return _APP_COMMIT
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        _APP_COMMIT = result.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        _APP_COMMIT = "unknown"
+    return _APP_COMMIT
 
 
 def get_graph_explorer_html() -> str:
-    """Load the Vite-built single-file React app from the static package."""
-    global _BUNDLED_HTML
-    if _BUNDLED_HTML is None:
+    """Load the Vite bundle, invalidating the cache when the file changes."""
+    global _BUNDLED_HTML, _BUNDLED_HTML_SIGNATURE
+    global _BUNDLED_HTML_SHA256, _BUNDLED_HTML_MTIME
+    with _BUNDLE_LOCK:
         try:
-            _BUNDLED_HTML = (
-                importlib.resources.files("cerebro_mcp")
-                .joinpath("static/graph_explorer.html")
-                .read_text("utf-8")
-            )
+            resource = _bundle_resource()
+            with importlib.resources.as_file(resource) as path:
+                stat = path.stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+                if _BUNDLED_HTML is not None and signature == _BUNDLED_HTML_SIGNATURE:
+                    return _BUNDLED_HTML
+                raw = path.read_bytes()
+                _BUNDLED_HTML = raw.decode("utf-8")
+                _BUNDLED_HTML_SIGNATURE = signature
+                _BUNDLED_HTML_SHA256 = hashlib.sha256(raw).hexdigest()
+                _BUNDLED_HTML_MTIME = _iso_mtime(stat.st_mtime)
         except (FileNotFoundError, ModuleNotFoundError):
             _BUNDLED_HTML = (
                 "<!doctype html><html><body>"
                 "<div id='root'>graph_explorer.html not built</div>"
                 "</body></html>"
             )
-    return _BUNDLED_HTML
+            _BUNDLED_HTML_SIGNATURE = None
+            _BUNDLED_HTML_SHA256 = hashlib.sha256(
+                _BUNDLED_HTML.encode("utf-8")
+            ).hexdigest()
+            _BUNDLED_HTML_MTIME = None
+        return _BUNDLED_HTML
+
+
+def get_graph_explorer_diagnostics() -> dict[str, Any]:
+    """Identity injected into the app and exposed on its health route."""
+    get_graph_explorer_html()
+    return {
+        "app_commit": _app_commit(),
+        "bundle_sha256": _BUNDLED_HTML_SHA256,
+        "bundle_mtime": _BUNDLED_HTML_MTIME,
+        "dbt_manifest_sha256": manifest.content_hash,
+    }
 
 
 def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
@@ -72,6 +151,9 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
 
     tools = {
         **register_ui_tools(mcp, ch),
+        **register_timeline_tools(mcp, ch),
+        **register_flows_tools(mcp, ch),
+        **register_transaction_tools(mcp, ch),
         **register_data_tools(mcp, ch),
     }
     web_apps.register_web_app(
@@ -79,6 +161,12 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         open_tool="open_graph_explorer",
         html_loader=get_graph_explorer_html,
         tools=tools,
+        title="Graph Explorer",
+        description=(
+            "Forensic graph of on-chain relationships and fund flows. Trace value hop by hop from a seed address, play a subgraph across time, or browse the semantic relationship catalog."
+        ),
+        icon="◈",
+        diagnostics_loader=get_graph_explorer_diagnostics,
     )
 
 
@@ -91,6 +179,7 @@ __all__ = [
     "DEFAULT_MAX_NEIGHBORS",
     "constants",
     "get_graph_explorer_html",
+    "get_graph_explorer_diagnostics",
     "register_graph_explorer_tools",
     "_canonical_edge_id",
     "_merge_graph",

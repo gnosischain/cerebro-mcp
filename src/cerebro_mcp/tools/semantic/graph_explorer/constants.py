@@ -42,15 +42,121 @@ EDGES_COLUMNS = [
     "edge_count",
     "directed",
 ]
-EDGE_EVIDENCE_COLUMNS = ["edge_id", "column", "value"]
-NODE_EVIDENCE_COLUMNS = ["node_id", "column", "value"]
+# First 7 columns positionally identical to EDGES_COLUMNS so the frontend's
+# parseEdgeRow works unmodified; the two bucket columns carry the compressed
+# interval (see build_timeline_sql for the per-shape semantics).
+TIMELINE_EDGES_COLUMNS = EDGES_COLUMNS + ["bucket_start", "bucket_end"]
+TIMELINE_NARRATIVE_COLUMNS = [
+    "bucket_start",
+    "direction",
+    "event_kind",
+    "counterparty_id",
+    "counterparty_label",
+    "token_address",
+    "token_symbol",
+    "raw_amount",
+    "normalized_amount",
+    "transfer_count",
+    "previous_token_amount",
+    "current_token_amount",
+    "delta_token_amount",
+    "previous_known_usd",
+    "current_known_usd",
+    "delta_known_usd",
+    "price_coverage",
+    "volume_driven_usd_effect",
+    "price_driven_usd_effect",
+    "change",
+    "scope_id",
+]
+EDGE_EVIDENCE_COLUMNS = [
+    "edge_id", "column", "value", "subject_kind", "request_id",
+]
+NODE_EVIDENCE_COLUMNS = [
+    "node_id", "column", "value", "subject_kind", "request_id",
+]
 METRICS_COLUMNS = ["metric", "value"]
+
+# Timeline caps + defaults. Per-profile budget is additionally bounded by
+# TIMELINE_MAX_ROWS // n_profiles (fair share) at query time.
+TIMELINE_ROWS_PER_PROFILE = 8_000
+TIMELINE_MAX_ROWS = 24_000
+TIMELINE_DEFAULT_GRAIN = "week"
+TIMELINE_DEFAULT_RANGE_DAYS = 365
+TIMELINE_DEFAULT_WINDOW_BUCKETS = 4
+
+# Flows mode (forensic fund tracing).
+FLOWS_DEFAULT_HOPS = 2
+FLOWS_MAX_HOPS = 4
+# 90d, not 30d: a forensic trace run weeks after an incident (e.g. a June
+# exploit queried in July) must still reach back into the incident window by
+# default. A 30d default silently excluded the very activity being traced.
+FLOWS_DEFAULT_RANGE_DAYS = 90
+FLOWS_DEFAULT_MIN_USD = 10.0
+FLOWS_EDGES_PER_QUERY = 2000     # per hop-leg SQL limit (n+1 inside)
+FLOWS_PER_HOP_NODE_BUDGET = 400  # new nodes admitted per hop per leg
+FLOWS_MAX_NODES = 3000           # layered-layout legibility ceiling
+FLOWS_MAX_EDGES = 8000
+FLOWS_MAX_SEEDS = 50
+# Auto-stop sectors (per-hop, checked BEFORE enqueueing the next frontier).
+# Payments stays traversable (GP wallets must be walkable); seeds are always
+# expandable; a per-node Trace action overrides terminal status.
+FLOWS_TERMINAL_SECTORS = frozenset({"Bridges", "DEX", "Privacy"})
+
+FLOW_NODES_COLUMNS = [
+    "id", "label", "sector", "project", "hop_rank",
+    "in_usd", "out_usd", "first_seen", "last_seen", "flags",
+]
+
+# Transactions mode (per-transfer-leg forensics).
+TX_DEFAULT_RANGE_DAYS = 30
+TX_DEFAULT_MAX_TXS = 25       # transactions opened per load
+TX_MAX_TXS = 200
+TX_MAX_LEGS = 4000            # legs rendered; a tx is never split across it
+TX_LEG_NODES_COLUMNS = [
+    "id", "label", "role", "project", "column_rank",
+    "in_usd", "out_usd", "leg_count", "flags",
+]
+TX_LEG_EDGES_COLUMNS = [
+    "id", "source", "target", "tx_hash", "log_index", "block_number",
+    "transaction_index", "block_timestamp", "token_address", "symbol",
+    "amount", "amount_usd", "seq", "tx_rank", "tx_status", "raw_amount",
+]
+# No amount_usd: USD needs the token-metadata + price join, which the
+# discovery query deliberately skips (it must stay a cheap, unfiltered
+# "which transactions" scan). Publishing a hard 0 would look like a real
+# value, which is the dishonesty this mode exists to avoid.
+TX_LIST_COLUMNS = [
+    "tx_hash", "block_number", "transaction_index", "block_timestamp",
+    "leg_count", "token_count",
+]
+TX_RAW_RECEIPTS_COLUMNS = [
+    "tx_hash", "receipt_json", "receipt_sha256", "logs_sha256",
+    "block_number", "transaction_index", "block_hash", "receipt_status",
+    "retrieved_at",
+]
+FLOW_EDGES_COLUMNS = [
+    "id", "source", "target", "edge_class", "token_address", "symbol",
+    "amount", "amount_usd", "transfer_count", "first_seen", "last_seen",
+    "unknown_usd_rows",
+]
 
 DATASET_TITLES = {
     "nodes": "Nodes",
     "edges": "Edges",
     "atlas_nodes": "Atlas Nodes",
     "atlas_edges": "Atlas Edges",
+    "atlas_preview_nodes": "Relationship Preview Nodes",
+    "atlas_preview_edges": "Relationship Preview Edges",
+    "timeline_nodes": "Timeline Nodes",
+    "timeline_edges": "Timeline Edges",
+    "timeline_narrative": "Timeline Narrative",
+    "flow_nodes": "Flow Nodes",
+    "flow_edges": "Flow Edges",
+    "tx_nodes": "Transaction Participants",
+    "tx_legs": "Transfer Legs",
+    "tx_list": "Transactions",
+    "tx_raw_receipts": "Raw RPC Receipts",
     "node_evidence": "Node Evidence",
     "edge_evidence": "Edge Evidence",
     "graph_metrics": "Graph Metrics",

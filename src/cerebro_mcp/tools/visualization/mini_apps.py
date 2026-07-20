@@ -631,6 +631,8 @@ def build_dataset_descriptor(
     dataset: CachedDataset,
     title: str = "",
     preview_limit: int = _VIEW_PAGE_SIZE,
+    scope_id: str | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> DatasetDescriptor:
     """Convert a ``CachedDataset`` into a lightweight ``DatasetDescriptor``."""
     preview = dataset.rows[:preview_limit]
@@ -649,6 +651,8 @@ def build_dataset_descriptor(
         stats=dataset.stats,
         preview_rows=preview,
         page_token=_encode_page_token(preview_limit) if has_more else None,
+        scope_id=scope_id,
+        provenance=dict(provenance or {}),
     )
 
 

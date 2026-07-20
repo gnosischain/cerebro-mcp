@@ -2516,6 +2516,13 @@ def register_metric_lab_tools(mcp, ch: ClickHouseManager) -> None:
         app_id=METRIC_LAB_APP_ID,
         open_tool="open_metric_lab",
         html_loader=get_metric_lab_html,
+        title="Metric Lab",
+        description=(
+            "Build and compare metrics from the semantic layer. Join models on a "
+            "date grain, chart several series side by side, and drop straight to "
+            "the generated SQL."
+        ),
+        icon="◧",
         tools={
             "open_metric_lab": open_metric_lab,
             "load_metric_lab_metric": load_metric_lab_metric,

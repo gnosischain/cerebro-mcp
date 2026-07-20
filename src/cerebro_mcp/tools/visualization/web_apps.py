@@ -25,13 +25,17 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import quote
 
 from mcp.types import CallToolResult
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
 logger = logging.getLogger(__name__)
+
+PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 # tool name -> plain callable returning a CallToolResult
 MINI_APP_TOOL_REGISTRY: dict[str, Callable[..., CallToolResult]] = {}
@@ -42,11 +46,21 @@ class WebAppConfig:
     app_id: str
     open_tool: str
     html_loader: Callable[[], str]
+    # Catalog metadata — what the landing page shows on each card. Optional so
+    # a registration that predates the catalog still works (falls back to a
+    # title derived from app_id).
+    title: str = ""
+    description: str = ""
+    icon: str = "▦"
     # Tool names this app may dispatch via POST /app/{app_id}/api/tool/{name}.
     # The registry is process-global; without this set any app iframe could
     # invoke any other app's tools (app-only metadata is visibility, NOT
     # authorization).
     allowed_tools: frozenset[str] = frozenset()
+    # Optional build/source identity for local diagnostics and forensic exports.
+    # Kept app-specific because split and single-file bundles have different
+    # fingerprinting rules.
+    diagnostics_loader: Callable[[], dict[str, Any]] | None = None
 
 
 # app_id -> WebAppConfig
@@ -67,17 +81,30 @@ def register_web_app(
     open_tool: str,
     html_loader: Callable[[], str],
     tools: dict[str, Callable[..., CallToolResult]],
+    title: str = "",
+    description: str = "",
+    icon: str = "▦",
+    diagnostics_loader: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     """Register a mini-app for standalone web delivery.
 
     Called from each ``register_*_tools`` function. Additive and idempotent —
     safe to call once per process boot.
+
+    ``title`` / ``description`` / ``icon`` feed the app catalog at ``/``. They
+    are optional so the catalog stays driven by this one registry — an app is
+    listed because it registered, never because a landing page hardcoded it
+    (dev-gated apps therefore appear only when they are actually registered).
     """
     WEB_APP_CONFIGS[app_id] = WebAppConfig(
         app_id=app_id,
         open_tool=open_tool,
         html_loader=html_loader,
         allowed_tools=frozenset(tools) | _SHARED_INFRA_TOOLS,
+        title=title,
+        description=description,
+        icon=icon,
+        diagnostics_loader=diagnostics_loader,
     )
     MINI_APP_TOOL_REGISTRY.update(tools)
 
@@ -186,7 +213,11 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
 
 
 def _inject_payload(
-    html: str, payload_json: str, app_id: str, token: str = ""
+    html: str,
+    payload_json: str,
+    app_id: str,
+    token: str = "",
+    diagnostics: dict[str, Any] | None = None,
 ) -> str:
     """Inject the initial payload + API pointer before the first script tag so
     ``loadEmbedded()`` finds the data when the app module executes.
@@ -205,10 +236,14 @@ def _inject_payload(
     # tabs for unregistered (e.g. dev-only) apps never render in standalone
     # mode. Dev (`npm run dev`) has no injection and keeps the static list.
     apps_line = f"window.__MINI_APP_APPS__={json.dumps(sorted(WEB_APP_CONFIGS))};"
+    diagnostics_line = (
+        "window.__MINI_APP_DIAGNOSTICS__="
+        f"{json.dumps(diagnostics or {}, default=str)};"
+    )
     snippet = (
         f'<script id="mini-app-data" type="application/json">{safe_json}</script>'
         f"<script>window.__MINI_APP_API__={json.dumps(api_base)};"
-        f"{apps_line}{token_line}</script>"
+        f"{apps_line}{diagnostics_line}{token_line}</script>"
     )
     lower = html.lower()
     idx = lower.find("<script")
@@ -274,7 +309,16 @@ async def serve_app(request: Request) -> Response:
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[len("Bearer ") :]
-    html = _inject_payload(config.html_loader(), payload_json, app_id, token)
+    diagnostics: dict[str, Any] = {}
+    if config.diagnostics_loader is not None:
+        try:
+            diagnostics = config.diagnostics_loader()
+        except Exception as exc:  # diagnostics must never take down the app
+            logger.warning("web app %s diagnostics failed: %s", app_id, exc)
+            diagnostics = {"status": "error", "error": str(exc)}
+    html = _inject_payload(
+        config.html_loader(), payload_json, app_id, token, diagnostics
+    )
     # gzip the (large, ~2.9MB single-file) bundle when the client accepts it —
     # ~40% wire cut. Scoped to this HTML route only; never touches the SSE
     # transport (response-buffering middleware would break the long-poll GET).
@@ -296,6 +340,43 @@ async def serve_app(request: Request) -> Response:
             },
         )
     return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
+
+
+async def serve_app_health(request: Request) -> JSONResponse:
+    """Return process and bundle identity for one registered mini app."""
+    denied = _check_auth(request)
+    if denied is not None:
+        return denied
+    app_id = request.path_params["app_id"]
+    config = WEB_APP_CONFIGS.get(app_id)
+    if config is None:
+        return JSONResponse({"error": f"Unknown app: {app_id}"}, status_code=404)
+    diagnostics: dict[str, Any] = {}
+    if config.diagnostics_loader is not None:
+        try:
+            diagnostics = config.diagnostics_loader()
+        except Exception as exc:
+            logger.exception("web app %s health diagnostics failed", app_id)
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "app_id": app_id,
+                    "pid": os.getpid(),
+                    "started_at": PROCESS_STARTED_AT,
+                    "error": str(exc),
+                },
+                status_code=503,
+            )
+    return JSONResponse(
+        {
+            "status": "ok",
+            "app_id": app_id,
+            "pid": os.getpid(),
+            "started_at": PROCESS_STARTED_AT,
+            **diagnostics,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def dispatch_app_tool(request: Request) -> JSONResponse:
@@ -409,13 +490,167 @@ async def serve_app_asset(request: Request) -> Response:
     return Response(content=data, media_type=media, headers=headers)
 
 
+_CATALOG_CSS = """
+/* EXACT copy of the `.mini-app-scope` token override in
+ * ui/src/themes/tokens.css (NOT the :root block — the mini apps override it to
+ * a cool near-black + sky-cyan palette). Keep these in sync with that block. */
+:root{
+  --bg:#0b0e12;--surface:#12161c;--surface-2:#1a1f26;--surface-3:#232932;
+  --text-primary:#e6e9ee;--text-secondary:#aab3be;--text-muted:#868e9b;
+  --border:rgba(255,255,255,0.12);--border-hover:rgba(255,255,255,0.22);
+  --primary:#67e8f9;--primary-hover:#7dd3fc;
+  --accent-bg:rgba(103,232,249,0.14);--accent-border:rgba(103,232,249,0.35);
+  --accent-text:#a5e8f5;
+  --surface-translucent:rgba(255,255,255,0.045);
+  --surface-translucent-strong:rgba(255,255,255,0.08);
+  --font-body:"Inter",system-ui,-apple-system,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+  color-scheme:dark;
+}
+[data-theme="light"]{
+  --bg:#ffffff;--surface:#ffffff;--surface-2:#f4f6f8;--surface-3:#e8ecef;
+  --text-primary:#111418;--text-secondary:#404a59;--text-muted:#5b6473;
+  --border:rgba(15,23,42,0.18);--border-hover:rgba(15,23,42,0.30);
+  --primary:#0891b2;--primary-hover:#0e7490;
+  --accent-bg:rgba(8,145,178,0.12);--accent-border:rgba(8,145,178,0.35);
+  --accent-text:#0e7490;
+  --surface-translucent:rgba(15,23,42,0.04);
+  --surface-translucent-strong:rgba(15,23,42,0.07);
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text-primary);
+  font-family:var(--font-body);-webkit-font-smoothing:antialiased}
+
+/* Chrome bar — same construction as .ma-bar in mini-app-chrome.css */
+.bar{display:flex;align-items:center;border-bottom:1px solid var(--border);
+  background:var(--surface)}
+.brand{padding:5px 12px;font-family:var(--font-mono);font-size:10.5px;
+  letter-spacing:.06em;color:var(--primary);border-right:1px solid var(--border);
+  white-space:nowrap;display:inline-flex;align-items:center}
+.bar-right{margin-left:auto;padding:5px 12px;border-left:1px solid var(--border);
+  display:flex;align-items:center;gap:8px}
+.tbtn{appearance:none;background:transparent;border:1px solid var(--border-hover);
+  color:var(--text-secondary);border-radius:999px;width:24px;height:24px;
+  display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
+  font-size:.85rem;line-height:1}
+.tbtn:hover{background:var(--surface-translucent);color:var(--text-primary)}
+
+.wrap{max-width:1100px;margin:0 auto;padding:36px 24px 64px}
+h1{font-size:1.7rem;font-weight:650;margin:0 0 8px;letter-spacing:-.02em}
+.sub{color:var(--text-secondary);font-size:.9rem;margin:0 0 30px;max-width:62ch;line-height:1.55}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+.card{display:flex;flex-direction:column;gap:9px;padding:18px;border-radius:12px;
+  border:1px solid var(--border);background:var(--surface);text-decoration:none;
+  color:inherit;transition:border-color .15s,background .15s,transform .15s}
+.card:hover{border-color:var(--primary);background:var(--surface-2);transform:translateY(-2px)}
+.card:focus-visible{outline:1px solid var(--primary);outline-offset:2px}
+.top{display:flex;align-items:center;gap:11px}
+.icon{width:36px;height:36px;flex:0 0 auto;display:grid;place-items:center;
+  border-radius:9px;background:var(--accent-bg);border:1px solid var(--border-hover);
+  font-size:1.1rem;color:var(--accent-text)}
+.name{font-size:1rem;font-weight:600;letter-spacing:-.01em}
+.desc{color:var(--text-secondary);font-size:.84rem;line-height:1.5;margin:0}
+.id{margin-top:auto;padding-top:8px;font-family:var(--font-mono);font-size:.68rem;
+  color:var(--text-muted);letter-spacing:.02em}
+.empty{color:var(--text-secondary);border:1px dashed var(--border);border-radius:12px;
+  padding:28px;text-align:center}
+footer{margin-top:36px;color:var(--text-muted);font-size:.75rem;font-family:var(--font-mono)}
+"""
+
+# The mini apps do NOT persist theme — useTheme() just reads the `data-theme`
+# attribute that each entry HTML declares (`<html data-theme="dark">`) and
+# toggles it in place. The catalog mirrors that exactly: default dark, toggle
+# flips the attribute, nothing stored.
+_CATALOG_JS = """
+(function(){
+  var b=document.getElementById('theme');
+  if(!b) return;
+  b.addEventListener('click',function(){
+    var el=document.documentElement;
+    var dark=el.getAttribute('data-theme')!=='light';
+    el.setAttribute('data-theme', dark?'light':'dark');
+    b.textContent = dark?'\\u263D':'\\u2600';
+  });
+})();
+"""
+
+
+def _catalog_html(apps: list[WebAppConfig], token: str) -> str:
+    """Server-rendered app catalog. Driven entirely by WEB_APP_CONFIGS so it
+    can never drift from what is actually registered/served."""
+    from html import escape
+
+    suffix = f"?token={quote(token)}" if token else ""
+    if apps:
+        cards = "\n".join(
+            f'<a class="card" href="/app/{escape(a.app_id)}{suffix}">'
+            f'<div class="top"><div class="icon" aria-hidden="true">{escape(a.icon or "▦")}</div>'
+            f'<div class="name">{escape(a.title or a.app_id.replace("_", " ").title())}</div></div>'
+            f'<p class="desc">{escape(a.description or "Open this mini app.")}</p>'
+            f'<div class="id">/app/{escape(a.app_id)}</div>'
+            f"</a>"
+            for a in apps
+        )
+        body = f'<div class="grid">{cards}</div>'
+    else:
+        body = '<div class="empty">No mini apps are registered in this server process.</div>'
+    return (
+        # data-theme="dark" mirrors every mini-app entry HTML.
+        "<!doctype html><html lang=\"en\" data-theme=\"dark\"><head><meta charset=\"utf-8\">"
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>Cerebro · Mini Apps</title>"
+        f"<style>{_CATALOG_CSS}</style></head><body>"
+        # Same chrome bar the mini apps render, so entering/leaving an app is
+        # visually continuous.
+        '<div class="bar"><span class="brand">CEREBRO ◇ GNOSIS</span>'
+        '<span class="bar-right">'
+        '<button id="theme" class="tbtn" type="button" title="Toggle theme"'
+        ' aria-label="Toggle theme">☀</button>'
+        "</span></div>"
+        '<div class="wrap">'
+        "<h1>Mini apps</h1>"
+        '<p class="sub">Interactive analysis surfaces served by this Cerebro MCP server. '
+        "Each one opens standalone in the browser and talks to the same warehouse and tools "
+        "the agent uses.</p>"
+        f"{body}"
+        f"<footer>{len(apps)} app{'' if len(apps) == 1 else 's'} registered</footer>"
+        f"</div><script>{_CATALOG_JS}</script></body></html>"
+    )
+
+
+async def serve_app_catalog(request: Request) -> Response:
+    """GET / — card catalog of every registered mini app."""
+    denied = _check_auth(request)
+    if denied is not None:
+        return denied
+    token = request.query_params.get("token", "")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer ") :]
+    apps = sorted(
+        WEB_APP_CONFIGS.values(),
+        key=lambda a: (a.title or a.app_id).lower(),
+    )
+    return Response(
+        content=_catalog_html(apps, token),
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},  # embeds a per-request token
+    )
+
+
 def register_web_app_routes(mcp) -> None:
     """Register the web-app routes on the FastMCP Starlette app."""
     # Assets first (more specific) so it wins over the bare /app/{app_id} route.
     mcp.custom_route(
         "/app/{app_id}/assets/{path:path}", methods=["GET"]
     )(serve_app_asset)
+    mcp.custom_route("/app/{app_id}/health", methods=["GET"])(serve_app_health)
     mcp.custom_route("/app/{app_id}", methods=["GET"])(serve_app)
     mcp.custom_route(
         "/app/{app_id}/api/tool/{tool_name}", methods=["POST"]
     )(dispatch_app_tool)
+    # Landing page: the catalog of everything registered above.
+    mcp.custom_route("/", methods=["GET"])(serve_app_catalog)
+    mcp.custom_route("/apps", methods=["GET"])(serve_app_catalog)

@@ -1,4 +1,4 @@
-.PHONY: build-ui build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio install dev test serve-catalog
+.PHONY: build-ui build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio install dev test serve-catalog status-catalog stop-catalog restart-catalog
 
 # Serve the mini-apps over HTTP so they open in a browser (Data Catalog at
 # /app/data_catalog). Reuses .env for ClickHouse/SEMANTIC config — the only
@@ -7,8 +7,16 @@
 # FastAPI/uvicorn dev servers bound to 127.0.0.1, which silently win localhost
 # routing and return {"detail":"Not Found"}). Override: `make serve-catalog FASTMCP_PORT=…`.
 serve-catalog:
-	@echo "→ open: http://localhost:$${FASTMCP_PORT:-8010}/app/data_catalog?token=$${MCP_AUTH_TOKEN:-dev}"
-	MCP_AUTH_TOKEN=$${MCP_AUTH_TOKEN:-dev} FASTMCP_PORT=$${FASTMCP_PORT:-8010} uv run cerebro-mcp --sse
+	MCP_AUTH_TOKEN=$${MCP_AUTH_TOKEN:-dev} FASTMCP_PORT=$${FASTMCP_PORT:-8010} python3 scripts/dev/catalog_server.py serve
+
+status-catalog:
+	MCP_AUTH_TOKEN=$${MCP_AUTH_TOKEN:-dev} FASTMCP_PORT=$${FASTMCP_PORT:-8010} python3 scripts/dev/catalog_server.py status
+
+stop-catalog:
+	MCP_AUTH_TOKEN=$${MCP_AUTH_TOKEN:-dev} FASTMCP_PORT=$${FASTMCP_PORT:-8010} python3 scripts/dev/catalog_server.py stop
+
+restart-catalog:
+	MCP_AUTH_TOKEN=$${MCP_AUTH_TOKEN:-dev} FASTMCP_PORT=$${FASTMCP_PORT:-8010} python3 scripts/dev/catalog_server.py restart
 
 # Each per-app target builds AND copies into src/cerebro_mcp/static/ so that
 # `make build-ui-<app>` is self-contained — running it and restarting the MCP

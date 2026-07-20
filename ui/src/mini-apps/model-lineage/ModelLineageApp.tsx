@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { MiniAppPayload } from "../shared/miniAppTypes";
 import { useMiniApp } from "../shared/useMiniApp";
-import { WarningBanner } from "../shared/WarningBanner";
+import { ToastStack } from "../shared/ToastStack";
 import { MiniAppChrome } from "../shared/MiniAppChrome";
 import { MaHelpButton } from "../shared/HelpDialog";
 import { MODEL_LINEAGE_HELP } from "../shared/helpContent";
@@ -231,7 +231,7 @@ export default function ModelLineageApp() {
     return (
       <MiniAppChrome activeTabId="lineage" bodyClassName="ma-body--flush" rightSlot={<MaHelpButton content={MODEL_LINEAGE_HELP} />}>
         <div className="ml-shell">
-          <WarningBanner warnings={view.warnings ?? []} />
+          <ToastStack warnings={view.warnings ?? []} />
           <CatalogScreen catalog={state.catalog ?? []} onSeed={onSeed} />
         </div>
       </MiniAppChrome>
@@ -241,7 +241,7 @@ export default function ModelLineageApp() {
   return (
     <MiniAppChrome activeTabId="lineage" bodyClassName="ma-body--flush" rightSlot={<MaHelpButton content={MODEL_LINEAGE_HELP} />}>
       <div className="ml-shell">
-        <WarningBanner warnings={view.warnings ?? []} />
+        <ToastStack warnings={view.warnings ?? []} />
         <FilterBar
           state={state}
           onSeed={onSeed}

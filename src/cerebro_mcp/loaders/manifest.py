@@ -597,7 +597,7 @@ class ManifestLoader:
             meta = node.get("meta", {})
         model_meta = {}
         if meta:
-            for key in ("owner", "authoritative", "full_refresh", "inference_notes"):
+            for key in ("owner", "authoritative", "full_refresh", "inference_notes", "agent"):
                 if key in meta:
                     model_meta[key] = meta[key]
 

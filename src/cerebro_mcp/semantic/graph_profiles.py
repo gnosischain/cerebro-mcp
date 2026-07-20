@@ -21,6 +21,23 @@ from cerebro_mcp.semantic.graph_extraction import (
 
 logger = logging.getLogger(__name__)
 
+# The currently deployed bridge aggregate can contain default-value endpoints
+# from ClickHouse LEFT JOIN semantics. A versioned replacement may be added
+# later, but this profile must fail closed until that relation passes its own
+# full-refresh/incremental equivalence gate.
+_DISABLED_GRAPH_PROFILE_IDS = frozenset({"bridge_user_flows"})
+_DISABLED_GRAPH_RELATIONS = frozenset(
+    {"int_execution_bridges_address_flows_daily"}
+)
+
+
+def _profile_is_runtime_safe(profile: GraphProfile) -> bool:
+    relation = str(profile.relation_name or profile.model_name or "").split(".")[-1]
+    return (
+        profile.profile not in _DISABLED_GRAPH_PROFILE_IDS
+        and relation not in _DISABLED_GRAPH_RELATIONS
+    )
+
 # Re-exported for backward compatibility — the canonical definitions now live in
 # `graph_extraction` (the single, pure place that reads the raw graph block).
 __all__ = [
@@ -47,7 +64,7 @@ def discover_profiles(models: dict[str, Any] | None = None) -> list[GraphProfile
             return []
         cached = getattr(snap, "graph_profiles", None)
         if cached:
-            return list(cached)
+            return [profile for profile in cached if _profile_is_runtime_safe(profile)]
         models = snap.models
     profiles: list[GraphProfile] = []
     for name, model in models.items():
@@ -58,7 +75,7 @@ def discover_profiles(models: dict[str, Any] | None = None) -> list[GraphProfile
             # observable (D4). The dbt validator is the authoritative gate.
             logger.warning("skipping graph profile: %s", exc)
             continue
-        if profile is not None:
+        if profile is not None and _profile_is_runtime_safe(profile):
             profiles.append(profile)
     profiles.sort(key=lambda p: (p.module, p.profile))
     return profiles
@@ -88,10 +105,13 @@ def build_kind_index(
 
 
 def profile_by_id(profile_id: str) -> GraphProfile | None:
+    if profile_id in _DISABLED_GRAPH_PROFILE_IDS:
+        return None
     snap = semantic_runtime.snapshot
     cached = getattr(snap, "profiles_by_id", None) if snap is not None else None
     if cached:
-        return cached.get(profile_id)
+        profile = cached.get(profile_id)
+        return profile if profile is not None and _profile_is_runtime_safe(profile) else None
     for profile in discover_profiles():
         if profile.profile == profile_id:
             return profile
@@ -102,7 +122,11 @@ def profiles_for_kind(node_kind: str) -> list[GraphProfile]:
     snap = semantic_runtime.snapshot
     cached = getattr(snap, "kind_to_profiles", None) if snap is not None else None
     if cached:
-        return list(cached.get(node_kind, ()))
+        return [
+            profile
+            for profile in cached.get(node_kind, ())
+            if _profile_is_runtime_safe(profile)
+        ]
     return [
         profile
         for profile in discover_profiles()
@@ -169,6 +193,55 @@ def _reject_unsafe_identifiers(*values: str | None) -> None:
             raise ValueError(f"unsafe SQL identifier in graph profile: {value!r}")
 
 
+def _relationship_time_clauses(
+    profile: GraphProfile,
+    *,
+    t0: str,
+    t1: str,
+) -> list[str]:
+    """Return the single canonical predicate used by graph query surfaces.
+
+    ``t0`` and ``t1`` are SQL expressions supplied by the caller (normally
+    bound-parameter expressions). Keeping the semantics here prevents sample,
+    neighbour, traversal, and evidence queries from describing different
+    relationship universes for the same controls.
+    """
+    kind = profile.relationship_time
+    start = profile.time_column
+    end = profile.time_end_column
+    if kind == "current_snapshot":
+        return []
+    if not start:
+        # Invalid authored metadata degrades to no historical assertion. The
+        # source-contract validator reports the missing column separately.
+        return []
+    if kind == "event":
+        return [f"{start} >= {t0}", f"{start} < {t1}"]
+    if kind == "state_at":
+        return [f"{start} <= {t1}"]
+    if kind == "interval":
+        clauses = [f"{start} < {t1}"]
+        if end:
+            clauses.append(f"({end} IS NULL OR {end} >= {t0})")
+        return clauses
+    return []
+
+
+def _lookback_time_clauses(
+    profile: GraphProfile,
+    *,
+    params: dict[str, Any],
+    window_days: int,
+) -> list[str]:
+    if profile.relationship_time in {"event", "interval"}:
+        params["win"] = int(max(1, window_days))
+    return _relationship_time_clauses(
+        profile,
+        t0="now() - INTERVAL {win:UInt32} DAY",
+        t1="now()",
+    )
+
+
 def build_neighbors_sql(
     profile: GraphProfile,
     *,
@@ -196,12 +269,23 @@ def build_neighbors_sql(
         where_bits.append("1 = 0")
     where_clause = " OR ".join(where_bits)
 
-    time_clause = ""
-    if profile.time_column:
-        time_clause = f" AND {profile.time_column} >= now() - INTERVAL {{win:UInt32}} DAY"
-        params["win"] = int(max(1, window_days))
+    time_clause = "".join(
+        f" AND {clause}"
+        for clause in _lookback_time_clauses(
+            profile, params=params, window_days=window_days
+        )
+    )
 
-    weight_expr = f"sum({profile.weight_column})" if profile.weight_column else "toFloat64(count())"
+    weight_expr = (
+        # ClickHouse aggregate defaults can turn an all-NULL weighted group
+        # into zero. Preserve the forensic distinction: a bridge relation
+        # whose volume_usd is entirely NULL has unknown weight, not $0.
+        f"if(count({profile.weight_column}) = 0, "
+        "CAST(NULL AS Nullable(Float64)), "
+        f"toNullable(toFloat64(sum({profile.weight_column}))))"
+        if profile.weight_column
+        else "toFloat64(count())"
+    )
 
     # Profile-authored guards (e.g. drop NULL/empty inviter endpoints).
     filter_clause = "".join(f" AND {c}" for c in _default_filter_clauses(profile))
@@ -217,7 +301,13 @@ def build_neighbors_sql(
         FROM {rel}
         WHERE ({where_clause}){time_clause}{filter_clause}
         GROUP BY source_id, target_id
-        ORDER BY weight DESC
+        -- Endpoint tiebreaker is NOT cosmetic: `ORDER BY weight DESC` alone is
+        -- a partial order, so ClickHouse may return ANY of the tied rows for
+        -- the LIMIT. Profiles with constant weight (one row per pair) are
+        -- entirely tied, and identical calls then returned DISJOINT edge sets
+        -- (measured: 0 of 50 shared between two runs of `address_labeled_as`).
+        -- The timeline builders below already carry this tiebreaker.
+        ORDER BY weight DESC, source_id, target_id
         LIMIT {{lim:UInt32}}
     """
     return sql, params
@@ -242,13 +332,19 @@ def build_sample_sql(
 
     params: dict[str, Any] = {"lim": int(limit)}
     where_bits: list[str] = []
-    if profile.time_column:
-        where_bits.append(f"{profile.time_column} >= now() - INTERVAL {{win:UInt32}} DAY")
-        params["win"] = int(max(1, window_days))
+    where_bits.extend(
+        _lookback_time_clauses(profile, params=params, window_days=window_days)
+    )
     where_bits.extend(_default_filter_clauses(profile))
     where_clause = f" WHERE {' AND '.join(where_bits)}" if where_bits else ""
 
-    weight_expr = f"sum({profile.weight_column})" if profile.weight_column else "toFloat64(count())"
+    weight_expr = (
+        f"if(count({profile.weight_column}) = 0, "
+        "CAST(NULL AS Nullable(Float64)), "
+        f"toNullable(toFloat64(sum({profile.weight_column}))))"
+        if profile.weight_column
+        else "toFloat64(count())"
+    )
     sql = f"""
         SELECT
             toString({src}) AS source_id,
@@ -257,9 +353,161 @@ def build_sample_sql(
             count() AS edge_count
         FROM {rel}{where_clause}
         GROUP BY source_id, target_id
-        ORDER BY weight DESC
+        -- See build_neighborhood_sql: total order, or the sample is a lottery.
+        ORDER BY weight DESC, source_id, target_id
         LIMIT {{lim:UInt32}}
     """
+    return sql, params
+
+
+# Timeline bucketing (mirror of metric_lab's private _TIME_GRAINS — a
+# deliberate 3-line copy rather than a cross-import of a 1000-line UI module).
+_TIMELINE_GRAINS: dict[str, str] = {
+    "day": "toDate({col})",
+    "week": "toStartOfWeek({col}, 1)",
+    "month": "toStartOfMonth({col})",
+}
+
+
+def build_timeline_sql(
+    profile: GraphProfile,
+    *,
+    node_ids: list[str],
+    grain: str = "week",
+    range_start: str = "",
+    range_end_exclusive: str = "",
+    limit: int = 8000,
+) -> tuple[str, dict[str, Any]]:
+    """Time-bucketed edges for the Timeline mode, per temporal shape.
+
+    Locked semantics (each pinned by a test):
+      * The range is HALF-OPEN ``[range_start, range_end_exclusive)`` — both
+        are server-computed, already-bucketed ISO dates, bound as parameters
+        (never bare ``now()`` lookbacks, so SQL and the client axis can't
+        drift).
+      * Scope: BOTH endpoints must be in ``node_ids`` — the timeline animates
+        a known subgraph; one-endpoint matches would grow it mid-playback.
+      * flow      -> one row per active bucket (``bucket_start == bucket_end``).
+      * state     -> one row per edge, ``bucket(min(time))`` .. NULL (open);
+                     NO lower time bound (a Safe owned since 2021 must appear
+                     in a 2025 range) but ``time < range_end_exclusive``.
+      * interval  -> one row per validity span; overlap filter; NULL end stays
+                     NULL (open). ``bucket(time_end)`` is the last ACTIVE
+                     bucket (inclusive) — client-side.
+      * static    -> one row per edge, NULL/NULL (always-on context).
+      * Undirected profiles canonicalize reciprocals in SQL via
+        least/greatest so A->B and B->A sum into one row per bucket.
+      * Deterministic ordering; the query asks for ``limit + 1`` rows so the
+        caller detects per-profile truncation precisely (drop the extra row).
+    """
+    if grain not in _TIMELINE_GRAINS:
+        raise ValueError(f"unknown timeline grain: {grain!r}")
+    src = profile.source_column
+    tgt = profile.target_column
+    rel = profile.relation_name or profile.model_name
+    _reject_unsafe_identifiers(
+        src, tgt, rel, profile.time_column, profile.time_end_column,
+        profile.weight_column,
+    )
+
+    def bexpr(col: str) -> str:
+        return _TIMELINE_GRAINS[grain].format(col=col)
+
+    if profile.directed:
+        src_expr = f"toString({src})"
+        tgt_expr = f"toString({tgt})"
+    else:
+        src_expr = f"least(toString({src}), toString({tgt}))"
+        tgt_expr = f"greatest(toString({src}), toString({tgt}))"
+
+    params: dict[str, Any] = {
+        "ids": [str(s) for s in node_ids],
+        "lim": int(limit) + 1,
+    }
+    scope = (
+        f"toString({src}) IN {{ids:Array(String)}} "
+        f"AND toString({tgt}) IN {{ids:Array(String)}}"
+    )
+    filters = "".join(f" AND {c}" for c in _default_filter_clauses(profile))
+    weight_expr = (
+        f"sum({profile.weight_column})"
+        if profile.weight_column
+        else "toFloat64(count())"
+    )
+    null_date = "CAST(NULL AS Nullable(Date))"
+    shape = profile.temporal_shape
+    t = profile.time_column or ""
+    te = profile.time_end_column or ""
+
+    if shape == "flow":
+        params["start"] = range_start
+        params["endx"] = range_end_exclusive
+        sql = f"""
+        SELECT
+            {src_expr} AS source_id,
+            {tgt_expr} AS target_id,
+            {bexpr(t)} AS bucket_start,
+            {bexpr(t)} AS bucket_end,
+            {weight_expr} AS weight,
+            count() AS edge_count
+        FROM {rel}
+        WHERE ({scope})
+          AND {t} >= {{start:Date}} AND {t} < {{endx:Date}}{filters}
+        GROUP BY source_id, target_id, bucket_start
+        ORDER BY weight DESC, source_id, target_id, bucket_start
+        LIMIT {{lim:UInt32}}
+        """
+    elif shape == "state":
+        params["endx"] = range_end_exclusive
+        sql = f"""
+        SELECT
+            {src_expr} AS source_id,
+            {tgt_expr} AS target_id,
+            {bexpr(f"min({t})")} AS bucket_start,
+            {null_date} AS bucket_end,
+            {weight_expr} AS weight,
+            count() AS edge_count
+        FROM {rel}
+        WHERE ({scope})
+          AND {t} < {{endx:Date}}{filters}
+        GROUP BY source_id, target_id
+        ORDER BY weight DESC, source_id, target_id, bucket_start
+        LIMIT {{lim:UInt32}}
+        """
+    elif shape == "interval":
+        params["start"] = range_start
+        params["endx"] = range_end_exclusive
+        sql = f"""
+        SELECT
+            {src_expr} AS source_id,
+            {tgt_expr} AS target_id,
+            {bexpr(t)} AS bucket_start,
+            if({te} IS NULL, {null_date}, {bexpr(te)}) AS bucket_end,
+            {weight_expr} AS weight,
+            count() AS edge_count
+        FROM {rel}
+        WHERE ({scope})
+          AND {t} < {{endx:Date}}
+          AND ({te} IS NULL OR {te} >= {{start:Date}}){filters}
+        GROUP BY source_id, target_id, bucket_start, bucket_end
+        ORDER BY weight DESC, source_id, target_id, bucket_start
+        LIMIT {{lim:UInt32}}
+        """
+    else:  # static
+        sql = f"""
+        SELECT
+            {src_expr} AS source_id,
+            {tgt_expr} AS target_id,
+            {null_date} AS bucket_start,
+            {null_date} AS bucket_end,
+            {weight_expr} AS weight,
+            count() AS edge_count
+        FROM {rel}
+        WHERE ({scope}){filters}
+        GROUP BY source_id, target_id
+        ORDER BY weight DESC, source_id, target_id
+        LIMIT {{lim:UInt32}}
+        """
     return sql, params
 
 
@@ -269,16 +517,50 @@ def build_evidence_sql(
     source_id: str,
     target_id: str,
     limit: int = 25,
+    window_days: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    """Backing rows for ONE edge.
+
+    ``window_days`` must be the window the EDGE's weight was computed over.
+    Without it this query had no time predicate at all, so an edge aggregated
+    over the last 90 days drilled into rows from 2021 — evidence from a
+    different era than the claim it was offered as proof of. Worse, because
+    each edge returned its own unwindowed slice, no two edges in a view were
+    temporally comparable.
+
+    The ``ORDER BY`` is likewise load-bearing: a bare ``LIMIT`` over an
+    unordered scan returns an arbitrary subset that changes between identical
+    calls (17 distinct result sets over 20 calls, measured). Evidence that
+    changes when you look at it twice is not evidence.
+    """
     model = profile.evidence_model or profile.model_name
     src = profile.evidence_source_column or profile.source_column
     tgt = profile.evidence_target_column or profile.target_column
-    _reject_unsafe_identifiers(src, tgt, model)
+    _reject_unsafe_identifiers(src, tgt, model, profile.time_column)
     params: dict[str, Any] = {"src": source_id, "tgt": target_id, "lim": int(limit)}
+
+    time_clause = ""
+    order_cols = []
+    if profile.time_column:
+        order_cols.append(f"{profile.time_column} DESC")
+        if window_days:
+            time_clause = "".join(
+                f" AND {clause}"
+                for clause in _lookback_time_clauses(
+                    profile, params=params, window_days=window_days
+                )
+            )
+    # Endpoints are fixed by the WHERE, so they cannot break a tie. `tuple(*)`
+    # gives a lexicographic total order over every column, which makes the
+    # result reproducible even on time-less profiles.
+    order_cols.append("tuple(*)")
+    order_clause = ", ".join(order_cols)
+
     sql = f"""
         SELECT *
         FROM {model}
-        WHERE {src} = {{src:String}} AND {tgt} = {{tgt:String}}
+        WHERE {src} = {{src:String}} AND {tgt} = {{tgt:String}}{time_clause}
+        ORDER BY {order_clause}
         LIMIT {{lim:UInt32}}
     """
     return sql, params
@@ -311,10 +593,12 @@ def build_node_flow_sql(
         f"toFloat64(sum({profile.weight_column}))" if profile.weight_column else "toFloat64(count())"
     )
 
-    time_clause = ""
-    if profile.time_column:
-        time_clause = f" AND {profile.time_column} >= now() - INTERVAL {{win:UInt32}} DAY"
-        params["win"] = int(max(1, window_days))
+    time_clause = "".join(
+        f" AND {clause}"
+        for clause in _lookback_time_clauses(
+            profile, params=params, window_days=window_days
+        )
+    )
     self_clause = f" AND toString({src}) != toString({tgt})" if exclude_self_loops else ""
     filter_clause = "".join(f" AND {c}" for c in _default_filter_clauses(profile))
 
@@ -361,18 +645,26 @@ _ROLE_TO_PROFILES: dict[str, tuple[str, ...]] = {
 
 
 def profiles_for_address_roles(roles: dict[str, Any]) -> list[str]:
-    """Map role flags from address_roles_current → graph profile ids."""
-    if not roles:
-        return []
-    seen: list[str] = []
+    """Map role flags from address_roles_current → graph profile ids.
+
+    ``token_transfers`` is ALWAYS present: value movement is the universal
+    forensic baseline, and a role profile is an ADDITION to it, never a
+    replacement. Previously a role match suppressed the fallback, so a
+    labelled address (``has_dune_label`` → ``address_labeled_as``, a
+    time-less label relation) resolved to the label edge alone and rendered
+    an EMPTY graph — despite, in the observed case, 49.5k transfers across
+    ~4k counterparties in the default 90d window. Labelled addresses are
+    exchanges, tokens and protocols: precisely where an investigation
+    starts, so this blanked the tool exactly where it mattered most.
+    ``is_safe``/``is_safe_owner`` already paired the transfer view in by
+    hand, which is the same intent applied inconsistently.
+    """
+    seen: list[str] = ["token_transfers"]
     for flag, profiles in _ROLE_TO_PROFILES.items():
         if roles.get(flag):
             for profile_id in profiles:
                 if profile_id not in seen:
                     seen.append(profile_id)
-    # A bare address with no known role still gets the universal transfer view.
-    if not seen:
-        seen.append("token_transfers")
     return seen
 
 

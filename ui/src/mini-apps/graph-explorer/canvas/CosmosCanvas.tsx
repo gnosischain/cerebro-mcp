@@ -7,7 +7,6 @@ import { Graph } from "@cosmos.gl/graph";
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { SPACE_SIZE, type GraphModel } from "../model/parseRows";
 import { COLOR_BY_KIND, FALLBACK_COLOR, SEED_COLOR, hexToRgba } from "../model/palette";
-import type { GraphLayout } from "../types";
 
 /** Imperative surface LabelsOverlay registers so the graph callbacks (tick /
  * zoom / data push) can drive label + tooltip painting without re-creating
@@ -19,16 +18,130 @@ export interface CanvasOverlayHandle {
   hideTooltip: () => void;
 }
 
+/** Imperative sim control CosmosCanvas registers so GraphCanvas's Play /
+ * Forces controls reheat through the SAME path (settle decay + regime reset),
+ * never leaving a hot burst to cool under the slow idle decay. */
+export interface CanvasSimControl {
+  reheat: (alpha: number) => void;
+}
+
+/** Browser-session camera state. Positions are keyed by node id rather than
+ * array index so a task can be restored safely after rows are reordered (or
+ * after a small incremental expansion). */
+export interface CanvasCameraSnapshot {
+  zoom: number;
+  center: [number, number];
+  nodePositions: ReadonlyMap<string, [number, number]>;
+}
+
+type CameraGraph = Pick<
+  Graph,
+  | "fitViewByPointPositions"
+  | "getPointPositions"
+  | "getZoomLevel"
+  | "screenToSpacePosition"
+  | "setZoomLevel"
+>;
+
+const finitePoint = (point: [number, number]): boolean =>
+  Number.isFinite(point[0]) && Number.isFinite(point[1]);
+
+export function captureCanvasCamera(
+  graph: CameraGraph,
+  model: Pick<GraphModel, "indexToId" | "n">,
+  viewport: { width: number; height: number },
+): CanvasCameraSnapshot | null {
+  if (viewport.width < 2 || viewport.height < 2 || model.n === 0) return null;
+  const zoom = graph.getZoomLevel();
+  const center = graph.screenToSpacePosition([
+    viewport.width / 2,
+    viewport.height / 2,
+  ]);
+  const positions = graph.getPointPositions();
+  if (
+    !Number.isFinite(zoom) ||
+    zoom <= 0 ||
+    !finitePoint(center) ||
+    positions.length !== model.n * 2
+  ) {
+    return null;
+  }
+  const nodePositions = new Map<string, [number, number]>();
+  for (let i = 0; i < model.n; i++) {
+    const id = model.indexToId[i];
+    const point: [number, number] = [positions[i * 2], positions[i * 2 + 1]];
+    if (id && finitePoint(point)) nodePositions.set(id, point);
+  }
+  if (!nodePositions.size) return null;
+  return { zoom, center, nodePositions };
+}
+
+export function positionsFromCameraSnapshot(
+  model: Pick<GraphModel, "indexToId" | "positions">,
+  snapshot: CanvasCameraSnapshot,
+): Float32Array {
+  const positions = Float32Array.from(model.positions);
+  for (let i = 0; i < model.indexToId.length; i++) {
+    const saved = snapshot.nodePositions.get(model.indexToId[i]);
+    if (!saved || !finitePoint(saved)) continue;
+    positions[i * 2] = saved[0];
+    positions[i * 2 + 1] = saved[1];
+  }
+  return positions;
+}
+
+export function cameraSnapshotMatchesModel(
+  snapshot: CanvasCameraSnapshot | null | undefined,
+  model: Pick<GraphModel, "indexToId">,
+): snapshot is CanvasCameraSnapshot {
+  return Boolean(
+    snapshot &&
+    Number.isFinite(snapshot.zoom) &&
+    snapshot.zoom > 0 &&
+    finitePoint(snapshot.center) &&
+    model.indexToId.some((id) => snapshot.nodePositions.has(id)),
+  );
+}
+
+/** Restore with public Cosmos APIs only. `fitViewByPointPositions` centers the
+ * saved world coordinate; once its zero-duration d3 transition has committed,
+ * `setZoomLevel` applies the saved scale around that same viewport center.
+ * Two animation frames avoid racing d3's deferred transition without relying
+ * on Cosmos's private transform method. */
+export function restoreCanvasCamera(
+  graph: Pick<CameraGraph, "fitViewByPointPositions" | "setZoomLevel">,
+  snapshot: CanvasCameraSnapshot,
+  onComplete?: () => void,
+): () => void {
+  let cancelled = false;
+  let secondFrame = 0;
+  graph.fitViewByPointPositions([...snapshot.center], 0);
+  const firstFrame = window.requestAnimationFrame(() => {
+    secondFrame = window.requestAnimationFrame(() => {
+      if (cancelled) return;
+      graph.setZoomLevel(snapshot.zoom, 0);
+      onComplete?.();
+    });
+  });
+  return () => {
+    cancelled = true;
+    window.cancelAnimationFrame(firstFrame);
+    if (secondFrame) window.cancelAnimationFrame(secondFrame);
+  };
+}
+
 interface Props {
   model: GraphModel;
   selectedNodeId: string;
+  selectedEdgeId?: string;
   seedNodeId?: string;
   focusMode: boolean;
-  layout: GraphLayout;
   hiddenKinds: Set<string>;
   /** Owned by GraphCanvas; shared with the toolbar (fit/recenter/search). */
   graphRef: MutableRefObject<Graph | null>;
   overlayRef: MutableRefObject<CanvasOverlayHandle | null>;
+  /** Optional: GraphCanvas registers here to reheat the sim (Play / Forces). */
+  simControlRef?: MutableRefObject<CanvasSimControl | null>;
   emptyHint: string;
   onSelectNode: (id: string) => void;
   onSelectEdge: (id: string) => void;
@@ -36,9 +149,106 @@ interface Props {
   /** Background (non-node, non-edge) click. */
   onViewClick?: () => void;
   onSimRunningChange?: (running: boolean) => void;
+  /** Flows seam: the layout is precomputed and authoritative — pushes use
+   * setPointPositions(positions, true) + render(); the force sim NEVER runs
+   * (no start(), no keep-warm). */
+  staticLayout?: boolean;
+  /** True while the user has explicitly paused the sim (keep-warm respects
+   * it — the simmer must not resurrect a paused layout). */
+  userPaused?: boolean;
+  /** Timeline seam: per-link alpha/width override composed onto the model's
+   * link colors each frame — applied via setLinkColors/setLinkWidths +
+   * render(), which does NOT touch simulation state. Alpha 0 hides; width 0
+   * also suppresses clicks on hidden links. */
+  linkOverride?: { alpha: Float32Array; width: Float32Array };
+  /** Timeline seam: per-point alpha multiplier (dims nodes with no visible
+   * incident edge in the window). */
+  pointAlphaOverride?: Float32Array;
+  /** Optional task-local camera captured by GraphCanvas. */
+  initialCamera?: CanvasCameraSnapshot | null;
+  onCameraStateChange?: (camera: CanvasCameraSnapshot) => void;
+  /** Renderer failures happen predominantly in effects and Cosmos callbacks,
+   * which React error boundaries cannot catch. Report them to GraphCanvas so
+   * it can retire only this renderer and keep the investigative shell alive. */
+  onRendererError?: (error: Error) => void;
 }
 
-function detectWebGL(): boolean {
+/** Cooling length (ticks) for the force sim — a smooth settle in ~10-15s. */
+export const SETTLE_DECAY = 1000;
+/** After a data change the camera fits ONCE, when the layout has settled below
+ * this alpha — so the graph frames itself without the camera moving while it
+ * spreads (the "always recentering" the user hated), and without leaving a big
+ * result off-screen. */
+export const FIRST_FIT_GATE = 0.1;
+/** Cap the zoom after an auto-fit so a 1–2 node result doesn't blow up into a
+ * giant blurry dot. */
+export const MAX_AUTO_ZOOM = 3.5;
+
+/** Link colors + widths to push to Cosmos for the current override state.
+ *
+ * ABSENCE of an override is itself a state to apply — it means "show every
+ * link at its baseline". The effect used to `return` early when the override
+ * was undefined, so un-hiding the last edge type (which drops the override
+ * back to undefined outside Timeline) left the zeroed widths and alphas on the
+ * GPU: edges could be toggled OFF but never back ON. Pure so vitest can pin
+ * the round trip without a WebGL context.
+ */
+export function composeLinkVisuals(
+  model: Pick<
+    GraphModel,
+    "linkColors" | "linkWidths" | "linkIds" | "linkEdgeIds"
+  >,
+  linkOverride?: { alpha: Float32Array; width: Float32Array },
+  selectedEdgeId?: string,
+): { colors: Float32Array; widths: Float32Array } {
+  const selectedLinkIndex = selectedEdgeId
+    ? model.linkEdgeIds.findIndex((edgeIds) => edgeIds.includes(selectedEdgeId))
+    : -1;
+  if (!linkOverride && selectedLinkIndex < 0) {
+    return { colors: model.linkColors, widths: model.linkWidths };
+  }
+  const linkCount = model.linkIds.length;
+  const colors = new Float32Array(model.linkColors);
+  const widths = linkOverride
+    ? new Float32Array(linkOverride.width)
+    : new Float32Array(model.linkWidths);
+  for (let i = 0; i < linkCount; i++) {
+    const alpha = linkOverride?.alpha[i] ?? 1;
+    colors[i * 4 + 3] = model.linkColors[i * 4 + 3] * alpha;
+    // Selection is a visual overlay, never a visibility override. A link
+    // hidden by profile/time filtering (zero alpha OR width) must stay hidden.
+    if (
+      i === selectedLinkIndex &&
+      colors[i * 4 + 3] > 0 &&
+      (widths[i] ?? 0) > 0
+    ) {
+      colors[i * 4] = 1;
+      colors[i * 4 + 1] = 0.72;
+      colors[i * 4 + 2] = 0.12;
+      colors[i * 4 + 3] = 1;
+      widths[i] = Math.max(widths[i] * 1.8, widths[i] + 2);
+    }
+  }
+  return { colors, widths };
+}
+
+/** Pure reheat-alpha (vitest target): a no-op republish gets 0; a fresh/
+ * replaced graph settles fully; an incremental push (positions retained) gets
+ * a gentle top-up. */
+export function reEnergizeAlpha(opts: {
+  sameGraph: boolean;
+  retained: number;
+  prevN: number;
+  nextN: number;
+}): number {
+  if (opts.sameGraph) return 0;
+  const churn = opts.prevN
+    ? 1 - opts.retained / Math.max(opts.nextN, opts.prevN)
+    : 1;
+  return churn > 0.3 ? 1 : 0.3;
+}
+
+export function detectWebGL(): boolean {
   try {
     const canvas = document.createElement("canvas");
     return !!(
@@ -53,25 +263,74 @@ function detectWebGL(): boolean {
 export function CosmosCanvas({
   model,
   selectedNodeId,
+  selectedEdgeId,
   seedNodeId,
   focusMode,
-  layout,
   hiddenKinds,
   graphRef,
   overlayRef,
+  simControlRef,
   emptyHint,
   onSelectNode,
   onSelectEdge,
   onExpandNode,
   onViewClick,
   onSimRunningChange,
+  staticLayout = false,
+  userPaused = false,
+  linkOverride,
+  pointAlphaOverride,
+  initialCamera,
+  onCameraStateChange,
+  onRendererError,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [webglOk] = useState(detectWebGL);
+  const rendererFailedRef = useRef(false);
+  const onRendererErrorRef = useRef(onRendererError);
+  onRendererErrorRef.current = onRendererError;
+  const onCameraStateChangeRef = useRef(onCameraStateChange);
+  onCameraStateChangeRef.current = onCameraStateChange;
+  const initialCameraRef = useRef(initialCamera);
+  const cameraRestoredRef = useRef(false);
+  const cameraRestorePendingRef = useRef(false);
+  const cancelCameraRestoreRef = useRef<(() => void) | null>(null);
+
+  const reportRendererError = (caught: unknown, phase: string) => {
+    if (rendererFailedRef.current) return;
+    rendererFailedRef.current = true;
+    const cause = caught instanceof Error ? caught : new Error(String(caught));
+    const error = new Error(`Cosmos renderer ${phase}: ${cause.message}`);
+    onRendererErrorRef.current?.(error);
+  };
+
+  /** Cosmos invokes these callbacks outside React. A thrown callback would
+   * otherwise become an uncaught window error instead of activating the
+   * first-class table surface. */
+  const guardRuntime = <TArgs extends unknown[]>(
+    phase: string,
+    callback: (...args: TArgs) => void,
+  ) => (...args: TArgs) => {
+    try {
+      callback(...args);
+    } catch (error) {
+      reportRendererError(error, phase);
+    }
+  };
   // double-click detection (Cosmos exposes single-click only)
   const lastClickRef = useRef<{ index: number; t: number }>({ index: -1, t: 0 });
-  // camera-follow throttle while the simulation runs
-  const lastFollowRef = useRef(0);
+  // Camera lock: false while framing a fresh graph's initial spread; true once
+  // locked (expands/Play/resize never recenter). A full-churn push unlocks it.
+  // Set true on every data change; the tick performs ONE fit when the layout
+  // settles below FIRST_FIT_GATE, then clears it. No continuous follow.
+  const pendingFitRef = useRef(false);
+  // Last observed canvas size — a pending fit waits for two identical
+  // readings so it never lands mid grid-transition.
+  const lastSizeRef = useRef({ w: -1, h: -1 });
+  // Live mirrors for the create-once callbacks (they capture creation scope).
+  const keepWarmStateRef = useRef({ staticLayout, userPaused, hasNodes: false });
+  keepWarmStateRef.current.staticLayout = staticLayout;
+  keepWarmStateRef.current.userPaused = userPaused;
 
   // The Cosmos Graph is created once (on [webglOk]); its click/tick callbacks
   // capture whatever is in scope at creation time — i.e. the initial EMPTY
@@ -109,14 +368,17 @@ export function CosmosCanvas({
       const isSeed = seedNodeId && node.id === seedNodeId;
       const hex = isSeed ? SEED_COLOR : COLOR_BY_KIND[node.kind] ?? FALLBACK_COLOR;
       const hidden = hiddenKinds.has(node.kind) && !isSeed;
-      const [r, g, b, a] = hexToRgba(hex, hidden ? 0.04 : 1);
+      let [r, g, b, a] = hexToRgba(hex, hidden ? 0.04 : 1);
+      if (pointAlphaOverride && i < pointAlphaOverride.length) {
+        a *= pointAlphaOverride[i];
+      }
       out[i * 4] = r;
       out[i * 4 + 1] = g;
       out[i * 4 + 2] = b;
       out[i * 4 + 3] = a;
     }
     return out;
-  }, [model, seedNodeId, hiddenKinds]);
+  }, [model, seedNodeId, hiddenKinds, pointAlphaOverride]);
 
   // Node sizes with a distinct seed marker: the seed is forced to a large
   // floor so it pops out of the cloud even when it isn't the top-degree hub.
@@ -133,18 +395,55 @@ export function CosmosCanvas({
   // (the empty placeholder overlays it) so this create-once effect never runs
   // against a missing container when the first payload has zero nodes.
   useEffect(() => {
+    if (!webglOk) {
+      reportRendererError(
+        new Error("WebGL is unavailable or disabled in this browser"),
+        "capability check failed",
+      );
+    }
+    // The callback is intentionally reached through a ref; this effect is a
+    // one-time capability gate rather than a response to parent renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [webglOk]);
+
+  useEffect(() => {
     if (!webglOk || !containerRef.current) return;
-    const graph = new Graph(containerRef.current, {
+    const container = containerRef.current;
+    let graph: Graph;
+    try {
+      graph = new Graph(container, {
       backgroundColor: [0, 0, 0, 0],
       spaceSize: SPACE_SIZE,
+      // Flows: the layered layout is authoritative and the physics engine must
+      // be OFF entirely — not merely "not restarted". With the sim enabled the
+      // graph auto-runs an initial cycle on first data set, which drifted the
+      // layered positions and read as perpetual "hiccups". enableSimulation
+      // false makes render() never advance physics (points stay exactly where
+      // setPointPositions puts them). GraphCanvas remounts this component when
+      // staticLayout flips (keyed), so the flag is always correct at creation.
+      enableSimulation: !staticLayout,
       pointSize: 3,
       pointSizeScale: 1,
       linkColor: [0.55, 0.6, 0.7, 0.6],
       linkWidth: 1,
       linkWidthScale: 1,
-      // Straight links so arrowheads read cleanly (curvature interferes with
-      // arrow placement in 2.6.4).
-      curvedLinks: false,
+      // Curved links so RECIPROCAL edges stop hiding each other. The shader
+      // places the control point at `(a+b)/2 + normal * dist * h`, and the
+      // normal is derived from (b - a) — so A→B and B→A bow to OPPOSITE sides
+      // and both become visible. Straight lines drew them exactly on top of
+      // each other, which read as a single one-way transfer.
+      //
+      // LIMIT worth knowing: `h` is a GLOBAL scalar, so two SAME-direction
+      // edges between the same pair still coincide exactly. No cosmos config
+      // fixes that (there is no per-link curvature in 2.6.4) — parallel
+      // same-direction edges are merged with a multiplicity count instead
+      // (see collapseParallelLinks in parseRows).
+      curvedLinks: true,
+      curvedLinkSegments: 16,
+      // Gentler than the 0.5 default: a deep bow pushes long edges far from
+      // the straight path and makes the topology harder to read.
+      curvedLinkControlPointDistance: 0.3,
+      curvedLinkWeight: 0.8,
       linkArrows: true,
       linkArrowsSizeScale: 0.8,
       // Keep edges legible across zoom levels — Cosmos defaults to [50,150]
@@ -155,53 +454,60 @@ export function CosmosCanvas({
       // Don't inflate points when zooming into a tight cluster — that's what
       // made dots balloon to ~50px and occlude the whole edge web.
       scalePointsOnZoom: false,
-      fitViewOnInit: true,
-      fitViewDelay: 300,
+      // The camera is decoupled from the sim: the ONLY automatic fit is the
+      // first non-empty data push (owned in the push effect via
+      // shouldFitOnPush). Everything else — ticks, cycle-ends, resize, expand
+      // — leaves the user's zoom/pan untouched; Fit/Recenter/Search are the
+      // sanctioned camera moves.
+      fitViewOnInit: false,
       hoveredPointCursor: "pointer",
       // Focus mode relies on selection greyout: non-selected points/links dim.
       pointGreyoutOpacity: 0.12,
       linkGreyoutOpacity: 0.06,
-      // Re-tuned for a SNAPPY, smooth settle (no hard timer freeze). Stronger
-      // link spring + higher friction pull the layout to equilibrium quickly
-      // and damp thrashing. Decay is the alpha half-life in TICKS: 4000 meant
-      // ~66s at 60fps before onSimulationEnd (and its rescue fitView) ever
-      // fired — 1000 settles in ~15s. Repulsion + a long link distance still
-      // spread leaves into a balanced cloud around a centered seed; low
-      // gravity keeps it framed without crushing it to a point.
-      simulationFriction: 0.9,
-      simulationGravity: 0.08,
+      // Spread-tuned defaults (user-adjustable live via the Sim panel —
+      // GraphCanvas pushes overrides through graph.setConfig). Stronger
+      // repulsion + longer link distance open dense hub-spoke clusters into a
+      // readable cloud inside the 8192 space; moderate gravity keeps the
+      // cloud centered so the camera-follow never has to chase it far. Decay
+      // is the cooling length in ticks: 1200 settles in roughly 15-20s.
+      simulationFriction: 0.88,
+      simulationGravity: 0.12,
       simulationCenter: 0,
-      simulationRepulsion: 1.6,
+      simulationRepulsion: 2.4,
       simulationRepulsionTheta: 1.15,
-      simulationLinkSpring: 0.5,
-      simulationLinkDistance: 60,
-      simulationDecay: 1000,
-      // Camera-follow while the sim runs. One-shot staged refits cannot cover
-      // a layout that keeps moving for many seconds — on large graphs the
-      // cloud walked out of the fitted viewport and "disappeared". Throttled
-      // so the chase stays smooth; when the sim is idle no ticks fire, so
-      // manual pan/zoom is never fought.
-      onSimulationTick: () => {
+      simulationLinkSpring: 0.35,
+      simulationLinkDistance: 90,
+      simulationDecay: SETTLE_DECAY,
+      // The tick NEVER follows the sim. It paints labels and, after a data
+      // change (pendingFit), performs exactly ONE fit once the layout has
+      // settled below the gate — so the graph frames itself when it's done
+      // moving, and the camera never chases the spread.
+      onSimulationTick: guardRuntime("simulation tick failed", (alpha?: number) => {
         overlayRef.current?.updateLabels();
-        const now = performance.now();
-        if (now - lastFollowRef.current > 800) {
-          lastFollowRef.current = now;
-          graphRef.current?.fitView(700);
+        const a = typeof alpha === "number" ? alpha : 0;
+        if (pendingFitRef.current && a < FIRST_FIT_GATE) {
+          pendingFitRef.current = false;
+          frameGraph();
         }
-      },
-      onSimulationStart: () => cbRef.current.onSimRunningChange?.(true),
-      onSimulationPause: () => cbRef.current.onSimRunningChange?.(false),
-      onSimulationUnpause: () => cbRef.current.onSimRunningChange?.(true),
-      onSimulationEnd: () => {
-        cbRef.current.onSimRunningChange?.(false);
-        graphRef.current?.fitView(400);
-        overlayRef.current?.updateLabels();
-      },
-      onZoom: () => overlayRef.current?.updateLabels(),
-      onBackgroundClick: () => {
+      }),
+      onSimulationStart: guardRuntime("simulation start callback failed", () =>
+        cbRef.current.onSimRunningChange?.(true)),
+      onSimulationPause: guardRuntime("simulation pause callback failed", () =>
+        cbRef.current.onSimRunningChange?.(false)),
+      onSimulationUnpause: guardRuntime("simulation resume callback failed", () =>
+        cbRef.current.onSimRunningChange?.(true)),
+      // CONTINUOUS LAYOUT: a cycle ending re-injects KEEP_WARM_ALPHA so the
+      // layout keeps gently breathing forever (the camera is decoupled, so
+      // this never recenters). Never for static layouts (Flows), the user's
+      // pause, or an empty canvas.
+      onSimulationEnd: guardRuntime("simulation end callback failed", () =>
+        cbRef.current.onSimRunningChange?.(false)),
+      onZoom: guardRuntime("zoom callback failed", () =>
+        overlayRef.current?.updateLabels()),
+      onBackgroundClick: guardRuntime("background selection failed", () => {
         cbRef.current.onViewClick?.();
-      },
-      onPointClick: (index: number) => {
+      }),
+      onPointClick: guardRuntime("node selection failed", (index: number) => {
         const now = Date.now();
         const last = lastClickRef.current;
         const id = modelRef.current.indexToId[index];
@@ -212,36 +518,76 @@ export function CosmosCanvas({
         }
         lastClickRef.current = { index, t: now };
         if (id) cbRef.current.onSelectNode(id);
-      },
-      onLinkClick: (linkIndex: number) => {
+      }),
+      onLinkClick: guardRuntime("edge selection failed", (linkIndex: number) => {
         const id = modelRef.current.linkIds[linkIndex];
         if (id) cbRef.current.onSelectEdge(id);
-      },
+      }),
       // Hover tooltip — the primary way to read a node's address/label without
       // covering the whole graph in always-on text. The overlay derives the
       // screen position from the point's space coordinate so it tracks the
       // node precisely regardless of the (variably-typed) DOM/D3 event.
-      onPointMouseOver: (index: number, pointPosition: [number, number]) => {
+      onPointMouseOver: guardRuntime("node hover failed", (index: number, pointPosition: [number, number]) => {
         overlayRef.current?.showTooltip(index, pointPosition);
-      },
-      onPointMouseOut: () => {
+      }),
+      onPointMouseOut: guardRuntime("node hover cleanup failed", () => {
         overlayRef.current?.hideTooltip();
-      },
-    });
+      }),
+      });
+    } catch (error) {
+      reportRendererError(error, "initialization failed");
+      return;
+    }
     graphRef.current = graph;
+
+    // Context loss is dispatched by the canvas rather than thrown through
+    // React. Capture it at the renderer container so it follows the same
+    // isolated fallback path as initialization and buffer-update failures.
+    const onContextLost = (event: Event) => {
+      event.preventDefault();
+      reportRendererError(new Error("WebGL context was lost"), "runtime failed");
+    };
+    container.addEventListener("webglcontextlost", onContextLost, true);
     return () => {
-      graph.destroy();
+      container.removeEventListener("webglcontextlost", onContextLost, true);
+      const restoreWasPending = cameraRestorePendingRef.current;
+      cancelCameraRestoreRef.current?.();
+      cancelCameraRestoreRef.current = null;
+      cameraRestorePendingRef.current = false;
+      try {
+        // If unmount happens during the two-frame public-API restore, retain
+        // the known-good incoming snapshot instead of capturing its temporary
+        // centering zoom. Otherwise capture the exact live layout/camera just
+        // before Cosmos releases its buffers.
+        const camera = restoreWasPending
+          ? initialCameraRef.current ?? null
+          : captureCanvasCamera(graph, modelRef.current, {
+              width: container.clientWidth,
+              height: container.clientHeight,
+            });
+        if (camera) onCameraStateChangeRef.current?.(camera);
+      } catch {
+        // Camera persistence is best-effort during teardown. A context-loss
+        // failure must not mask the original renderer error.
+      }
+      try {
+        graph.destroy();
+      } catch {
+        // The renderer is already being retired. A failed teardown must not
+        // replace the original, actionable failure shown in the fallback.
+      }
       graphRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [webglOk]);
 
   // Keep the WebGL canvas sized to its container. Cosmos sizes to the canvas
-  // but only re-measures on an explicit render()/fitView() — it has no internal
+  // but only re-measures on an explicit render() — it has no internal
   // ResizeObserver — so toggling the details panel (the .ge-body grid flips
   // 1fr 320px ↔ 1fr 0) or resizing the desktop window left the canvas at its
-  // old width and clipped on the right. Observe the wrapper and re-measure on
-  // every size change (rAF-debounced), refitting so the graph stays framed.
+  // old width and clipped on the right. Re-measure via render() only —
+  // deliberately NO fitView: a panel toggle must not recenter the graph
+  // (content stays anchored in world space; the user's zoom/pan is preserved).
   useEffect(() => {
     const wrap = containerRef.current?.parentElement;
     if (!wrap || typeof ResizeObserver === "undefined") return;
@@ -249,11 +595,17 @@ export function CosmosCanvas({
     const ro = new ResizeObserver(() => {
       if (raf) cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
-        const graph = graphRef.current;
-        if (!graph) return;
-        graph.render();
-        graph.fitView(300);
-        overlayRef.current?.updateLabels();
+        try {
+          const graph = graphRef.current;
+          if (!graph) return;
+          graph.render();
+          overlayRef.current?.updateLabels();
+          // No-op unless a fit is PENDING — an ordinary panel toggle or window
+          // resize must never recenter a graph the user has already positioned.
+          attemptFit();
+        } catch (error) {
+          reportRendererError(error, "resize render failed");
+        }
       });
     });
     ro.observe(wrap);
@@ -272,23 +624,175 @@ export function CosmosCanvas({
   //  - If the node-id set is UNCHANGED (zero-gain expand, re-hydration,
   //    profile echo), the sim is not restarted and the camera not refit —
   //    the graph must not visibly react to a no-op.
+  // Fit the whole graph into view, then cap the zoom so a 1–2 node result
+  // doesn't become a giant blurry dot. The single sanctioned auto-frame.
+  /** Request a fit. It lands only once the canvas has a STABLE, non-zero size.
+   *
+   * The container is not its final size when data arrives: `.ge-body` animates
+   * `grid-template-columns` for 250ms when the details panel opens/closes, and
+   * a freshly mounted mode can measure 0×0 for a frame. Fitting against that
+   * box frames a canvas that no longer exists a moment later, which is why the
+   * graph kept landing off-screen and only a manual Fit rescued it.
+   *
+   * `attemptFit` is also called from the ResizeObserver, but it is a NO-OP
+   * unless a fit is pending — so an ordinary panel toggle or window resize
+   * still never recenters the view.
+   */
+  const frameGraph = () => {
+    if (!graphRef.current) return;
+    pendingFitRef.current = true;
+    lastSizeRef.current = { w: -1, h: -1 };
+    attemptFit();
+    // Fallback: a container that never fires another resize would otherwise
+    // hold the fit forever.
+    window.setTimeout(() => {
+      try {
+        if (pendingFitRef.current) {
+          lastSizeRef.current = canvasSize();
+          attemptFit();
+        }
+      } catch (error) {
+        reportRendererError(error, "deferred frame failed");
+      }
+    }, 400);
+  };
+
+  const canvasSize = () => {
+    const wrap = containerRef.current?.parentElement;
+    return { w: wrap?.clientWidth ?? 0, h: wrap?.clientHeight ?? 0 };
+  };
+
+  const attemptFit = () => {
+    if (!pendingFitRef.current || !graphRef.current) return;
+    const { w, h } = canvasSize();
+    if (w < 2 || h < 2) return; // not laid out yet — wait for the next resize
+    const last = lastSizeRef.current;
+    lastSizeRef.current = { w, h };
+    if (last.w !== w || last.h !== h) return; // still animating — wait
+    pendingFitRef.current = false;
+    doFit();
+  };
+
+  const doFit = () => {
+    // Defer a beat before fitting: with enableSimulation:false cosmos rescales
+    // and re-measures AFTER the push, so an immediate fitView frames a stale
+    // bounding box and leaves the graph as a tiny speck (manual Fit then
+    // worked, which is what proved the timing was the bug).
+    window.setTimeout(() => {
+      try {
+        const g = graphRef.current;
+        if (!g) return;
+        g.fitView(400);
+        // Only the DEGENERATE case (a lone node / single pair) needs a zoom cap —
+        // fitView on one point zooms to fill and renders a giant blurry dot.
+        // Clamping any larger graph would shrink a legitimately tight layout.
+        if (modelRef.current.n > 2) return;
+        window.setTimeout(() => {
+          try {
+            const g2 = graphRef.current;
+            if (g2 && (g2.getZoomLevel?.() ?? 1) > MAX_AUTO_ZOOM) {
+              g2.setZoomLevel?.(MAX_AUTO_ZOOM, 200);
+            }
+          } catch (error) {
+            reportRendererError(error, "zoom cap failed");
+          }
+        }, 430);
+      } catch (error) {
+        reportRendererError(error, "fit view failed");
+      }
+    }, 150);
+  };
+
+  // Reheat = the ONE path that injects settle energy. Registered on
+  // simControlRef so GraphCanvas's Play / Forces reheat identically.
+  const reheat = (alpha: number) => {
+    try {
+      const graph = graphRef.current;
+      if (!graph) return;
+      graph.setConfig({ simulationDecay: SETTLE_DECAY });
+      graph.start(alpha);
+    } catch (error) {
+      reportRendererError(error, "simulation restart failed");
+    }
+  };
+  useEffect(() => {
+    if (simControlRef) simControlRef.current = { reheat };
+    return () => {
+      if (simControlRef) simControlRef.current = null;
+    };
+  });
+
+  const restoreInitialCameraOnce = (
+    graph: Graph,
+    currentModel: GraphModel,
+  ): boolean => {
+    if (cameraRestoredRef.current) return false;
+    cameraRestoredRef.current = true;
+    const snapshot = initialCameraRef.current;
+    if (!cameraSnapshotMatchesModel(snapshot, currentModel)) return false;
+    pendingFitRef.current = false;
+    cameraRestorePendingRef.current = true;
+    cancelCameraRestoreRef.current?.();
+    cancelCameraRestoreRef.current = restoreCanvasCamera(
+      graph,
+      snapshot,
+      () => {
+        cameraRestorePendingRef.current = false;
+        cancelCameraRestoreRef.current = null;
+        overlayRef.current?.updateLabels();
+      },
+    );
+    return true;
+  };
+
   const prevPushRef = useRef<{ idsKey: string; model: GraphModel | null }>({
     idsKey: "",
     model: null,
   });
   useEffect(() => {
     const graph = graphRef.current;
+    keepWarmStateRef.current.hasNodes = model.n > 0;
     if (!graph || !model.n) return;
-    const idsKey = `${layout}|${model.indexToId.join(" ")}`;
-    const prev = prevPushRef.current;
-    const sameGraph = prev.idsKey === idsKey;
-    if (prev.model && !sameGraph) {
+    try {
+      const cachedCamera =
+        !cameraRestoredRef.current &&
+        cameraSnapshotMatchesModel(initialCameraRef.current, model)
+          ? initialCameraRef.current
+          : null;
+      if (staticLayout) {
+      // Flows: the precomputed layered layout is AUTHORITATIVE — push it
+      // outright (no live-position retention), render, and fit ONCE (the first
+      // non-empty push per mount). The force sim never runs here.
+      graph.setPointPositions(model.positions, true);
+      graph.setPointColors(colors);
+      graph.setPointSizes(sizes);
+      graph.setLinks(model.links);
+      if (model.linkWidths.length) graph.setLinkWidths(model.linkWidths);
+      if (model.linkColors.length) graph.setLinkColors(model.linkColors);
+      if (model.linkArrows.length) graph.setLinkArrows(model.linkArrows);
+      overlayRef.current?.retrackLabels();
+      graph.render();
+      // Deterministic layout, no sim. A returning task restores its camera;
+      // first load and later trace/merge results still receive the normal fit.
+      if (!restoreInitialCameraOnce(graph, model)) frameGraph();
+        return;
+      }
+      const idsKey = model.indexToId.join(" ");
+      const prev = prevPushRef.current;
+      const sameGraph = prev.idsKey === idsKey;
+    // Topology churn measured on RETAINED ids (not count delta — a same-sized
+    // but completely different graph must read as full churn). Drives the
+    // re-energize alpha below.
+      let retained = 0;
+      if (prev.model && !sameGraph) {
       try {
         const live = graph.getPointPositions();
-        if (live && live.length === prev.model.n * 2) {
-          for (let i = 0; i < model.n; i++) {
-            const pi = prev.model.idToIndex.get(model.indexToId[i]);
-            if (pi !== undefined) {
+        const havePrev = live && live.length === prev.model.n * 2;
+        for (let i = 0; i < model.n; i++) {
+          const pi = prev.model.idToIndex.get(model.indexToId[i]);
+          if (pi !== undefined) {
+            retained++;
+            if (havePrev) {
               model.positions[i * 2] = live[pi * 2];
               model.positions[i * 2 + 1] = live[pi * 2 + 1];
             }
@@ -297,62 +801,133 @@ export function CosmosCanvas({
       } catch {
         /* keep seeded positions */
       }
-    }
-    prevPushRef.current = { idsKey, model };
-    if (!sameGraph) graph.setPointPositions(model.positions);
-    graph.setPointColors(colors);
-    graph.setPointSizes(sizes);
-    graph.setLinks(model.links);
-    if (model.linkWidths.length) graph.setLinkWidths(model.linkWidths);
-    if (model.linkColors.length) graph.setLinkColors(model.linkColors);
-    if (model.linkArrows.length) graph.setLinkArrows(model.linkArrows);
+      }
+      prevPushRef.current = { idsKey, model };
+      if (!sameGraph) {
+        graph.setPointPositions(
+          cachedCamera
+            ? positionsFromCameraSnapshot(model, cachedCamera)
+            : model.positions,
+        );
+      }
+      graph.setPointColors(colors);
+      graph.setPointSizes(sizes);
+      graph.setLinks(model.links);
+      if (model.linkWidths.length) graph.setLinkWidths(model.linkWidths);
+      if (model.linkColors.length) graph.setLinkColors(model.linkColors);
+      if (model.linkArrows.length) graph.setLinkArrows(model.linkArrows);
     // Cosmos only tracks points that already exist — re-track the label set now
     // that positions are set, otherwise getTrackedPointPositionsMap() is empty
     // and no labels ever paint.
-    overlayRef.current?.retrackLabels();
-    const timers: number[] = [];
-    if (sameGraph) {
+      overlayRef.current?.retrackLabels();
+      const timers: number[] = [];
+      const alpha = reEnergizeAlpha({
+        sameGraph,
+        retained,
+        prevN: prev.model?.n ?? 0,
+        nextN: model.n,
+      });
+      // Materialize buffers before applying the saved world-center transform.
+      // `render()` does not alter simulation state.
+      let restoredCamera = false;
+      if (cachedCamera) {
+        graph.render();
+        restoredCamera = restoreInitialCameraOnce(graph, model);
+      } else if (!cameraRestoredRef.current) {
+        // The saved camera belongs to a wholly different node universe. Retire
+        // it so a later incremental response cannot unexpectedly resurrect it.
+        cameraRestoredRef.current = true;
+      }
+      if (sameGraph) {
+        graph.render();
+      } else if (keepWarmStateRef.current.userPaused) {
+      // TRUE FREEZE: paused means paused. Buffers are set + rendered above, but
+      // we must not start()/reheat. Still frame the new result once (a paused
+      // expand should show its result, just without motion).
       graph.render();
-    } else if (layout === "circular") {
-      // Keep the circular seed positions; don't run the force sim.
-      graph.setPointPositions(model.positions, true);
-      graph.render();
-      graph.fitView(400);
+      if (!restoredCamera) {
+        pendingFitRef.current = true;
+        timers.push(window.setTimeout(
+          guardRuntime("paused graph frame failed", () => frameGraph()),
+          200,
+        ));
+      }
+      } else {
+      // A data change (new seed / mode / expand / merge): the tick will fit
+      // ONCE when this settles below the gate — framing the result without
+      // chasing the spread.
+      pendingFitRef.current = !restoredCamera;
+      reheat(alpha);
       timers.push(
-        window.setTimeout(() => overlayRef.current?.retrackLabels(), 450),
+        window.setTimeout(
+          guardRuntime("deferred label tracking failed", () =>
+            overlayRef.current?.retrackLabels()),
+          3100,
+        ),
       );
-    } else {
-      graph.start();
-      // Stage refits as the force layout expands so the graph never drifts
-      // out of view before it settles. No hard pause timer — the tuned decay
-      // cools the sim to a natural stop (onSimulationEnd does the final fit +
-      // label repaint), which the user can re-energize via the play control.
-      timers.push(window.setTimeout(() => graph.fitView(400), 300));
-      timers.push(window.setTimeout(() => graph.fitView(400), 1200));
-      timers.push(window.setTimeout(() => graph.fitView(400), 3000));
+      // Safety net: if the sim settles so fast the tick's gate never catches a
+      // pending fit (or ticks stop early), frame it after the settle window.
       timers.push(
-        window.setTimeout(() => overlayRef.current?.retrackLabels(), 3100),
+        window.setTimeout(guardRuntime("settled graph frame failed", () => {
+          if (pendingFitRef.current) {
+            pendingFitRef.current = false;
+            frameGraph();
+          }
+        }), 2600),
       );
+      }
+      return () => timers.forEach((t) => window.clearTimeout(t));
+    } catch (error) {
+      reportRendererError(error, "data update failed");
     }
-    return () => timers.forEach((t) => window.clearTimeout(t));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, layout]);
+  }, [model, staticLayout]);
 
   // Recolor on seed/hidden-kind change without rebuilding the whole graph.
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph || !model.n) return;
-    graph.setPointColors(colors);
-    graph.render();
+    try {
+      graph.setPointColors(colors);
+      graph.render();
+    } catch (error) {
+      reportRendererError(error, "node color update failed");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [colors, model.n]);
+
+  // Timeline frame: compose the override alpha into the model's link colors
+  // and rewrite the width buffer, then render(). Deliberately NO start(), NO
+  // refit — cosmos applies buffer rewrites without touching sim state, so
+  // scrubbing/playback never perturbs the settled layout.
+  useEffect(() => {
+    const graph = graphRef.current;
+    if (!graph || !model.n) return;
+    try {
+      const { colors, widths } = composeLinkVisuals(
+        model,
+        linkOverride,
+        selectedEdgeId,
+      );
+      graph.setLinkColors(colors);
+      graph.setLinkWidths(widths);
+      graph.render();
+    } catch (error) {
+      reportRendererError(error, "link visibility update failed");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkOverride, selectedEdgeId, model]);
 
   // Resize the seed marker on seed change without rebuilding the whole graph.
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph || !model.n) return;
-    graph.setPointSizes(sizes);
-    graph.render();
+    try {
+      graph.setPointSizes(sizes);
+      graph.render();
+    } catch (error) {
+      reportRendererError(error, "node size update failed");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sizes, model.n]);
 
@@ -360,18 +935,22 @@ export function CosmosCanvas({
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph) return;
-    const idx = selectedNodeId ? model.idToIndex.get(selectedNodeId) : undefined;
-    if (idx === undefined) {
-      graph.unselectPoints();
-      return;
-    }
-    if (focusMode) {
-      // Isolate selected + neighbors: select the whole neighborhood so the
-      // built-in greyout dims everything else.
-      const adj = graph.getAdjacentIndices(idx) ?? [];
-      graph.selectPointsByIndices([idx, ...adj]);
-    } else {
-      graph.selectPointByIndex(idx, true);
+    try {
+      const idx = selectedNodeId ? model.idToIndex.get(selectedNodeId) : undefined;
+      if (idx === undefined) {
+        graph.unselectPoints();
+        return;
+      }
+      if (focusMode) {
+        // Isolate selected + neighbors: select the whole neighborhood so the
+        // built-in greyout dims everything else.
+        const adj = graph.getAdjacentIndices(idx) ?? [];
+        graph.selectPointsByIndices([idx, ...adj]);
+      } else {
+        graph.selectPointByIndex(idx, true);
+      }
+    } catch (error) {
+      reportRendererError(error, "selection update failed");
     }
   }, [selectedNodeId, focusMode, model, graphRef]);
 

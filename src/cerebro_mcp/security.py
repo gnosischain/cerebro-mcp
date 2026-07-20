@@ -206,7 +206,10 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "set_metric_lab_charts": _AO_SW,
     # graph explorer (frontend-only helpers)
     "load_graph_atlas_sample": _AO,     # read-only sample queries into view datasets
-    "set_graph_explorer_view": _AO_SW,  # persists the two-mode view layout
+    "set_graph_explorer_view": _AO_SW,  # persists the multi-mode view layout
+    "load_graph_timeline": _AO,         # read-only bucketed-edge queries into view datasets
+    "load_graph_flows": _AO,            # read-only fund-flow trace queries into view datasets
+    "load_graph_transactions": _AO,     # read-only per-transfer-leg tx queries into view datasets
     # report studio
     "list_report_archive": _AO,
     "get_report_archive_entry": _AO,

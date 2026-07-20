@@ -523,6 +523,11 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         app_id=APP_ID,
         open_tool="open_contract_explorer",
         html_loader=get_contract_explorer_html,
+        title="Contract Explorer",
+        description=(
+        "Inspect any contract: resolved ABI (proxy-aware), read functions live over RPC, and decode transaction inputs and receipt logs."
+        ),
+        icon="◎",
         tools={
             "open_contract_explorer": open_contract_explorer,
             "load_contract_explorer_address": load_contract_explorer_address,

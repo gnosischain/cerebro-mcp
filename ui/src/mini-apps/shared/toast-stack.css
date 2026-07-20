@@ -1,0 +1,104 @@
+/* Floating notice stack — replaces the pinned warning banner.
+   Bottom-right so it never displaces the canvas or the top bar. */
+
+.ma-toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.ma-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-2, #1a1f26);
+  border: 1px solid var(--warning, #f59e0b);
+  border-left-width: 3px;
+  color: var(--text-primary, #e6e9ee);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  animation: ma-toast-in 160ms ease-out;
+}
+
+@keyframes ma-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ma-toast {
+    animation: none;
+  }
+}
+
+.ma-toast-glyph {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--warning, #f59e0b);
+  color: #0b0e12;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+.ma-toast-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ma-toast-close {
+  flex: 0 0 auto;
+  margin: -2px -3px 0 0;
+  padding: 0 4px;
+  background: none;
+  border: none;
+  color: var(--text-muted, #868e9b);
+  font-size: 1.05rem;
+  line-height: 1.2;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.ma-toast-close:hover {
+  color: var(--text-primary, #e6e9ee);
+  background: var(--surface, #12161c);
+}
+
+.ma-toast-clear {
+  pointer-events: auto;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--surface, #12161c);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  color: var(--text-secondary, #aab3be);
+  font-size: 0.71rem;
+  cursor: pointer;
+}
+
+.ma-toast-clear:hover {
+  color: var(--text-primary, #e6e9ee);
+  border-color: var(--primary, #67e8f9);
+}

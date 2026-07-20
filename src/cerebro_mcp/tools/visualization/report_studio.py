@@ -712,6 +712,11 @@ def register_report_studio_tools(
         app_id=REPORT_STUDIO_APP_ID,
         open_tool="open_report_studio",
         html_loader=get_report_studio_html,
+        title="Report Studio",
+        description=(
+        "Browse, preview and manage generated reports. Compose new ones from saved charts and rename or archive the back catalogue."
+        ),
+        icon="▥",
         tools={
             "open_report_studio": open_report_studio,
             "list_report_archive": list_report_archive,

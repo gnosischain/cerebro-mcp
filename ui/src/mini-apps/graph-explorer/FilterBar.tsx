@@ -1,26 +1,33 @@
 // Investigate-mode topbar: window / max-neighbors (debounced refetch by the
-// parent), layout toggle, semantic-status filter, expand-depth stepper (reads
-// the SERVER-published limits — no compile-time hop cap), and the explicit
+// parent), the Edge-types popover (slot), expand-depth stepper (reads the
+// SERVER-published limits — no compile-time hop cap), and the explicit
 // "+ Expand" button. Expansion happens ONLY on explicit action (this button
 // or a canvas double-click) — never silently on stepper change (WS10-F).
 
-import type { GraphLayout, Limits, StatusFilter } from "./types";
+import type { ReactNode } from "react";
+import type { Limits } from "./types";
 
 interface Props {
   windowDays: number;
   maxNeighbors: number;
-  layout: GraphLayout;
-  statusFilter: StatusFilter;
   expandDepth: number;
   limits: Limits;
   /** "selected node" or "seed" — surfaced on the expand button. */
   expandTarget: string;
   canExpand: boolean;
   detailsOpen: boolean;
+  /** Seed identity cell (label + address + copy) — owned by InvestigateView.
+   * Lives IN the bar so the app has exactly one header row. */
+  leftSlot?: ReactNode;
+  /** The Edge-types popover button (owned by InvestigateView). */
+  edgeTypesSlot?: ReactNode;
+  /** Mode switch (Atlas | Investigate | …) — rendered at the far end. */
+  endSlot?: ReactNode;
+  /** Evidence/status trigger immediately beside the inspector control. */
+  accessorySlot?: ReactNode;
+  statusSlot?: ReactNode;
   onWindowChange: (days: number) => void;
   onMaxNeighborsChange: (value: number) => void;
-  onLayoutChange: (layout: GraphLayout) => void;
-  onStatusFilterChange: (filter: StatusFilter) => void;
   onExpandDepthChange: (depth: number) => void;
   onExpand: () => void;
   onToggleDetails: () => void;
@@ -29,17 +36,18 @@ interface Props {
 export function FilterBar({
   windowDays,
   maxNeighbors,
-  layout,
-  statusFilter,
   expandDepth,
   limits,
   expandTarget,
   canExpand,
   detailsOpen,
+  leftSlot,
+  edgeTypesSlot,
+  endSlot,
+  accessorySlot,
+  statusSlot,
   onWindowChange,
   onMaxNeighborsChange,
-  onLayoutChange,
-  onStatusFilterChange,
   onExpandDepthChange,
   onExpand,
   onToggleDetails,
@@ -47,7 +55,10 @@ export function FilterBar({
   const maxHops = Math.max(1, limits.max_hops);
   return (
     <header className="ge-topbar">
-      <div className="ge-topbar-filters">
+      {leftSlot}
+      <details className="ge-filter-drawer">
+        <summary>Filters</summary>
+        <div className="ge-topbar-filters">
         <label className="ge-pill" title="Time window (days)">
           <span className="ge-pill-icon" aria-hidden>🕑</span>
           <input
@@ -73,58 +84,18 @@ export function FilterBar({
           />
         </label>
 
-        <div className="ge-segment" role="tablist" aria-label="Layout">
-          <button
-            type="button"
-            className={layout === "force" ? "active" : ""}
-            onClick={() => onLayoutChange("force")}
-            title="Force layout"
-          >
-            Force
-          </button>
-          <button
-            type="button"
-            className={layout === "circular" ? "active" : ""}
-            onClick={() => onLayoutChange("circular")}
-            title="Circular layout"
-          >
-            Circle
-          </button>
+        {/* Layout toggle removed — force is the only layout (tunable live
+            via the canvas "⚙ Forces" panel). The semantic-status filter
+            moved into the Edge types popover. */}
         </div>
+      </details>
 
-        <div className="ge-segment ge-segment-status" role="tablist" aria-label="Semantic status">
-          <button
-            type="button"
-            className={statusFilter === "all" ? "active" : ""}
-            onClick={() => onStatusFilterChange("all")}
-            title="Show all profiles"
-          >
-            All
-          </button>
-          <button
-            type="button"
-            aria-label="Show approved profiles only"
-            className={"appr " + (statusFilter === "approved" ? "active" : "")}
-            onClick={() => onStatusFilterChange("approved")}
-            title="Approved only"
-          >
-            <span className="ge-dot ge-dot-approved" aria-hidden />
-            <span className="sr-only">Approved</span>
-          </button>
-          <button
-            type="button"
-            aria-label="Show candidate profiles only"
-            className={"cand " + (statusFilter === "candidate" ? "active" : "")}
-            onClick={() => onStatusFilterChange("candidate")}
-            title="Candidate only"
-          >
-            <span className="ge-dot ge-dot-candidate" aria-hidden />
-            <span className="sr-only">Candidate</span>
-          </button>
-        </div>
-      </div>
+      {/* Outside .ge-topbar-filters — its overflow-x scroll would clip the
+          absolutely-positioned dropdown panel. */}
+      {edgeTypesSlot}
 
       <div className="ge-topbar-right">
+        {statusSlot}
         <div
           className="ge-pill ge-stepper"
           title={`BFS depth — how many frontier rounds the expand button (and double-click) add. Server cap: ${maxHops}.`}
@@ -167,6 +138,7 @@ export function FilterBar({
         >
           + Expand {expandTarget}
         </button>
+        {accessorySlot}
         <button
           type="button"
           className={`ge-icon-btn ${detailsOpen ? "active" : ""}`}
@@ -176,6 +148,7 @@ export function FilterBar({
         >
           ⓘ
         </button>
+        {endSlot}
       </div>
     </header>
   );

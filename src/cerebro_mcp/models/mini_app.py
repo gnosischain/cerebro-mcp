@@ -50,6 +50,11 @@ class DatasetDescriptor(BaseModel):
     stats: DatasetStats
     preview_rows: list[list[Any]] = Field(default_factory=list)
     page_token: str | None = None
+    # Optional dataset-local forensic attribution. Generic mini apps may omit
+    # it; forensic surfaces attach the exact scope that answered this dataset
+    # so provenance/freshness cannot be separated from the rows in transit.
+    scope_id: str | None = None
+    provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 class SummaryCard(BaseModel):

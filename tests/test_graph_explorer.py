@@ -14,6 +14,10 @@ from cerebro_mcp.clients.clickhouse import ExecutedQuery
 from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
 from cerebro_mcp.tools.visualization import mini_apps
 from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_tools
+from cerebro_mcp.tools.semantic.graph_explorer import constants
+from cerebro_mcp.tools.semantic.graph_explorer.forensics import (
+    reset_source_contract_cache_for_tests,
+)
 
 
 AVATAR = "0xaaaa000000000000000000000000000000000001"
@@ -52,7 +56,10 @@ def _graph_model(
     source_kind: str,
     target_kind: str,
     time_column: str | None = None,
+    time_end_column: str | None = None,
+    temporal_semantics: str | None = None,
     weight_column: str | None = None,
+    directed: bool = True,
     status: str = "approved",
     synonyms: tuple[str, ...] = (),
     description: str = "",
@@ -75,8 +82,18 @@ def _graph_model(
                     "target_column": target_column,
                     "source_kind": source_kind,
                     "target_kind": target_kind,
-                    "directed": True,
+                    "directed": directed,
                     **({"time_column": time_column} if time_column else {}),
+                    **(
+                        {"time_end_column": time_end_column}
+                        if time_end_column
+                        else {}
+                    ),
+                    **(
+                        {"temporal_semantics": temporal_semantics}
+                        if temporal_semantics
+                        else {}
+                    ),
                     **({"weight_column": weight_column} if weight_column else {}),
                 },
             },
@@ -170,6 +187,25 @@ class StubCH:
         parameters: dict[str, Any] | None = None,
     ) -> ExecutedQuery:
         params = parameters or {}
+        if "FROM system.columns" in sql:
+            required = list(params.get("required") or [])
+            rows = [[name, "String"] for name in required]
+            return ExecutedQuery(
+                sql, sql, database, ["name", "type"], rows, len(rows), 0.0, "rows", []
+            )
+        if "AS source_horizon" in sql:
+            rows = [["2026-07-18T00:00:00Z"]]
+            return ExecutedQuery(
+                sql,
+                sql,
+                database,
+                ["source_horizon"],
+                rows,
+                1,
+                0.0,
+                "rows",
+                [],
+            )
         if "int_execution_address_roles_current" in sql:
             addr = str(params.get("addr", "")).lower()
             cols = [
@@ -197,9 +233,11 @@ class StubCH:
 @pytest.fixture(autouse=True)
 def reset_state():
     reset_cache_for_tests()
+    reset_source_contract_cache_for_tests()
     mini_apps.reset_views_for_tests()
     yield
     reset_cache_for_tests()
+    reset_source_contract_cache_for_tests()
     mini_apps.reset_views_for_tests()
 
 
@@ -282,6 +320,44 @@ def test_open_graph_explorer_empty_catalog(fake_snapshot):
     # No seed yet — no nodes / edges.
     assert sc["datasets"]["nodes"]["stats"]["row_count"] == 0
     assert sc["datasets"]["edges"]["stats"]["row_count"] == 0
+    assert sc["datasets"]["tx_raw_receipts"]["stats"]["row_count"] == 0
+    assert [
+        column["name"] for column in sc["datasets"]["tx_raw_receipts"]["columns"]
+    ] == constants.TX_RAW_RECEIPTS_COLUMNS
+
+
+def test_open_explicit_atlas_route_with_seed_keeps_catalog_mode(fake_snapshot):
+    """Standalone ``?mode=atlas&seed=…`` must not launch Investigate.
+
+    The web route filters query arguments against the open-tool signature. If
+    ``mode`` is absent from that signature it is discarded while ``seed`` is
+    forwarded, and the initial payload contradicts the public deep link before
+    React has mounted.
+    """
+    ch = StubCH(
+        edge_rows={
+            "api_execution_circles_v2_trust_relations_current": [
+                [AVATAR, TRUSTEE, 1.0, 1],
+            ],
+        }
+    )
+    server = _server(ch)
+    result = _call_tool(
+        server,
+        "open_graph_explorer",
+        {
+            "seed_node_id": AVATAR,
+            "seed_model": "circles_trust",
+            "mode": "atlas",
+        },
+    )
+    state = result.structuredContent["view_state"]
+
+    assert state["mode"] == "atlas"
+    assert state["mode_revision"] == 1
+    assert state["investigate"]["seed"]["id"] == AVATAR
+    assert state["investigate"]["active_profiles"] == ["circles_trust"]
+    assert result.structuredContent["datasets"]["edges"]["stats"]["row_count"] == 1
 
 
 def test_load_seed_with_explicit_profile(fake_snapshot):
@@ -300,6 +376,7 @@ def test_load_seed_with_explicit_profile(fake_snapshot):
             "view_id": view_id,
             "seed_node_id": AVATAR,
             "seed_model": "circles_trust",
+            "request_id": 7,
         },
     )
     sc = result.structuredContent
@@ -309,8 +386,23 @@ def test_load_seed_with_explicit_profile(fake_snapshot):
     node_ids = {row[0] for row in nodes}
     assert AVATAR in node_ids
     assert TRUSTEE in node_ids
-    assert sc["view_state"]["mode"] == "investigate"
+    # A direct seed data load no longer flips mode (owned by explicit mode
+    # commands); the view stays in whatever mode it was opened (atlas).
+    assert sc["view_state"]["mode"] == "atlas"
     assert sc["view_state"]["investigate"]["active_profiles"] == ["circles_trust"]
+    scope = sc["view_state"]["investigate"]["scope"]
+    assert scope["request_id"] == 7
+    assert scope["status"] == "ready"
+    assert scope["sources"][0]["name"] == (
+        "dbt.api_execution_circles_v2_trust_relations_current"
+    )
+    assert scope["sources"][0]["horizon"] == "2026-07-18T00:00:00Z"
+    assert scope["sources"][0]["fetched_at"]
+    assert scope["data_horizon"] == "2026-07-18T00:00:00Z"
+    for key in ("nodes", "edges", "graph_metrics"):
+        assert sc["view_state"]["dataset_scopes"][key] == scope["scope_id"]
+        assert sc["datasets"][key]["scope_id"] == scope["scope_id"]
+        assert sc["datasets"][key]["provenance"]["scope_id"] == scope["scope_id"]
     # `suggested_next_hops` returns CROSS-sector pivots only — same-kind
     # profiles (circles_avatar -> circles_avatar) are intentionally filtered
     # out because they describe in-sector expansion, not a pivot. The
@@ -497,6 +589,194 @@ def test_update_focus_returns_patch(fake_snapshot):
     assert sc["patch"]["view_state"]["investigate"]["max_neighbors"] == 50
 
 
+def test_focus_evidence_is_subject_stamped_symmetric_and_monotonic(fake_snapshot):
+    role_row = [
+        True, False, False, "", False, "", False, False, False, "",
+        False, False, False, False, "",
+    ]
+    ch = StubCH(
+        edge_rows={TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]]},
+        roles={AVATAR: role_row},
+    )
+    server = _server(ch)
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent["view_id"]
+
+    node = _call_tool(
+        server,
+        "update_graph_explorer_focus",
+        {"view_id": view_id, "selected_node_id": AVATAR, "request_id": 11},
+    )
+    node_rows = node.structuredContent["patch"]["datasets"]["node_evidence"][
+        "preview_rows"
+    ]
+    assert node_rows
+    assert all(row[0] == AVATAR and row[3:] == ["node", 11] for row in node_rows)
+    assert node.structuredContent["patch"]["datasets"]["edge_evidence"][
+        "preview_rows"
+    ] == []
+
+    edge_id = f"circles_trust:{AVATAR}->{TRUSTEE}"
+    edge = _call_tool(
+        server,
+        "update_graph_explorer_focus",
+        {"view_id": view_id, "selected_edge_id": edge_id, "request_id": 12},
+    )
+    edge_rows = edge.structuredContent["patch"]["datasets"]["edge_evidence"][
+        "preview_rows"
+    ]
+    assert edge_rows
+    assert all(row[0] == edge_id and row[3:] == ["edge", 12] for row in edge_rows)
+    assert edge.structuredContent["patch"]["datasets"]["node_evidence"][
+        "preview_rows"
+    ] == []
+
+    node_again = _call_tool(
+        server,
+        "update_graph_explorer_focus",
+        {"view_id": view_id, "selected_node_id": AVATAR, "request_id": 13},
+    )
+    assert node_again.structuredContent["patch"]["datasets"]["node_evidence"][
+        "preview_rows"
+    ]
+    assert node_again.structuredContent["patch"]["datasets"]["edge_evidence"][
+        "preview_rows"
+    ] == []
+
+    stale = _call_tool(
+        server,
+        "update_graph_explorer_focus",
+        {"view_id": view_id, "selected_node_id": TRUSTEE, "request_id": 11},
+    )
+    assert stale.isError is True
+    stored = mini_apps.get_view(view_id)
+    assert stored is not None
+    assert stored.view_state["selection"] == {
+        "node_id": AVATAR, "edge_id": "", "request_id": 13,
+    }
+
+    cleared = _call_tool(
+        server,
+        "update_graph_explorer_focus",
+        {"view_id": view_id, "request_id": 14},
+    )
+    assert cleared.isError is not True
+    for key in ("node_evidence", "edge_evidence"):
+        assert cleared.structuredContent["patch"]["datasets"][key][
+            "preview_rows"
+        ] == []
+
+
+def test_node_focus_query_failure_is_failed_unknown_not_verified_empty(
+    fake_snapshot,
+):
+    class NodeEvidenceFailureCH(StubCH):
+        def run_query(self, sql, database="dbt", **kwargs):
+            if "FROM int_execution_address_roles_current" in sql:
+                raise RuntimeError("role evidence source unavailable")
+            return super().run_query(sql, database, **kwargs)
+
+    server = _server(NodeEvidenceFailureCH())
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+    result = _call_tool(
+        server,
+        "update_graph_explorer_focus",
+        {"view_id": view_id, "selected_node_id": AVATAR, "request_id": 21},
+    )
+
+    assert result.isError is not True
+    patch = result.structuredContent["patch"]
+    assert patch["datasets"]["node_evidence"]["preview_rows"] == []
+    assert patch["datasets"]["edge_evidence"]["preview_rows"] == []
+    scope = patch["view_state"]["focus_scope"]
+    assert scope["status"] == "failed"
+    assert scope["verification"]["status"] == "unverified"
+    assert scope["coverage"]["rows"] == {"shown": 0, "total": None}
+    assert scope["coverage"]["nodes"] == {"shown": 0, "total": None}
+    assert scope["data_horizon"] == "2026-07-18T00:00:00Z"
+    assert scope["sources"][0]["status"] == "error"
+    assert "role evidence source unavailable" in scope["sources"][0]["error"]
+    assert patch["view_state"]["selection"] == {
+        "node_id": AVATAR,
+        "edge_id": "",
+        "request_id": 21,
+    }
+
+
+def test_edge_focus_query_failure_is_failed_unknown_not_verified_empty(
+    fake_snapshot,
+):
+    class EdgeEvidenceFailureCH(StubCH):
+        def run_query(self, sql, database="dbt", **kwargs):
+            if (
+                "SELECT *" in sql
+                and "api_execution_circles_v2_trust_relations_current" in sql
+            ):
+                raise RuntimeError("edge evidence source unavailable")
+            return super().run_query(sql, database, **kwargs)
+
+    server = _server(EdgeEvidenceFailureCH())
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+    edge_id = f"circles_trust:{AVATAR}->{TRUSTEE}"
+    result = _call_tool(
+        server,
+        "update_graph_explorer_focus",
+        {"view_id": view_id, "selected_edge_id": edge_id, "request_id": 22},
+    )
+
+    assert result.isError is not True
+    patch = result.structuredContent["patch"]
+    assert patch["datasets"]["edge_evidence"]["preview_rows"] == []
+    assert patch["datasets"]["node_evidence"]["preview_rows"] == []
+    scope = patch["view_state"]["focus_scope"]
+    assert scope["status"] == "failed"
+    assert scope["verification"]["status"] == "unverified"
+    assert scope["coverage"]["rows"] == {"shown": 0, "total": None}
+    assert scope["coverage"]["edges"] == {"shown": 0, "total": None}
+    assert scope["data_horizon"] == "2026-07-18T00:00:00Z"
+    assert scope["sources"][0]["status"] == "error"
+    assert "edge evidence source unavailable" in scope["sources"][0]["error"]
+    assert patch["view_state"]["selection"] == {
+        "node_id": "",
+        "edge_id": edge_id,
+        "request_id": 22,
+    }
+
+
+@pytest.mark.parametrize("subject_kind", ["node", "edge"])
+def test_focus_verified_empty_requires_successful_exact_query(
+    fake_snapshot,
+    subject_kind,
+):
+    relation = "api_execution_circles_v2_trust_relations_current"
+    server = _server(StubCH(edge_rows={relation: []}))
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+    request = {"view_id": view_id, "request_id": 23}
+    if subject_kind == "node":
+        request["selected_node_id"] = AVATAR
+    else:
+        request["selected_edge_id"] = f"circles_trust:{AVATAR}->{TRUSTEE}"
+
+    result = _call_tool(server, "update_graph_explorer_focus", request)
+
+    assert result.isError is not True
+    patch = result.structuredContent["patch"]
+    assert patch["datasets"]["node_evidence"]["preview_rows"] == []
+    assert patch["datasets"]["edge_evidence"]["preview_rows"] == []
+    scope = patch["view_state"]["focus_scope"]
+    assert scope["status"] == "ready"
+    assert scope["verification"]["status"] == "verified"
+    assert scope["coverage"]["rows"] == {"shown": 0, "total": 0}
+    assert scope["data_horizon"] == "2026-07-18T00:00:00Z"
+    assert scope["sources"][0]["status"] == "ok"
+    assert scope["sources"][0]["horizon"] == "2026-07-18T00:00:00Z"
+
+
 def test_edge_query_failure_reports_warning(fake_snapshot):
     class FailingCH(StubCH):
         def run_query(self, sql, database="dbt", **kwargs):
@@ -516,6 +796,47 @@ def test_edge_query_failure_reports_warning(fake_snapshot):
     sc = result.structuredContent
     warnings = sc.get("warnings") or []
     assert any("clickhouse exploded" in w for w in warnings)
+    scope = sc["view_state"]["investigate"]["scope"]
+    assert scope["status"] == "failed"
+    assert scope["coverage"]["rows"]["total"] is None
+    assert scope["sources"][0]["status"] == "error"
+
+
+def test_relationship_horizon_probe_failure_is_not_a_ready_empty_graph(
+    fake_snapshot,
+):
+    class MissingFreshnessCH(StubCH):
+        def run_query(self, sql, database="dbt", **kwargs):
+            if "AS source_horizon" in sql:
+                raise RuntimeError("freshness probe unavailable")
+            return super().run_query(sql, database, **kwargs)
+
+    ch = MissingFreshnessCH(
+        edge_rows={
+            "api_execution_circles_v2_trust_relations_current": [
+                [AVATAR, TRUSTEE, 1.0, 1],
+            ],
+        }
+    )
+    server = _server(ch)
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+    result = _call_tool(
+        server,
+        "load_graph_explorer_seed",
+        {
+            "view_id": view_id,
+            "seed_node_id": AVATAR,
+            "seed_model": "circles_trust",
+        },
+    )
+    scope = result.structuredContent["view_state"]["investigate"]["scope"]
+    assert scope["status"] == "failed"
+    assert scope["data_horizon"] is None
+    assert scope["sources"][0]["status"] == "error"
+    assert "freshness probe unavailable" in scope["sources"][0]["error"]
+    assert scope["coverage"]["rows"]["total"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +977,117 @@ def test_build_node_flow_sql_casts_weight_to_float():
     sql, _ = build_node_flow_sql(prof, node_ids=["0xabc"])
     assert "toFloat64(sum(w))" in sql
     assert "toFloat64(0)" in sql
+
+
+def test_profile_contract_extracts_physical_columns_from_endpoint_expression():
+    from cerebro_mcp.semantic.graph_profiles import GraphProfile
+    from cerebro_mcp.tools.semantic.graph_explorer.forensics import (
+        physical_columns_from_expression,
+    )
+    from cerebro_mcp.tools.semantic.graph_explorer.ui_tools import (
+        _profile_contract_columns,
+    )
+
+    withdrawal_address = (
+        "concat('0x', substring(withdrawal_credentials, 27, 40))"
+    )
+    profile = GraphProfile(
+        profile="deposit_to_validator",
+        model_name="int_GBCDeposit_deposists_daily",
+        relation_name="int_GBCDeposit_deposists_daily",
+        source_column=withdrawal_address,
+        target_column="validator_index",
+        source_kind="address",
+        target_kind="validator",
+        time_column="date",
+        weight_column="amount",
+    )
+
+    assert physical_columns_from_expression(withdrawal_address) == [
+        "withdrawal_credentials"
+    ]
+    assert _profile_contract_columns(profile) == [
+        "withdrawal_credentials",
+        "validator_index",
+        "date",
+        "amount",
+    ]
+
+
+def test_null_weight_relationship_is_partial_unknown_not_zero(fake_snapshot):
+    from cerebro_mcp.semantic.graph_extraction import synthesize_search_documents
+
+    relation = "int_test_nullable_edge_weight"
+    fake_snapshot.models = {
+        relation: _graph_model(
+            relation,
+            profile="nullable_weight_relation",
+            module="bridges",
+            source_column="user_address",
+            target_column="bridge_contract",
+            source_kind="address",
+            target_kind="bridge",
+            time_column="date",
+            weight_column="volume_usd",
+            status="candidate",
+        )
+    }
+    profiles = tuple(graph_profiles.discover_profiles(models=fake_snapshot.models))
+    fake_snapshot.graph_profiles = profiles
+    fake_snapshot.profiles_by_id = {profile.profile: profile for profile in profiles}
+    fake_snapshot.kind_to_profiles = graph_profiles.build_kind_index(profiles)
+    fake_snapshot.graph_search_documents = tuple(
+        synthesize_search_documents(profiles)
+    )
+
+    server = _server(StubCH(edge_rows={relation: [[AVATAR, SAFE, None, 4]]}))
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+    result = _call_tool(
+        server,
+        "load_graph_atlas_sample",
+        {
+            "view_id": view_id,
+            "profiles": ["nullable_weight_relation"],
+            "sample_size": 10,
+        },
+    )
+
+    assert result.isError is not True
+    edge = result.structuredContent["datasets"]["atlas_edges"]["preview_rows"][0]
+    assert edge[4] is None
+    scope = result.structuredContent["view_state"]["atlas"]["scope"]
+    assert scope["status"] == "partial"
+    assert scope["sources"][0]["status"] == "partial"
+    assert scope["coverage"]["rows"] == {"shown": 1, "total": 1}
+    assert scope["verification"]["status"] == "verified"
+    assert any("weight unknown" in warning for warning in scope["warnings"])
+
+    sql, _ = graph_profiles.build_sample_sql(profiles[0], limit=10)
+    assert "count(volume_usd) = 0" in sql
+    assert "CAST(NULL AS Nullable(Float64))" in sql
+
+
+def test_unsafe_deployed_bridge_profile_is_suppressed(fake_snapshot):
+    relation = "int_execution_bridges_address_flows_daily"
+    fake_snapshot.models = {
+        relation: _graph_model(
+            relation,
+            profile="bridge_user_flows",
+            module="bridges",
+            source_column="user_address",
+            target_column="bridge_contract",
+            source_kind="address",
+            target_kind="bridge",
+            time_column="date",
+            weight_column="volume_usd",
+            status="candidate",
+        )
+    }
+
+    assert graph_profiles.discover_profiles(models=fake_snapshot.models) == []
+    assert graph_profiles.profile_by_id("bridge_user_flows") is None
 
 
 def test_calculate_flow_efficiency_unknown_profile(fake_snapshot):
@@ -1034,10 +1466,17 @@ def test_open_emits_v2_state_and_limits(fake_snapshot):
     assert vs["limits"]["default_expand_depth"] == 1
     assert vs["limits"]["ui_default_window_days"] == 90
     assert vs["limits"]["ui_default_max_neighbors"] == 100
-    assert vs["selection"] == {"node_id": "", "edge_id": ""}
+    assert vs["selection"] == {"node_id": "", "edge_id": "", "request_id": 0}
     assert "dataset_revisions" in vs
     # Both dataset pairs exist from the start.
-    assert {"nodes", "edges", "atlas_nodes", "atlas_edges"} <= set(
+    assert {
+        "nodes",
+        "edges",
+        "atlas_nodes",
+        "atlas_edges",
+        "atlas_preview_nodes",
+        "atlas_preview_edges",
+    } <= set(
         result.structuredContent["datasets"]
     )
 
@@ -1056,7 +1495,11 @@ def test_atlas_sample_replace_semantics(fake_snapshot):
     both = _call_tool(
         server,
         "load_graph_atlas_sample",
-        {"view_id": view_id, "profiles": ["circles_trust", "safe_ownership"]},
+        {
+            "view_id": view_id,
+            "profiles": ["circles_trust", "safe_ownership"],
+            "request_id": 4,
+        },
     )
     sc = both.structuredContent
     assert sc["view_state"]["mode"] == "atlas"
@@ -1064,6 +1507,12 @@ def test_atlas_sample_replace_semantics(fake_snapshot):
         "circles_trust", "safe_ownership",
     ]
     assert len(sc["datasets"]["atlas_edges"]["preview_rows"]) == 2
+    scope = sc["view_state"]["atlas"]["scope"]
+    assert scope["request_id"] == 4
+    assert scope["status"] == "ready"
+    for key in ("atlas_nodes", "atlas_edges"):
+        assert sc["view_state"]["dataset_scopes"][key] == scope["scope_id"]
+        assert sc["datasets"][key]["scope_id"] == scope["scope_id"]
 
     # REPLACE: re-request with only one profile -> the other's edges gone.
     one = _call_tool(
@@ -1079,6 +1528,48 @@ def test_atlas_sample_replace_semantics(fake_snapshot):
         server, "load_graph_atlas_sample", {"view_id": view_id, "profiles": ["nope"]}
     )
     assert unknown.isError
+
+
+def test_atlas_preview_is_real_but_does_not_change_applied_selection(fake_snapshot):
+    ch = StubCH(
+        edge_rows={
+            TRUST_TABLE: [[AVATAR, TRUSTEE, 1.0, 1]],
+            SAFES_TABLE: [[OWNER, SAFE, 2.0, 2]],
+        }
+    )
+    server = _server(ch)
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+    _call_tool(
+        server,
+        "load_graph_atlas_sample",
+        {"view_id": view_id, "profiles": ["safe_ownership"]},
+    )
+
+    result = _call_tool(
+        server,
+        "load_graph_atlas_preview",
+        {
+            "view_id": view_id,
+            "profile": "circles_trust",
+            "sample_size": 25,
+            "request_id": 9,
+        },
+    )
+    sc = result.structuredContent
+    assert sc["view_state"]["atlas"]["selected_profiles"] == ["safe_ownership"]
+    assert sc["view_state"]["atlas_preview"]["profile"] == "circles_trust"
+    assert sc["datasets"]["atlas_edges"]["preview_rows"][0][3] == "safe_ownership"
+    assert sc["datasets"]["atlas_preview_edges"]["preview_rows"][0][3] == (
+        "circles_trust"
+    )
+    scope = sc["view_state"]["atlas_preview"]["scope"]
+    assert scope["request_id"] == 9
+    assert scope["sources"][0]["name"] == f"dbt.{TRUST_TABLE}"
+    for key in ("atlas_preview_nodes", "atlas_preview_edges"):
+        assert sc["view_state"]["dataset_scopes"][key] == scope["scope_id"]
+        assert sc["datasets"][key]["provenance"]["scope_id"] == scope["scope_id"]
 
 
 def test_investigate_load_preserves_atlas_datasets(fake_snapshot):
@@ -1102,7 +1593,8 @@ def test_investigate_load_preserves_atlas_datasets(fake_snapshot):
         {"view_id": view_id, "seed_node_id": AVATAR},
     )
     sc = result.structuredContent
-    assert sc["view_state"]["mode"] == "investigate"
+    # Direct seed load is a data load — it doesn't flip mode (stays atlas).
+    assert sc["view_state"]["mode"] == "atlas"
     # Atlas datasets survive the investigate load (per-key attach).
     assert len(sc["datasets"]["atlas_edges"]["preview_rows"]) == 1
     assert len(sc["datasets"]["edges"]["preview_rows"]) == 1
@@ -1157,8 +1649,11 @@ def test_set_graph_explorer_view_schema(fake_snapshot):
         {"view_id": view_id, "patch": {"mode": "banana"}},
     )
     assert bad_mode.isError
+    # The error enumerates all four accepted modes.
+    assert "timeline" in bad_mode.content[0].text and "flows" in bad_mode.content[0].text
 
-    # Mode switch clears selection.
+    # Mode switch clears selection AND bumps mode_revision (authorizes the
+    # client to adopt the new mode over later data-load adoptions).
     _call_tool(
         server, "update_graph_explorer_focus",
         {"view_id": view_id, "selected_node_id": AVATAR},
@@ -1167,9 +1662,18 @@ def test_set_graph_explorer_view_schema(fake_snapshot):
         server, "set_graph_explorer_view",
         {"view_id": view_id, "patch": {"mode": "investigate"}},
     )
-    assert switched.structuredContent["patch"]["view_state"]["selection"] == {
-        "node_id": "", "edge_id": "",
+    switched_vs = switched.structuredContent["patch"]["view_state"]
+    assert switched_vs["selection"] == {
+        "node_id": "", "edge_id": "", "request_id": 1,
     }
+    assert switched_vs["mode_revision"] >= 1
+    # timeline + flows are accepted modes.
+    for m in ("timeline", "flows"):
+        ok = set_fn(
+            server, "set_graph_explorer_view",
+            {"view_id": view_id, "patch": {"mode": m}},
+        )
+        assert ok.isError is not True
 
 
 def test_mode_switch_via_focus_clears_selection(fake_snapshot):
@@ -1185,7 +1689,58 @@ def test_mode_switch_via_focus_clears_selection(fake_snapshot):
     )
     vs_patch = result.structuredContent["patch"]["view_state"]
     assert vs_patch["mode"] == "investigate"
-    assert vs_patch["selection"] == {"node_id": "", "edge_id": ""}
+    assert vs_patch["selection"] == {
+        "node_id": "", "edge_id": "", "request_id": 1,
+    }
+    assert vs_patch["mode_revision"] >= 1  # explicit mode command bumps it
+
+    # An invalid mode is rejected and the message enumerates all four modes.
+    bad = _call_tool(
+        server, "update_graph_explorer_focus",
+        {"view_id": view_id, "mode": "banana"},
+    )
+    assert bad.isError
+    assert "flows" in bad.content[0].text and "timeline" in bad.content[0].text
+
+
+def test_mode_switch_and_target_selection_publish_as_one_focus_revision(
+    fake_snapshot,
+):
+    role_row = [
+        True, False, False, "", False, "", False, False, False, "",
+        False, False, False, False, "",
+    ]
+    server = _server(StubCH(roles={AVATAR: role_row}))
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+
+    result = _call_tool(
+        server,
+        "update_graph_explorer_focus",
+        {
+            "view_id": view_id,
+            "mode": "investigate",
+            "selected_node_id": AVATAR,
+            "request_id": 31,
+        },
+    )
+
+    assert result.isError is not True
+    patch = result.structuredContent["patch"]
+    state = patch["view_state"]
+    assert state["mode"] == "investigate"
+    assert state["mode_revision"] >= 1
+    assert state["selection"] == {
+        "node_id": AVATAR,
+        "edge_id": "",
+        "request_id": 31,
+    }
+    node_rows = patch["datasets"]["node_evidence"]["preview_rows"]
+    assert node_rows
+    assert all(row[0] == AVATAR and row[3:] == ["node", 31] for row in node_rows)
+    assert patch["datasets"]["edge_evidence"]["preview_rows"] == []
+    assert state["focus_scope"]["request_id"] == 31
 
 
 def test_new_graph_app_tools_hidden_from_model(fake_snapshot):
@@ -1198,10 +1753,15 @@ def test_new_graph_app_tools_hidden_from_model(fake_snapshot):
     register_graph_explorer_tools(server, StubCH())
     names = [t.name for t in _asyncio.run(server.list_tools())]
     assert "load_graph_atlas_sample" not in names
+    assert "load_graph_atlas_preview" not in names
     assert "set_graph_explorer_view" not in names
     assert "open_graph_explorer" in names
     cfg = _web_apps.WEB_APP_CONFIGS["graph_explorer"]
-    assert {"load_graph_atlas_sample", "set_graph_explorer_view"} <= cfg.allowed_tools
+    assert {
+        "load_graph_atlas_sample",
+        "load_graph_atlas_preview",
+        "set_graph_explorer_view",
+    } <= cfg.allowed_tools
 
 
 def test_seed_normalizes_checksummed_address(fake_snapshot):
@@ -1280,3 +1840,104 @@ def test_budget_truncated_round_consumes_only_fetched_groups(fake_snapshot):
     # Only the first kind group's fetch ran before the budget tripped; the
     # second group stays expandable for the next round.
     assert res.expanded_frontier == {"0xa1"}
+
+
+# ---------------------------------------------------------------------------
+# Role → profile inference
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        {"has_dune_label": 1, "dune_project": "ERC20"},
+        {"is_lp_provider": 1},
+        {"is_pool": 1},
+        {"is_lending_user": 1},
+        {"is_circles_avatar": 1},
+        {"is_validator_depositor": 1},
+        {"is_gpay_wallet": 1},
+        {},
+    ],
+)
+def test_token_transfers_always_offered(roles):
+    """Value movement is the universal forensic baseline.
+
+    Regression: a role match used to SUPPRESS the token_transfers fallback, so
+    a labelled address (has_dune_label -> address_labeled_as, a time-less label
+    relation) resolved to the label edge alone and rendered an empty graph —
+    observed on the aGnoEURe reserve, which had ~49.5k transfers across ~4k
+    counterparties inside the default 90d window. Labelled addresses are
+    exchanges, tokens and protocols: exactly where an investigation begins.
+    """
+    assert "token_transfers" in graph_profiles.profiles_for_address_roles(roles)
+
+
+def test_role_profiles_supplement_rather_than_replace_transfers():
+    selected = graph_profiles.profiles_for_address_roles(
+        {"has_dune_label": 1, "is_safe": 1}
+    )
+    assert "token_transfers" in selected
+    assert "address_labeled_as" in selected
+    assert "safe_ownership" in selected
+    # No duplicates: is_safe already names token_transfers explicitly.
+    assert len(selected) == len(set(selected))
+
+
+# ---------------------------------------------------------------------------
+# SQL determinism + evidence scoping
+# ---------------------------------------------------------------------------
+
+
+def _a_profile():
+    """A time-aware profile for SQL-shape assertions (registry is not loaded
+    under pytest, so build one directly)."""
+    from cerebro_mcp.semantic.graph_profiles import GraphProfile
+
+    return GraphProfile(
+        profile="p", model_name="m", relation_name="m",
+        source_column="a", target_column="b",
+        source_kind="address", target_kind="address",
+        weight_column="w", time_column="block_timestamp",
+    )
+
+
+def test_neighborhood_and_sample_sql_have_a_total_order():
+    """`ORDER BY weight DESC` alone is a PARTIAL order.
+
+    Profiles whose weight is constant (one row per pair) are entirely tied, so
+    ClickHouse could return any subset for the LIMIT. Two identical Atlas calls
+    returned completely disjoint 50-edge sets (0 of 50 shared) before the
+    endpoint tiebreaker was added.
+    """
+    prof = _a_profile()
+    neigh, _ = graph_profiles.build_neighbors_sql(
+        prof, seed_ids=["0xa1"], direction="out", window_days=90, limit=50
+    )
+    sample, _ = graph_profiles.build_sample_sql(prof, limit=50, window_days=90)
+    for sql in (neigh, sample):
+        assert "ORDER BY weight DESC, source_id, target_id" in sql
+
+
+def test_evidence_sql_is_ordered_and_window_bound():
+    """The drill-down must describe the EDGE it hangs off.
+
+    With no time predicate, an edge aggregated over 90 days returned rows from
+    years earlier; with no ORDER BY, the same selection returned different rows
+    each call (17 distinct sets over 20 calls).
+    """
+    prof = _a_profile()
+    sql, params = graph_profiles.build_evidence_sql(
+        prof, source_id="0xa1", target_id="0xb2", limit=25, window_days=90
+    )
+    assert "ORDER BY" in sql
+    assert "tuple(*)" in sql
+    assert "block_timestamp" in sql
+    assert params["win"] == 90
+
+    # Omitting the window must not silently drop the ordering.
+    unbound_sql, unbound_params = graph_profiles.build_evidence_sql(
+        prof, source_id="0xa1", target_id="0xb2", limit=25
+    )
+    assert "ORDER BY" in unbound_sql
+    assert "win" not in unbound_params

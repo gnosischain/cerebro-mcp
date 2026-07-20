@@ -3,9 +3,10 @@
 // All rows arrive PRE-PARSED through model/parseRows — this panel never
 // parses dataset rows itself. (No "Ask" button by design — removed in WS10.)
 
-import { shortId } from "./model/parseRows";
+import { filterEvidenceRows, shortId } from "./model/parseRows";
 import type {
   AddressRoles,
+  EvidenceExpectation,
   EvidenceRow,
   GraphEdgeRow,
   GraphNodeRow,
@@ -24,10 +25,29 @@ interface Props {
   suggestions: HopSuggestion[];
   nodeEvidence: EvidenceRow[];
   edgeEvidence: EvidenceRow[];
-  onExpand: (nodeId: string) => void;
-  onRecenter: (nodeId: string) => void;
+  /** Latest CLIENT focus intent. `null` explicitly invalidates all evidence;
+   * when omitted during migration, owner + subject are still enforced but
+   * request-order safety requires the caller to provide this prop. */
+  evidenceExpectation?: EvidenceExpectation | null;
+  /** OPTIONAL on purpose: a mode that cannot expand must not render an
+   * Expand button. Three of four modes used to pass `() => undefined`, so the
+   * button rendered, looked live, and silently did nothing when clicked. An
+   * action with no handler is now simply not shown. */
+  onExpand?: (nodeId: string) => void;
+  onRecenter?: (nodeId: string) => void;
   onApplyHop: (profileId: string) => void;
   onSelectNode: (nodeId: string) => void;
+  /** Flows mode: per-node Trace actions replace Expand/Recenter. Tracing
+   * through a node OVERRIDES terminal-sector status (analyst's choice). */
+  flowActions?: {
+    traceIn: (nodeId: string) => void;
+    traceOut: (nodeId: string) => void;
+  };
+  /** Extra key/value rows appended to the node / edge sections (Flows:
+   * hop rank, in/out USD, flags; token, amounts). */
+  extraNodeRows?: Array<[string, string]>;
+  extraEdgeRows?: Array<[string, string]>;
+  onClose?: () => void;
 }
 
 const ROLE_LABELS: Array<[keyof AddressRoles, string]> = [
@@ -64,15 +84,37 @@ export function DetailsPanel({
   suggestions,
   nodeEvidence,
   edgeEvidence,
+  evidenceExpectation,
   onExpand,
   onRecenter,
   onApplyHop,
   onSelectNode,
+  flowActions,
+  extraNodeRows,
+  extraEdgeRows,
+  onClose,
 }: Props) {
   const selectedNode =
     nodes.find((n) => n.id === selectedNodeId) ||
     nodes.find((n) => n.id === seedNodeId);
   const selectedEdge = edges.find((e) => e.id === selectedEdgeId);
+
+  const safeNodeEvidence =
+    evidenceExpectation === undefined
+      ? nodeEvidence.filter(
+          (row) => row.subjectKind === "node" && row.ownerId === selectedNodeId,
+        )
+      : filterEvidenceRows(nodeEvidence, evidenceExpectation).filter(
+          (row) => row.subjectKind === "node",
+        );
+  const safeEdgeEvidence =
+    evidenceExpectation === undefined
+      ? edgeEvidence.filter(
+          (row) => row.subjectKind === "edge" && row.ownerId === selectedEdgeId,
+        )
+      : filterEvidenceRows(edgeEvidence, evidenceExpectation).filter(
+          (row) => row.subjectKind === "edge",
+        );
 
   // Neighbors of the selected node, derived from the loaded edge list. Each is
   // clickable (select) with an inline expand, so the panel doubles as a
@@ -111,9 +153,62 @@ export function DetailsPanel({
     catalog.map((p) => [p.profile, p]),
   );
 
+  // Selection context is ordered by the analyst's explicit intent. An edge
+  // click must put edge identity/evidence first; the seed fallback node and
+  // its neighbours remain useful secondary context below it.
+  const edgeSection = selectedEdge ? (
+    <section data-inspector-context="edge">
+      <h3>Edge</h3>
+      <dl className="ge-kv">
+        <dt>profile</dt>
+        <dd>{selectedEdge.profile}</dd>
+        <dt>source</dt>
+        <dd>{selectedEdge.source}</dd>
+        <dt>target</dt>
+        <dd>{selectedEdge.target}</dd>
+        <dt>weight</dt>
+        <dd>
+          {Number.isFinite(selectedEdge.weight)
+            ? selectedEdge.weight.toFixed(4)
+            : "unknown"}
+        </dd>
+        <dt>edge_count</dt>
+        <dd>{selectedEdge.edge_count}</dd>
+        {(extraEdgeRows ?? []).map(([k, v]) => (
+          <div key={k} style={{ display: "contents" }}>
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {safeEdgeEvidence.length > 0 ? (
+        <div className="ge-evidence" style={{ marginTop: 8 }}>
+          <h4>Evidence</h4>
+          <dl className="ge-kv">
+            {safeEdgeEvidence.map((e, i) => (
+              <div key={`${e.column}-${i}`} style={{ display: "contents" }}>
+                <dt>{e.column}</dt>
+                <dd>{e.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ) : null}
+    </section>
+  ) : null;
+
   return (
     <aside className="ge-details">
-      <section>
+      {onClose ? (
+        <header className="ge-details__header">
+          <strong>Details</strong>
+          <button type="button" className="ge-icon-btn" onClick={onClose} aria-label="Close details">
+            ×
+          </button>
+        </header>
+      ) : null}
+      {edgeSection}
+      <section data-inspector-context="node">
         <h3>Node</h3>
         {selectedNode ? (
           <>
@@ -124,22 +219,55 @@ export function DetailsPanel({
               <dd>{selectedNode.kind}</dd>
               <dt>profiles</dt>
               <dd>{selectedNode.profiles.join(", ") || "—"}</dd>
+              {(extraNodeRows ?? []).map(([k, v]) => (
+                <div key={k} style={{ display: "contents" }}>
+                  <dt>{k}</dt>
+                  <dd>{v}</dd>
+                </div>
+              ))}
             </dl>
             <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-              <button
-                type="button"
-                className="ge-btn"
-                onClick={() => onExpand(selectedNode.id)}
-              >
-                Expand
-              </button>
-              <button
-                type="button"
-                className="ge-btn"
-                onClick={() => onRecenter(selectedNode.id)}
-              >
-                Recenter
-              </button>
+              {flowActions ? (
+                <>
+                  <button
+                    type="button"
+                    className="ge-btn"
+                    onClick={() => flowActions.traceIn(selectedNode.id)}
+                    title="Trace where this address was funded FROM (1 hop upstream)"
+                  >
+                    ← Trace in
+                  </button>
+                  <button
+                    type="button"
+                    className="ge-btn"
+                    onClick={() => flowActions.traceOut(selectedNode.id)}
+                    title="Trace where funds went FROM this address (1 hop downstream)"
+                  >
+                    Trace out →
+                  </button>
+                </>
+              ) : (
+                <>
+                  {onExpand && (
+                    <button
+                      type="button"
+                      className="ge-btn"
+                      onClick={() => onExpand(selectedNode.id)}
+                    >
+                      Expand
+                    </button>
+                  )}
+                  {onRecenter && (
+                    <button
+                      type="button"
+                      className="ge-btn"
+                      onClick={() => onRecenter(selectedNode.id)}
+                    >
+                      Investigate from here
+                    </button>
+                  )}
+                </>
+              )}
               <button
                 type="button"
                 className="ge-btn"
@@ -171,11 +299,11 @@ export function DetailsPanel({
                 ) : null}
               </>
             ) : null}
-            {nodeEvidence.length > 0 ? (
+            {safeNodeEvidence.length > 0 ? (
               <div className="ge-evidence" style={{ marginTop: 10 }}>
                 <h4>Evidence</h4>
                 <dl className="ge-kv">
-                  {nodeEvidence.map((e, i) => (
+                  {safeNodeEvidence.map((e, i) => (
                     <div key={`${e.column}-${i}`} style={{ display: "contents" }}>
                       <dt>{e.column}</dt>
                       <dd>{e.value}</dd>
@@ -210,51 +338,22 @@ export function DetailsPanel({
                   <span className="ge-neighbor-label">{nb.label || shortId(nb.id)}</span>
                   <span className="ge-neighbor-kind">{nb.kind}</span>
                 </button>
-                <button
-                  type="button"
-                  className="ge-neighbor-expand"
-                  onClick={() => onExpand(nb.id)}
-                  title="Expand this neighbor"
-                >
-                  +
-                </button>
+                {onExpand && (
+                  <button
+                    type="button"
+                    className="ge-neighbor-expand"
+                    onClick={() => onExpand(nb.id)}
+                    title="Expand this neighbor"
+                  >
+                    +
+                  </button>
+                )}
               </div>
             ))}
             {neighbors.length > 50 ? (
               <div className="ge-neighbor-more">+{neighbors.length - 50} more…</div>
             ) : null}
           </div>
-        </section>
-      ) : null}
-
-      {selectedEdge ? (
-        <section>
-          <h3>Edge</h3>
-          <dl className="ge-kv">
-            <dt>profile</dt>
-            <dd>{selectedEdge.profile}</dd>
-            <dt>source</dt>
-            <dd>{selectedEdge.source}</dd>
-            <dt>target</dt>
-            <dd>{selectedEdge.target}</dd>
-            <dt>weight</dt>
-            <dd>{selectedEdge.weight.toFixed(4)}</dd>
-            <dt>edge_count</dt>
-            <dd>{selectedEdge.edge_count}</dd>
-          </dl>
-          {edgeEvidence.length > 0 ? (
-            <div className="ge-evidence" style={{ marginTop: 8 }}>
-              <h4>Evidence</h4>
-              <dl className="ge-kv">
-                {edgeEvidence.map((e, i) => (
-                  <div key={`${e.column}-${i}`} style={{ display: "contents" }}>
-                    <dt>{e.column}</dt>
-                    <dd>{e.value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          ) : null}
         </section>
       ) : null}
 

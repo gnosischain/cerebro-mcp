@@ -18,6 +18,25 @@ export interface GraphUrlState {
   status: string;
   layout: string;
   depth: number;
+  tgrain: string;
+  trange: number;
+  twin: number;
+  /** Flows deep-link state. */
+  fseeds: string[];
+  fdir: string;
+  fhops: number;
+  fmin: number;
+  frange: number;
+  ftok: string[];
+  /** Transaction Detail deep-link state. */
+  txhashes: string[];
+  txseed: string;
+  txcounterparties: string[];
+  txtokens: string[];
+  txrange: number;
+  txmax: number;
+  txt0: string;
+  txt1: string;
 }
 
 const URL_KEYS = [
@@ -31,6 +50,23 @@ const URL_KEYS = [
   "status",
   "layout",
   "depth",
+  "tgrain",
+  "trange",
+  "twin",
+  "fseeds",
+  "fdir",
+  "fhops",
+  "fmin",
+  "frange",
+  "ftok",
+  "txhashes",
+  "txseed",
+  "txcounterparties",
+  "txtokens",
+  "txrange",
+  "txmax",
+  "txt0",
+  "txt1",
 ];
 
 export function readUrl(): GraphUrlState {
@@ -46,6 +82,23 @@ export function readUrl(): GraphUrlState {
     status: p.get("status") || "",
     layout: p.get("layout") || "",
     depth: Number(p.get("depth")) || 0,
+    tgrain: p.get("tgrain") || "",
+    trange: Number(p.get("trange")) || 0,
+    twin: Number(p.get("twin")) || 0,
+    fseeds: (p.get("fseeds") || "").split(",").filter(Boolean),
+    fdir: p.get("fdir") || "",
+    fhops: Number(p.get("fhops")) || 0,
+    fmin: Number(p.get("fmin")) || 0,
+    frange: Number(p.get("frange")) || 0,
+    ftok: (p.get("ftok") || "").split(",").filter(Boolean),
+    txhashes: (p.get("txhashes") || "").split(",").filter(Boolean),
+    txseed: p.get("txseed") || "",
+    txcounterparties: (p.get("txcounterparties") || "").split(",").filter(Boolean),
+    txtokens: (p.get("txtokens") || "").split(",").filter(Boolean),
+    txrange: Number(p.get("txrange")) || 0,
+    txmax: Number(p.get("txmax")) || 0,
+    txt0: p.get("txt0") || "",
+    txt1: p.get("txt1") || "",
   };
 }
 
@@ -62,6 +115,25 @@ export function writeUrl(s: GraphUrlState, push = false): void {
   if (s.status && s.status !== "all") p.set("status", s.status);
   if (s.layout && s.layout !== "force") p.set("layout", s.layout);
   if (s.depth && s.depth !== 1) p.set("depth", String(s.depth));
+  if (s.tgrain && s.tgrain !== "week") p.set("tgrain", s.tgrain);
+  if (s.trange && s.trange !== 365) p.set("trange", String(s.trange));
+  if (s.twin && s.twin !== 4) p.set("twin", String(s.twin));
+  if (s.fseeds.length) p.set("fseeds", s.fseeds.join(","));
+  if (s.fdir && s.fdir !== "out") p.set("fdir", s.fdir);
+  if (s.fhops && s.fhops !== 2) p.set("fhops", String(s.fhops));
+  if (s.fmin && s.fmin !== 10) p.set("fmin", String(s.fmin));
+  if (s.frange && s.frange !== 30) p.set("frange", String(s.frange));
+  if (s.ftok.length) p.set("ftok", s.ftok.join(","));
+  if (s.txhashes.length) p.set("txhashes", s.txhashes.join(","));
+  if (s.txseed) p.set("txseed", s.txseed);
+  if (s.txcounterparties.length) {
+    p.set("txcounterparties", s.txcounterparties.join(","));
+  }
+  if (s.txtokens.length) p.set("txtokens", s.txtokens.join(","));
+  if (s.txrange && s.txrange !== 30) p.set("txrange", String(s.txrange));
+  if (s.txmax && s.txmax !== 25) p.set("txmax", String(s.txmax));
+  if (s.txt0) p.set("txt0", s.txt0);
+  if (s.txt1) p.set("txt1", s.txt1);
   const qs = p.toString();
   const url = window.location.pathname + (qs ? "?" + qs : "") + window.location.hash;
   if (push) window.history.pushState({}, "", url);

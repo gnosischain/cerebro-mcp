@@ -39,6 +39,12 @@ _VALID_ROLES = {
     "grafana_architect",
     # On-chain incident forensics via the bulk RPC scan toolkit
     "chain_forensics",
+    # Transaction/pattern forensics. These share the accuracy contract in
+    # prompts/agents/_forensic_standards.md (evidence tiers, calibrated
+    # confidence, mandatory alternative hypothesis, coverage disclosure).
+    "transaction_forensics",
+    "pattern_forensics",
+    "forensic_reviewer",
     # Deep-research workflow lead (multi-phase research projects + peer review)
     "gnosis_research_analyst",
 }
@@ -72,7 +78,10 @@ def register_agent_tools(mcp):
                 'unified_allocator'), the deep-research lead
                 ('gnosis_research_analyst'), the Grafana dashboard
                 architect ('grafana_architect'), the on-chain forensics
-                analyst ('chain_forensics'),
+                analyst ('chain_forensics'), the transaction/pattern
+                forensic specialists ('transaction_forensics',
+                'pattern_forensics') and their accuracy gate
+                ('forensic_reviewer'),
                 or the top-level dispatcher ('cerebro_dispatcher').
         """
         if role not in _VALID_ROLES:

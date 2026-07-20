@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMiniApp } from "../shared/useMiniApp";
-import { WarningBanner } from "../shared/WarningBanner";
+import { ToastStack } from "../shared/ToastStack";
 import { MiniAppChrome, MaIdentity, MaSection } from "../shared/MiniAppChrome";
 import { MaHelpButton } from "../shared/HelpDialog";
 import { CONTRACT_EXPLORER_HELP } from "../shared/helpContent";
@@ -265,10 +265,9 @@ export default function ContractExplorerApp() {
           />
         </form>
 
-        <WarningBanner warnings={view.warnings ?? []} />
-        {state?.warnings?.length ? (
-          <WarningBanner warnings={state.warnings} />
-        ) : null}
+        <ToastStack
+          warnings={[...(view.warnings ?? []), ...(state?.warnings ?? [])]}
+        />
 
         {/* Identity card — only when a contract is loaded */}
         {state?.address ? (

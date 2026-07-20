@@ -38,12 +38,12 @@ body { overflow: hidden; }
 .ge-topbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 3px 12px;
+  gap: 8px;
+  padding: 2px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   flex: 0 0 auto;
-  min-height: 30px;
+  min-height: 28px;
 }
 .ge-topbar-left {
   display: flex;
@@ -152,6 +152,9 @@ body { overflow: hidden; }
   align-items: center;
   justify-content: center;
   gap: 4px;
+  /* Labels carry a direction arrow ("← In", "Out →"); in the slimmed top bar
+   * they wrapped onto two lines and blew out the row height. */
+  white-space: nowrap;
   transition: background 0.12s, color 0.12s;
 }
 .ge-segment button:hover { color: var(--text-primary); background: var(--surface-translucent-strong); }
@@ -199,9 +202,17 @@ body { overflow: hidden; }
 }
 .ge-topbar-right {
   display: flex;
-  gap: 4px;
+  /* Without this the 24px info button and the taller mode switch align to
+   * stretch/flex-start and read as misaligned against the 24px filter row. */
+  align-items: center;
+  gap: 6px;
   flex: 0 0 auto;
+  margin-left: auto;
 }
+/* Match the mode switch to the 24px control height used across the top bar so
+ * the whole row sits on one baseline. */
+.ge-topbar-right .seg { height: 24px; align-items: center; }
+.ge-topbar-right .seg__btn { padding-top: 0; padding-bottom: 0; }
 .ge-btn {
   appearance: none;
   border: 1px solid var(--border-hover);
@@ -501,12 +512,19 @@ body { overflow: hidden; }
   position: absolute;
   bottom: 10px;
   left: 10px;
-  background: var(--surface-translucent);
+  /* OPAQUE panel, not `--surface-translucent` (4.5% white): at that alpha the
+   * WebGL canvas rendered straight through the legend and nodes appeared to
+   * sit on top of the labels. A control surface must be readable over
+   * whatever the graph happens to draw underneath it. */
+  background: var(--surface);
+  backdrop-filter: blur(6px);
   border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 0.72rem;
   max-width: 230px;
-  z-index: 5;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  /* Above the canvas, label layer and tooltip (all z-index <= 5). */
+  z-index: 12;
 }
 .ge-legend-toggle {
   width: 100%;
@@ -666,9 +684,19 @@ body { overflow: hidden; }
 .ge-details {
   padding: 12px 14px 18px;
   overflow-y: auto;
+  /* Nothing in a 320px side panel may scroll sideways — content wraps (see
+     .ge-kv / .ge-suggestion). This is the backstop, not the fix. */
+  overflow-x: hidden;
+  overscroll-behavior: contain;
   border-left: 1px solid var(--border);
   font-size: 0.8rem;
   min-height: 0;
+  min-width: 0;
+}
+/* Every descendant may shrink below its content width, so one long token can
+   never widen the panel and clip its neighbours. */
+.ge-details * {
+  min-width: 0;
 }
 .ge-details section { margin-bottom: 14px; }
 .ge-details h3 {
@@ -693,13 +721,30 @@ body { overflow: hidden; }
 
 .ge-kv {
   display: grid;
-  grid-template-columns: auto 1fr;
+  /* minmax(0, …) on BOTH tracks: a bare `auto`/`1fr` has an automatic minimum
+     of max-content, so one long unbroken identifier (a model name, a
+     `gen_address__…` rationale, a file path) widens the grid past the 320px
+     panel and the text gets clipped instead of wrapped. */
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
   gap: 3px 10px;
   font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 0.72rem;
+  min-width: 0;
 }
-.ge-kv dt { color: var(--text-muted); }
-.ge-kv dd { margin: 0; word-break: break-all; color: var(--text-secondary); }
+.ge-kv dt {
+  color: var(--text-muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ge-kv dd {
+  margin: 0;
+  min-width: 0;
+  /* `anywhere`, not `break-all`: break-all splits EVERY word at the margin
+     ("…transfers_whiteli / sted_daily"), while `anywhere` keeps normal words
+     intact and only breaks a token that genuinely cannot fit. */
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+}
 
 .ge-badge {
   font-size: 0.62rem;
@@ -718,11 +763,18 @@ body { overflow: hidden; }
 }
 .ge-roles .ge-badge { background: var(--accent-bg); color: var(--accent-text); }
 
-.ge-suggestions { display: flex; flex-direction: column; gap: 5px; }
+.ge-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
 .ge-suggestion {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  /* `stretch`, not `flex-start`: flex-start sizes children to their content,
+     so a long rationale refuses to shrink and spills out of the card. */
+  align-items: stretch;
   gap: 2px;
   padding: 6px 8px;
   border: 1px dashed var(--accent-border);
@@ -731,9 +783,18 @@ body { overflow: hidden; }
   cursor: pointer;
   color: inherit;
   font-size: 0.74rem;
+  min-width: 0;
+  max-width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 .ge-suggestion:hover { background: var(--accent-bg); }
-.ge-suggestion .ge-rationale { font-size: 0.66rem; color: var(--text-muted); }
+.ge-suggestion > * { min-width: 0; max-width: 100%; }
+.ge-suggestion .ge-rationale {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
 
 /* ======= Catalog (empty state) — compact, address-first ======= */
 .ge-catalog {
@@ -993,11 +1054,12 @@ body { overflow: hidden; }
 .ge-modebar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 12px;
+  gap: 10px;
+  padding: 3px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   flex: 0 0 auto;
+  min-height: 28px;
 }
 .ge-modebar .ge-title { margin-right: auto; }
 
@@ -1032,6 +1094,9 @@ body { overflow: hidden; }
   flex: 1 1 auto;
   min-height: 0;
   position: relative;
+}
+.ge-atlas-body.has-preview {
+  grid-template-columns: minmax(520px, 40%) minmax(0, 1fr);
 }
 .ge-atlas-rail {
   display: flex;
@@ -1233,7 +1298,7 @@ body { overflow: hidden; }
 }
 
 /* ======= Responsive: narrow chat column — details becomes an overlay ======= */
-@media (max-width: 900px) {
+@media (max-width: 899px) {
   .ge-body {
     grid-template-columns: 1fr 0; /* canvas full width; details slides in as overlay */
   }
@@ -1268,4 +1333,2604 @@ body { overflow: hidden; }
   .ge-input em { display: none; }
   .ge-input input { width: 36px; font-size: 0.72rem; }
   .ge-btn { padding: 3px 7px; font-size: 0.68rem; }
+}
+
+/* ======= Edge-types popover (replaces the full-width chip strip row) ======= */
+.ge-etypes { position: relative; flex: 0 0 auto; }
+.ge-etypes-btn { display: inline-flex; align-items: center; gap: 7px; }
+.ge-etypes-btn.active { border-color: var(--accent-text); color: var(--accent-text); }
+.ge-etypes-count {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+.ge-etypes-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(480px, 70vh);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ge-etypes-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-etypes-status-label {
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+/* Vertical sector groups inside the panel: sector label on its own line,
+ * chips wrapping below — no horizontal scrolling. */
+.ge-chip-groups { display: flex; flex-direction: column; gap: 10px; }
+.ge-chip-groups .ge-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ge-chip-groups .ge-chip-group-label { flex: 0 0 100%; text-align: left; }
+
+/* ======= Sim-parameter panel (canvas toolbar "⚙ Forces") ======= */
+.ge-sim-tune { position: relative; }
+.ge-sim-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: 250px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ge-sim-row {
+  display: grid;
+  grid-template-columns: 86px 1fr 34px;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+.ge-sim-label { white-space: nowrap; }
+.ge-sim-value {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.68rem;
+  color: var(--text);
+  text-align: right;
+}
+.ge-sim-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent-text);
+  height: 4px;
+}
+
+/* ======= Single top bar: seed cell + canvas stats chip ======= */
+.ge-seedcell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-right: 10px;
+  border-right: 1px solid var(--border);
+}
+.ge-canvas-stats {
+  position: absolute;
+  /* One row BELOW the canvas toolbar — the toolbar spans the top edge and
+   * collided with a top-anchored chip on narrower canvases. */
+  top: 54px;
+  right: 10px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-translucent, rgba(11, 14, 18, 0.82));
+  backdrop-filter: blur(4px);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  cursor: default;
+}
+.ge-canvas-stats b { color: var(--text); font-weight: 600; }
+/* Compact + clickable (opt-out). Tighter gaps/padding than the old block. */
+.ge-canvas-stats {
+  gap: 8px;
+  padding: 3px 9px;
+  font-size: 0.66rem;
+  cursor: pointer;
+  appearance: none;
+}
+.ge-canvas-stats:hover { border-color: var(--border-hover); color: var(--text-secondary); }
+.ge-canvas-stats.collapsed {
+  gap: 0;
+  padding: 3px 7px;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+/* ======= Timeline scrubber (bottom canvas overlay — zero header height) ==== */
+.ge-scrubber {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-translucent, rgba(11, 14, 18, 0.85));
+  backdrop-filter: blur(4px);
+}
+.ge-scrubber input[type="range"] {
+  flex: 1 1 auto;
+  accent-color: var(--accent-text);
+  height: 4px;
+  min-width: 0;
+}
+.ge-scrubber-label {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.7rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+/* "Time" caption — disambiguates the scrubber's time playback from the
+ * toolbar's "Layout" sim Play/Pause. */
+.ge-scrubber-caption {
+  flex: 0 0 auto;
+  font-size: 0.64rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.ge-scrubber-speed {
+  flex: 0 0 auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.7rem;
+  padding: 2px 4px;
+}
+/* Timeline range/window selects reuse the pill look. */
+.ge-pill select {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  font-size: 0.74rem;
+  outline: none;
+}
+
+/* When the Timeline scrubber occupies the bottom edge, lift the legend (and
+ * keep the scrubber above it) so the two overlays never overlap. */
+.ge-has-scrubber .ge-legend { bottom: 68px; }
+.ge-scrubber { z-index: 14; }
+
+/* ======= Flows mode ======= */
+/* The Flows seed cell is short (just 'FLOWS <addr>'), so the base
+ * .ge-topbar-filters `margin-left:auto` shoved the whole control cluster to
+ * the far right and left a big void beside the seed — it read as misaligned.
+ * Anchor the filters next to the seed and push only the info+mode-switch group
+ * to the right edge instead. */
+.ge-flow-filters {
+  margin-left: 10px;
+  margin-right: auto;
+  /* CRITICAL: the base .ge-topbar-filters sets `overflow-x: auto`, which CLIPS
+   * absolutely-positioned dropdowns — that is why the Tokens popover could not
+   * be used. The flows row is anchored left and fits, so no scroll is needed. */
+  overflow: visible;
+}
+/* Normalize control heights so nothing sits a pixel taller than its neighbors. */
+.ge-flow-filters > .ge-btn,
+.ge-flow-filters > .ge-etypes > .ge-etypes-btn { height: 24px; }
+/* Direction/depth stepper buttons reuse .ge-stepper inside a .ge-pill; give
+ * the +/- controls a hit target consistent with the rest of the top bar. */
+.ge-stepper.ge-pill { gap: 8px; padding: 4px 8px; }
+.ge-stepper.ge-pill > button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.ge-stepper.ge-pill > button:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--surface-translucent-strong);
+}
+.ge-stepper.ge-pill > button:disabled { opacity: 0.35; cursor: not-allowed; }
+.ge-stepper.ge-pill > span { min-width: 46px; text-align: center; font-variant-numeric: tabular-nums; }
+
+.ge-flow-minusd {
+  width: 64px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+}
+.ge-flow-minusd::-webkit-outer-spin-button,
+.ge-flow-minusd::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+/* Seed cell + popover (multi-seed management). */
+.ge-flow-seedcell { position: relative; }
+.ge-flow-seeds-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+}
+.ge-flow-seeds-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 240px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ge-flow-seed-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.74rem;
+  padding: 2px 4px;
+}
+.ge-flow-seed-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.ge-flow-seed-add input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-translucent);
+  color: var(--text-primary);
+  font: inherit;
+  outline: none;
+}
+.ge-flow-seed-add input:focus { border-color: var(--primary); }
+.ge-empty-card .ge-flow-seed-add--primary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  gap: 8px;
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.ge-empty-card .ge-flow-seed-add--primary input { width: 100%; }
+.ge-empty-card .ge-flow-seed-add--primary .ge-btn { min-width: 120px; }
+
+/* Token menu list. */
+.ge-token-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 280px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+.ge-token-usd {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.ge-token-empty {
+  padding: 8px 4px;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+/* Sits over the canvas when a trace found a seed but no flows (a lone dot
+ * otherwise reads as a bug). Non-interactive so canvas pan/zoom still work. */
+.ge-flow-hint {
+  position: absolute;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 13;
+  max-width: 420px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-translucent, rgba(11, 14, 18, 0.9));
+  backdrop-filter: blur(4px);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* ---- Transactions mode ---------------------------------------------------
+   Split surface: canvas (structure) + leg rail (sequence). The rail is the
+   reading surface — a node-link canvas cannot draw a sequence ladder, so the
+   ordering that makes a swap/settlement/drain legible lives in the list. */
+
+.ge-mode--tx {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.ge-tx-bar {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ge-tx-input {
+  flex: 1 1 320px;
+  min-width: 220px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 0.74rem;
+}
+
+.ge-tx-invalid {
+  color: var(--warning, #f59e0b);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+/* Coverage is stated, never assumed — the audit found panels claiming
+   exactness while silently capped at 25 rows. */
+.ge-tx-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 12px;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.ge-tx-scope strong {
+  font-size: 0.64rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
+.ge-tx-scope.is-exact strong {
+  color: #0b0e12;
+  background: var(--success, #34d399);
+}
+
+.ge-tx-scope.is-partial strong {
+  color: #0b0e12;
+  background: var(--warning, #f59e0b);
+}
+
+.ge-tx-scope-warn {
+  color: var(--warning, #f59e0b);
+}
+
+.ge-tx-scope-residual {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+}
+
+/* Three columns: canvas | leg rail | details. The details panel is a GRID
+   COLUMN, never a block stacked under the canvas — as a vertical sibling it
+   ate half the viewport, collapsed the canvas to a sliver, and pushed the
+   bottom-anchored legend up over the toolbar. */
+.ge-body--tx {
+  grid-template-columns: minmax(0, 1fr) 420px 320px;
+}
+.ge-body--tx.details-closed {
+  grid-template-columns: minmax(0, 1fr) 420px 0;
+}
+
+.ge-tx-rail {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  padding: 8px;
+}
+
+.ge-tx-rail-empty {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  padding: 14px 10px;
+}
+
+.ge-tx-rail-empty p {
+  margin: 8px 0 0;
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
+.ge-tx-group + .ge-tx-group {
+  margin-top: 10px;
+}
+
+.ge-tx-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px 6px 0 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom: 0;
+}
+
+.ge-tx-group-head code {
+  font-size: 0.7rem;
+  color: var(--primary);
+}
+
+.ge-tx-group-meta {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+
+.ge-tx-legs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 0 0 6px 6px;
+}
+
+.ge-tx-leg {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 12px minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 0.69rem;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  cursor: pointer;
+  border-top: 1px solid var(--border);
+}
+
+.ge-tx-legs > .ge-tx-leg:first-child {
+  border-top: 0;
+}
+
+.ge-tx-leg:hover {
+  background: var(--surface-2);
+}
+
+.ge-tx-leg.is-selected {
+  background: var(--surface-2);
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
+/* log_index — the position inside the transaction. Adjacent indices moving
+   different tokens between the same parties are the signature of a swap. */
+.ge-tx-logidx {
+  color: var(--text-muted);
+  text-align: right;
+  font-size: 0.64rem;
+}
+
+.ge-tx-addr {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+/* A leg ending at a token contract or the zero address is a mint/burn/reserve
+   payout — never a payment to a counterparty. Colour keeps them apart. */
+.ge-tx-role--token {
+  color: #f472b6;
+}
+
+.ge-tx-role--burn {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.ge-tx-arrow {
+  color: var(--text-muted);
+}
+
+.ge-tx-token {
+  color: var(--accent-text, #a5e8f5);
+  font-size: 0.66rem;
+}
+
+.ge-tx-amt {
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.ge-tx-usd {
+  color: var(--text-muted);
+  text-align: right;
+  font-size: 0.66rem;
+  min-width: 52px;
+}
+
+/* Narrow: drop the details column first, then stack the rail under the
+   canvas — the rail is the reading surface and must never be squeezed to an
+   unreadable width. */
+@media (max-width: 1200px) {
+  .ge-body--tx,
+  .ge-body--tx.details-closed {
+    grid-template-columns: minmax(0, 1fr) 360px;
+  }
+  .ge-body--tx .ge-details {
+    display: none;
+  }
+}
+
+@media (max-width: 820px) {
+  .ge-body--tx,
+  .ge-body--tx.details-closed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(220px, 1fr) minmax(0, 1fr);
+  }
+  .ge-tx-rail {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}
+
+/* Address cell in a leg row: inspect + follow-forward. */
+.ge-tx-addr-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.ge-tx-addr-cell .ge-tx-addr {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--text-primary);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ge-tx-addr-cell .ge-tx-addr:hover {
+  color: var(--accent-text, #a5e8f5);
+  text-decoration: underline;
+}
+/* The forward-traversal affordance — "what did this address do next?".
+   Hidden until row hover so the rail stays readable, but always visible once
+   an address has been followed, so the trail taken is legible at a glance. */
+.ge-tx-follow {
+  flex: 0 0 auto;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+}
+.ge-tx-leg:hover .ge-tx-follow,
+.ge-tx-follow:focus-visible {
+  opacity: 1;
+}
+.ge-tx-follow:hover {
+  color: var(--primary);
+  background: var(--surface-2);
+}
+.ge-tx-follow.is-followed {
+  opacity: 1;
+  color: var(--primary);
+}
+
+/* "Legs complete, but more transactions exist" — distinct from a leg-level
+   truncation, because reading "179 of 179 legs" next to PARTIAL is a
+   contradiction the analyst has to resolve by guessing. */
+.ge-tx-scope.is-more strong {
+  color: #0b0e12;
+  background: var(--primary, #67e8f9);
+}
+
+/* ---- Mode switch position is a SHELL invariant, not a per-mode choice -----
+   Views disagreed about where to render `modeSwitch` (Transactions put it
+   first, Timeline/Flows last), so the tab bar jumped between modes. Flex
+   `order` pins it to the far right of whichever bar it lands in, so a new mode
+   cannot move it by accident no matter where it drops the element. */
+.ge-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  order: 99;
+}
+/* Direct child of the top bar (no `.ge-topbar-right` wrapper): also push it
+   past any filter group, which itself uses margin-left:auto. */
+.ge-topbar > .ge-mode-switch {
+  margin-left: auto;
+}
+
+/* Busy strip. Following an address forward takes seconds; with no feedback the
+   ↪ button reads as broken and users click it repeatedly. */
+.ge-tx-busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 0.72rem;
+  color: var(--accent-text, #a5e8f5);
+  background: var(--accent-bg, rgba(103, 232, 249, 0.08));
+  border-bottom: 1px solid var(--border);
+}
+.ge-tx-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--primary, #67e8f9);
+  border-top-color: transparent;
+  animation: ge-tx-spin 0.7s linear infinite;
+}
+@keyframes ge-tx-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .ge-tx-spinner { animation: none; }
+}
+
+/* ======= Three-task shell =================================================
+   Task navigation owns its own row. It is never placed inside a mode filter
+   bar, so a wide set of data controls cannot clip the analyst's exit route. */
+.ge-task-nav {
+  min-height: 42px;
+  padding: 5px 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.ge-task-diagnostics {
+  position: relative;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+.ge-task-diagnostics > summary {
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.68rem;
+  list-style: none;
+}
+.ge-task-diagnostics > summary::-webkit-details-marker { display: none; }
+.ge-task-diagnostics__panel {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  gap: 4px;
+  min-width: 270px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+  color: var(--text-muted);
+  font: 0.68rem/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.ge-task-diagnostics__panel strong { color: var(--text); }
+.ge-task-nav__title {
+  display: flex;
+  flex-direction: column;
+  min-width: 124px;
+  line-height: 1.05;
+}
+.ge-task-nav__title span { font-size: 0.8rem; font-weight: 650; }
+.ge-task-nav__title small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.ge-task-tabs,
+.ge-task-subviews {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-translucent);
+}
+.ge-task-tabs button,
+.ge-task-subviews button {
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ge-task-tabs button:hover,
+.ge-task-subviews button:hover { color: var(--text-primary); }
+.ge-task-tabs button.is-active,
+.ge-task-subviews button.is-active {
+  color: var(--accent-text);
+  background: var(--accent-bg);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+.ge-task-subviews { margin-left: auto; }
+.ge-task-context {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+.ge-task-select { display: none; }
+.ge-filter-drawer { display: contents; }
+.ge-filter-drawer > summary { display: none; }
+
+@media (min-width: 900px) {
+  .ge-filter-drawer > .ge-topbar-filters {
+    display: flex !important;
+  }
+}
+
+/* Secondary renderer controls stay available without crowding the primary
+   search / fit / focus row. */
+.ge-canvas-advanced { position: relative; }
+.ge-canvas-advanced > summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+}
+.ge-canvas-advanced > summary::-webkit-details-marker { display: none; }
+.ge-canvas-advanced[open] > summary {
+  color: var(--accent-text);
+  background: var(--accent-bg);
+}
+.ge-canvas-advanced__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 25;
+  min-width: 260px;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+}
+
+@media (max-width: 899px) {
+  .ge-task-nav { gap: 8px; }
+  .ge-task-nav__title { min-width: 104px; }
+  .ge-task-tabs { display: none; }
+  .ge-task-select {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 0.66rem;
+  }
+  .ge-task-select select {
+    min-height: 30px;
+    max-width: 180px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-translucent);
+    color: var(--text-primary);
+    padding: 3px 8px;
+  }
+  .ge-task-subviews { margin-left: auto; }
+
+  .ge-filter-drawer {
+    order: 4;
+    width: 100%;
+    display: block;
+  }
+  .ge-filter-drawer > summary {
+    width: max-content;
+    display: list-item;
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-translucent);
+    color: var(--text-secondary);
+    font-size: 0.66rem;
+    cursor: pointer;
+  }
+  .ge-filter-drawer[open] > summary {
+    color: var(--accent-text);
+    background: var(--accent-bg);
+  }
+  .ge-filter-drawer > .ge-topbar-filters {
+    margin-top: 5px;
+  }
+
+  /* Mode filters wrap within their own row instead of forming a clipped,
+     1200px-wide strip. Primary task navigation remains above this row. */
+  .ge-topbar,
+  .ge-tx-bar {
+    flex-wrap: wrap;
+    align-content: center;
+    gap: 6px;
+    padding-block: 5px;
+  }
+  .ge-topbar-filters,
+  .ge-flow-filters {
+    order: 4;
+    width: 100%;
+    margin: 0;
+    padding-top: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    overflow: visible;
+    border-top: 1px solid var(--border);
+  }
+  .ge-topbar-right { margin-left: auto; }
+  .ge-atlas-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .ge-atlas-drawer {
+    min-width: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .ge-atlas-drawer > summary {
+    width: max-content;
+    margin: 6px 8px;
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-translucent);
+    color: var(--text-secondary);
+    font-size: 0.66rem;
+    cursor: pointer;
+  }
+  .ge-atlas-drawer[open] > summary {
+    color: var(--accent-text);
+    background: var(--accent-bg);
+  }
+  .ge-atlas-drawer > .ge-atlas-rail {
+    width: 100%;
+    max-height: min(56vh, 520px);
+    border-right: 0;
+  }
+  .ge-atlas-body > .ge-canvas {
+    grid-column: 1;
+    grid-row: 2;
+  }
+}
+
+@media (min-width: 900px) {
+  .ge-atlas-drawer { min-width: 0; }
+  .ge-atlas-drawer > summary { display: none; }
+  .ge-atlas-drawer > .ge-atlas-rail { width: 100%; height: 100%; }
+}
+
+/* Money Trail makes the ranked movements the primary reading surface and
+   keeps the canvas as context. */
+.ge-scope-disclosure {
+  position: relative;
+  margin: 4px 8px 0;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--success, #15803d);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 0.64rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  flex: 0 0 auto;
+}
+
+.ge-scope-disclosure--partial {
+  border-left-color: var(--warning, #a16207);
+}
+
+.ge-scope-disclosure--failed,
+.ge-scope-disclosure--missing {
+  border-left-color: var(--danger, #b91c1c);
+}
+
+.ge-scope-disclosure__headline {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 3px 4px 3px 8px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ge-scope-disclosure__headline > span {
+  flex: 0 0 auto;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ge-scope-disclosure__headline > .ge-scope-disclosure__summary {
+  flex: 1 1 auto;
+  max-width: none;
+}
+.ge-scope-disclosure__headline strong {
+  color: var(--text);
+  letter-spacing: 0.05em;
+}
+.ge-scope-disclosure__headline > span:not(:last-child)::after {
+  content: "·";
+  margin-left: 10px;
+  color: var(--text-muted);
+}
+.ge-scope-disclosure__bound { color: var(--warning, #a16207); }
+.ge-scope-disclosure__trigger {
+  flex: 0 0 auto;
+  min-height: 22px;
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border-hover);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent-text);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ge-scope-disclosure__trigger:hover,
+.ge-scope-disclosure__trigger[aria-expanded="true"] { background: var(--accent-bg); }
+.ge-evidence-sheet {
+  position: fixed;
+  top: 64px;
+  right: 0;
+  bottom: 0;
+  z-index: 80;
+  width: min(440px, calc(100vw - 16px));
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-hover);
+  background: var(--surface);
+  box-shadow: -12px 0 34px rgba(0, 0, 0, 0.34);
+}
+.ge-evidence-sheet__header {
+  min-height: 48px;
+  padding: 8px 10px 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-evidence-sheet__header > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ge-evidence-sheet__header strong { font-size: 0.76rem; }
+.ge-evidence-sheet__header span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+}
+.ge-scope-disclosure__details-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow: auto;
+  padding: 10px 12px 18px;
+  background: var(--surface);
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+.ge-scope-disclosure__meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 10px;
+  margin: 0;
+}
+.ge-scope-disclosure__meta dt { color: var(--text-muted); }
+.ge-scope-disclosure__meta dd { margin: 0; color: var(--text-secondary); }
+.ge-scope-disclosure__coverage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--text-muted);
+}
+.ge-scope-disclosure__sources,
+.ge-scope-disclosure__warnings,
+.ge-scope-disclosure__residuals {
+  display: grid;
+  gap: 2px;
+}
+
+.ge-scope-disclosure__sources b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.ge-scope-disclosure__warnings {
+  color: var(--warning, #a16207);
+}
+.ge-scope-disclosure__truncation { margin: 0; color: var(--warning, #a16207); }
+
+@media (max-width: 899px) {
+  .ge-scope-disclosure { margin: 4px 6px 0; }
+  .ge-scope-disclosure__headline {
+    min-height: 30px;
+    overflow: hidden;
+  }
+  .ge-scope-disclosure__headline > span:not(.ge-scope-disclosure__summary) { display: none; }
+  .ge-scope-disclosure__summary { max-width: 24ch !important; }
+  .ge-evidence-sheet { top: 52px; width: min(100vw, 440px); }
+  .ge-scope-disclosure__meta { grid-template-columns: 1fr; }
+  .ge-scope-disclosure__meta dd { margin-bottom: 4px; }
+}
+.ge-body--money {
+  grid-template-columns:
+    minmax(360px, calc(var(--ge-money-table-width, 52%) - 4px))
+    8px
+    minmax(360px, 1fr);
+  overflow: hidden;
+}
+.ge-body--money.details-closed {
+  grid-template-columns:
+    minmax(360px, calc(var(--ge-money-table-width, 52%) - 4px))
+    8px
+    minmax(360px, 1fr);
+}
+.ge-body--money .ge-details { display: none; }
+.ge-body--money.details-open .ge-details {
+  display: block;
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: min(360px, 90%);
+  z-index: 30;
+  background: var(--surface);
+  border-left: 1px solid var(--border-hover);
+  box-shadow: -4px 0 14px rgba(0, 0, 0, 0.35);
+}
+.ge-money-table {
+  grid-column: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+.ge-money-resizer {
+  grid-column: 2;
+  position: relative;
+  min-width: 8px;
+  cursor: col-resize;
+  background: var(--surface);
+  border-inline: 1px solid var(--border);
+  touch-action: none;
+}
+.ge-money-resizer > span {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 42px;
+  border-radius: 99px;
+  background: var(--border-hover);
+  transform: translate(-50%, -50%);
+}
+.ge-money-resizer:hover,
+.ge-money-resizer:focus-visible { background: var(--accent-bg); }
+.ge-money-resizer:hover > span,
+.ge-money-resizer:focus-visible > span { background: var(--primary); }
+.ge-money-table > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-money-table > header div { display: flex; flex-direction: column; gap: 2px; }
+.ge-money-table > header strong { font-size: 0.74rem; }
+.ge-money-table > header span,
+.ge-money-table > header small { color: var(--text-muted); font-size: 0.6rem; }
+.ge-money-table__lanes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-money-table__lanes button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 0.62rem;
+  cursor: pointer;
+}
+.ge-money-table__lanes button.active,
+.ge-money-table__lanes button[aria-selected="true"] {
+  border-color: var(--accent-text);
+  background: var(--accent-bg);
+  color: var(--text-primary);
+}
+.ge-money-table__rows { min-height: 0; overflow-y: auto; }
+.ge-money-table__rows > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+}
+.ge-money-table__rows > div:hover,
+.ge-money-table__rows > div.is-selected { background: var(--accent-bg); }
+.ge-money-table__main,
+.ge-money-table__open {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.ge-money-table__main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  padding: 7px 8px;
+  text-align: left;
+}
+.ge-money-table__main > span:first-child,
+.ge-money-table__main > span:last-child {
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+}
+.ge-money-table__main > span:nth-child(2) {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ge-money-table__main strong,
+.ge-money-table__main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ge-money-table__main strong { font: 0.64rem var(--font-mono, ui-monospace); }
+.ge-money-table__main small { color: var(--text-muted); font-size: 0.58rem; }
+.ge-money-table__open {
+  width: 64px;
+  padding: 4px;
+  border-left: 1px solid var(--border);
+  color: var(--accent-text);
+  font-size: 0.58rem;
+}
+.ge-money-table__open:hover { background: var(--accent-bg); }
+.ge-money-table__empty {
+  margin: 0;
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.ge-money-table__pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.64rem;
+}
+
+.ge-money-map {
+  grid-column: 3;
+  position: relative;
+  min-width: 0;
+  min-height: 360px;
+  overflow: auto;
+  background: var(--bg);
+}
+
+@media (min-width: 1440px) {
+  .ge-body--money.details-open {
+    grid-template-columns:
+      minmax(340px, calc(var(--ge-money-table-width, 52%) - 170px))
+      8px
+      minmax(360px, 1fr)
+      340px;
+  }
+  .ge-body--money.details-open .ge-details {
+    position: static;
+    grid-column: 4;
+    display: block;
+    width: auto;
+    border-left: 1px solid var(--border-hover);
+    box-shadow: none;
+  }
+}
+.ge-money-map.is-stale { opacity: 0.58; }
+.ge-money-sankey {
+  min-width: 0;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.ge-money-sankey--empty {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--text-muted);
+}
+.ge-money-sankey__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-money-sankey__header > div:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.ge-money-sankey__header strong { font-size: 0.74rem; }
+.ge-money-sankey__header span,
+.ge-money-sankey__header small {
+  color: var(--text-muted);
+  font-size: 0.6rem;
+}
+.ge-money-sankey__legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 8px;
+  max-width: 44%;
+}
+.ge-money-sankey__coverage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.6rem;
+}
+.ge-money-sankey__selection {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-bg);
+  font-size: 0.62rem;
+}
+.ge-money-sankey__selection span { color: var(--text-muted); }
+.ge-money-sankey__svg {
+  display: block;
+  width: 100%;
+  min-height: 360px;
+  flex: 1 1 auto;
+  overflow: visible;
+}
+.ge-money-ribbon { color: var(--accent-text); }
+.ge-money-ribbon.is-mint { color: var(--success); }
+.ge-money-ribbon.is-burn { color: var(--error); }
+.ge-money-ribbon.is-bridge_attributed { color: var(--warning); }
+.ge-money-ribbon.is-contract_endpoint { color: var(--text-secondary); }
+.ge-money-ribbon__visible {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  opacity: 0.66;
+  pointer-events: none;
+}
+.ge-money-ribbon__selection {
+  fill: none;
+  stroke: var(--text-primary);
+  stroke-linecap: round;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.ge-money-ribbon__hit {
+  fill: none;
+  stroke: transparent;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.ge-money-ribbon.is-categorical .ge-money-ribbon__visible {
+  stroke-dasharray: 7 5;
+  opacity: 0.9;
+}
+.ge-money-ribbon.is-selected .ge-money-ribbon__visible,
+.ge-money-ribbon.is-hovered .ge-money-ribbon__visible {
+  opacity: 1;
+  filter: drop-shadow(0 0 2px currentColor);
+}
+.ge-money-ribbon.is-dimmed { opacity: 0.15; }
+.ge-money-sankey__connectors line {
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 2 3;
+  cursor: pointer;
+}
+.ge-money-sankey__connectors line:focus,
+.ge-money-ribbon__hit:focus,
+.ge-money-node:focus {
+  filter: drop-shadow(0 0 3px var(--accent-text));
+}
+.ge-money-node { cursor: pointer; }
+.ge-money-node rect {
+  fill: var(--surface);
+  stroke: var(--text-secondary);
+  stroke-width: 1.5;
+}
+.ge-money-node.is-seed rect {
+  fill: var(--accent-bg);
+  stroke: var(--accent-text);
+  stroke-width: 2;
+}
+.ge-money-node.is-terminal rect { stroke-dasharray: 3 2; }
+.ge-money-node.is-selected rect { stroke: var(--accent-text); stroke-width: 3; }
+.ge-money-node text {
+  fill: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace);
+  font-size: 10px;
+}
+.ge-money-node .ge-money-node__role {
+  fill: var(--text-muted);
+  font-family: inherit;
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 1439px) {
+  .ge-body--money,
+  .ge-body--money.details-closed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(280px, 44%) minmax(360px, 1fr);
+    overflow-y: auto;
+  }
+  .ge-body--money > .ge-money-table { grid-column: 1; grid-row: 1; border-right: 0; border-bottom: 1px solid var(--border); }
+  .ge-body--money > .ge-money-resizer { display: none; }
+  .ge-body--money > .ge-money-map { grid-column: 1; grid-row: 2; }
+}
+@media (max-width: 899px) {
+  .ge-body--money,
+  .ge-body--money.details-closed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(300px, 48vh) minmax(360px, 1fr);
+    overflow-y: auto;
+  }
+  .ge-body--money > .ge-money-table {
+    grid-column: 1;
+    grid-row: 1;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .ge-body--money > .ge-money-resizer { display: none; }
+  .ge-body--money > .ge-money-map { grid-column: 1; grid-row: 2; }
+  .ge-money-sankey__header { flex-direction: column; }
+  .ge-money-sankey__legend { max-width: none; justify-content: flex-start; }
+}
+
+@media (max-width: 699px) {
+  .ge-task-nav__title small { display: none; }
+  .ge-task-subviews button { padding-inline: 8px; }
+  .ge-tx-input { min-width: min(220px, 100%); }
+}
+
+/* Relationship catalog is inspect-first: selecting a row previews its data
+   contract; the explicit action adds/removes it from the applied graph. */
+button.ge-atlas-item {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+}
+.ge-atlas-item.is-preview { background: var(--surface-translucent-strong); }
+.ge-atlas-item.is-applied { color: var(--accent-text); }
+.ge-atlas-item-state {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.ge-relation-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-hover);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 0.72rem;
+  overflow-y: auto;
+}
+.ge-relation-preview__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ge-relation-preview__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ge-relation-preview__head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ge-relation-preview p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.35;
+  white-space: normal;
+}
+.ge-relation-preview dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+.ge-relation-preview dl > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ge-relation-preview dt { color: var(--text-muted); }
+.ge-relation-preview dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ge-relation-preview__sample {
+  flex: 1 1 260px;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+.ge-relation-preview__sample-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-relation-preview__sample-head span { color: var(--text-muted); }
+.ge-relation-preview__sample-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.ge-relation-preview__sample table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font: 0.64rem var(--font-mono, ui-monospace);
+}
+.ge-relation-preview__sample th,
+.ge-relation-preview__sample td {
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ge-relation-preview__sample th { color: var(--text-muted); }
+.ge-quality {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+}
+.ge-quality--approved { color: var(--success); border-color: var(--success); }
+.ge-quality--candidate { color: var(--warning); border-color: var(--warning); }
+.ge-atlas-body.has-preview > .ge-canvas {
+  border-left: 1px solid var(--border);
+  background: var(--surface-subtle, var(--bg));
+}
+
+/* Relationships keeps a keyboard-readable ranking beside the spatial view. */
+.ge-body--relationships,
+.ge-body--relationships.details-closed {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr) 340px;
+}
+.ge-body--relationships .ge-details { display: none; }
+.ge-body--relationships.details-open .ge-details {
+  display: block;
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: min(360px, 90%);
+  z-index: 30;
+  background: var(--surface);
+  border-left: 1px solid var(--border-hover);
+  box-shadow: -4px 0 14px rgba(0, 0, 0, 0.35);
+}
+.ge-ranked-table {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+.ge-ranked-table > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-ranked-table > header div { display: flex; flex-direction: column; gap: 2px; }
+.ge-ranked-table > header strong { font-size: 0.74rem; }
+.ge-ranked-table > header span,
+.ge-ranked-table > header small { color: var(--text-muted); font-size: 0.6rem; }
+.ge-ranked-table__rows { min-height: 0; overflow-y: auto; }
+.ge-ranked-table__group > h3 {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 0.64rem;
+}
+.ge-ranked-table__group > h3 small {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.ge-ranked-table__group > button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  padding: 7px 9px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ge-ranked-table__group > button:hover,
+.ge-ranked-table__group > button.is-selected { background: var(--accent-bg); }
+.ge-ranked-table__group > button.is-selected { box-shadow: inset 2px 0 var(--primary); }
+.ge-ranked-table__rank,
+.ge-ranked-table__weight {
+  color: var(--text-muted);
+  font-size: 0.64rem;
+  font-variant-numeric: tabular-nums;
+}
+.ge-ranked-table__edge { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ge-ranked-table__edge strong,
+.ge-ranked-table__edge small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ge-ranked-table__edge strong { font: 0.66rem var(--font-mono, ui-monospace); }
+.ge-ranked-table__edge small { color: var(--text-muted); font-size: 0.6rem; }
+.ge-ranked-table__rows > p {
+  margin: 0;
+  padding: 14px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+@media (min-width: 900px) and (max-width: 1439px) {
+  .ge-atlas-body.has-preview {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(340px, 48vh) minmax(360px, 1fr);
+    overflow-y: auto;
+  }
+  .ge-atlas-body.has-preview > .ge-atlas-drawer {
+    grid-column: 1;
+    grid-row: 1;
+    min-height: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .ge-atlas-body.has-preview > .ge-atlas-drawer > .ge-atlas-rail {
+    max-height: 48vh;
+    border-right: 0;
+  }
+  .ge-atlas-body.has-preview > .ge-canvas {
+    grid-column: 1;
+    grid-row: 2;
+    min-height: 360px;
+  }
+  .ge-body--relationships,
+  .ge-body--relationships.details-closed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(280px, 42vh) minmax(360px, 1fr);
+    overflow-y: auto;
+  }
+  .ge-body--relationships > .ge-ranked-table {
+    grid-column: 1;
+    grid-row: 1;
+    border-left: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .ge-body--relationships > .ge-canvas {
+    grid-column: 1;
+    grid-row: 2;
+  }
+}
+@media (max-width: 899px) {
+  .ge-atlas-body.has-preview { grid-template-columns: minmax(0, 1fr); }
+  .ge-relation-preview dl { grid-template-columns: minmax(0, 1fr); }
+  .ge-body--relationships,
+  .ge-body--relationships.details-closed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(220px, 40vh) minmax(360px, 1fr);
+    overflow-y: auto;
+  }
+  .ge-body--relationships > .ge-ranked-table {
+    grid-row: 1;
+    border-left: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .ge-body--relationships > .ge-canvas { grid-row: 2; }
+  .ge-body--relationships.details-open .ge-details,
+  .ge-body--money.details-open .ge-details {
+    display: block;
+  }
+}
+
+/* Transaction Detail: the ordered receipt table is the primary surface. The
+   deterministic SVG is an optional overview and the inspector remains an
+   isolated side sheet/column. */
+.ge-body--tx-detail,
+.ge-body--tx-detail.details-closed {
+  min-height: 0;
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+}
+.ge-body--tx-detail.details-open .ge-details {
+  display: block;
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: min(360px, 90%);
+  z-index: 30;
+  background: var(--surface);
+  border-left: 1px solid var(--border-hover);
+  box-shadow: -4px 0 14px rgba(0, 0, 0, 0.35);
+}
+.ge-tx-workspace {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: opacity 150ms ease;
+}
+.ge-tx-workspace.is-stale { opacity: 0.58; }
+.ge-canvas.is-stale { opacity: 0.58; }
+.ge-tx-picker {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.ge-tx-picker button {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.66rem;
+  cursor: pointer;
+}
+.ge-tx-picker button.active {
+  border-color: var(--primary);
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+.ge-tx-overview,
+.ge-tx-table-region {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.ge-tx-overview > header,
+.ge-tx-table-region > header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-tx-overview > header > div,
+.ge-tx-table-region > header > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ge-tx-overview > header strong,
+.ge-tx-table-region > header strong { font-size: 0.76rem; }
+.ge-tx-overview > header code {
+  max-width: min(68vw, 850px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 0.61rem;
+}
+.ge-tx-overview > header span,
+.ge-tx-table-region > header span {
+  color: var(--text-muted);
+  font-size: 0.61rem;
+}
+.ge-tx-overview svg { background: var(--surface-subtle, var(--surface)); }
+.ge-tx-table-region { flex: 0 0 auto; }
+.ge-table-scroll {
+  max-width: 100%;
+  overflow: auto;
+  outline-offset: -2px;
+}
+.ge-tx-table {
+  width: 100%;
+  min-width: 1460px;
+  border-collapse: collapse;
+  color: var(--text-primary);
+  font-size: 0.64rem;
+}
+.ge-tx-table th,
+.ge-tx-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.ge-tx-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-translucent-strong, var(--surface));
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.035em;
+}
+.ge-tx-table tbody tr { cursor: pointer; }
+.ge-tx-table tbody tr:hover,
+.ge-tx-table tbody tr.is-selected { background: var(--accent-bg); }
+.ge-tx-table tbody tr.is-selected { box-shadow: inset 3px 0 var(--primary); }
+.ge-tx-table td > code {
+  display: block;
+  max-width: 300px;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 0.59rem;
+}
+.ge-tx-table .ge-tx-addr-cell { white-space: nowrap; }
+.ge-tx-table-empty {
+  padding: 24px !important;
+  color: var(--text-muted);
+  text-align: center !important;
+}
+.ge-link-btn {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent-text);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.ge-tx-scope-provenance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.ge-load-error,
+.ge-applied-scope-chip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.66rem;
+}
+.ge-load-error { background: var(--danger-bg, #fff1f2); color: var(--danger, #9f1239); }
+.ge-applied-scope-chip { background: var(--warning-bg, #fffbeb); color: var(--text-secondary); }
+
+@media (max-width: 899px) {
+  .ge-body--tx-detail,
+  .ge-body--tx-detail.details-closed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ge-body--tx-detail.details-open .ge-details {
+    position: absolute;
+    inset: auto 0 0 0;
+    width: auto;
+    z-index: 20;
+    display: block;
+    max-height: min(72vh, 620px);
+    box-shadow: 0 -12px 40px rgba(15, 23, 42, 0.24);
+  }
+  .ge-tx-workspace { padding: 7px; }
+  .ge-tx-overview > header { align-items: flex-start; }
+}
+
+/* Over time is narrative-first. The legacy graph is deliberately secondary
+   and collapsed until the analyst asks for spatial playback. */
+.ge-mode--timeline {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ge-timeline-narrative,
+.ge-timeline-overview,
+.ge-timeline-scope {
+  flex: 0 0 auto;
+  margin: 8px 10px 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.ge-timeline-narrative__header,
+.ge-timeline-overview__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-timeline-narrative__header h2,
+.ge-timeline-overview__header h2 {
+  margin: 0;
+  font-size: 0.82rem;
+}
+.ge-timeline-narrative__header p,
+.ge-timeline-overview__header p {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 0.64rem;
+}
+.ge-timeline-narrative__count {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+}
+.ge-timeline-narrative__error,
+.ge-timeline-load-error,
+.ge-timeline-stale {
+  margin: 0;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.66rem;
+}
+.ge-timeline-narrative__error,
+.ge-timeline-load-error {
+  background: var(--danger-bg, #fff1f2);
+  color: var(--danger, #9f1239);
+}
+.ge-timeline-load-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ge-timeline-stale {
+  background: var(--warning-bg, #fffbeb);
+  color: var(--text-secondary);
+}
+.ge-timeline-narrative__scroll {
+  max-height: min(46vh, 520px);
+  overflow: auto;
+}
+.ge-timeline-narrative table {
+  width: 100%;
+  min-width: 1640px;
+  border-collapse: collapse;
+  font-size: 0.67rem;
+}
+.ge-timeline-narrative th,
+.ge-timeline-narrative td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+  vertical-align: top;
+}
+.ge-timeline-narrative th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-translucent-strong, var(--surface));
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.035em;
+}
+.ge-timeline-narrative tbody tr:hover { background: var(--accent-bg); }
+.ge-timeline-change {
+  display: inline-flex;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-raised, var(--surface));
+  font-size: 0.58rem;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.ge-timeline-change--new,
+.ge-timeline-change--first_observed,
+.ge-timeline-change--increased { color: var(--success, #15803d); background: #ecfdf5; }
+.ge-timeline-change--decreased,
+.ge-timeline-change--disappeared,
+.ge-timeline-change--not_observed { color: var(--danger, #b91c1c); background: #fef2f2; }
+.ge-timeline-direction,
+.ge-timeline-event {
+  display: inline-flex;
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 0.56rem;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.ge-timeline-event--mint { color: var(--success, #15803d); background: #ecfdf5; }
+.ge-timeline-event--burn { color: var(--danger, #b91c1c); background: #fef2f2; }
+.ge-timeline-counterparty {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent-text);
+  font: 0.64rem var(--font-mono, ui-monospace);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.ge-timeline-full-address {
+  display: block;
+  max-width: 330px;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font: 0.57rem var(--font-mono, ui-monospace);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.ge-timeline-narrative td > span,
+.ge-timeline-narrative td > small,
+.ge-timeline-narrative td > code:not(.ge-timeline-full-address) {
+  display: block;
+}
+.ge-timeline-narrative td > small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 0.57rem;
+}
+.ge-timeline-narrative td > code:not(.ge-timeline-full-address) {
+  max-width: 220px;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 0.56rem;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.ge-timeline-narrative__empty {
+  padding: 24px !important;
+  color: var(--text-muted);
+  text-align: center !important;
+}
+.ge-timeline-scope { padding: 9px 12px; }
+.ge-timeline-scope > header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 7px;
+}
+.ge-timeline-scope > header strong {
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.58rem;
+}
+.ge-timeline-scope > header span { color: var(--text-secondary); font-size: 0.66rem; }
+.ge-timeline-scope--ready > header strong { color: var(--success, #15803d); }
+.ge-timeline-scope--partial > header strong { color: var(--warning, #a16207); }
+.ge-timeline-scope--failed > header strong { color: var(--danger, #b91c1c); }
+.ge-timeline-scope dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 9px;
+  font-size: 0.62rem;
+}
+.ge-timeline-scope dt { color: var(--text-muted); }
+.ge-timeline-scope dd { margin: 0; overflow-wrap: anywhere; }
+.ge-timeline-scope__coverage,
+.ge-timeline-scope__warnings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 8px 0 0;
+  padding-left: 16px;
+  font-size: 0.62rem;
+}
+.ge-timeline-scope__note,
+.ge-timeline-scope__warning {
+  margin: 7px 0 0;
+  font-size: 0.63rem;
+}
+.ge-timeline-scope__warning { color: var(--warning, #a16207); }
+.ge-timeline-scope__sources,
+.ge-timeline-scope__residuals {
+  margin-top: 7px;
+  font-size: 0.62rem;
+}
+.ge-timeline-scope__sources ul,
+.ge-timeline-scope__residuals ul { margin: 5px 0 0; padding-left: 18px; }
+.ge-timeline-overview { margin-bottom: 10px; }
+.ge-timeline-overview > .ge-body { height: min(62vh, 680px); }
+
+/* ========================================================================
+   Structural task accessories and graph chrome
+
+   These rules intentionally come last. Earlier iterations used independent
+   absolute overlays for provenance, controls, stats and legends. Keeping the
+   final layout contract together prevents mode-specific selectors from
+   accidentally turning them back into floating canvas boxes.
+   ======================================================================== */
+
+.ge-evidence-trigger {
+  position: relative;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border-hover);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.ge-evidence-trigger:hover,
+.ge-evidence-trigger[aria-expanded="true"] {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+.ge-evidence-trigger__icon { font-size: 0.82rem; line-height: 1; }
+.ge-evidence-trigger__status {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--surface);
+  border-radius: 50%;
+  background: var(--success);
+}
+.ge-evidence-trigger--partial .ge-evidence-trigger__status { background: var(--warning); }
+.ge-evidence-trigger--failed .ge-evidence-trigger__status,
+.ge-evidence-trigger--missing .ge-evidence-trigger__status { background: var(--error); }
+.ge-pending-chip {
+  flex: 0 1 auto;
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 7px;
+  border: 1px solid var(--warning);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--warning);
+  font-size: 0.61rem;
+}
+
+.ge-task-accessory-panel {
+  position: fixed;
+  top: 76px;
+  right: 0;
+  bottom: 0;
+  z-index: 80;
+  width: 360px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-hover);
+  background: var(--surface);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28);
+}
+.ge-task-accessory-panel__header {
+  min-height: 48px;
+  padding: 8px 10px 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-task-accessory-panel__header > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ge-task-accessory-panel__header strong { font-size: 0.76rem; }
+.ge-task-accessory-panel__header span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+}
+.ge-task-accessory-panel__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.ge-details__header {
+  position: sticky;
+  top: -12px;
+  z-index: 5;
+  min-height: 40px;
+  margin: -12px -12px 10px;
+  padding: 6px 8px 6px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.ge-details__header strong { font-size: 0.74rem; }
+.ge-evidence-panel__details {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px 14px 20px;
+  font-size: 0.68rem;
+  line-height: 1.42;
+}
+.ge-evidence-panel__summary,
+.ge-evidence-panel__sources,
+.ge-evidence-panel__warnings,
+.ge-evidence-panel__residuals {
+  display: grid;
+  gap: 3px;
+}
+.ge-evidence-panel__summary {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-translucent);
+}
+.ge-evidence-panel__summary span,
+.ge-evidence-panel__coverage { color: var(--text-muted); }
+.ge-evidence-panel__meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+}
+.ge-evidence-panel__meta dt { color: var(--text-muted); }
+.ge-evidence-panel__meta dd { margin: 0; overflow-wrap: anywhere; }
+.ge-evidence-panel__coverage { display: grid; gap: 2px; }
+.ge-evidence-panel__sources b { color: var(--text-primary); }
+.ge-evidence-panel__warnings,
+.ge-evidence-panel__truncation { color: var(--warning); }
+.ge-evidence-panel__truncation { margin: 0; }
+
+@media (min-width: 1200px) {
+  .ge-shell:has(.ge-task-accessory-panel),
+  .ge-shell:has(.ge-body.details-open > .ge-details) {
+    box-sizing: border-box;
+    padding-right: 360px;
+  }
+  .ge-body.details-open > .ge-details {
+    display: block !important;
+    position: fixed !important;
+    inset: 76px 0 0 auto !important;
+    width: 360px !important;
+    z-index: 80 !important;
+    border-left: 1px solid var(--border-hover) !important;
+    background: var(--surface) !important;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28) !important;
+  }
+}
+
+@media (min-width: 600px) and (max-width: 1199px) {
+  .ge-shell:has(.ge-task-accessory-panel),
+  .ge-shell:has(.ge-body.details-open > .ge-details) {
+    box-sizing: border-box;
+    padding-bottom: min(45dvh, 420px);
+  }
+  .ge-task-accessory-panel {
+    top: auto;
+    left: 0;
+    width: 100%;
+    height: min(45dvh, 420px);
+    border-top: 1px solid var(--border-hover);
+    border-left: 0;
+    box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.3);
+  }
+  .ge-body.details-open > .ge-details {
+    display: block !important;
+    position: fixed !important;
+    inset: auto 0 0 0 !important;
+    width: 100% !important;
+    height: min(45dvh, 420px) !important;
+    max-height: none !important;
+    z-index: 80 !important;
+    border-top: 1px solid var(--border-hover) !important;
+    border-left: 0 !important;
+    background: var(--surface) !important;
+    box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.3) !important;
+  }
+}
+
+@media (max-width: 599px) {
+  .ge-task-accessory-panel {
+    top: auto;
+    left: 0;
+    width: 100%;
+    height: min(62dvh, 520px);
+    border-top: 1px solid var(--border-hover);
+    border-left: 0;
+  }
+}
+
+.ge-graph-frame {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+.ge-graph-chrome {
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.ge-graph-chrome__end {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.ge-graph-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 280px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.ge-graph-controls {
+  position: static;
+  z-index: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.ge-graph-search { flex: 0 1 260px; min-width: 150px; }
+.ge-graph-search input { width: 100%; min-width: 0; }
+.ge-canvas-advanced { position: relative; }
+.ge-canvas-advanced__panel {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 45;
+}
+.ge-canvas-stats,
+.ge-canvas-stats.collapsed {
+  position: static;
+  z-index: auto;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.ge-legend,
+.ge-legend.open,
+.ge-legend.collapsed {
+  position: static;
+  z-index: auto;
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: none;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--surface);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.ge-legend-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  max-height: 88px;
+  padding: 6px 10px 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.ge-legend-section {
+  min-width: max-content;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.ge-legend-section + .ge-legend-section {
+  margin-top: 0;
+  padding-top: 0;
+  padding-left: 16px;
+  border-top: 0;
+  border-left: 1px solid var(--border);
+}
+.ge-legend-title { flex: 0 0 100%; margin: 0; }
+.ge-legend-item { width: auto; padding: 1px 0; }
+.ge-cosmos-wrap { position: relative; }
+.ge-cosmos-canvas,
+.ge-label-layer { position: absolute; inset: 0; }
+
+/* Stale intent is stated in task chrome; muting the complete renderer changed
+   semantic colors and produced the muddy preview background. */
+.ge-canvas.is-stale,
+.ge-tx-workspace.is-stale,
+.ge-timeline-canvas.is-stale {
+  opacity: 1;
+}
+
+@media (max-width: 899px) {
+  .ge-graph-chrome { align-items: stretch; }
+  .ge-graph-chrome__end { align-self: center; }
+  .ge-canvas-stats:not(.collapsed) span:nth-child(n + 3) { display: none; }
+  .ge-legend-body { max-height: 76px; }
+}
+
+/* Relationship filters expand as a structural strip instead of covering the
+   graph with a detached popover. */
+.ge-topbar:has(.ge-etypes-panel) { flex-wrap: wrap; }
+.ge-topbar .ge-etypes:has(.ge-etypes-panel) { display: contents; }
+.ge-topbar .ge-etypes-panel {
+  position: static;
+  order: 20;
+  flex: 1 1 100%;
+  width: 100%;
+  max-height: 164px;
+  border-radius: 6px;
+  box-shadow: none;
+  overflow-y: auto;
+}
+
+.ge-atlas-body.has-preview {
+  grid-template-columns: minmax(520px, 42%) minmax(0, 1fr);
+  overflow: hidden;
+}
+.ge-atlas-body.has-preview > .ge-atlas-drawer {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.ge-atlas-body.has-preview > .ge-atlas-drawer > .ge-atlas-rail {
+  height: 100%;
+  min-height: 0;
+}
+.ge-atlas-body.has-preview > .ge-canvas {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.ge-atlas-body.has-preview > .ge-canvas > .ge-applied-scope-chip {
+  position: static;
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+.ge-atlas-body.has-preview > .ge-canvas > .ge-graph-frame {
+  flex: 1 1 auto;
+  height: auto;
+}
+.ge-atlas-body.has-preview .ge-catalog-seed {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+}
+.ge-atlas-body.has-preview .ge-catalog-seed-row { min-width: 0; }
+.ge-relation-preview {
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto minmax(180px, 1fr) auto;
+}
+.ge-relation-preview__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.ge-relation-preview__definition {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-translucent);
+}
+.ge-relation-preview__definition > summary {
+  padding: 7px 9px;
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  cursor: pointer;
+}
+.ge-relation-preview__definition-body {
+  display: grid;
+  gap: 8px;
+  padding: 0 9px 9px;
+}
+.ge-relation-preview__sample {
+  min-height: 0;
+  height: 100%;
+}
+.ge-relation-preview__sample-scroll {
+  height: 100%;
+  min-height: 0;
+}
+
+@media (min-width: 1440px) {
+  .ge-atlas-body.has-preview > .ge-atlas-drawer {
+    position: relative;
+  }
+  .ge-atlas-body.has-preview > .ge-atlas-drawer > .ge-atlas-rail {
+    position: absolute;
+    inset: 0;
+    height: auto;
+  }
+}
+
+@media (min-width: 900px) and (max-width: 1439px) {
+  .ge-atlas-body.has-preview {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+}
+.ge-timeline-overview__collapsed {
+  margin: 0;
+  padding: 18px 12px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+.ge-timeline-canvas.is-stale { pointer-events: none; }
+
+@media (max-width: 699px) {
+  .ge-timeline-narrative,
+  .ge-timeline-overview,
+  .ge-timeline-scope { margin-inline: 6px; }
+  .ge-timeline-scope > header { align-items: flex-start; flex-direction: column; }
+  .ge-timeline-scope dl { grid-template-columns: minmax(0, 1fr); }
+  .ge-timeline-scope dd { margin-bottom: 4px; }
 }

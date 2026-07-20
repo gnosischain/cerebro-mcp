@@ -31,6 +31,8 @@ export interface DatasetDescriptor {
   stats: DatasetStats;
   preview_rows: unknown[][];
   page_token?: string | null;
+  scope_id?: string | null;
+  provenance?: Record<string, unknown>;
 }
 
 export interface SummaryCard {

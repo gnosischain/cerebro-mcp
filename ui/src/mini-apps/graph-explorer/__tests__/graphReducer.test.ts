@@ -5,7 +5,13 @@
 import { describe, expect, it } from "vitest";
 import {
   buildInitialState,
+  createProfileSelection,
+  createScopedControls,
   graphReducer,
+  normalizedStringSetsEqual,
+  normalizeStringSet,
+  reduceScopedControls,
+  scopedControlsAreStale,
   type GraphLocalState,
 } from "../state/graphReducer";
 import { syncedJson } from "../state/useGraphSync";
@@ -18,6 +24,12 @@ const LIMITS: Limits = {
   ui_default_window_days: 90,
   ui_default_max_neighbors: 100,
   atlas_sample_size: 150,
+  // Flows defaults ride in view_state["limits"] in production; include them so
+  // the adopted limits (PLACEHOLDER_LIMITS merged) match exactly.
+  flows_default_hops: 2,
+  flows_max_hops: 4,
+  flows_default_min_usd: 10,
+  flows_default_range_days: 30,
 };
 
 function serverState(
@@ -120,6 +132,102 @@ describe("selection", () => {
   });
 });
 
+describe("profile selection authority", () => {
+  it("distinguishes not-yet-adopted from an authoritative empty list", () => {
+    expect(createProfileSelection(undefined)).toEqual({
+      phase: "unresolved",
+      draft: [],
+      applied: [],
+      scopeId: null,
+    });
+    expect(createProfileSelection([], "scope-empty")).toEqual({
+      phase: "applied",
+      draft: [],
+      applied: [],
+      scopeId: "scope-empty",
+    });
+  });
+});
+
+describe("scoped draft/pending/applied controls", () => {
+  const normalize = (value: { profiles: string[]; range: number }) => ({
+    profiles: normalizeStringSet(value.profiles),
+    range: Math.max(1, Math.floor(value.range)),
+  });
+
+  it("labels only the matching pending snapshot as applied", () => {
+    let controls = createScopedControls(
+      { profiles: ["b", "a"], range: 90 },
+      { profiles: ["a"], range: 30 },
+    );
+    controls = reduceScopedControls(
+      controls,
+      { type: "EDIT_DRAFT", value: { profiles: ["b", "a", "a"], range: 90 } },
+      normalize,
+    );
+    controls = reduceScopedControls(
+      controls,
+      { type: "LOAD_STARTED", requestId: 7 },
+      normalize,
+    );
+    expect(controls.pending).toEqual({
+      requestId: 7,
+      snapshot: { profiles: ["a", "b"], range: 90 },
+    });
+    expect(scopedControlsAreStale(controls)).toBe(true);
+
+    const staleAcceptance = reduceScopedControls(controls, {
+      type: "SCOPE_ACCEPTED",
+      requestId: 6,
+      scopeId: "old",
+    });
+    expect(staleAcceptance).toBe(controls);
+
+    controls = reduceScopedControls(
+      controls,
+      { type: "SCOPE_ACCEPTED", requestId: 7, scopeId: "scope-7" },
+      normalize,
+    );
+    expect(controls.applied).toEqual({ profiles: ["a", "b"], range: 90 });
+    expect(controls.draft).toEqual(controls.applied);
+    expect(controls.scopeId).toBe("scope-7");
+    expect(controls.pending).toBeNull();
+  });
+
+  it("rolls a failed current draft back but ignores stale failures", () => {
+    let controls = createScopedControls(
+      { profiles: ["a"], range: 30 },
+      { profiles: ["a"], range: 30 },
+    );
+    controls = reduceScopedControls(controls, {
+      type: "EDIT_DRAFT",
+      value: { profiles: ["b"], range: 365 },
+    });
+    controls = reduceScopedControls(controls, { type: "LOAD_STARTED", requestId: 9 });
+    expect(
+      reduceScopedControls(controls, {
+        type: "LOAD_FAILED",
+        requestId: 8,
+        error: "old failure",
+      }),
+    ).toBe(controls);
+
+    controls = reduceScopedControls(controls, {
+      type: "LOAD_FAILED",
+      requestId: 9,
+      error: "timeout",
+    });
+    expect(controls.draft).toEqual({ profiles: ["a"], range: 30 });
+    expect(controls.applied).toEqual({ profiles: ["a"], range: 30 });
+    expect(controls.pending).toBeNull();
+    expect(controls.error).toBe("timeout");
+  });
+
+  it("compares normalized sets without JSON serialization order", () => {
+    expect(normalizedStringSetsEqual(["b", "a", "a"], ["a", "b"])).toBe(true);
+  });
+});
+
 describe("expand-depth clamping vs limits", () => {
   it("clamps into 1..limits.max_hops", () => {
     const s = adopted();
@@ -167,25 +275,16 @@ describe("sync projection stability", () => {
     expect(syncedJson(second)).toBe(syncedJson(first));
   });
 
-  it("projection carries exactly the set_graph_explorer_view schema keys", () => {
+  it("generic persistence projects only safe visual preferences", () => {
     const proj = JSON.parse(syncedJson(adopted()));
     expect(Object.keys(proj).sort()).toEqual([
-      "atlas",
-      "investigate",
       "layout",
-      "mode",
       "semantic_status_filter",
     ]);
-    expect(Object.keys(proj.atlas).sort()).toEqual([
-      "sample_size",
-      "selected_profiles",
-      "window_days",
-    ]);
-    expect(Object.keys(proj.investigate).sort()).toEqual([
-      "active_profiles",
-      "max_neighbors",
-      "window_days",
-    ]);
+    expect(proj).toEqual({
+      layout: "circular",
+      semantic_status_filter: "approved",
+    });
   });
 });
 
@@ -195,5 +294,129 @@ describe("numeric guards", () => {
     expect(graphReducer(s, { type: "SET_WINDOW", days: 0 }).windowDays).toBe(1);
     expect(graphReducer(s, { type: "SET_MAX_NEIGHBORS", value: -5 }).maxNeighbors).toBe(1);
     expect(graphReducer(s, { type: "SET_WINDOW", days: 365 }).windowDays).toBe(365);
+  });
+});
+
+describe("flows namespace", () => {
+  const FLOW_LIMITS: Limits = {
+    ...LIMITS,
+    flows_default_hops: 2,
+    flows_max_hops: 4,
+    flows_default_min_usd: 10,
+    flows_default_range_days: 30,
+  };
+  function flowServer(over: Partial<GraphExplorerViewState> = {}) {
+    return serverState({
+      limits: FLOW_LIMITS,
+      mode: "flows",
+      flows: {
+        seeds: ["0xseed"],
+        direction: "both",
+        hops: 3,
+        range_days: 90,
+        t0: "2026-06-01 00:00:00",
+        t1: "2026-07-01 00:00:00",
+        min_usd: 100,
+        tokens: ["0xtok"],
+        include_bridges: false,
+        node_count: 5,
+        edge_count: 4,
+        truncated: false,
+        truncated_hops: [],
+        expanded: {},
+        token_catalog: [],
+      },
+      ...over,
+    });
+  }
+
+  it("adopts the flows namespace and recognizes the flows mode", () => {
+    const s = buildInitialState(flowServer());
+    expect(s.mode).toBe("flows");
+    expect(s.flowsDirection).toBe("both");
+    expect(s.flowsHops).toBe(3);
+    expect(s.flowsRangeDays).toBe(90);
+    expect(s.flowsMinUsd).toBe(100);
+    expect(s.flowsTokens).toEqual(["0xtok"]);
+    expect(s.flowsIncludeBridges).toBe(false);
+  });
+
+  it("clamps flows hops into 1..flows_max_hops", () => {
+    const s = buildInitialState(flowServer());
+    expect(graphReducer(s, { type: "SET_FLOWS_HOPS", hops: 99 }).flowsHops).toBe(4);
+    expect(graphReducer(s, { type: "SET_FLOWS_HOPS", hops: 0 }).flowsHops).toBe(1);
+  });
+
+  it("min-usd floors at 0; direction/tokens/bridges are set verbatim", () => {
+    let s = buildInitialState(flowServer());
+    s = graphReducer(s, { type: "SET_FLOWS_MIN_USD", minUsd: -50 });
+    expect(s.flowsMinUsd).toBe(0);
+    s = graphReducer(s, { type: "SET_FLOWS_DIRECTION", direction: "in" });
+    expect(s.flowsDirection).toBe("in");
+    s = graphReducer(s, { type: "SET_FLOWS_TOKENS", tokens: ["0xa", "0xb"] });
+    expect(s.flowsTokens).toEqual(["0xa", "0xb"]);
+    s = graphReducer(s, { type: "SET_FLOWS_BRIDGES", on: true });
+    expect(s.flowsIncludeBridges).toBe(true);
+  });
+
+  it("re-adopting the same flows server state is projection-stable", () => {
+    const first = buildInitialState(flowServer());
+    const second = graphReducer(first, {
+      type: "ADOPT_SERVER",
+      server: flowServer(),
+    });
+    expect(syncedJson(second)).toBe(syncedJson(first));
+  });
+});
+
+describe("mode authority (mode_revision gate)", () => {
+  it("initial build adopts the server mode + revision", () => {
+    const s = adopted({ mode: "timeline", mode_revision: 4 });
+    expect(s.mode).toBe("timeline");
+    expect(s.modeRevision).toBe(4);
+  });
+
+  it("a data-load adoption (revision unchanged) PRESERVES local mode + selection but still adopts the namespace", () => {
+    // User is in timeline at revision 4.
+    const start = adopted({ mode: "timeline", mode_revision: 4 });
+    // A slow flows trace lands: server now says mode=flows BUT mode_revision is
+    // unchanged (loaders no longer bump it), and it carries fresh flows data.
+    const straggler = serverState({
+      mode: "flows",
+      mode_revision: 4,
+      selection: { node_id: "0xLATE", edge_id: "" },
+      flows: {
+        seeds: ["0xseed"], direction: "in", hops: 2, range_days: 30,
+        t0: "", t1: "", min_usd: 10, tokens: [], include_bridges: true,
+        node_count: 0, edge_count: 0, truncated: false, truncated_hops: [],
+        expanded: {}, token_catalog: [],
+      },
+    });
+    const next = graphReducer(start, { type: "ADOPT_SERVER", server: straggler });
+    // Mode + selection held (the exact "Timeline jumps to Flows" bug)…
+    expect(next.mode).toBe("timeline");
+    expect(next.selection).toEqual(start.selection);
+    // …but the flows NAMESPACE was still adopted (only mode/selection gated).
+    expect(next.flowsDirection).toBe("in");
+  });
+
+  it("an advanced mode_revision (explicit mode command) adopts the new mode + selection", () => {
+    const start = adopted({ mode: "timeline", mode_revision: 4 });
+    const deliberate = serverState({
+      mode: "flows",
+      mode_revision: 5, // bumped by update_graph_explorer_focus
+      selection: { node_id: "", edge_id: "" },
+    });
+    const next = graphReducer(start, { type: "ADOPT_SERVER", server: deliberate });
+    expect(next.mode).toBe("flows");
+    expect(next.modeRevision).toBe(5);
+  });
+
+  it("SET_MODE flips locally without touching modeRevision", () => {
+    const start = adopted({ mode: "atlas", mode_revision: 2 });
+    const next = graphReducer(start, { type: "SET_MODE", mode: "flows" });
+    expect(next.mode).toBe("flows");
+    expect(next.modeRevision).toBe(2);
+    expect(next.selection).toEqual({ nodeId: "", edgeId: "" });
   });
 });

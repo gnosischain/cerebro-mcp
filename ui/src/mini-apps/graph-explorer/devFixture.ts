@@ -26,6 +26,11 @@ const DEV_LIMITS: Limits = {
   ui_default_window_days: 90,
   ui_default_max_neighbors: 100,
   atlas_sample_size: 150,
+  flows_default_hops: 2,
+  flows_max_hops: 4,
+  flows_default_min_usd: 10,
+  flows_default_range_days: 90,
+  flows_max_edges: 8000,
 };
 
 export const DEV_CATALOG: ProfileCard[] = [
@@ -74,6 +79,35 @@ export const DEV_EDGES: unknown[][] = [
 
 const NODE_COLS = ["id", "kind", "label", "profiles"];
 const EDGE_COLS = ["id", "source", "target", "profile", "weight", "edge_count", "directed"];
+const FLOW_NODE_COLS = [
+  "id", "label", "sector", "project", "hop_rank", "in_usd", "out_usd",
+  "first_seen", "last_seen", "flags",
+];
+const FLOW_EDGE_COLS = [
+  "id", "source", "target", "edge_class", "token_address", "symbol",
+  "amount", "amount_usd", "transfer_count", "first_seen", "last_seen",
+  "unknown_usd_rows",
+];
+
+// sessionStorage.ge_force_flows = '1' → FLOWS mode with a traced fixture
+// (victim → exploiter → mixer/bridge fan-out + upstream gas funder).
+const TOK_EURE = "0xtok00000000000000000000000000000000eure";
+const TOK_GNO = "0xtok000000000000000000000000000000000gno";
+export const DEV_FLOW_NODES: unknown[][] = [
+  ["0xv1c", "0xv1c…tim", "", "", 0, 0, 4500, "2026-06-02 10:00:00", "2026-06-20 10:00:00", ["old_safe"]],
+  ["0xexp", "0xexp…loit", "", "", 1, 4500, 3900, "2026-06-02 10:00:00", "2026-06-21 09:00:00", []],
+  ["0xmix", "Tornado-ish", "Privacy", "MixerX", 2, 2400, 0, "2026-06-05 11:00:00", "2026-06-19 12:00:00", []],
+  ["0xbrg", "Omnibridge", "Bridges", "gnosis-omnibridge", 2, 0, 0, "2026-06-06 08:00:00", "2026-06-18 16:00:00", []],
+  ["0xdex", "CowSwap", "DEX", "CowSwap", 2, 1500, 0, "2026-06-07 14:00:00", "2026-06-17 10:00:00", []],
+  ["0xgas", "0xgas…fund", "", "", -1, 0, 120, "2026-06-01 09:00:00", "2026-06-01 09:00:00", []],
+];
+export const DEV_FLOW_EDGES: unknown[][] = [
+  [`flow:0xv1c->0xexp:${TOK_EURE}`, "0xv1c", "0xexp", "transfer", TOK_EURE, "EURe", 4500, 4500, 9, "2026-06-02 10:00:00", "2026-06-20 10:00:00"],
+  [`flow:0xexp->0xmix:${TOK_EURE}`, "0xexp", "0xmix", "transfer", TOK_EURE, "EURe", 2400, 2400, 4, "2026-06-05 11:00:00", "2026-06-19 12:00:00"],
+  [`flow:0xexp->0xdex:${TOK_GNO}`, "0xexp", "0xdex", "transfer", TOK_GNO, "GNO", 11.6, 1500, 3, "2026-06-07 14:00:00", "2026-06-17 10:00:00"],
+  [`bridge:0xexp->0xbrg:${TOK_EURE}`, "0xexp", "0xbrg", "bridge", TOK_EURE, "EURe", null, null, 5, "2026-06-06", "2026-06-18"],
+  [`flow:0xgas->0xv1c:${TOK_GNO}`, "0xgas", "0xv1c", "transfer", TOK_GNO, "GNO", 0.9, 120, 1, "2026-06-01 09:00:00", "2026-06-01 09:00:00"],
+];
 
 function makeDataset(key: string, columns: string[], rows: unknown[][]): DatasetDescriptor {
   return {
@@ -97,6 +131,7 @@ function emptyViewState(): GraphExplorerViewState {
   return {
     title: "Graph Explorer",
     mode: "atlas",
+    mode_revision: 0,
     catalog: DEV_CATALOG,
     limits: DEV_LIMITS,
     atlas: {
@@ -110,6 +145,23 @@ function emptyViewState(): GraphExplorerViewState {
       window_days: DEV_LIMITS.ui_default_window_days,
       max_neighbors: DEV_LIMITS.ui_default_max_neighbors,
       hops_used: 0,
+    },
+    flows: {
+      seeds: [],
+      direction: "out",
+      hops: 2,
+      range_days: 90,
+      t0: "",
+      t1: "",
+      min_usd: 10,
+      tokens: [],
+      include_bridges: true,
+      node_count: 0,
+      edge_count: 0,
+      truncated: false,
+      truncated_hops: [],
+      expanded: {},
+      token_catalog: [],
     },
     selection: { node_id: "", edge_id: "" },
     layout: "force",
@@ -130,6 +182,7 @@ function flag(name: string): boolean {
 export function buildMockPayload(): MiniAppPayload<GraphExplorerViewState> {
   const forceEmpty = flag("ge_force_empty");
   const forceSample = flag("ge_force_sample");
+  const forceFlows = flag("ge_force_flows");
 
   const base: MiniAppPayload<GraphExplorerViewState> = {
     type: "INITIAL_LOAD",
@@ -146,12 +199,38 @@ export function buildMockPayload(): MiniAppPayload<GraphExplorerViewState> {
       node_evidence: makeDataset("node_evidence", ["node_id", "column", "value"], []),
       edge_evidence: makeDataset("edge_evidence", ["edge_id", "column", "value"], []),
       graph_metrics: makeDataset("graph_metrics", ["metric", "value"], []),
+      flow_nodes: makeDataset("flow_nodes", FLOW_NODE_COLS, []),
+      flow_edges: makeDataset("flow_edges", FLOW_EDGE_COLS, []),
     },
     view_state: emptyViewState(),
     warnings: [],
   };
 
   if (forceEmpty) return base;
+
+  if (forceFlows) {
+    base.datasets!.flow_nodes = makeDataset("flow_nodes", FLOW_NODE_COLS, DEV_FLOW_NODES);
+    base.datasets!.flow_edges = makeDataset("flow_edges", FLOW_EDGE_COLS, DEV_FLOW_EDGES);
+    const vs = emptyViewState();
+    base.view_state = {
+      ...vs,
+      mode: "flows",
+      flows: {
+        ...vs.flows!,
+        seeds: ["0xv1c"],
+        t0: "2026-06-01 00:00:00",
+        t1: "2026-07-01 00:00:00",
+        node_count: DEV_FLOW_NODES.length,
+        edge_count: DEV_FLOW_EDGES.length,
+        token_catalog: [
+          { token_address: TOK_EURE, symbol: "EURe", amount_usd: 6900 },
+          { token_address: TOK_GNO, symbol: "GNO", amount_usd: 1620 },
+        ],
+      },
+      dataset_revisions: { ...vs.dataset_revisions, flow_nodes: 1, flow_edges: 1 },
+    };
+    return base;
+  }
 
   if (forceSample) {
     base.datasets!.atlas_nodes = makeDataset("atlas_nodes", NODE_COLS, DEV_NODES);

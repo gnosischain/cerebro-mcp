@@ -1496,6 +1496,11 @@ def register_portfolio_tools(mcp, ch: ClickHouseManager) -> None:
         app_id=PORTFOLIO_APP_ID,
         open_tool="open_portfolio",
         html_loader=get_portfolio_html,
+        title="Portfolio",
+        description=(
+        "Address-centric holdings view — balances, positions and activity across the protocols an account touches."
+        ),
+        icon="◑",
         tools={
             "open_portfolio": open_portfolio,
             "load_portfolio_address": load_portfolio_address,

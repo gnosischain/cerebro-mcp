@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMiniApp } from "../shared/useMiniApp";
-import { WarningBanner } from "../shared/WarningBanner";
+import { ToastStack } from "../shared/ToastStack";
 import { DatasetTable } from "../shared/DatasetTable";
 import { TabBar, type TabDef } from "../shared/TabBar";
 import { AsyncButton } from "../shared/AsyncButton";
@@ -432,7 +432,7 @@ export default function PortfolioApp() {
         />
       ) : null}
 
-      <WarningBanner warnings={view.warnings ?? []} />
+      <ToastStack warnings={view.warnings ?? []} />
 
       {otherCards.length > 0 ? (
         <MaKpiGrid>

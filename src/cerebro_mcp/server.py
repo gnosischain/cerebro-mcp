@@ -32,6 +32,7 @@ from cerebro_mcp.tools.analytics.schema import register_schema_tools
 from cerebro_mcp.tools.analytics.dbt import register_dbt_tools
 from cerebro_mcp.tools.analytics.lineage_graph import register_lineage_graph_tools
 from cerebro_mcp.tools.analytics.metadata import register_metadata_tools
+from cerebro_mcp.tools.analytics.agent_knowledge import register_agent_knowledge_tools
 from cerebro_mcp.resources.context import register_resources
 from cerebro_mcp.resources.reference import register_reference_resources
 from cerebro_mcp.prompts.templates import register_prompts
@@ -84,6 +85,14 @@ mcp = FastMCP(
         "the HTML exported (via `export_report`) or converted to docx/pdf/pptx. "
         "For lightweight visual answers, just summarize the insight.\n"
         "2. No emojis or Unicode symbols — use clean, professional markdown only.\n\n"
+
+        "DBT ENGINEERING WORK (changing/backfilling/reviewing dbt models):\n"
+        "- Call `get_dbt_change_context(models=...)` BEFORE touching any dbt model — it "
+        "returns the model's resolved contract (grain, invariants), known hazards with "
+        "status, lineage impact, and the safe reprocess runbook. "
+        "`search_dbt_knowledge(query)` finds the repo's lesson records by symptom "
+        "(wipes, duplicates, negative balances, stale snapshots). Both are read-only; "
+        "on-chain verification stays with the RPC/contract tools.\n\n"
 
         "DEFAULT DISCOVERY PATH:\n"
         "- For almost any analytical question, call `find(query, mode=\"answer\")` FIRST. "
@@ -322,6 +331,7 @@ register_schema_tools(mcp, ch)
 register_dbt_tools(mcp)
 register_lineage_graph_tools(mcp)
 register_metadata_tools(mcp, ch)
+register_agent_knowledge_tools(mcp)
 
 # Register resources and prompts
 register_resources(mcp)
@@ -554,13 +564,15 @@ class BearerAuthMiddleware:
             path == "/health"
             or path == "/metrics"
             or path == "/favicon.ico"
+            or path == "/"
+            or path == "/apps"
             or path.startswith("/reports/")
             or path.startswith("/app/")
         ):
             # These routes either need no auth or do their own (the
-            # /reports/ and /app/ handlers accept a ?token= query param,
-            # which a browser navigation can supply where an Authorization
-            # header cannot).
+            # /reports/, /app/ and app-catalog ("/", "/apps") handlers accept a
+            # ?token= query param, which a browser navigation can supply where
+            # an Authorization header cannot).
             await self.app(scope, receive, send)
             return
 

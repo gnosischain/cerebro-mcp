@@ -7,6 +7,7 @@ sample fetches share it.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
@@ -15,6 +16,7 @@ from cerebro_mcp.semantic.graph_profiles import (
     build_evidence_sql,
     build_neighbors_sql,
     build_sample_sql,
+    build_timeline_sql,
     profile_by_id,
 )
 from cerebro_mcp.tools.visualization import mini_apps
@@ -22,6 +24,43 @@ from cerebro_mcp.tools.visualization import mini_apps
 from .state import short_id
 
 logger = logging.getLogger(__name__)
+
+
+ADDRESS_ROLES_RELATION = "int_execution_address_roles_current"
+ADDRESS_ROLE_COLUMNS = (
+    "is_safe",
+    "is_gpay_wallet",
+    "is_ga_user",
+    "controls_gpay_wallet",
+    "is_circles_avatar",
+    "circles_avatar_type",
+    "is_circles_wrapper",
+    "is_safe_owner",
+    "is_lp_provider",
+    "pool_protocol",
+    "is_pool",
+    "is_lending_user",
+    "is_validator_depositor",
+    "has_dune_label",
+    "dune_project",
+)
+
+
+@dataclass(frozen=True)
+class EvidenceQueryStatus:
+    """Outcome of the source query behind one focus evidence dataset.
+
+    Evidence rows deliberately stay a plain list for the existing call sites,
+    while focus loading consumes this companion status to distinguish an exact
+    empty answer from an exception that happened to produce no display rows.
+    ``complete`` is false when a result exactly meets the query cap because a
+    larger backing set may exist.
+    """
+
+    succeeded: bool
+    source_rows_returned: int = 0
+    complete: bool = False
+    error: str | None = None
 
 
 _ROLES_SQL = """
@@ -37,9 +76,15 @@ _ROLES_SQL = """
 """
 
 
-def resolve_address_roles(ch: ClickHouseManager, address: str) -> dict[str, Any]:
+def resolve_address_roles_with_status(
+    ch: ClickHouseManager, address: str
+) -> tuple[dict[str, Any], EvidenceQueryStatus]:
+    """Resolve roles and retain whether the query genuinely succeeded."""
     if not address:
-        return {}
+        return {}, EvidenceQueryStatus(
+            succeeded=False,
+            error="address role evidence requires a selected address",
+        )
     try:
         result = mini_apps.run_structured_query(
             ch,
@@ -50,14 +95,36 @@ def resolve_address_roles(ch: ClickHouseManager, address: str) -> dict[str, Any]
         )
     except Exception as exc:
         logger.info("graph_explorer: roles lookup failed for %s: %s", address, exc)
-        return {}
+        return {}, EvidenceQueryStatus(succeeded=False, error=str(exc))
     if not result.rows:
-        return {}
+        return {}, EvidenceQueryStatus(
+            succeeded=True,
+            source_rows_returned=0,
+            complete=True,
+        )
     row = result.rows[0]
-    return {col: value for col, value in zip(result.columns, row)}
+    return (
+        {col: value for col, value in zip(result.columns, row)},
+        EvidenceQueryStatus(
+            succeeded=True,
+            source_rows_returned=1,
+            complete=True,
+        ),
+    )
 
 
-def node_evidence_rows(node_id: str, roles: dict[str, Any]) -> list[list[Any]]:
+def resolve_address_roles(ch: ClickHouseManager, address: str) -> dict[str, Any]:
+    roles, _status = resolve_address_roles_with_status(ch, address)
+    return roles
+
+
+def node_evidence_rows(
+    node_id: str,
+    roles: dict[str, Any],
+    *,
+    request_id: int = 0,
+    subject_kind: str = "node",
+) -> list[list[Any]]:
     """Flatten resolved role flags into (node_id, column, value) evidence rows.
 
     Boolean role flags are emitted only when truthy; string-valued attributes
@@ -71,38 +138,174 @@ def node_evidence_rows(node_id: str, roles: dict[str, Any]) -> list[list[Any]]:
     for col, value in roles.items():
         if value in (None, "", 0, "0"):
             continue
-        rows.append([node_id, col, str(value)])
+        rows.append([node_id, col, str(value), subject_kind, int(request_id or 0)])
     return rows
 
 
-def edge_evidence_rows(
-    ch: ClickHouseManager, edge_id: str, limit: int = 25
+def flow_evidence_rows_with_status(
+    ch: ClickHouseManager,
+    edge_id: str,
+    view_state: dict[str, Any],
+    limit: int = 25,
+    request_id: int = 0,
+    subject_kind: str = "edge",
+) -> tuple[list[list[Any]], EvidenceQueryStatus]:
+    """Transaction-level (or per-day for bridge) backing rows for a flow
+    edge. Needs the view's flows t0/t1 so evidence matches the traced range."""
+    from cerebro_mcp.semantic.flow_queries import (
+        build_flow_evidence_sql,
+        parse_flow_edge_id,
+    )
+
+    parsed = parse_flow_edge_id(edge_id)
+    if parsed is None:
+        return [], EvidenceQueryStatus(
+            succeeded=False,
+            error=f"invalid flow evidence edge id: {edge_id}",
+        )
+    edge_class, src, tgt, token = parsed
+    flows = (view_state or {}).get("flows") or {}
+    t0, t1 = str(flows.get("t0") or ""), str(flows.get("t1") or "")
+    if not (t0 and t1):
+        return [], EvidenceQueryStatus(
+            succeeded=False,
+            error="flow evidence requires an applied t0/t1 window",
+        )
+    try:
+        sql, params = build_flow_evidence_sql(
+            edge_class=edge_class,
+            source_id=src,
+            target_id=tgt,
+            token_address=token,
+            t0=t0,
+            t1_exclusive=t1,
+            limit=limit,
+        )
+        result = mini_apps.run_structured_query(
+            ch, sql, database="dbt", parameters=params, requested_max_rows=limit
+        )
+    except Exception as exc:
+        logger.info("graph_explorer: flow evidence failed for %s: %s", edge_id, exc)
+        return [], EvidenceQueryStatus(succeeded=False, error=str(exc))
+    rows: list[list[Any]] = []
+    for row in result.rows:
+        for col, value in zip(result.columns, row):
+            if value in (None, ""):
+                continue
+            rows.append(
+                [edge_id, col, str(value), subject_kind, int(request_id or 0)]
+            )
+    source_row_count = len(result.rows)
+    return rows, EvidenceQueryStatus(
+        succeeded=True,
+        source_rows_returned=source_row_count,
+        complete=source_row_count < limit,
+    )
+
+
+def flow_evidence_rows(
+    ch: ClickHouseManager,
+    edge_id: str,
+    view_state: dict[str, Any],
+    limit: int = 25,
+    request_id: int = 0,
+    subject_kind: str = "edge",
 ) -> list[list[Any]]:
+    rows, _status = flow_evidence_rows_with_status(
+        ch,
+        edge_id,
+        view_state,
+        limit,
+        request_id,
+        subject_kind,
+    )
+    return rows
+
+
+def edge_evidence_rows_with_status(
+    ch: ClickHouseManager,
+    edge_id: str,
+    limit: int = 25,
+    view_state: dict[str, Any] | None = None,
+    request_id: int = 0,
+    subject_kind: str = "edge",
+) -> tuple[list[list[Any]], EvidenceQueryStatus]:
     """Resolve the raw backing rows for a selected edge via the profile's
-    evidence model. Edge ids are `{profile}:{src}->{tgt}`."""
+    evidence model. Edge ids are `{profile}:{src}->{tgt}`; flow-mode ids
+    (`flow:` / `bridge:`) route to the tx-level flow evidence path."""
     if not edge_id or ":" not in edge_id or "->" not in edge_id:
-        return []
+        return [], EvidenceQueryStatus(
+            succeeded=False,
+            error=f"invalid graph evidence edge id: {edge_id}",
+        )
+    if edge_id.startswith(("flow:", "bridge:")):
+        return flow_evidence_rows_with_status(
+            ch,
+            edge_id,
+            view_state or {},
+            limit,
+            request_id=request_id,
+            subject_kind=subject_kind,
+        )
     profile_id, _, endpoints = edge_id.partition(":")
     src, _, tgt = endpoints.partition("->")
     profile = profile_by_id(profile_id)
     if profile is None or not src or not tgt:
-        return []
+        return [], EvidenceQueryStatus(
+            succeeded=False,
+            error=f"unknown graph profile or endpoints for edge: {edge_id}",
+        )
+    # Bind the drill-down to the SAME window the edge's weight was aggregated
+    # over, so the evidence describes the edge it hangs off rather than the
+    # model's entire history.
+    investigate = (view_state or {}).get("investigate") or {}
+    window_days = investigate.get("window_days")
     try:
         sql, params = build_evidence_sql(
-            profile, source_id=src, target_id=tgt, limit=limit
+            profile,
+            source_id=src,
+            target_id=tgt,
+            limit=limit,
+            window_days=int(window_days) if window_days else None,
         )
         result = mini_apps.run_structured_query(
             ch, sql, database="dbt", parameters=params, requested_max_rows=limit
         )
     except Exception as exc:
         logger.info("graph_explorer: edge evidence failed for %s: %s", edge_id, exc)
-        return []
+        return [], EvidenceQueryStatus(succeeded=False, error=str(exc))
     rows: list[list[Any]] = []
     for row in result.rows:
         for col, value in zip(result.columns, row):
             if value in (None, ""):
                 continue
-            rows.append([edge_id, col, str(value)])
+            rows.append(
+                [edge_id, col, str(value), subject_kind, int(request_id or 0)]
+            )
+    source_row_count = len(result.rows)
+    return rows, EvidenceQueryStatus(
+        succeeded=True,
+        source_rows_returned=source_row_count,
+        complete=source_row_count < limit,
+    )
+
+
+def edge_evidence_rows(
+    ch: ClickHouseManager,
+    edge_id: str,
+    limit: int = 25,
+    view_state: dict[str, Any] | None = None,
+    request_id: int = 0,
+    subject_kind: str = "edge",
+) -> list[list[Any]]:
+    rows, _status = edge_evidence_rows_with_status(
+        ch,
+        edge_id,
+        limit,
+        view_state,
+        request_id,
+        subject_kind,
+    )
     return rows
 
 
@@ -136,12 +339,12 @@ def _rows_to_graph(
             continue
         src = "" if row[0] is None else str(row[0])
         tgt = "" if row[1] is None else str(row[1])
-        weight = 0.0
+        weight: float | None = None
         if len(row) >= 3 and row[2] is not None:
             try:
                 weight = float(row[2])
             except (TypeError, ValueError):
-                weight = 0.0
+                weight = None
         edge_count = 0
         if len(row) >= 4 and row[3] is not None:
             try:
@@ -215,8 +418,99 @@ def fetch_profile_edges(
         )
         warnings.append(f"{profile.profile}: {exc}")
         return [], [], warnings
+    unknown_weight_rows = sum(
+        1 for row in result.rows if len(row) >= 3 and row[2] is None
+    )
+    if profile.weight_column and unknown_weight_rows:
+        warnings.append(
+            f"{profile.profile}: weight unknown for {unknown_weight_rows} "
+            "edge group(s); the source returned no non-null weighted values"
+        )
     nodes, edges = _rows_to_graph(result.rows, profile)
     return nodes, edges, warnings
+
+
+def fetch_timeline_edges(
+    ch: ClickHouseManager,
+    profile: GraphProfile,
+    *,
+    node_ids: list[str],
+    grain: str,
+    range_start: str,
+    range_end_exclusive: str,
+    limit: int,
+) -> tuple[list[list[Any]], bool, list[str]]:
+    """One profile's time-bucketed edge rows for the Timeline mode.
+
+    Returns ``(rows, truncated, warnings)`` where rows are already in
+    TIMELINE_EDGES_COLUMNS order. The SQL asks for ``limit + 1`` rows — the
+    presence of the extra row is the exact truncation signal (it is dropped).
+    Undirected reciprocals are canonicalized in the SQL (least/greatest), so
+    the edge id built here matches the investigate ``canonical_edge_id``
+    convention and evidence lookups keep working. A query failure degrades to
+    a warning, never an exception.
+    """
+    sql, params = build_timeline_sql(
+        profile,
+        node_ids=node_ids,
+        grain=grain,
+        range_start=range_start,
+        range_end_exclusive=range_end_exclusive,
+        limit=limit,
+    )
+    warnings: list[str] = []
+    try:
+        result = mini_apps.run_structured_query(
+            ch, sql, database="dbt", parameters=params, requested_max_rows=limit + 1
+        )
+    except Exception as exc:
+        logger.info(
+            "graph_explorer: %s timeline query failed: %s", profile.profile, exc
+        )
+        warnings.append(f"{profile.profile}: {exc}")
+        return [], False, warnings
+
+    raw = list(result.rows)
+    truncated = len(raw) > limit
+    if truncated:
+        raw = raw[:limit]
+    rows: list[list[Any]] = []
+    for row in raw:
+        if len(row) < 2:
+            continue
+        src = "" if row[0] is None else str(row[0])
+        tgt = "" if row[1] is None else str(row[1])
+        if not src or not tgt:
+            continue
+        bucket_start = "" if len(row) < 3 or row[2] is None else str(row[2])
+        bucket_end = "" if len(row) < 4 or row[3] is None else str(row[3])
+        try:
+            weight = float(row[4]) if len(row) >= 5 and row[4] is not None else 0.0
+        except (TypeError, ValueError):
+            weight = 0.0
+        try:
+            edge_count = int(row[5]) if len(row) >= 6 and row[5] is not None else 0
+        except (TypeError, ValueError):
+            edge_count = 0
+        if profile.directed:
+            edge_id = f"{profile.profile}:{src}->{tgt}"
+        else:
+            a, b = sorted((src, tgt))
+            edge_id = f"{profile.profile}:{a}|{b}"
+        rows.append(
+            [
+                edge_id,
+                src,
+                tgt,
+                profile.profile,
+                weight,
+                edge_count,
+                profile.directed,
+                bucket_start,
+                bucket_end,
+            ]
+        )
+    return rows, truncated, warnings
 
 
 def search_doc_hit(doc: dict[str, Any], score: float | None) -> dict[str, Any]:

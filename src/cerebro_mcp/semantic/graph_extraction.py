@@ -31,6 +31,15 @@ GRAPH_REQUIRED = (
 GRAPH_OPTIONAL = (
     "directed",
     "time_column",
+    # Temporal extensions (Timeline mode). Forward-compatible: absent in
+    # older registries/catalogs -> None; authoring them requires the matching
+    # dbt-cerebro validator/publisher update (contract-only sharing).
+    "time_end_column",
+    "temporal_semantics",
+    "sector",
+    "weight_unit",
+    "freshness_sla",
+    "coverage_note",
     "weight_column",
     "node_enrichment_model",
     "node_enrichment_key",
@@ -90,6 +99,17 @@ class GraphProfile:
     target_kind: str
     directed: bool = True
     time_column: str | None = None
+    #: End of a validity interval (e.g. circles_trust ``valid_to``). NULL/open
+    #: intervals mean "still active".
+    time_end_column: str | None = None
+    #: Canonical authored time contract. The legacy flow/state/static aliases
+    #: remain readable so an older published catalog cannot change query
+    #: semantics during a rolling deployment.
+    temporal_semantics: str | None = None
+    sector: str = ""
+    weight_unit: str = ""
+    freshness_sla: str = ""
+    coverage_note: str = ""
     weight_column: str | None = None
     evidence_model: str | None = None
     evidence_source_column: str | None = None
@@ -107,6 +127,68 @@ class GraphProfile:
     @property
     def time_aware(self) -> bool:
         return self.time_column is not None
+
+    @property
+    def relationship_time(self) -> str:
+        """Canonical relationship-time contract used by every graph query.
+
+        ``event`` is bounded to the requested interval. ``state_at`` starts at
+        ``time_column`` and remains applicable at the requested as-of time.
+        ``interval`` overlaps the requested interval. ``current_snapshot`` is
+        current at retrieval and must never be represented as historical.
+
+        Inference is retained for older catalogs, but new authoring should
+        always state the contract explicitly.
+        """
+        authored = {
+            "event": "event",
+            "state_at": "state_at",
+            "interval": "interval",
+            "current_snapshot": "current_snapshot",
+            # Legacy aliases.
+            "flow": "event",
+            "state": "state_at",
+            "static": "current_snapshot",
+        }.get(self.temporal_semantics or "")
+        if authored:
+            return authored
+
+        # Compatibility for the currently deployed semantic registry. These
+        # profiles/relations publish retrieval-time snapshots but predate the
+        # explicit temporal_semantics field. A timestamp on such a model is a
+        # freshness/observation timestamp, not a historical valid-from fact.
+        # Keep this inference in the application so older deployed manifests
+        # remain safe without requiring a dbt metadata deployment.
+        legacy_snapshot_profiles = {
+            "safe_ownership",
+            "gpay_ownership",
+            "lending_user_to_reserve",
+            "address_labeled_as",
+            "circles_trust",
+        }
+        relation = str(self.model_name or "").lower()
+        snapshot_named_relation = (
+            relation.endswith("_current")
+            or relation.endswith("_latest")
+            or "_current_" in relation
+        )
+        if self.profile in legacy_snapshot_profiles or snapshot_named_relation:
+            return "current_snapshot"
+        if self.time_column is None:
+            return "current_snapshot"
+        if self.time_end_column:
+            return "interval"
+        return "event" if self.weight_column else "state_at"
+
+    @property
+    def temporal_shape(self) -> str:
+        """Legacy Timeline shape derived from :attr:`relationship_time`."""
+        return {
+            "event": "flow",
+            "state_at": "state",
+            "interval": "interval",
+            "current_snapshot": "static",
+        }[self.relationship_time]
 
 
 def _coerce_str(value: Any) -> str | None:
@@ -156,6 +238,12 @@ def extract_graph_profile(name: str, model: dict[str, Any]) -> GraphProfile | No
         target_kind=graph["target_kind"],
         directed=bool(graph.get("directed", True)),
         time_column=_coerce_str(graph.get("time_column")),
+        time_end_column=_coerce_str(graph.get("time_end_column")),
+        temporal_semantics=_coerce_str(graph.get("temporal_semantics")),
+        sector=_coerce_str(graph.get("sector")) or "",
+        weight_unit=_coerce_str(graph.get("weight_unit")) or "",
+        freshness_sla=_coerce_str(graph.get("freshness_sla")) or "",
+        coverage_note=_coerce_str(graph.get("coverage_note")) or "",
         weight_column=_coerce_str(graph.get("weight_column")),
         evidence_model=_coerce_str(graph.get("evidence_model")),
         evidence_source_column=_coerce_str(graph.get("evidence_source_column"))

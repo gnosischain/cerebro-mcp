@@ -37,6 +37,14 @@ function tabHref(tab: MiniAppTab): string {
   return tab.href ?? "#";
 }
 
+/** Link back to the app catalog ("/"), carrying the injected token. Returns
+ * null under `npm run dev`, where there is no server catalog to return to. */
+function catalogHref(): string | null {
+  if (typeof window === "undefined" || !window.__MINI_APP_API__) return null;
+  const token = window.__MINI_APP_TOKEN__;
+  return token ? `/?token=${encodeURIComponent(token)}` : "/";
+}
+
 interface MiniAppChromeProps {
   brand?: string;
   tabs?: MiniAppTab[];
@@ -104,11 +112,20 @@ export function MiniAppChrome({
   // the primary navigation spine instead of competing with the chrome.
   const [appMenuOpen, setAppMenuOpen] = useState(false);
   const current = effectiveTabs.find((t) => t.id === activeTabId);
+  const homeHref = catalogHref();
 
   return (
     <div className="ma-chrome mini-app-scope">
       <nav className="ma-bar">
-        <span className="ma-brand">{brand}</span>
+        {/* The brand doubles as "home" — the way back to the app catalog.
+         * Falls back to a plain span under `npm run dev` (no catalog there). */}
+        {homeHref ? (
+          <a className="ma-brand ma-brand-link" href={homeHref} title="All apps">
+            {brand}
+          </a>
+        ) : (
+          <span className="ma-brand">{brand}</span>
+        )}
         {effectiveTabs.length > 0 && (
           <div className="ma-appsw">
             <button
@@ -127,6 +144,16 @@ export function MiniAppChrome({
                 <div className="ma-appsw-scrim" onClick={() => setAppMenuOpen(false)} />
                 <div className="ma-appsw-menu" role="menu">
                   <div className="ma-appsw-head">Apps</div>
+                  {homeHref && (
+                    <a
+                      role="menuitem"
+                      href={homeHref}
+                      className="ma-appsw-item ma-appsw-home"
+                      onClick={() => setAppMenuOpen(false)}
+                    >
+                      ← All apps
+                    </a>
+                  )}
                   {effectiveTabs.map((t) => (
                     <a
                       key={t.id}

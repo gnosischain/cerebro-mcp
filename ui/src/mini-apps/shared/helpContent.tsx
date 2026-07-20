@@ -64,6 +64,51 @@ export const GRAPH_EXPLORER_HELP: HelpContent = {
             <strong>Window / max-per-hop:</strong> the numeric pills bound the
             time range and how many neighbours each expansion pulls in.
           </li>
+          <li>
+            <strong>Timeline:</strong> switch to the Timeline mode to play the
+            current subgraph's interactions across time — a sliding window
+            scrubs over day/week/month buckets; flows pulse with volume,
+            ownership/trust edges appear when they began, and snapshot
+            relationships show as dim always-on context (toggleable).
+          </li>
+          <li>
+            <strong>Flows:</strong> forensic follow-the-money. Seed one or more
+            addresses and trace value <em>out</em> (where funds went),
+            <em> in</em> (who funded them), or both, hop by hop. The layout is
+            left-to-right: upstream funders on the left, seeds in the middle,
+            downstream recipients on the right. Edges carry token, USD amount,
+            and transfer count; nodes show hop rank, in/out USD, and sector
+            attribution (bridges, DEX, mixers, payments). Click an edge for
+            transaction-level evidence (tx hash + timestamp); use
+            <strong> Trace in/out</strong> on a node to extend the graph another
+            hop — that also pushes through a DEX/bridge/mixer that a plain trace
+            stops at.
+          </li>
+        </ul>
+      ),
+    },
+    {
+      heading: "Flows: coverage & caveats",
+      body: (
+        <ul>
+          <li>
+            <strong>Whitelisted tokens only:</strong> flows are built from
+            whitelisted ERC-20 + WxDAI transfers with a USD price. A leg moved
+            in a non-whitelisted token is invisible — a chain that goes dark may
+            have hopped through one.
+          </li>
+          <li>
+            <strong>Bridges are exits, not payouts:</strong> bridge edges are
+            deposits INTO a bridge (funds leaving Gnosis Chain). The tool never
+            fabricates a bridge→user payout — the destination chain is out of
+            scope.
+          </li>
+          <li>
+            <strong>Terminal sectors:</strong> DEX, bridges, and privacy/mixer
+            nodes are attributed but not auto-expanded (their outflows aren't
+            attributable). Payments (e.g. Gnosis Pay) stays walkable. Trace
+            in/out overrides this when you want to push through.
+          </li>
         </ul>
       ),
     },

@@ -1682,6 +1682,11 @@ def register_data_catalog_tools(mcp, ch=None) -> None:
         app_id=DATA_CATALOG_APP_ID,
         open_tool="open_data_catalog",
         html_loader=get_data_catalog_html,
+        title="Data Catalog",
+        description=(
+        "Search every dbt model and metric in the warehouse — schemas, lineage, freshness and sample rows, with column-level provenance."
+        ),
+        icon="▤",
         tools={
             "open_data_catalog": open_data_catalog,
             # Plain-dict tools (web dispatch wraps them as structuredContent).

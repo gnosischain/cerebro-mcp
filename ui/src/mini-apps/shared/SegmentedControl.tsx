@@ -35,6 +35,10 @@ export function SegmentedControl<T extends string>({
             role="radio"
             aria-checked={active}
             aria-label={opt.ariaLabel}
+            // Same text as the aria-label, exposed to SIGHTED users too: the
+            // mode descriptions existed only for screen readers, which is why
+            // "what is Atlas vs Investigate?" was unanswerable from the UI.
+            title={opt.ariaLabel}
             disabled={disabled}
             onClick={() => {
               if (!active) onChange(opt.value);

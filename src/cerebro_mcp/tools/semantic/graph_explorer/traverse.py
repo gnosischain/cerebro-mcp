@@ -56,7 +56,11 @@ def _accumulate_edge(
     existing = edges.get(eid)
     if existing is not None:
         if not edge.get("directed", True):
-            existing["weight"] += edge["weight"]
+            incoming_weight = edge.get("weight")
+            if existing.get("weight") is None:
+                existing["weight"] = incoming_weight
+            elif incoming_weight is not None:
+                existing["weight"] += incoming_weight
             existing["edge_count"] += edge["edge_count"]
         return
     edges[eid] = {
@@ -274,7 +278,11 @@ def merge_graph(
         if eid in edge_pos:
             if not edge.get("directed", True):
                 row = edge_rows[edge_pos[eid]]
-                row[4] = (row[4] or 0) + edge["weight"]
+                incoming_weight = edge.get("weight")
+                if row[4] is None:
+                    row[4] = incoming_weight
+                elif incoming_weight is not None:
+                    row[4] += incoming_weight
                 row[5] = (row[5] or 0) + edge["edge_count"]
             continue
         edge_rows.append(

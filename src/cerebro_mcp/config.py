@@ -111,6 +111,19 @@ class Settings(BaseSettings):
     # `tools/semantic.py`.
     SEMANTIC_AUTOLOAD_ON_LOCAL_MTIME: bool = True
 
+    # Agent-context artifact (dbt-cerebro engineering knowledge: lesson records
+    # + per-model resolved contracts, built by that repo's
+    # scripts/agent_context/build_agent_context.py and published privacy-
+    # filtered to gh-pages). Local path takes precedence when configured —
+    # point it at <dbt-cerebro>/target/agent_context.json during authoring
+    # loops (the local full variant includes privacy-tagged models; the
+    # manifest's own INTERNAL_ONLY filter still governs what tools reveal).
+    AGENT_CONTEXT_URL: Optional[str] = (
+        "https://gnosischain.github.io/dbt-cerebro/agent_context.public.json"
+    )
+    AGENT_CONTEXT_PATH: str = ""
+    AGENT_CONTEXT_REFRESH_INTERVAL_SECONDS: int = 3600
+
     # Dashboard builder
     DASHBOARD_BUILDER_ENABLED: bool = False
     METRICS_DASHBOARD_PATH: str = ""
@@ -170,7 +183,11 @@ class Settings(BaseSettings):
     # new nodes a single hop round may add so one dense frontier can't consume
     # the whole budget in one step.
     GRAPH_EXPLORER_SEED_NODE_CAP: int = 3000
-    GRAPH_EXPLORER_BFS_NODE_CAP: int = 15000
+    # 50k: several full frontier rounds on dense clusters before the global
+    # ceiling. The frontend hydration row cap must stay ABOVE this (nodes)
+    # and above the implied edge count — see GRAPH_ROW_CAP in
+    # ui/src/mini-apps/graph-explorer/GraphExplorerApp.tsx (120k).
+    GRAPH_EXPLORER_BFS_NODE_CAP: int = 50000
     # 10k: a single frontier round on a dense cluster (e.g. a whole Circles
     # trust neighborhood) fits in one Expand instead of stopping at 3k; the
     # global BFS_NODE_CAP still bounds total growth.

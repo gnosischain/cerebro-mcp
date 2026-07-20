@@ -673,6 +673,11 @@ def register_model_lineage_tools(mcp, ch: ClickHouseManager) -> None:
         app_id=MODEL_LINEAGE_APP_ID,
         open_tool="open_model_lineage",
         html_loader=get_model_lineage_html,
+        title="Model Lineage",
+        description=(
+        "Left-to-right DAG of dbt dependencies. Walk upstream sources and downstream impact, including column-level lineage."
+        ),
+        icon="◇",
         tools={
             "open_model_lineage": open_model_lineage,
             "expand_model_lineage_node": expand_model_lineage_node,

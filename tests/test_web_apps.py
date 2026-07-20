@@ -65,6 +65,18 @@ def test_register_web_app_populates_registry(registered):
 
 
 @pytest.mark.asyncio
+async def test_app_health_exposes_process_identity(registered):
+    req = FakeRequest(path_params={"app_id": "model_lineage"})
+    resp = await web_apps.serve_app_health(req)
+    assert resp.status_code == 200
+    data = json.loads(resp.body.decode())
+    assert data["status"] == "ok"
+    assert data["app_id"] == "model_lineage"
+    assert isinstance(data["pid"], int)
+    assert data["started_at"].endswith("Z")
+
+
+@pytest.mark.asyncio
 async def test_serve_app_returns_html_with_payload(registered):
     req = FakeRequest(path_params={"app_id": "model_lineage"})
     resp = await web_apps.serve_app(req)
