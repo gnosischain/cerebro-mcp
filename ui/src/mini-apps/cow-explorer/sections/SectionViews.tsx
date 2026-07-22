@@ -1,16 +1,18 @@
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { ChartCard } from "../../../components/ChartCard";
 import { MaKpi, MaKpiGrid, MaSection, MaSkeletonKpiGrid, MaSkeletonRows } from "../../shared/MiniAppChrome";
 import type { DatasetDescriptor, PageRowsResponse } from "../../shared/miniAppTypes";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
 import { CollapsibleSection } from "../../shared/CollapsibleSection";
 import { activityOption, candleOption, depthOption, rankingOption, referencePriceOption, shareHeatmapOption, volumeOption } from "../model/chartOptions";
-import { buildShareHeatmap, parseCandles, parseDepth, parseExecutionFlow, parseReferencePrices, rowsToObjects } from "../model/parseRows";
+import { rowsToObjects } from "../../shared/rowDataset";
+import { buildShareHeatmap, parseCandles, parseDepth, parseExecutionFlow, parseReferencePrices } from "../model/parseRows";
 import type { CowExplorerViewState, EntityType } from "../types";
 import { ChainBadge } from "../components/ChainBadge";
 import { CuratedTable } from "../components/CuratedTable";
 import { InfoBlocks, InfoPopover } from "../components/InfoPopover";
-import { DATASET_GROUP, datasetError } from "../model/datasetGroups";
+import { datasetError } from "../../shared/datasetError";
+import { DATASET_GROUP } from "../model/datasetGroups";
 import { DATASET_DOCS } from "../model/datasetDocs";
 import { solverName } from "../model/solverRegistry";
 import { SankeySvg } from "../../shared/svg-flow/SankeySvg";
@@ -38,10 +40,17 @@ interface Props {
   liveAutoDefault?: boolean;
 }
 
-function dataset(hydrated: Record<string, HydratedDataset>, key: string) {
-  const value = hydrated[key];
+function toDataset(value?: HydratedDataset) {
   return value ? { columns: value.columns, rows: value.rows } : undefined;
 }
+
+function dataset(hydrated: Record<string, HydratedDataset>, key: string) {
+  return toDataset(hydrated[key]);
+}
+
+// Chart specs are memoized on the backing hydrated dataset (and any label
+// inputs) — ChartCard renders with notMerge, so an unstable spec identity
+// tears down and re-animates the chart on every unrelated parent render.
 
 function formatNumber(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -191,6 +200,11 @@ function coverageMeta(descriptor?: DatasetDescriptor): string {
 }
 
 function Overview(props: Props) {
+  const networkActivity = props.hydrated.network_activity;
+  const networkActivitySpec = useMemo(
+    () => activityOption(toDataset(networkActivity), "trade_count", "chain_id"),
+    [networkActivity],
+  );
   const summary = rowsToObjects(dataset(props.hydrated, "network_summary"));
   const totals = summary.reduce<{ trades: number; orders: number; competitions: number }>(
     (acc, row) => ({
@@ -215,7 +229,7 @@ function Overview(props: Props) {
       <GroupGate props={props} group="breakdown">
         <div className="cow-grid-2">
           <ChartSection datasetKey="network_activity" title="Execution activity" props={props}>
-            {props.hydrated.network_activity ? <ChartCard renderer="svg" chartId="cow-network-activity" hideId title="Settled fills by network" spec={activityOption(dataset(props.hydrated, "network_activity"), "trade_count", "chain_id")} /> : null}
+            {networkActivity ? <ChartCard renderer="svg" chartId="cow-network-activity" hideId title="Settled fills by network" spec={networkActivitySpec} /> : null}
           </ChartSection>
           <Table datasetKey="top_pairs" title="Top pairs by fill count" props={props} />
         </div>
@@ -231,9 +245,16 @@ function Overview(props: Props) {
 }
 
 function Markets(props: Props) {
-  const candles = parseCandles(dataset(props.hydrated, "price_candles"));
-  const auctionReferences = parseReferencePrices(dataset(props.hydrated, "auction_reference_prices"));
-  const nativeReferences = parseReferencePrices(dataset(props.hydrated, "native_reference_prices"));
+  const priceCandles = props.hydrated.price_candles;
+  const candles = useMemo(() => parseCandles(toDataset(priceCandles)), [priceCandles]);
+  const candleSpec = useMemo(() => candleOption(candles), [candles]);
+  const volumeSpec = useMemo(() => volumeOption(candles), [candles]);
+  const auctionRefHydrated = props.hydrated.auction_reference_prices;
+  const auctionReferences = useMemo(() => parseReferencePrices(toDataset(auctionRefHydrated)), [auctionRefHydrated]);
+  const auctionRefSpec = useMemo(() => referencePriceOption(auctionReferences, "Auction reference"), [auctionReferences]);
+  const nativeRefHydrated = props.hydrated.native_reference_prices;
+  const nativeReferences = useMemo(() => parseReferencePrices(toDataset(nativeRefHydrated)), [nativeRefHydrated]);
+  const nativeRefSpec = useMemo(() => referencePriceOption(nativeReferences, "Native-price observation"), [nativeReferences]);
   return (
     <>
       <KpiRow
@@ -248,14 +269,14 @@ function Markets(props: Props) {
       <GroupGate props={props} group="charts">
         <div className="cow-grid-2">
         <ChartSection datasetKey="price_candles" title="Execution prices (settled fills)" props={props}>
-          {candles.length ? <ChartCard renderer="svg" chartId="cow-candles" hideId spec={candleOption(candles)} /> : <div className="cow-empty">No normalized execution candles. Token decimals may be missing.</div>}
+          {candles.length ? <ChartCard renderer="svg" chartId="cow-candles" hideId spec={candleSpec} /> : <div className="cow-empty">No normalized execution candles. Token decimals may be missing.</div>}
         </ChartSection>
-        {candles.length > 0 && <MaSection title="Execution volume" meta={<CoverageInfo descriptor={props.descriptors.price_candles} label="Base units · coverage" />}><ChartCard renderer="svg" chartId="cow-volume" hideId spec={volumeOption(candles)} /></MaSection>}
+        {candles.length > 0 && <MaSection title="Execution volume" meta={<CoverageInfo descriptor={props.descriptors.price_candles} label="Base units · coverage" />}><ChartCard renderer="svg" chartId="cow-volume" hideId spec={volumeSpec} /></MaSection>}
         <ChartSection datasetKey="auction_reference_prices" title="Auction reference prices" props={props}>
-          {auctionReferences.length > 0 ? <ChartCard renderer="svg" chartId="cow-auction-reference" hideId spec={referencePriceOption(auctionReferences, "Auction reference")} /> : <div className="cow-empty">No auction reference prices with mapped auction block timestamps in this indexed window.</div>}
+          {auctionReferences.length > 0 ? <ChartCard renderer="svg" chartId="cow-auction-reference" hideId spec={auctionRefSpec} /> : <div className="cow-empty">No auction reference prices with mapped auction block timestamps in this indexed window.</div>}
         </ChartSection>
         <ChartSection datasetKey="native_reference_prices" title="Native-price API observations" props={props}>
-          {nativeReferences.length > 0 ? <ChartCard renderer="svg" chartId="cow-native-reference" hideId spec={referencePriceOption(nativeReferences, "Native-price observation")} /> : <div className="cow-empty">No matching native-price API observations in this indexed window.</div>}
+          {nativeReferences.length > 0 ? <ChartCard renderer="svg" chartId="cow-native-reference" hideId spec={nativeRefSpec} /> : <div className="cow-empty">No matching native-price API observations in this indexed window.</div>}
         </ChartSection>
         </div>
       </GroupGate>
@@ -267,6 +288,8 @@ function Markets(props: Props) {
 }
 
 function Trades(props: Props) {
+  const tradeActivity = props.hydrated.trade_activity;
+  const tradeActivitySpec = useMemo(() => activityOption(toDataset(tradeActivity), "fill_count"), [tradeActivity]);
   const activityRows = rowsToObjects(dataset(props.hydrated, "trade_activity"));
   return (
     <GroupGate props={props} group="core">
@@ -279,7 +302,7 @@ function Trades(props: Props) {
         meta={<CoverageInfo descriptor={props.descriptors.trade_activity} label="KPI methodology" />}
       />
       <ChartSection datasetKey="trade_activity" title="Settled fill activity" props={props}>
-        {props.hydrated.trade_activity ? <ChartCard renderer="svg" chartId="cow-trade-activity" hideId spec={activityOption(dataset(props.hydrated, "trade_activity"), "fill_count")} /> : null}
+        {tradeActivity ? <ChartCard renderer="svg" chartId="cow-trade-activity" hideId spec={tradeActivitySpec} /> : null}
       </ChartSection>
       <Table datasetKey="trade_pair_breakdown" title="Pair breakdown" props={props} />
       <GroupGate props={props} group="tape">
@@ -290,7 +313,11 @@ function Trades(props: Props) {
 }
 
 function Orders(props: Props) {
-  const depth = parseDepth(dataset(props.hydrated, "intent_depth"));
+  const intentDepth = props.hydrated.intent_depth;
+  const depth = useMemo(() => parseDepth(toDataset(intentDepth)), [intentDepth]);
+  const depthSpec = useMemo(() => depthOption(depth), [depth]);
+  const orderActivity = props.hydrated.order_activity;
+  const orderActivitySpec = useMemo(() => activityOption(toDataset(orderActivity), "order_count"), [orderActivity]);
   const statusRows = rowsToObjects(dataset(props.hydrated, "order_status_summary"));
   const openCount = statusRows.filter((row) => String(row.status) === "open").reduce((acc, row) => acc + Number(row.order_count ?? 0), 0);
   return (
@@ -305,12 +332,12 @@ function Orders(props: Props) {
       />
       <div className="cow-inline-info"><InfoPopover label="What “known intents” means"><strong>Known open intents (observed snapshot).</strong> This is not a complete live orderbook. Freshness does not imply completeness.</InfoPopover></div>
       <ChartSection datasetKey="order_activity" title="Observed order lifecycle" props={props}>
-        {props.hydrated.order_activity ? <ChartCard renderer="svg" chartId="cow-order-activity" hideId spec={activityOption(dataset(props.hydrated, "order_activity"), "order_count")} /> : null}
+        {orderActivity ? <ChartCard renderer="svg" chartId="cow-order-activity" hideId spec={orderActivitySpec} /> : null}
       </ChartSection>
       <Table datasetKey="order_status_summary" title="Observed status summary" props={props} />
       <GroupGate props={props} group="intents">
         <ChartSection datasetKey="intent_depth" title="Known intents" props={props}>
-          {depth.length ? <ChartCard renderer="svg" chartId="cow-depth" hideId spec={depthOption(depth)} /> : <div className="cow-empty">No executable normalized intent depth for this pair.</div>}
+          {depth.length ? <ChartCard renderer="svg" chartId="cow-depth" hideId spec={depthSpec} /> : <div className="cow-empty">No executable normalized intent depth for this pair.</div>}
         </ChartSection>
         <Table datasetKey="known_intents" title="Known intent summary" props={props} />
         <Table datasetKey="known_orders" title="Known open intents (observed snapshot)" props={props} />
@@ -329,6 +356,11 @@ function Orders(props: Props) {
 }
 
 function Auctions(props: Props) {
+  const auctionActivity = props.hydrated.auction_activity;
+  const auctionActivitySpec = useMemo(
+    () => activityOption(toDataset(auctionActivity), "competition_count", "chain_id", "bar"),
+    [auctionActivity],
+  );
   const activityRows = rowsToObjects(dataset(props.hydrated, "auction_activity"));
   return (
     <GroupGate props={props} group="core">
@@ -340,8 +372,8 @@ function Auctions(props: Props) {
         meta={<CoverageInfo descriptor={props.descriptors.auction_activity} label="KPI methodology" />}
       />
       <ChartSection datasetKey="auction_activity" title="Settled competitions per day" props={props}>
-        {rowsToObjects(dataset(props.hydrated, "auction_activity")).length > 0
-          ? <ChartCard renderer="svg" chartId="cow-auction-activity" hideId spec={activityOption(dataset(props.hydrated, "auction_activity"), "competition_count", "chain_id", "bar")} />
+        {activityRows.length > 0
+          ? <ChartCard renderer="svg" chartId="cow-auction-activity" hideId spec={auctionActivitySpec} />
           : <div className="cow-empty">No settled competitions indexed in this window on this chain — competition data comes from the CoW API enrichment and covers a shorter span than on-chain fills.</div>}
       </ChartSection>
       <GroupGate props={props} group="list">
@@ -420,6 +452,14 @@ function CrossChainMatrix(props: Props) {
 }
 
 function Solvers(props: Props) {
+  const chainId = props.state.chain_id || 1;
+  const solverActivity = props.hydrated.solver_activity;
+  const solverActivitySpec = useMemo(
+    () => activityOption(toDataset(solverActivity), "competitions", "competition_solver", "bar", (value) => solverName(chainId, value) || `${value.slice(0, 6)}…${value.slice(-4)}`),
+    [solverActivity, chainId],
+  );
+  const rankingDistribution = props.hydrated.ranking_distribution;
+  const rankingSpec = useMemo(() => rankingOption(toDataset(rankingDistribution)), [rankingDistribution]);
   const flow = parseExecutionFlow(dataset(props.hydrated, "execution_flow"));
   const allNetworks = props.state.chain_id === 0;
   const statRows = rowsToObjects(dataset(props.hydrated, "solver_stats"));
@@ -434,13 +474,13 @@ function Solvers(props: Props) {
         meta={<CoverageInfo descriptor={props.descriptors.solver_stats} label="KPI methodology" />}
       />
       <ChartSection datasetKey="solver_activity" title="Competition entries per day (top solvers)" props={props}>
-        {rowsToObjects(dataset(props.hydrated, "solver_activity")).length > 0
-          ? <ChartCard renderer="svg" chartId="cow-solver-activity" hideId spec={activityOption(dataset(props.hydrated, "solver_activity"), "competitions", "competition_solver", "bar", (value) => solverName(props.state.chain_id || 1, value) || `${value.slice(0, 6)}…${value.slice(-4)}`)} />
+        {(solverActivity?.rows.length ?? 0) > 0
+          ? <ChartCard renderer="svg" chartId="cow-solver-activity" hideId spec={solverActivitySpec} />
           : <div className="cow-empty">No competition entries indexed in this window on this chain — competition data comes from the CoW API enrichment and covers a shorter span than on-chain fills.</div>}
       </ChartSection>
       <GroupGate props={props} group="detail">
         <ChartSection datasetKey="ranking_distribution" title="Solution ranking distribution" props={props}>
-          {props.hydrated.ranking_distribution ? <ChartCard renderer="svg" chartId="cow-rankings" hideId spec={rankingOption(dataset(props.hydrated, "ranking_distribution"))} /> : null}
+          {rankingDistribution ? <ChartCard renderer="svg" chartId="cow-rankings" hideId spec={rankingSpec} /> : null}
         </ChartSection>
         {allNetworks ? (
           <>
@@ -481,6 +521,8 @@ function Solvers(props: Props) {
 }
 
 function Traders(props: Props) {
+  const traderActivity = props.hydrated.trader_activity;
+  const traderActivitySpec = useMemo(() => activityOption(toDataset(traderActivity), "active_traders"), [traderActivity]);
   const leaderRows = rowsToObjects(dataset(props.hydrated, "trader_leaderboard"));
   return (
     <GroupGate props={props} group="core">
@@ -493,7 +535,7 @@ function Traders(props: Props) {
         meta={<CoverageInfo descriptor={props.descriptors.trader_leaderboard} label="KPI methodology" />}
       />
       <ChartSection datasetKey="trader_activity" title="Active and new traders" props={props}>
-        {props.hydrated.trader_activity ? <ChartCard renderer="svg" chartId="cow-trader-activity" hideId spec={activityOption(dataset(props.hydrated, "trader_activity"), "active_traders")} /> : null}
+        {traderActivity ? <ChartCard renderer="svg" chartId="cow-trader-activity" hideId spec={traderActivitySpec} /> : null}
       </ChartSection>
       <Table datasetKey="trader_leaderboard" title="Trader leaderboard" props={props} />
     </GroupGate>
@@ -505,9 +547,9 @@ function Patterns(props: Props) {
   const short = (value: unknown) => `${String(value).slice(0, 6)}…${String(value).slice(-4)}`;
   const solverLabel = (row: Record<string, unknown>, field: string) =>
     solverName(chainId, String(row[field] ?? "")) || short(row[field]);
-  const pairRows = rowsToObjects(dataset(props.hydrated, "solver_pair_matrix"));
-  const pairHeatmap = buildShareHeatmap({
-    rows: pairRows,
+  const pairMatrix = props.hydrated.solver_pair_matrix;
+  const pairHeatmap = useMemo(() => buildShareHeatmap({
+    rows: rowsToObjects(toDataset(pairMatrix)),
     rowLabel: (row) => {
       const t0 = String(row.token0_symbol || "") || short(row.token0);
       const t1 = String(row.token1_symbol || "") || short(row.token1);
@@ -516,16 +558,18 @@ function Patterns(props: Props) {
     colLabel: (row) => solverLabel(row, "settlement_executor"),
     weightField: "fill_count",
     shareField: "pair_share",
-  });
-  const affinityRows = rowsToObjects(dataset(props.hydrated, "trader_solver_affinity"));
-  const affinityHeatmap = buildShareHeatmap({
-    rows: affinityRows,
+  }), [pairMatrix, chainId]);
+  const pairSpec = useMemo(() => shareHeatmapOption({ ...pairHeatmap, colorLabel: "pair share" }), [pairHeatmap]);
+  const affinity = props.hydrated.trader_solver_affinity;
+  const affinityHeatmap = useMemo(() => buildShareHeatmap({
+    rows: rowsToObjects(toDataset(affinity)),
     rowLabel: (row) => short(row.trader ?? row.owner),
     colLabel: (row) => solverLabel(row, "settlement_executor"),
     weightField: "fill_count",
     shareField: "trader_share",
     maxRows: 25,
-  });
+  }), [affinity, chainId]);
+  const affinitySpec = useMemo(() => shareHeatmapOption({ ...affinityHeatmap, colorLabel: "trader share" }), [affinityHeatmap]);
   return (
     <>
       <div className="cow-inline-info">
@@ -535,7 +579,7 @@ function Patterns(props: Props) {
       </div>
       <ChartSection datasetKey="solver_pair_matrix" title="Solver-pair specialization (share of each pair's fills)" props={props}>
         {pairHeatmap.cells.length > 0
-          ? <ChartCard renderer="svg" chartId="cow-pair-matrix" hideId spec={shareHeatmapOption({ ...pairHeatmap, colorLabel: "pair share" })} />
+          ? <ChartCard renderer="svg" chartId="cow-pair-matrix" hideId spec={pairSpec} />
           : <div className="cow-empty">No settled fills with resolvable executors in this indexed window.</div>}
       </ChartSection>
       <CollapsibleSection title="Specialization rows (raw)" defaultOpen={false}>
@@ -544,7 +588,7 @@ function Patterns(props: Props) {
       <GroupGate props={props} group="affinity">
         <ChartSection datasetKey="trader_solver_affinity" title="Trader-solver affinity (share of each trader's fills)" props={props}>
           {affinityHeatmap.cells.length > 0
-            ? <ChartCard renderer="svg" chartId="cow-affinity" hideId spec={shareHeatmapOption({ ...affinityHeatmap, colorLabel: "trader share" })} />
+            ? <ChartCard renderer="svg" chartId="cow-affinity" hideId spec={affinitySpec} />
             : <div className="cow-empty">No trader-solver affinity rows in this indexed window.</div>}
         </ChartSection>
         <CollapsibleSection title="Affinity rows (raw)" defaultOpen={false}>

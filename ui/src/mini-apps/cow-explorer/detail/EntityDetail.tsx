@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { MaIdentity, MaKpi, MaKpiGrid, MaSection } from "../../shared/MiniAppChrome";
 import type { DatasetDescriptor, PageRowsResponse } from "../../shared/miniAppTypes";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
@@ -8,7 +9,7 @@ import { InfoBlocks, InfoPopover } from "../components/InfoPopover";
 import { KeyValueGrid } from "../components/KeyValueGrid";
 import { buildTransactionExecutionGraph } from "../model/executionGraph";
 import { transactionExecutionGraphOption } from "../model/chartOptions";
-import { datasetError } from "../model/datasetGroups";
+import { datasetError } from "../../shared/datasetError";
 import { DATASET_DOCS } from "../model/datasetDocs";
 
 type FetchRows = (viewId: string, datasetKey: string, pageToken?: string) => Promise<PageRowsResponse | null>;
@@ -110,22 +111,27 @@ function firstRowObject(descriptor?: DatasetDescriptor): Record<string, unknown>
 
 export function EntityDetail(props: Props) {
   const entity = props.state.selected_entity;
+  const { hydrated, descriptors } = props;
+  // Memoized on the backing datasets: ChartCard renders with notMerge, so an
+  // unstable spec identity re-animates the graph on every unrelated render.
+  const executionGraph = useMemo(() => {
+    if (entity?.entity_type !== "transaction") return { nodes: [], edges: [] };
+    const graphDatasets = Object.fromEntries(
+      ["transaction_detail", "transaction_trades", "transaction_interactions", "transaction_competition"].map((key) => {
+        const hydratedDs = hydrated?.[key];
+        const descriptor = descriptors[key];
+        return [key, hydratedDs
+          ? { columns: hydratedDs.columns, rows: hydratedDs.rows }
+          : descriptor
+            ? { columns: descriptor.columns.map((column) => column.name), rows: descriptor.preview_rows }
+            : undefined];
+      }),
+    );
+    return buildTransactionExecutionGraph(graphDatasets, entity.identifier);
+  }, [entity, hydrated, descriptors]);
+  const executionGraphSpec = useMemo(() => transactionExecutionGraphOption(executionGraph), [executionGraph]);
   if (!entity) return <div className="cow-empty">No entity selected.</div>;
   const url = buildExternalExplorerUrl(props.state);
-  const graphDatasets = Object.fromEntries(
-    ["transaction_detail", "transaction_trades", "transaction_interactions", "transaction_competition"].map((key) => {
-      const hydrated = props.hydrated?.[key];
-      const descriptor = props.descriptors[key];
-      return [key, hydrated
-        ? { columns: hydrated.columns, rows: hydrated.rows }
-        : descriptor
-          ? { columns: descriptor.columns.map((column) => column.name), rows: descriptor.preview_rows }
-          : undefined];
-    }),
-  );
-  const executionGraph = entity.entity_type === "transaction"
-    ? buildTransactionExecutionGraph(graphDatasets, entity.identifier)
-    : { nodes: [], edges: [] };
   const headerDescriptor = props.descriptors[ENTITY_HEADER[entity.entity_type]];
   const layout = ENTITY_LAYOUT[entity.entity_type] ?? [];
   // Dashboard KPI header for solver/address entities: the summary datasets
@@ -208,7 +214,7 @@ export function EntityDetail(props: Props) {
               renderer="svg"
               chartId="cow-transaction-execution"
               hideId
-              spec={transactionExecutionGraphOption(executionGraph)}
+              spec={executionGraphSpec}
               onEvents={{
                 click: (params) => {
                   const data = (params as { data?: { entityType?: EntityType; identifier?: string } }).data;

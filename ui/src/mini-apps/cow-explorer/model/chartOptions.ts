@@ -1,7 +1,6 @@
 import type { EChartsOption } from "echarts";
 import type { CandleRow, DepthRow, ExecutionGraphModel, FlowLink, ReferencePriceRow } from "../types";
-import type { RowDataset } from "./parseRows";
-import { rowsToObjects } from "./parseRows";
+import { rowsToObjects, type RowDataset } from "../../shared/rowDataset";
 
 const insideZoom = [{ type: "inside" as const, start: 0, end: 100 }];
 

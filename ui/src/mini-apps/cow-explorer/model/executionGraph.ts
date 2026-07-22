@@ -1,5 +1,5 @@
 import type { ExecutionGraphEdge, ExecutionGraphModel, ExecutionGraphNode, ExecutionNodeKind } from "../types";
-import { rowsToObjects, type RowDataset } from "./parseRows";
+import { rowsToObjects, type RowDataset } from "../../shared/rowDataset";
 
 function short(value: unknown, left = 6, right = 4): string {
   const text = String(value ?? "");

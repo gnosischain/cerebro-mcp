@@ -116,10 +116,6 @@ function isAddress(value: string): boolean {
   return ADDRESS_RE.test(value.trim());
 }
 
-function shortAddress(address: string): string {
-  return `${address.slice(0, 6)}...${address.slice(-4)}`;
-}
-
 function money(value: unknown): string {
   const numeric = typeof value === "number" ? value : Number(value ?? 0);
   if (!Number.isFinite(numeric)) return "—";
@@ -152,7 +148,7 @@ function OverviewPanel({ state }: { state: PortfolioState }) {
       <div className="mini-app-card-grid">
         <div className="mini-app-data-card">
           <span>Address</span>
-          <strong>{presence.address ? shortAddress(presence.address) : "—"}</strong>
+          <strong>{presence.address ? shortAddr(presence.address) : "—"}</strong>
           <small>{presence.circles_display_name || "Canonical wallet view"}</small>
         </div>
         <div className="mini-app-data-card">
@@ -241,7 +237,7 @@ function RelationshipsPanel({
                 onClick={() => void onNavigate(String(row.related_address))}
               >
                 <strong>{String(row.label || row.related_address)}</strong>
-                <span>{shortAddress(String(row.related_address))}</span>
+                <span>{shortAddr(String(row.related_address))}</span>
                 <small>Since {String(row.became_related_at || "—")}</small>
                 <small>Threshold {number(row.threshold ?? 0, 0)} · {number(row.owner_count ?? 0, 0)} owners</small>
                 <div className="mini-app-badge-row">
@@ -491,10 +487,10 @@ export default function PortfolioApp() {
                   className="mini-app-breadcrumbs__item"
                   onClick={() => void loadAddress(crumb.address)}
                 >
-                  {crumb.label || shortAddress(crumb.address)}
+                  {crumb.label || shortAddr(crumb.address)}
                 </button>
               ))}
-              <span className="mini-app-breadcrumbs__current">{shortAddress(state.current_address)}</span>
+              <span className="mini-app-breadcrumbs__current">{shortAddr(state.current_address)}</span>
             </div>
           ) : null}
 

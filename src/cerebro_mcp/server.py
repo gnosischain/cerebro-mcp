@@ -64,6 +64,7 @@ from cerebro_mcp.tools.semantic.graph_explorer import register_graph_explorer_to
 from cerebro_mcp.tools.visualization.dev_apps import register_dev_mini_apps
 from cerebro_mcp.tools.semantic.data_catalog import register_data_catalog_tools
 from cerebro_mcp.tools.visualization.cow_explorer import register_cow_explorer_tools
+from cerebro_mcp.tools.visualization.governance_explorer import register_governance_tools
 from cerebro_mcp.tools.semantic.find import register_find_tool
 from cerebro_mcp.tools.analytics.list_unifier import register_list_tool
 from cerebro_mcp.tools.web3.rpc import register_rpc_tools
@@ -369,6 +370,7 @@ register_metric_lab_tools(mcp, ch)
 register_graph_explorer_tools(mcp, ch)
 register_data_catalog_tools(mcp, ch)
 register_cow_explorer_tools(mcp, ch)
+register_governance_tools(mcp, ch)
 register_report_studio_tools(mcp, ch)
 # Dev-only apps (portfolio, model lineage) — absent unless
 # DEV_MINI_APPS_ENABLED (see tools/visualization/dev_apps.py).

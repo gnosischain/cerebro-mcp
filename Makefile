@@ -1,4 +1,4 @@
-.PHONY: build-ui build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-cow-explorer build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio install dev test serve-catalog status-catalog stop-catalog restart-catalog
+.PHONY: build-ui build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-cow-explorer build-ui-governance build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio install dev test serve-catalog status-catalog stop-catalog restart-catalog
 
 # Serve the mini-apps over HTTP so they open in a browser (Data Catalog at
 # /app/data_catalog). Reuses .env for ClickHouse/SEMANTIC config — the only
@@ -23,7 +23,7 @@ restart-catalog:
 # server is enough for the app's new bundle to take effect. The top-level
 # build-ui target simply fans out to all per-app targets.
 
-build-ui: build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-cow-explorer build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio
+build-ui: build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-cow-explorer build-ui-governance build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio
 
 build-ui-report:
 	cd ui && npm ci && CEREBRO_UI_ENTRY=report npm run build
@@ -69,6 +69,14 @@ build-ui-cow-explorer:
 	rm -rf src/cerebro_mcp/static/assets/cow_explorer
 	mkdir -p src/cerebro_mcp/static/assets/cow_explorer
 	cp -R ui/dist-cow-explorer/assets/. src/cerebro_mcp/static/assets/cow_explorer/
+
+build-ui-governance:
+	rm -rf ui/dist-governance
+	cd ui && CEREBRO_UI_ENTRY=governance CEREBRO_UI_OUT_DIR=dist-governance npm run build
+	cp ui/dist-governance/governance.html src/cerebro_mcp/static/governance.html
+	rm -rf src/cerebro_mcp/static/assets/governance
+	mkdir -p src/cerebro_mcp/static/assets/governance
+	cp -R ui/dist-governance/assets/. src/cerebro_mcp/static/assets/governance/
 
 build-ui-contract-explorer:
 	cd ui && CEREBRO_UI_ENTRY=contractExplorer npm run build

@@ -9,13 +9,11 @@ source for decorative token imagery.
 
 from __future__ import annotations
 
-import hashlib
-import importlib.resources
 import logging
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -24,9 +22,12 @@ from urllib.parse import urlparse
 import requests
 from mcp.types import CallToolResult
 
-from cerebro_mcp.clients.clickhouse import ClickHouseManager
-from cerebro_mcp.models.mini_app import DatasetStats, MiniAppPayload, SummaryCard
-from cerebro_mcp.runtime.mini_app_cache import CachedDataset
+from cerebro_mcp.clients.clickhouse import (
+    INTERACTIVE_QUERY_BUDGET,
+    ClickHouseManager,
+)
+from cerebro_mcp.models.mini_app import MiniAppPayload, SummaryCard
+from cerebro_mcp.runtime.mini_app_cache import CachedDataset, FailureCache
 from cerebro_mcp.tools.visualization import mini_apps, web_apps
 
 logger = logging.getLogger(__name__)
@@ -256,61 +257,19 @@ class QuerySpec:
     exact_count: bool = True
 
 
-_BUNDLED_HTML: str | None = None
-_BUNDLE_SIGNATURE: tuple[int, int] | None = None
-_BUNDLE_SHA256: str | None = None
-_BUNDLE_MTIME: str | None = None
-_BUNDLE_LOCK = threading.Lock()
-
-
-def _bundle_resource():
-    return importlib.resources.files("cerebro_mcp").joinpath("static/cow_explorer.html")
+_BUNDLE = mini_apps.StaticBundle(
+    "cow_explorer.html",
+    assets_dir="assets/cow_explorer",
+    build_hint="make build-ui-cow-explorer",
+)
 
 
 def get_cow_explorer_html() -> str:
-    global _BUNDLED_HTML, _BUNDLE_SIGNATURE, _BUNDLE_SHA256, _BUNDLE_MTIME
-    with _BUNDLE_LOCK:
-        try:
-            resource = _bundle_resource()
-            with importlib.resources.as_file(resource) as path:
-                stat = path.stat()
-                signature = (stat.st_mtime_ns, stat.st_size)
-                if _BUNDLED_HTML is not None and signature == _BUNDLE_SIGNATURE:
-                    return _BUNDLED_HTML
-                raw = path.read_bytes()
-                _BUNDLED_HTML = raw.decode("utf-8")
-                _BUNDLE_SIGNATURE = signature
-                _BUNDLE_SHA256 = hashlib.sha256(raw).hexdigest()
-                _BUNDLE_MTIME = datetime.fromtimestamp(
-                    stat.st_mtime, timezone.utc
-                ).isoformat().replace("+00:00", "Z")
-        except (FileNotFoundError, ModuleNotFoundError, OSError):
-            _BUNDLED_HTML = (
-                "<!doctype html><html><body><div id='root'>"
-                "cow_explorer.html not built — run "
-                "<code>make build-ui-cow-explorer</code></div></body></html>"
-            )
-            _BUNDLE_SIGNATURE = None
-            _BUNDLE_SHA256 = hashlib.sha256(_BUNDLED_HTML.encode()).hexdigest()
-            _BUNDLE_MTIME = None
-        return _BUNDLED_HTML
+    return _BUNDLE.html()
 
 
 def get_cow_explorer_diagnostics() -> dict[str, Any]:
-    get_cow_explorer_html()
-    assets: list[str] = []
-    try:
-        root = importlib.resources.files("cerebro_mcp").joinpath(
-            "static/assets/cow_explorer"
-        )
-        assets = sorted(entry.name for entry in root.iterdir() if entry.is_file())
-    except (FileNotFoundError, ModuleNotFoundError, OSError, NotADirectoryError):
-        pass
-    return {
-        "bundle_sha256": _BUNDLE_SHA256,
-        "bundle_mtime": _BUNDLE_MTIME,
-        "assets": assets,
-    }
+    return _BUNDLE.diagnostics()
 
 
 #: Static per-chain data caveats surfaced in the chain selector and coverage
@@ -1125,11 +1084,13 @@ ORDER BY fills DESC, token0, token1
 LIMIT 1"""
     params = {"env": chain.environment, "chain_id": chain.chain_id}
     result = mini_apps.run_structured_query(
-        ch, recent_sql, COW_DB, params, requested_max_rows=1
+        ch, recent_sql, COW_DB, params, requested_max_rows=1,
+        query_budget=INTERACTIVE_QUERY_BUDGET,
     )
     if not result.rows:
         result = mini_apps.run_structured_query(
-            ch, fallback_sql, COW_DB, params, requested_max_rows=1
+            ch, fallback_sql, COW_DB, params, requested_max_rows=1,
+            query_budget=INTERACTIVE_QUERY_BUDGET,
         )
     if not result.rows:
         return "", ""
@@ -1504,6 +1465,7 @@ GROUP BY token0,token1""")
         "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
         + "\n) ORDER BY bucket,chain_id"
     )
+    pair_union = "\nUNION ALL\n".join(pair_parts)
     breakdown = f"""WITH {shared_ctes},{tmx}
 SELECT p.chain_id AS chain_id, p.token0 AS token0, p.token1 AS token1,
        if(m0.token='','',m0.symbol) AS token0_symbol,
@@ -1511,7 +1473,7 @@ SELECT p.chain_id AS chain_id, p.token0 AS token0, p.token1 AS token1,
        p.fill_count AS fill_count, p.settlement_transactions AS settlement_transactions,
        p.indexed_from AS indexed_from, p.indexed_to AS indexed_to,
        p.source_observed_at AS source_observed_at
-FROM ({"UNION ALL".join(pair_parts)}) AS p
+FROM ({pair_union}) AS p
 LEFT JOIN tmx AS m0 ON m0.chain_id=p.chain_id AND m0.token=p.token0
 LEFT JOIN tmx AS m1 ON m1.chain_id=p.chain_id AND m1.token=p.token1
 ORDER BY p.fill_count DESC,p.chain_id,p.token0,p.token1
@@ -1641,6 +1603,7 @@ FROM cow_db.trades AS t
 INNER JOIN fs AS f ON f.chain_id={cid} AND f.owner=t.owner
 WHERE {arm_where}
 GROUP BY bucket""")
+    leader_union = "\nUNION ALL\n".join(leader_parts)
     leaderboard = f"""
 WITH {shared_ctes}
 SELECT trader,
@@ -1654,7 +1617,7 @@ SELECT trader,
        max(ls_arm) AS indexed_to,
        max(obs_arm) AS source_observed_at
 FROM (
-{"UNION ALL".join(leader_parts)}
+{leader_union}
 ) GROUP BY trader
 ORDER BY fill_count DESC, trader
 LIMIT 200"""
@@ -3239,54 +3202,67 @@ def _coverage_from_dataset(
     return coverage, warning_codes
 
 
-#: Negative-result cache: a dataset whose query failed is remembered for this
-#: long so a manual Retry within the window returns the cached failure
-#: INSTANTLY instead of re-running a query known to blow up or time out.
-#: force_refresh bypasses the read (an explicit refresh may genuinely retry).
-_FAILURE_TTL_SECONDS = 120
-_FAILURE_CACHE: dict[str, tuple[float, str]] = {}
-_FAILURE_CACHE_LOCK = threading.Lock()
-_FAILURE_CACHE_MAX = 256
-
-
-class _CachedFailure(RuntimeError):
-    """A query failure replayed from the negative cache (not re-executed)."""
-
-
-def _failure_cache_key(spec: QuerySpec) -> str:
-    from cerebro_mcp.runtime.mini_app_cache import make_cache_key
-
-    return make_cache_key(spec.sql, COW_DB, spec.parameters, "failure")
-
-
-def _failure_cache_get(spec: QuerySpec) -> str | None:
-    key = _failure_cache_key(spec)
-    with _FAILURE_CACHE_LOCK:
-        hit = _FAILURE_CACHE.get(key)
-        if hit is None:
-            return None
-        expires, message = hit
-        if time.monotonic() > expires:
-            _FAILURE_CACHE.pop(key, None)
-            return None
-        return message
-
-
-def _failure_cache_put(spec: QuerySpec, message: str) -> None:
-    key = _failure_cache_key(spec)
-    with _FAILURE_CACHE_LOCK:
-        if len(_FAILURE_CACHE) >= _FAILURE_CACHE_MAX:
-            now = time.monotonic()
-            for stale_key in [k for k, (exp, _) in _FAILURE_CACHE.items() if exp < now]:
-                _FAILURE_CACHE.pop(stale_key, None)
-            if len(_FAILURE_CACHE) >= _FAILURE_CACHE_MAX:
-                _FAILURE_CACHE.pop(next(iter(_FAILURE_CACHE)), None)
-        _FAILURE_CACHE[key] = (time.monotonic() + _FAILURE_TTL_SECONDS, message)
+#: Negative-result cache: a failed dataset query is remembered so a manual
+#: Retry within the TTL returns the cached failure INSTANTLY instead of
+#: re-running a query known to blow up or time out. force_refresh bypasses
+#: the read (an explicit refresh may genuinely retry).
+_FAILURE_CACHE = FailureCache(COW_DB)
 
 
 def reset_failure_cache_for_tests() -> None:
-    with _FAILURE_CACHE_LOCK:
-        _FAILURE_CACHE.clear()
+    _FAILURE_CACHE.reset()
+
+
+def _log_dataset_loaded(
+    spec: QuerySpec,
+    dataset: CachedDataset,
+    range_state: dict[str, Any],
+    elapsed: float,
+) -> None:
+    logger.info(
+        "cow_explorer_dataset key=%s environment=%s chain=%s window=%s rows=%s source_rows=%s truncated=%s elapsed=%.3f",
+        spec.key,
+        spec.parameters.get("env", ""),
+        spec.parameters.get("chain_id", 0),
+        range_state.get("window_days", range_state.get("kind")),
+        dataset.stats.rows_returned,
+        dataset.stats.source_rows,
+        dataset.stats.truncated,
+        elapsed,
+    )
+
+
+def _log_dataset_failed(spec: QuerySpec, error: Exception) -> None:
+    logger.warning("cow_explorer dataset %s failed: %s", spec.key, error)
+
+
+def _failure_coverage(
+    spec: QuerySpec,
+    range_state: dict[str, Any],
+    fetched_at: str,
+    error: str,
+) -> dict[str, Any]:
+    return {
+        "basis": spec.basis,
+        "requested_start": range_state.get("start_at") or None,
+        "requested_end": range_state.get("end_at") or None,
+        "actual_start": None,
+        "actual_end": None,
+        "anchor": range_state.get("anchor"),
+        "latest_source_observation": None,
+        "fetched_at": fetched_at,
+        "checkpoint_block": None,
+        "checkpoint_timestamp": None,
+        "returned_rows": 0,
+        "source_rows": None,
+        "row_cap": ROW_CAP,
+        "truncated": False,
+        "mode": spec.coverage_mode,
+        "warning_codes": ["query_failed"],
+        # The frontend renders an explicit error card from this —
+        # a failed dataset must stay VISIBLE, never silently vanish.
+        "error": error[:400],
+    }
 
 
 def _load_specs_safe(
@@ -3296,35 +3272,6 @@ def _load_specs_safe(
     *,
     force_refresh: bool,
 ) -> tuple[dict[str, CachedDataset], dict[str, Any], list[str]]:
-    datasets: dict[str, CachedDataset] = {}
-    coverage: dict[str, Any] = {}
-    warnings: list[str] = []
-
-    def load_one(spec: QuerySpec) -> tuple[CachedDataset, dict[str, Any], list[str], float]:
-        started = time.monotonic()
-        if "ORDER BY" not in spec.sql.upper():
-            raise ValueError(f"{spec.key} must define a deterministic ORDER BY")
-        if not force_refresh:
-            cached_failure = _failure_cache_get(spec)
-            if cached_failure is not None:
-                raise _CachedFailure(
-                    f"{cached_failure} (cached failure; retry in up to "
-                    f"{_FAILURE_TTL_SECONDS}s, use Refresh to force, or "
-                    "narrow the window)"
-                )
-        dataset = mini_apps.load_exact_capped_dataset(
-            ch,
-            spec.sql,
-            database=COW_DB,
-            parameters=spec.parameters,
-            force_refresh=force_refresh,
-            cache_ttl_seconds=spec.cache_ttl_seconds,
-            row_cap=ROW_CAP,
-            exact_source_rows=spec.exact_count,
-        )
-        cov, codes = _coverage_from_dataset(dataset, spec, range_state)
-        return dataset, cov, codes, time.monotonic() - started
-
     # ClickHouseManager maintains thread-local clients. All-network bundles
     # stay at two workers: their per-chain UNION arms are individually
     # memory-bounded, but running three ten-arm expansions at once can still
@@ -3333,96 +3280,22 @@ def _load_specs_safe(
     all_network = any(
         int((spec.parameters or {}).get("chain_id") or 0) == 0 for spec in specs
     )
-    worker_limit = 2 if all_network else 3
-    max_workers = min(len(specs), worker_limit)
-    results: dict[int, tuple[CachedDataset, dict[str, Any], list[str], float] | Exception] = {}
-    if max_workers <= 1:
-        for index, spec in enumerate(specs):
-            try:
-                results[index] = load_one(spec)
-            except Exception as exc:  # one dataset must not fail the section
-                results[index] = exc
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cow-data") as pool:
-            futures = {pool.submit(load_one, spec): index for index, spec in enumerate(specs)}
-            for future in as_completed(futures):
-                index = futures[future]
-                try:
-                    results[index] = future.result()
-                except Exception as exc:  # one dataset must not fail the section
-                    results[index] = exc
-
-    for index, spec in enumerate(specs):
-        result = results[index]
-        if not isinstance(result, Exception):
-            dataset, cov, codes, elapsed = result
-            datasets[spec.key] = dataset
-            coverage[spec.key] = cov
-            warnings.extend(codes)
-            logger.info(
-                "cow_explorer_dataset key=%s environment=%s chain=%s window=%s rows=%s source_rows=%s truncated=%s elapsed=%.3f",
-                spec.key,
-                spec.parameters.get("env", ""),
-                spec.parameters.get("chain_id", 0),
-                range_state.get("window_days", range_state.get("kind")),
-                dataset.stats.rows_returned,
-                dataset.stats.source_rows,
-                dataset.stats.truncated,
-                elapsed,
-            )
-        else:
-            logger.warning("cow_explorer dataset %s failed: %s", spec.key, result)
-            if not isinstance(result, _CachedFailure):
-                # Remember the failure so immediate retries replay it instead
-                # of re-running a query that just OOMed/timed out.
-                _failure_cache_put(spec, str(result))
-            message = f"{spec.title} unavailable: {result}"
-            warnings.extend(["query_failed", message])
-            fetched_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            coverage[spec.key] = {
-                "basis": spec.basis,
-                "requested_start": range_state.get("start_at") or None,
-                "requested_end": range_state.get("end_at") or None,
-                "actual_start": None,
-                "actual_end": None,
-                "anchor": range_state.get("anchor"),
-                "latest_source_observation": None,
-                "fetched_at": fetched_at,
-                "checkpoint_block": None,
-                "checkpoint_timestamp": None,
-                "returned_rows": 0,
-                "source_rows": None,
-                "row_cap": ROW_CAP,
-                "truncated": False,
-                "mode": spec.coverage_mode,
-                "warning_codes": ["query_failed"],
-                # The frontend renders an explicit error card from this —
-                # a failed dataset must stay VISIBLE, never silently vanish.
-                "error": str(result)[:400],
-            }
-            # Stub dataset so the key survives into descriptors/attach: the
-            # payload keeps the panel present (zero rows + provenance error)
-            # instead of dropping it, which blanked whole sections in v2.
-            datasets[spec.key] = CachedDataset(
-                columns=[],
-                column_types=[],
-                rows=[],
-                stats=DatasetStats(
-                    row_count=0,
-                    rows_returned=0,
-                    mode="exact_capped",
-                    source_rows=0,
-                    row_cap=ROW_CAP,
-                    truncated=False,
-                    fetched_at=fetched_at,
-                    elapsed_seconds=0.0,
-                    warnings=[message],
-                ),
-                sql=spec.sql,
-                database=COW_DB,
-                parameters=spec.parameters,
-            )
-    return datasets, coverage, list(dict.fromkeys(warnings))
+    return mini_apps.load_specs_safe(
+        ch,
+        specs,
+        range_state,
+        force_refresh=force_refresh,
+        database=COW_DB,
+        row_cap=ROW_CAP,
+        failure_cache=_FAILURE_CACHE,
+        coverage_fn=_coverage_from_dataset,
+        failure_coverage_fn=_failure_coverage,
+        worker_limit=2 if all_network else 3,
+        thread_name_prefix="cow-data",
+        log_success=_log_dataset_loaded,
+        log_failure=_log_dataset_failed,
+        query_budget=INTERACTIVE_QUERY_BUDGET,
+    )
 
 
 def _empty_loaded_groups() -> dict[str, Any]:
@@ -3473,8 +3346,7 @@ def _empty_state(
     }
 
 
-def _dataset_titles(specs: list[QuerySpec]) -> dict[str, str]:
-    return {spec.key: spec.title for spec in specs}
+_dataset_titles = mini_apps.dataset_titles
 
 
 def _summary_cards(record: mini_apps.ViewRecord) -> list[SummaryCard]:
@@ -3497,35 +3369,12 @@ def _payload_from_record(
     record: mini_apps.ViewRecord,
     titles: dict[str, str] | None = None,
 ) -> MiniAppPayload:
-    # Retained sections' datasets outlive the specs that created them, so the
-    # persisted title map is the fallback for keys the caller didn't pass.
-    titles = {
-        **(record.view_state.get("dataset_titles") or {}),
-        **(titles or {}),
-    }
-    scope_id = str(record.view_state.get("scope_id") or "")
-    coverage = record.view_state.get("coverage") or {}
-    descriptors = {
-        key: mini_apps.build_dataset_descriptor(
-            key=key,
-            dataset=dataset,
-            title=titles.get(key, key.replace("_", " ").title()),
-            scope_id=scope_id,
-            provenance={"source": COW_DB, "coverage": coverage.get(key, {})},
-        )
-        for key, dataset in record.datasets.items()
-    }
-    return MiniAppPayload(
-        type="INITIAL_LOAD",
-        view_id=record.view_id,
+    return mini_apps.payload_from_record(
+        record,
         app_id=COW_APP_ID,
-        title=record.title,
-        status="ready",
-        summary_cards=_summary_cards(record),
-        datasets=descriptors,
-        view_state=record.view_state,
-        provenance={"source": COW_DB, "coverage": coverage},
-        warnings=list(record.view_state.get("warnings") or []),
+        database=COW_DB,
+        summary_cards=_summary_cards,
+        titles=titles,
     )
 
 
@@ -3595,7 +3444,8 @@ WHERE {where} AND lower(symbol)=lower({{symbol:String}})
 GROUP BY chain_id,token ORDER BY chain_id,token"""
         identifier = ""
     result = mini_apps.run_structured_query(
-        ch, sql, COW_DB, params, requested_max_rows=100
+        ch, sql, COW_DB, params, requested_max_rows=100,
+        query_budget=INTERACTIVE_QUERY_BUDGET,
     )
     columns = {name: idx for idx, name in enumerate(result.columns)}
     candidates: list[dict[str, Any]] = []
@@ -3688,28 +3538,13 @@ def _section_fingerprint(
 
 
 def _touch_section_lru(view_id: str, state: dict[str, Any], keep_section: str) -> None:
-    """Mark ``keep_section`` most-recent and evict retained sections above cap.
-
-    Mutates ``state`` in place (section_lru / section_datasets /
-    section_fingerprints / loaded_groups) and detaches evicted datasets.
-    """
-    lru = [s for s in (state.get("section_lru") or []) if s != keep_section]
-    lru.append(keep_section)
-    section_datasets = dict(state.get("section_datasets") or {})
-    fingerprints = dict(state.get("section_fingerprints") or {})
-    loaded = dict(state.get("loaded_groups") or {})
-    while len(lru) > MAX_RETAINED_SECTIONS:
-        victim = lru.pop(0)
-        keys = list(section_datasets.pop(victim, []) or [])
-        if keys:
-            mini_apps.remove_view_datasets(view_id, keys)
-        fingerprints.pop(victim, None)
-        for group in SECTION_GROUPS.get(victim, {}):
-            loaded[f"{victim}.{group}"] = False
-    state["section_lru"] = lru
-    state["section_datasets"] = section_datasets
-    state["section_fingerprints"] = fingerprints
-    state["loaded_groups"] = loaded
+    mini_apps.touch_section_lru(
+        view_id,
+        state,
+        keep_section,
+        section_groups=SECTION_GROUPS,
+        max_retained=MAX_RETAINED_SECTIONS,
+    )
 
 
 def _apply_section_load(

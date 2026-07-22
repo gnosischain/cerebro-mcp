@@ -1,0 +1,75 @@
+// Per-table presentation config for PaginatedTable renders: display labels
+// and hidden columns. Cell renderers live beside the tables (sections/detail)
+// because they need click-through callbacks.
+
+export const COLUMN_LABELS: Record<string, string> = {
+  title: "Title",
+  state: "State",
+  type: "Type",
+  author: "Author",
+  start_at: "Voting starts",
+  end_at: "Voting ends",
+  created_at: "Created",
+  scores_total: "Total VP cast",
+  scores_state: "Scores",
+  quorum_status: "Quorum",
+  quorum_ratio: "Quorum ratio",
+  votes_count: "Votes",
+  leading_choice: "Leading choice",
+  leading_choice_share: "Leading share",
+  gip_number: "GIP",
+  voter: "Voter",
+  vote_count: "Votes",
+  total_vp: "Total VP",
+  avg_vp: "Avg VP",
+  first_vote_at: "First vote",
+  last_vote_at: "Latest vote",
+  choice_label: "Choice",
+  proposal_state: "State",
+  vp: "VP",
+  vp_state: "VP state",
+  choice_kind: "Choice",
+  reason: "Reason",
+  proposal_title: "Proposal",
+  category_name: "Category",
+  posts_count: "Posts",
+  reply_count: "Replies",
+  participant_count: "Participants",
+  views: "Views",
+  like_count: "Likes",
+  likes_given: "Likes given",
+  likes_received: "Likes received",
+  last_posted_at: "Last activity",
+  status: "Status",
+  username: "Username",
+  trust_level: "Trust level",
+  days_visited: "Days visited",
+  post_count: "Posts",
+  topic_count: "Topics",
+  posts_in_range: "Posts (range)",
+  topics_started: "Topics started",
+  last_post_at: "Last post",
+  post_number: "#",
+  reads: "Reads",
+  topic_title: "Topic",
+  excerpt: "Excerpt",
+  link_source: "Link tier",
+};
+
+/** Columns kept in the row payload (for click-through identifiers and cell
+ * renderers) but not shown as table columns. */
+export const HIDDEN_COLUMNS: Record<string, string[]> = {
+  proposals: ["id", "discussion", "discussion_topic_id", "choice_shape_flagged", "created_at", "snapshot_block", "quorum", "choices", "scores", "len_ok"],
+  // choice_kind is VISIBLE (rendered as the "Choice" cell from the row's
+  // choice_index/choice_indexes/choice_label payload columns, which stay hidden).
+  proposal_votes: ["vote_id", "voter_key", "proposal_id", "choice_index", "choice_indexes"],
+  voter_votes: ["vote_id", "voter_key", "proposal_id", "choice_index", "choice_indexes", "choice_label"],
+  voter_leaderboard: ["voter_key"],
+  forum_topics: ["id", "category_id", "created_at", "slug", "bumped_at", "closed", "archived", "pinned"],
+  contributor_leaderboard: ["id", "user_id"],
+  contributor_posts: ["id", "topic_id", "user_id", "post_id"],
+};
+
+export function hiddenColumnsFor(datasetKey: string): string[] {
+  return HIDDEN_COLUMNS[datasetKey] ?? [];
+}

@@ -17,6 +17,7 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 //   contractExplorer
 //   modelLineage
 //   cowExplorer
+//   governance
 
 const ENTRY_MAP: Record<string, { html: string; out: string }> = {
   report:           { html: "index.html",            out: "index.html" },
@@ -29,6 +30,7 @@ const ENTRY_MAP: Record<string, { html: string; out: string }> = {
   dataCatalog:      { html: "data-catalog.html",     out: "data-catalog.html" },
   reportStudio:     { html: "report-studio.html",    out: "report-studio.html" },
   cowExplorer:      { html: "cow-explorer.html",     out: "cow-explorer.html" },
+  governance:       { html: "governance.html",       out: "governance.html" },
 };
 
 const entryName = process.env.CEREBRO_UI_ENTRY ?? "report";
@@ -46,6 +48,7 @@ const SPLIT_BASE: Record<string, string> = {
   dataCatalog: "/app/data_catalog/",
   cowExplorer: "/app/cow_explorer/",
   graphExplorerWeb: "/app/graph_explorer/",
+  governance: "/app/governance/",
 };
 const splitBase = SPLIT_BASE[entryName];
 const isSplit = Boolean(splitBase);

@@ -16,6 +16,7 @@ export interface MiniAppTab {
 export const DEFAULT_APP_TABS: MiniAppTab[] = [
   { id: "catalog", label: "Catalog", href: "/data-catalog.html", appId: "data_catalog" },
   { id: "cow", label: "CoW", href: "/cow-explorer.html", appId: "cow_explorer" },
+  { id: "governance", label: "Governance", href: "/governance.html", appId: "governance" },
   { id: "portfolio", label: "Portfolio", href: "/portfolio.html", appId: "portfolio" },
   { id: "contract", label: "Contract", href: "/contract-explorer.html", appId: "contract_explorer" },
   { id: "graph", label: "Graph", href: "/graph-explorer.html", appId: "graph_explorer" },

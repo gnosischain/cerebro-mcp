@@ -129,6 +129,7 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "open_report_studio": _RO,
     "open_contract_explorer": _RO,
     "open_cow_explorer": _RO,
+    "open_governance": _RO,
     "load_contract_explorer_address": _RO,
     "contract_explorer_call_function": _RO,
     "open_graph_explorer": _RO,
@@ -205,6 +206,11 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "load_cow_entity": _AO,
     "load_cow_explorer_datasets": _AO,
     "load_cow_icon_overlay": _AO,
+    # governance explorer (frontend-only helpers)
+    "load_governance_section": _AO,
+    "load_governance_datasets": _AO,
+    "search_governance": _AO,
+    "load_governance_entity": _AO,
     # metric lab (frontend-only helpers)
     "search_metric_catalog": _AO,
     "get_metric_catalog_entry": _AO,

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -120,6 +121,68 @@ class MiniAppCache:
             del self._store[oldest]
 
 
+class CachedFailure(RuntimeError):
+    """A query failure replayed from the negative cache (not re-executed)."""
+
+
+class FailureCache:
+    """Negative-result cache for mini-app dataset queries.
+
+    A dataset whose query failed is remembered for ``ttl_seconds`` so a manual
+    Retry within the window returns the cached failure INSTANTLY instead of
+    re-running a query known to blow up or time out. Callers doing an explicit
+    force-refresh bypass :meth:`get` (a refresh may genuinely retry).
+
+    Each app owns one instance scoped to its database — keys are derived with
+    :func:`make_cache_key` under the ``"failure"`` mode.
+    """
+
+    def __init__(
+        self,
+        database: str,
+        *,
+        ttl_seconds: int = 120,
+        max_entries: int = 256,
+    ) -> None:
+        self._database = database
+        self.ttl_seconds = ttl_seconds
+        self._max_entries = max_entries
+        self._entries: dict[str, tuple[float, str]] = {}
+        self._lock = threading.Lock()
+
+    def _key(self, sql: str, parameters: dict[str, Any] | None) -> str:
+        return make_cache_key(sql, self._database, parameters, "failure")
+
+    def get(self, sql: str, parameters: dict[str, Any] | None) -> str | None:
+        key = self._key(sql, parameters)
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit is None:
+                return None
+            expires, message = hit
+            if time.monotonic() > expires:
+                self._entries.pop(key, None)
+                return None
+            return message
+
+    def put(self, sql: str, parameters: dict[str, Any] | None, message: str) -> None:
+        key = self._key(sql, parameters)
+        with self._lock:
+            if len(self._entries) >= self._max_entries:
+                now = time.monotonic()
+                for stale_key in [
+                    k for k, (exp, _) in self._entries.items() if exp < now
+                ]:
+                    self._entries.pop(stale_key, None)
+                if len(self._entries) >= self._max_entries:
+                    self._entries.pop(next(iter(self._entries)), None)
+            self._entries[key] = (time.monotonic() + self.ttl_seconds, message)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
 # Module-level singleton — both Token Explorer and Metric Lab share this.
 _cache = MiniAppCache()
 
@@ -135,6 +198,8 @@ def reset_cache_for_tests() -> None:
 
 __all__ = [
     "CachedDataset",
+    "CachedFailure",
+    "FailureCache",
     "MiniAppCache",
     "make_cache_key",
     "get_cache",

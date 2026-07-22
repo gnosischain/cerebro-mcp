@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from cerebro_mcp.clients.clickhouse import ExecutedQuery
+from cerebro_mcp.clients.clickhouse import INTERACTIVE_QUERY_BUDGET, ExecutedQuery
 from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
 from cerebro_mcp.security import RiskClass, TOOL_RISK_REGISTRY
 from cerebro_mcp.tools.visualization import cow_explorer, mini_apps, web_apps
@@ -23,12 +23,16 @@ ORDER_UID = "0x" + "55" * 56
 
 
 class StubCH:
-    """ClickHouse stub used by the one-pass exact-capped dataset loader."""
+    """ClickHouse stub used by the one-pass exact-capped dataset loader.
+
+    Records ``(sql, database, max_rows, parameters, query_budget)`` per call
+    so tests can assert every interactive query carries the shared budget.
+    """
 
     def __init__(self, *, total: int = 2, fail_marker: str = ""):
         self.total = total
         self.fail_marker = fail_marker
-        self.calls: list[tuple[str, str, int, dict | None]] = []
+        self.calls: list[tuple[str, str, int, dict | None, object]] = []
 
     def run_query(
         self,
@@ -38,8 +42,9 @@ class StubCH:
         audience="tool",
         fetch_mode="auto",
         parameters=None,
+        query_budget=None,
     ):
-        self.calls.append((sql, database, requested_max_rows, parameters))
+        self.calls.append((sql, database, requested_max_rows, parameters, query_budget))
         if self.fail_marker and self.fail_marker in sql:
             raise RuntimeError("planned dataset failure")
         n = min(self.total, requested_max_rows)
@@ -68,8 +73,8 @@ class StubCH:
 
 
 class SearchCH(StubCH):
-    def run_query(self, sql, database="dbt", requested_max_rows=100, audience="tool", fetch_mode="auto", parameters=None):
-        self.calls.append((sql, database, requested_max_rows, parameters))
+    def run_query(self, sql, database="dbt", requested_max_rows=100, audience="tool", fetch_mode="auto", parameters=None, query_budget=None):
+        self.calls.append((sql, database, requested_max_rows, parameters, query_budget))
         if "token AS identifier" in sql:
             return self._result(sql, database, ["chain_id", "identifier", "entity_type", "role", "evidence_count"], [[1, TOKEN_A, "token", "token_symbol", 3]])
         if "'transaction' AS entity_type" in sql:
@@ -80,7 +85,7 @@ class SearchCH(StubCH):
             return self._result(sql, database, ["chain_id", "entity_type", "role", "evidence_count"], [[1, "auction", "auction", 1]])
         if "'interaction_target'" in sql:
             return self._result(sql, database, ["chain_id", "role", "evidence_count"], [[1, "owner", 8], [100, "competition_solver", 2]])
-        return super().run_query(sql, database, requested_max_rows, audience, fetch_mode, parameters)
+        return super().run_query(sql, database, requested_max_rows, audience, fetch_mode, parameters, query_budget)
 
 
 @pytest.fixture(autouse=True)
@@ -360,6 +365,63 @@ def test_exact_capped_mode_rejects_unordered_sql_before_querying():
     with pytest.raises(mini_apps.MiniAppQueryError, match="ORDER BY"):
         mini_apps.load_exact_capped_dataset(ch, "SELECT * FROM cow_db.events", database="cow_db")
     assert ch.calls == []
+
+
+def test_specs_carry_interactive_query_budget():
+    server, ch = _server()
+    opened = _tool(server, "open_cow_explorer")()
+    view_id = opened.structuredContent["view_id"]
+    applied = _tool(server, "load_cow_explorer_section")(
+        view_id=view_id, request_id=1, section="overview", chain_id=0
+    ).structuredContent
+    _tool(server, "load_cow_explorer_datasets")(
+        view_id=view_id, request_id=0, section="overview", group="breakdown",
+        scope_id=applied["view_state"]["scope_id"],
+    )
+    assert ch.calls
+    assert all(call[4] is INTERACTIVE_QUERY_BUDGET for call in ch.calls)
+
+
+def test_search_carries_interactive_query_budget():
+    ch = SearchCH()
+    cow_explorer._search_candidates(ch, TOKEN_A, "production", 0)
+    assert ch.calls
+    assert all(call[4] is INTERACTIVE_QUERY_BUDGET for call in ch.calls)
+
+
+def test_generated_spec_sql_never_glues_tokens_to_set_operators():
+    """Multi-arm UNION assembly must keep whitespace around set-op keywords.
+
+    Regression: f-string expressions cannot contain ``\\n`` on py<3.12, so
+    ``"UNION ALL".join(parts)`` inline in an f-string silently produced
+    ``GROUP BY token0,token1UNION ALL`` — a live-only ClickHouse syntax
+    error (code 62) on every all-networks arm (single-chain has one arm and
+    never joins). Sweep every section's generated SQL for glued keywords.
+    """
+    import re
+
+    glued = re.compile(r"\S(?:UNION|EXCEPT|INTERSECT)\b|\b(?:UNION ALL|EXCEPT|INTERSECT)\S")
+    filters = {"status": "", "owner": "", "solver": "", "token": ""}
+    single = cow_explorer.COW_CHAINS[1]
+    for section in cow_explorer.SECTION_DEFAULT_DAYS:
+        chains = (
+            (None, cow_explorer.COW_CHAINS[100])
+            if section in cow_explorer.ALL_NETWORK_SECTIONS
+            else (single,)
+        )
+        for chain in chains:
+            range_state = cow_explorer._range_state(section, -1, "", "")
+            specs = cow_explorer._section_specs(
+                section, "production", chain, (TOKEN_A, TOKEN_B), "1h",
+                range_state, filters,
+            )
+            assert specs
+            for spec in specs:
+                match = glued.search(spec.sql)
+                assert match is None, (
+                    f"{section}/{spec.key}: glued set-op keyword "
+                    f"{match.group(0)!r} in generated SQL"
+                )
 
 
 def test_sql_contracts_cover_price_depth_fee_and_solver_invariants():

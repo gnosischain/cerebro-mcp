@@ -8,12 +8,9 @@
 //   decimals === 0 is treated as unknown-SUSPECT (the indexer stores a failed
 //   decimals() getter as 0, indistinguishable from a real 0-decimals token).
 
-export const NATIVE_TOKEN = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+import { shortAddr } from "../../../utils/format";
 
-export function shortAddr(address: string): string {
-  const value = String(address || "");
-  return value.length >= 12 ? `${value.slice(0, 6)}…${value.slice(-4)}` : value;
-}
+export const NATIVE_TOKEN = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 export function displayToken(
   address: string,

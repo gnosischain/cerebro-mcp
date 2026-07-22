@@ -1,8 +1,6 @@
 import { useState } from "react";
 
-function shortAddress(value: string): string {
-  return /^0x[0-9a-f]{40}$/i.test(value) ? `${value.slice(0, 6)}…${value.slice(-4)}` : value;
-}
+import { shortAddr } from "../../../utils/format";
 
 export function TokenIdentity({ address, iconUrl, symbol }: { address: string; iconUrl?: string; symbol?: string }) {
   const [failedUrl, setFailedUrl] = useState("");
@@ -15,7 +13,7 @@ export function TokenIdentity({ address, iconUrl, symbol }: { address: string; i
       ) : (
         <span className="cow-token__fallback" aria-hidden="true">{fallback}</span>
       )}
-      <span>{symbol || shortAddress(address)}</span>
+      <span>{symbol || shortAddr(address)}</span>
     </span>
   );
 }

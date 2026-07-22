@@ -20,6 +20,7 @@ it, how to develop it, and how it talks to the backend.
 | Graph Explorer     | `ui://cerebro/graph_explorer`      | Cross-sector semantic graph (Circles trust, Safe, pools, …)  | `open_graph_explorer`         |
 | Contract Explorer  | `ui://cerebro/contract_explorer`   | Per-contract: ABI, callable functions, view-call, tx decode  | `open_contract_explorer`      |
 | CoW Data Explorer  | `ui://cerebro/cow_explorer`        | Indexed CoW fills, markets, intents, auctions, solvers, and entity evidence | `open_cow_explorer` |
+| Governance Explorer | `ui://cerebro/governance`         | GnosisDAO Snapshot signaling + forum activity: proposals, votes, voters, forum, GIP/discussion cross-links | `open_governance` |
 
 All apps share the same plumbing:
 
@@ -178,6 +179,7 @@ Open any of:
 - `http://localhost:5173/graph-explorer.html`       — Graph Explorer
 - `http://localhost:5173/contract-explorer.html`    — Contract Explorer
 - `http://localhost:5173/cow-explorer.html`         — CoW Data Explorer
+- `http://localhost:5173/governance.html`           — Governance Explorer
 
 Or from the repo root: `make dev`.
 
@@ -349,6 +351,55 @@ The app and Data Catalog use isolated split bundles. Their public assets remain
 
 ---
 
+## Governance Explorer
+
+**Resource**: `ui://cerebro/governance`
+
+**Standalone**: `/app/governance`
+
+**Source**: [`ui/src/mini-apps/governance/`](../ui/src/mini-apps/governance/) · [`governance_explorer.py`](../src/cerebro_mcp/tools/visualization/governance_explorer.py)
+
+**Agent tool**: `open_governance`
+**App-only tools**: `load_governance_section`, `load_governance_datasets`, `search_governance`, `load_governance_entity`
+
+Read-only governance intelligence over `governance_db` (populated by the
+click-runner Snapshot + Discourse ingestors, daily cadence). Four sections —
+Overview, Proposals, Voters, Forum — plus proposal / voter / forum-topic /
+contributor drill-downs, global typed search, CSV export (formula-injection
+neutralized), and an Ask Cerebro host-chat handoff. Everything is labelled
+Snapshot off-chain signaling or forum activity; the app never claims binding
+execution and never derives passed/failed semantics (quorum status is
+met / missed / unspecified only).
+
+Load model mirrors CoW v2: `open_governance` runs ZERO ClickHouse queries;
+each section's `core` group loads on section apply and the rest streams via
+`load_governance_datasets` (stale-scope guarded, additive PATCH). Five scopes
+are retained per view (four sections + one entity), so tab returns with an
+unchanged scope fingerprint are query-free. All eight `governance_db` tables
+are `ReplacingMergeTree(ingested_at)` re-inserted by the daily ingestors, so
+every table read carries `FINAL`. Freshness is tracked as two independent
+clocks per source (ingestion vs latest activity; `source_stale` after 24h).
+
+Cross-source linking is two-tier and never fuzzy: the author-declared
+Snapshot `discussion` URL (exact forum topic id) ranks first
+(`link_source='discussion'`), exact GIP-number title matches second
+(`link_source='gip'`); all candidates are shown when a GIP number maps to
+several proposals/topics. Untrusted content: proposal bodies and forum raw
+markdown render through react-markdown (`skipHtml`, https-only links routed
+through the host `openLink`); forum cooked HTML is the DOMPurify-sanitized
+fallback; images are stripped to "[image] — open on forum" chips. Date ranges
+use fingerprint-stable tokens (`start_at` = `""` all-history / `"90d"` /
+`"1y"` / ISO pair custom); the Proposals range matches by voting-window
+overlap.
+
+Dev loop: `npm run dev` renders against `devFixture.ts` with no backend;
+against the real backend run `make build-ui-governance` and restart the
+server (the standalone route serves the static bundle — check
+`/app/governance/health` for the live bundle's sha256/mtime). The opt-in live
+smoke suite is `CEREBRO_LIVE_CH_SMOKE=1 pytest tests/test_governance_live_smoke.py`.
+
+---
+
 ## Graph Explorer
 
 **Resource**: `ui://cerebro/graph_explorer`  
@@ -467,11 +518,11 @@ All in [`src/cerebro_mcp/tools/semantic/graph_explorer/constants.py`](../src/cer
 
 ## Adding a new mini-app
 
-A mini-app has five files on the backend and about six on the frontend. Use `graph_explorer` or `portfolio` as the canonical template.
+A mini-app has five files on the backend and about six on the frontend. Use `cow_explorer` or `governance_explorer` (both under `tools/visualization/`) as the canonical v2 template — zero-query opener, deferred `SECTION_GROUPS`, scope fingerprints, partial-failure isolation.
 
 ### Backend
 
-1. `src/cerebro_mcp/tools/<app>.py`
+1. `src/cerebro_mcp/tools/visualization/<app>.py`
    - Define `APP_ID`, `URI`, `DEFAULT_TITLE`, and a `register_<app>_tools(mcp, ch)` function.
    - In `register_*_tools`:
      - `mini_apps.register_app(APP_ID, title=..., resource_uri=URI)`
@@ -479,9 +530,9 @@ A mini-app has five files on the backend and about six on the frontend. Use `gra
      - `@mcp.tool(meta={"ui": {"resourceUri": URI}})` for each interaction. `open_*` returns `INITIAL_LOAD`; `update_*_focus` returns `PATCH_VIEW_STATE`.
    - Use `mini_apps.run_structured_query` or `mini_apps.load_bounded_dataset` for ClickHouse queries — they handle caching and dataset-mode rules.
 2. `src/cerebro_mcp/server.py` — call `register_<app>_tools(mcp, ch)`.
-3. `src/cerebro_mcp/security.py` — classify every new tool as `_RO` (read-only).
-4. `src/cerebro_mcp/tools/metadata.py` — add the tools to the manual tool table.
-5. `tests/test_mini_app_visibility.py` — extend the visibility assertions.
+3. `src/cerebro_mcp/security.py` — classify the `open_*` tool as `_RO` and every app-only hydration tool as `_AO` in `TOOL_RISK_REGISTRY`.
+4. `src/cerebro_mcp/tools/tool_meta.py` — add an `open_*` entry (`domain` / `tier` / `tags`) to `TOOL_META`.
+5. `tests/test_<app>.py` (e.g. `tests/test_governance_explorer.py`) — the app's backend suite, plus `tests/test_web_apps.py` for the shared registration/visibility assertions.
 
 ### Frontend
 
@@ -494,7 +545,7 @@ A mini-app has five files on the backend and about six on the frontend. Use `gra
 ### Visibility + tests
 
 ```bash
-pytest tests/test_mini_app_visibility.py tests/test_<app>.py -v
+pytest tests/test_web_apps.py tests/test_<app>.py -v
 ```
 
 ---

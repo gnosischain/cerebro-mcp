@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DATASET_DOCS } from "../model/datasetDocs";
-import { DATASET_GROUP, SECTION_GROUPS, datasetError } from "../model/datasetGroups";
+import { DATASET_GROUP, SECTION_GROUPS } from "../model/datasetGroups";
 import { ENTITY_HEADER, ENTITY_LAYOUT } from "../detail/EntityDetail";
 import { buildShareHeatmap } from "../model/parseRows";
 
@@ -34,21 +34,6 @@ describe("dataset docs completeness", () => {
     for (const [key, owner] of Object.entries(DATASET_GROUP)) {
       expect(SECTION_GROUPS[owner.section][owner.group]).toContain(key);
     }
-  });
-});
-
-describe("datasetError (stub-descriptor failure contract)", () => {
-  it("returns the server error message when present", () => {
-    expect(
-      datasetError({ provenance: { coverage: { error: "boom", warning_codes: ["query_failed"] } } }),
-    ).toBe("boom");
-  });
-  it("falls back to a generic message on query_failed without error text", () => {
-    expect(datasetError({ provenance: { coverage: { warning_codes: ["query_failed"] } } })).toBe("Query failed.");
-  });
-  it("returns empty for healthy datasets", () => {
-    expect(datasetError({ provenance: { coverage: { warning_codes: [] } } })).toBe("");
-    expect(datasetError(undefined)).toBe("");
   });
 });
 

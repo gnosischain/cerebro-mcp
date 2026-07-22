@@ -20,17 +20,21 @@ future apps). It owns:
 
 from __future__ import annotations
 
+import hashlib
+import importlib.resources
 import logging
 import math
 import json
 import inspect
 import re
 import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from mcp.types import CallToolResult, TextContent
 
@@ -41,6 +45,8 @@ from cerebro_mcp.clients.clickhouse import (
 )
 from cerebro_mcp.runtime.mini_app_cache import (
     CachedDataset,
+    CachedFailure,
+    FailureCache,
     get_cache,
     make_cache_key,
 )
@@ -50,6 +56,7 @@ from cerebro_mcp.models.mini_app import (
     DatasetSchemaColumn,
     DatasetStats,
     MiniAppPayload,
+    SummaryCard,
 )
 
 logger = logging.getLogger(__name__)
@@ -703,6 +710,7 @@ def load_exact_capped_dataset(
     cache_ttl_seconds: int = 300,
     row_cap: int = SAMPLE_TARGET,
     exact_source_rows: bool = True,
+    query_budget: QueryBudget | None = None,
 ) -> CachedDataset:
     """Load the newest deterministic rows without random sampling.
 
@@ -711,6 +719,10 @@ def load_exact_capped_dataset(
     filtered/aggregated statement once while still reporting the exact source
     row count.  This is intended for forensic/analyst tables where a random
     sample would destroy ordering and make pagination misleading.
+
+    ``query_budget`` (optional) is forwarded to that single ClickHouse
+    round-trip so interactive apps can cap execution time / memory / result
+    rows / threads per query.
 
     ``exact_source_rows=False`` (opt-in, for HEAVY queries) skips the
     ``count() OVER ()`` window column entirely.  An empty-frame window
@@ -767,6 +779,7 @@ def load_exact_capped_dataset(
             database,
             parameters,
             requested_max_rows=cap,
+            query_budget=query_budget,
         )
     except Exception as exc:
         logger.warning("mini_app exact capped load failed: %s", exc)
@@ -1027,6 +1040,313 @@ def collect_dataset_warnings(*datasets: CachedDataset | None) -> list[str]:
                 seen.add(w)
                 out.append(w)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Shared sectioned-app plumbing (CoW Explorer, Governance Explorer, ...)
+# ---------------------------------------------------------------------------
+#
+# The v2 sectioned mini apps share app-agnostic machinery: a static-bundle
+# loader, a parallel partial-failure dataset loader, section LRU retention,
+# and ViewRecord -> MiniAppPayload assembly. Each app binds these with its own
+# app id / database / spec catalog and keeps a thin module-local wrapper —
+# mirroring the frontend's shared useGroupLoader + per-app binding pattern.
+
+
+class StaticBundle:
+    """Mtime-aware cached loader for a Vite-built single-file app bundle.
+
+    ``html()`` re-reads the artifact whenever its ``(mtime_ns, size)``
+    signature changes — a rebuilt bundle is picked up without a server
+    restart — and falls back to a small placeholder page pointing at
+    ``build_hint`` when the artifact is missing. ``diagnostics()`` exposes
+    the served bundle's sha256/mtime plus the asset directory listing.
+    """
+
+    def __init__(self, filename: str, *, assets_dir: str, build_hint: str) -> None:
+        self._filename = filename
+        self._assets_dir = assets_dir
+        self._build_hint = build_hint
+        self._lock = threading.Lock()
+        self._html: str | None = None
+        self._signature: tuple[int, int] | None = None
+        self._sha256: str | None = None
+        self._mtime: str | None = None
+
+    def _resource(self):
+        return importlib.resources.files("cerebro_mcp").joinpath(
+            f"static/{self._filename}"
+        )
+
+    def html(self) -> str:
+        with self._lock:
+            try:
+                resource = self._resource()
+                with importlib.resources.as_file(resource) as path:
+                    stat = path.stat()
+                    signature = (stat.st_mtime_ns, stat.st_size)
+                    if self._html is not None and signature == self._signature:
+                        return self._html
+                    raw = path.read_bytes()
+                    self._html = raw.decode("utf-8")
+                    self._signature = signature
+                    self._sha256 = hashlib.sha256(raw).hexdigest()
+                    self._mtime = datetime.fromtimestamp(
+                        stat.st_mtime, timezone.utc
+                    ).isoformat().replace("+00:00", "Z")
+            except (FileNotFoundError, ModuleNotFoundError, OSError):
+                self._html = (
+                    "<!doctype html><html><body><div id='root'>"
+                    f"{self._filename} not built — run "
+                    f"<code>{self._build_hint}</code></div></body></html>"
+                )
+                self._signature = None
+                self._sha256 = hashlib.sha256(self._html.encode()).hexdigest()
+                self._mtime = None
+            return self._html
+
+    def diagnostics(self) -> dict[str, Any]:
+        self.html()
+        assets: list[str] = []
+        try:
+            root = importlib.resources.files("cerebro_mcp").joinpath(
+                f"static/{self._assets_dir}"
+            )
+            assets = sorted(entry.name for entry in root.iterdir() if entry.is_file())
+        except (FileNotFoundError, ModuleNotFoundError, OSError, NotADirectoryError):
+            pass
+        return {
+            "bundle_sha256": self._sha256,
+            "bundle_mtime": self._mtime,
+            "assets": assets,
+        }
+
+
+class SectionQuerySpec(Protocol):
+    """Structural contract the shared loaders need from an app's QuerySpec.
+
+    Apps keep their own frozen dataclasses (with extra app-specific fields
+    such as coverage modes or source planes); only these attributes are read
+    here.
+    """
+
+    key: str
+    title: str
+    sql: str
+    parameters: dict[str, Any]
+    cache_ttl_seconds: int
+    exact_count: bool
+
+
+def dataset_titles(specs: Iterable[SectionQuerySpec]) -> dict[str, str]:
+    return {spec.key: spec.title for spec in specs}
+
+
+def payload_from_record(
+    record: ViewRecord,
+    *,
+    app_id: str,
+    database: str,
+    summary_cards: Callable[[ViewRecord], list[SummaryCard]],
+    titles: dict[str, str] | None = None,
+) -> MiniAppPayload:
+    """Assemble the full INITIAL_LOAD payload for a sectioned app's view."""
+    # Retained sections' datasets outlive the specs that created them, so the
+    # persisted title map is the fallback for keys the caller didn't pass.
+    titles = {
+        **(record.view_state.get("dataset_titles") or {}),
+        **(titles or {}),
+    }
+    scope_id = str(record.view_state.get("scope_id") or "")
+    coverage = record.view_state.get("coverage") or {}
+    descriptors = {
+        key: build_dataset_descriptor(
+            key=key,
+            dataset=dataset,
+            title=titles.get(key, key.replace("_", " ").title()),
+            scope_id=scope_id,
+            provenance={"source": database, "coverage": coverage.get(key, {})},
+        )
+        for key, dataset in record.datasets.items()
+    }
+    return MiniAppPayload(
+        type="INITIAL_LOAD",
+        view_id=record.view_id,
+        app_id=app_id,
+        title=record.title,
+        status="ready",
+        summary_cards=summary_cards(record),
+        datasets=descriptors,
+        view_state=record.view_state,
+        provenance={"source": database, "coverage": coverage},
+        warnings=list(record.view_state.get("warnings") or []),
+    )
+
+
+def touch_section_lru(
+    view_id: str,
+    state: dict[str, Any],
+    keep_section: str,
+    *,
+    section_groups: Mapping[str, Mapping[str, Any]],
+    max_retained: int,
+    protected_keys: Sequence[str] = (),
+) -> None:
+    """Mark ``keep_section`` most-recent and evict retained sections above cap.
+
+    Mutates ``state`` in place (section_lru / section_datasets /
+    section_fingerprints / loaded_groups) and detaches evicted datasets.
+    Keys in ``protected_keys`` survive every eviction.
+    """
+    lru = [s for s in (state.get("section_lru") or []) if s != keep_section]
+    lru.append(keep_section)
+    section_datasets = dict(state.get("section_datasets") or {})
+    fingerprints = dict(state.get("section_fingerprints") or {})
+    loaded = dict(state.get("loaded_groups") or {})
+    while len(lru) > max_retained:
+        victim = lru.pop(0)
+        keys = [
+            key for key in (section_datasets.pop(victim, []) or [])
+            if key not in protected_keys
+        ]
+        if keys:
+            remove_view_datasets(view_id, keys)
+        fingerprints.pop(victim, None)
+        for group in section_groups.get(victim, {}):
+            loaded[f"{victim}.{group}"] = False
+    state["section_lru"] = lru
+    state["section_datasets"] = section_datasets
+    state["section_fingerprints"] = fingerprints
+    state["loaded_groups"] = loaded
+
+
+def load_specs_safe(
+    ch: ClickHouseManager,
+    specs: Sequence[SectionQuerySpec],
+    range_state: dict[str, Any],
+    *,
+    force_refresh: bool,
+    database: str,
+    row_cap: int,
+    failure_cache: FailureCache,
+    coverage_fn: Callable[
+        [CachedDataset, Any, dict[str, Any]], tuple[dict[str, Any], list[str]]
+    ],
+    failure_coverage_fn: Callable[[Any, dict[str, Any], str, str], dict[str, Any]],
+    worker_limit: int,
+    thread_name_prefix: str,
+    log_success: Callable[[Any, CachedDataset, dict[str, Any], float], None],
+    log_failure: Callable[[Any, Exception], None],
+    query_budget: QueryBudget | None = None,
+) -> tuple[dict[str, CachedDataset], dict[str, Any], list[str]]:
+    """Load a section's datasets in parallel with partial-failure isolation.
+
+    One failed dataset never fails the section: its error is remembered in
+    the app's negative ``failure_cache`` (so an immediate Retry replays it
+    instead of re-running a query that just blew up), reported through
+    ``failure_coverage_fn``'s coverage dict, and materialized as a zero-row
+    stub dataset so the panel stays VISIBLE instead of silently vanishing.
+    """
+    datasets: dict[str, CachedDataset] = {}
+    coverage: dict[str, Any] = {}
+    warnings: list[str] = []
+
+    def load_one(
+        spec: SectionQuerySpec,
+    ) -> tuple[CachedDataset, dict[str, Any], list[str], float]:
+        started = time.monotonic()
+        if "ORDER BY" not in spec.sql.upper():
+            raise ValueError(f"{spec.key} must define a deterministic ORDER BY")
+        if not force_refresh:
+            cached_failure = failure_cache.get(spec.sql, spec.parameters)
+            if cached_failure is not None:
+                raise CachedFailure(
+                    f"{cached_failure} (cached failure; retry in up to "
+                    f"{failure_cache.ttl_seconds}s, use Refresh to force, or "
+                    "narrow the window)"
+                )
+        dataset = load_exact_capped_dataset(
+            ch,
+            spec.sql,
+            database=database,
+            parameters=spec.parameters,
+            force_refresh=force_refresh,
+            cache_ttl_seconds=spec.cache_ttl_seconds,
+            row_cap=row_cap,
+            exact_source_rows=spec.exact_count,
+            query_budget=query_budget,
+        )
+        cov, codes = coverage_fn(dataset, spec, range_state)
+        return dataset, cov, codes, time.monotonic() - started
+
+    max_workers = min(len(specs), worker_limit)
+    results: dict[
+        int, tuple[CachedDataset, dict[str, Any], list[str], float] | Exception
+    ] = {}
+    if max_workers <= 1:
+        for index, spec in enumerate(specs):
+            try:
+                results[index] = load_one(spec)
+            except Exception as exc:  # one dataset must not fail the section
+                results[index] = exc
+    else:
+        with ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix=thread_name_prefix
+        ) as pool:
+            futures = {
+                pool.submit(load_one, spec): index
+                for index, spec in enumerate(specs)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:  # one dataset must not fail the section
+                    results[index] = exc
+
+    for index, spec in enumerate(specs):
+        result = results[index]
+        if not isinstance(result, Exception):
+            dataset, cov, codes, elapsed = result
+            datasets[spec.key] = dataset
+            coverage[spec.key] = cov
+            warnings.extend(codes)
+            log_success(spec, dataset, range_state, elapsed)
+        else:
+            log_failure(spec, result)
+            if not isinstance(result, CachedFailure):
+                # Remember the failure so immediate retries replay it instead
+                # of re-running a query that just blew up or timed out.
+                failure_cache.put(spec.sql, spec.parameters, str(result))
+            message = f"{spec.title} unavailable: {result}"
+            warnings.extend(["query_failed", message])
+            fetched_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            coverage[spec.key] = failure_coverage_fn(
+                spec, range_state, fetched_at, str(result)
+            )
+            # Stub dataset so the key survives into descriptors/attach: the
+            # payload keeps the panel present (zero rows + provenance error)
+            # instead of dropping it, which blanked whole sections in v2.
+            datasets[spec.key] = CachedDataset(
+                columns=[],
+                column_types=[],
+                rows=[],
+                stats=DatasetStats(
+                    row_count=0,
+                    rows_returned=0,
+                    mode="exact_capped",
+                    source_rows=0,
+                    row_cap=row_cap,
+                    truncated=False,
+                    fetched_at=fetched_at,
+                    elapsed_seconds=0.0,
+                    warnings=[message],
+                ),
+                sql=spec.sql,
+                database=database,
+                parameters=spec.parameters,
+            )
+    return datasets, coverage, list(dict.fromkeys(warnings))
 
 
 # ---------------------------------------------------------------------------

@@ -5,16 +5,19 @@ from __future__ import annotations
 
 import pytest
 
+from cerebro_mcp.clients.clickhouse import ExecutedQuery, QueryBudget
 from cerebro_mcp.models.mini_app import DatasetStats
-from cerebro_mcp.runtime.mini_app_cache import CachedDataset
+from cerebro_mcp.runtime.mini_app_cache import CachedDataset, reset_cache_for_tests
 from cerebro_mcp.tools.visualization import mini_apps
 
 
 @pytest.fixture(autouse=True)
 def reset_state():
     mini_apps.reset_views_for_tests()
+    reset_cache_for_tests()
     yield
     mini_apps.reset_views_for_tests()
+    reset_cache_for_tests()
 
 
 def _dataset(
@@ -32,6 +35,64 @@ def _dataset(
         sql=sql,
         database="dbt",
     )
+
+
+class BudgetStubCH:
+    """ClickHouse stub recording the ``query_budget`` forwarded per call."""
+
+    def __init__(self, *, total: int = 3):
+        self.total = total
+        self.calls: list[tuple[str, str, int, dict | None, QueryBudget | None]] = []
+
+    def run_query(
+        self,
+        sql,
+        database="dbt",
+        requested_max_rows=100,
+        audience="tool",
+        fetch_mode="auto",
+        parameters=None,
+        query_budget=None,
+    ):
+        self.calls.append(
+            (sql, database, requested_max_rows, parameters, query_budget)
+        )
+        n = min(self.total, requested_max_rows)
+        rows = [[index, self.total] for index in range(n)]
+        return ExecutedQuery(
+            sql=sql,
+            executed_sql=sql,
+            database=database,
+            columns=["a", "__source_rows"],
+            rows=rows,
+            row_count=len(rows),
+            elapsed_seconds=0.001,
+            fetch_mode="rows",
+            warnings=[],
+        )
+
+
+def test_exact_capped_forwards_query_budget():
+    ch = BudgetStubCH()
+    budget = QueryBudget(max_execution_time=20, max_result_rows=10_000)
+    dataset = mini_apps.load_exact_capped_dataset(
+        ch, "SELECT a FROM t ORDER BY a", query_budget=budget
+    )
+    assert dataset.rows == [[0], [1], [2]]
+    # Every ClickHouse round-trip carries the budget (the exact count rides
+    # the capped fetch as a window column, so today this is a single call).
+    assert ch.calls
+    assert [call[4] for call in ch.calls] == [budget] * len(ch.calls)
+
+
+def test_exact_capped_defaults_to_no_budget():
+    ch = BudgetStubCH()
+    dataset = mini_apps.load_exact_capped_dataset(ch, "SELECT a FROM t ORDER BY a")
+    assert dataset.stats.mode == "exact_capped"
+    assert dataset.stats.source_rows == 3
+    assert dataset.stats.truncated is False
+    assert ch.calls
+    assert [call[4] for call in ch.calls] == [None] * len(ch.calls)
 
 
 def test_attach_dataset_bumps_revision():

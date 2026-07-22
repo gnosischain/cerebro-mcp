@@ -19,7 +19,8 @@ RUN CEREBRO_UI_ENTRY=report          npm run build \
  && CEREBRO_UI_ENTRY=modelLineage    npm run build \
  && CEREBRO_UI_ENTRY=reportStudio    npm run build \
  && CEREBRO_UI_ENTRY=dataCatalog CEREBRO_UI_OUT_DIR=dist-data-catalog npm run build \
- && CEREBRO_UI_ENTRY=cowExplorer CEREBRO_UI_OUT_DIR=dist-cow-explorer npm run build
+ && CEREBRO_UI_ENTRY=cowExplorer CEREBRO_UI_OUT_DIR=dist-cow-explorer npm run build \
+ && CEREBRO_UI_ENTRY=governance CEREBRO_UI_OUT_DIR=dist-governance npm run build
 
 # Stage 2: Build the Python package
 FROM python:3.12-slim
@@ -46,6 +47,8 @@ COPY --from=ui-builder /ui/dist-data-catalog/data-catalog.html src/cerebro_mcp/s
 COPY --from=ui-builder /ui/dist-data-catalog/assets/   src/cerebro_mcp/static/assets/data_catalog/
 COPY --from=ui-builder /ui/dist-cow-explorer/cow-explorer.html src/cerebro_mcp/static/cow_explorer.html
 COPY --from=ui-builder /ui/dist-cow-explorer/assets/   src/cerebro_mcp/static/assets/cow_explorer/
+COPY --from=ui-builder /ui/dist-governance/governance.html src/cerebro_mcp/static/governance.html
+COPY --from=ui-builder /ui/dist-governance/assets/     src/cerebro_mcp/static/assets/governance/
 
 RUN pip install --no-cache-dir . && \
     useradd -r -u 1000 cerebro && \

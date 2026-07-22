@@ -16,9 +16,10 @@ import type { DatasetDescriptor } from "../../shared/miniAppTypes";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
 import { ChainBadge } from "../components/ChainBadge";
 import { InfoPopover } from "../components/InfoPopover";
-import { displayAmount, displayToken, shortAddr } from "../model/identity";
+import { shortAddr } from "../../../utils/format";
+import { displayAmount, displayToken } from "../model/identity";
 import { solverName } from "../model/solverRegistry";
-import { rowsToObjects } from "../model/parseRows";
+import { rowsToObjects } from "../../shared/rowDataset";
 import type { CowExplorerViewState, EntityType } from "../types";
 
 const STALE_LAG_SECONDS = 600;

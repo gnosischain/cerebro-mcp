@@ -5,7 +5,8 @@
 
 import type { ReactNode } from "react";
 import type { CellKind } from "../model/columns";
-import { displayAmount, shortAddr } from "../model/identity";
+import { shortAddr } from "../../../utils/format";
+import { displayAmount } from "../model/identity";
 import { solverName } from "../model/solverRegistry";
 import type { CowExplorerViewState } from "../types";
 import { ChainBadge } from "./ChainBadge";

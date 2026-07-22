@@ -122,6 +122,11 @@ TOOL_META: dict[str, Meta] = {
         "tier": "advanced",
         "tags": ["cow", "orders", "trades", "prices", "auctions", "solvers", "orderbook"],
     },
+    "open_governance": {
+        "domain": "visualization",
+        "tier": "advanced",
+        "tags": ["governance", "snapshot", "gnosisdao", "proposals", "votes", "forum", "gip", "quorum"],
+    },
     # ── web3 / rpc (advanced) ────────────────────────────────────────
     "contract_explore": {"domain": "web3", "tier": "advanced", "tags": ["contract", "abi", "address"]},
     "contract_call_function": {"domain": "web3", "tier": "advanced", "tags": ["contract", "call", "read"]},
