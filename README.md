@@ -1152,9 +1152,52 @@ This is the default mode for local desktop MCP hosts:
 cerebro-mcp
 ```
 
-### Run With SSE
+### Run With Streamable HTTP (recommended for remote)
 
-Use this for remote or browser-accessed MCP clients:
+Streamable HTTP is the modern MCP transport and the right choice for any
+remote deployment — behind a load balancer / ALB, reached by Claude Desktop
+or claude.ai:
+
+```bash
+export MCP_AUTH_TOKEN=replace_me
+cerebro-mcp --http
+```
+
+Why it beats legacy SSE for remote clients:
+
+- **Single endpoint `/mcp`** — no long-lived idle stream for a proxy to reap.
+- **Stateless by default** (`STREAMABLE_HTTP_STATELESS=true`) — a request can
+  land on *any* replica, so it needs no load-balancer session affinity. Legacy
+  SSE binds a session to one pod's memory; without sticky sessions the
+  follow-up `POST /messages/` hits the wrong pod and the connection breaks.
+  This is the number-one cause of "Claude Desktop keeps disconnecting" against
+  a multi-replica remote deployment.
+- **Native Claude connector** — Desktop / claude.ai speak `/mcp` directly, so
+  clients can drop the fragile `mcp-remote` bridge (a second common source of
+  drops).
+
+`--http` behavior:
+
+- serves `/mcp` (Streamable HTTP) **and**, for a zero-downtime cutover, the
+  legacy `/sse` + `/messages/` routes from the same process — so existing
+  `mcp-remote -> /sse` clients keep working while you migrate.
+- binds to `FASTMCP_HOST` / `FASTMCP_PORT`
+- `/mcp` requires `Authorization: Bearer <token>` **or** `?token=<token>` (the
+  query form lets a URL-only native connector authenticate; prefer the header —
+  a query token can appear in access logs)
+- `/health` and `/metrics` are public; `/reports/{id}` accepts bearer or `?token=`
+
+Tuning (defaults are correct for a multi-replica ALB deployment):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `STREAMABLE_HTTP_STATELESS` | `true` | No per-request server session; any replica can serve any call. Set `false` only for a single replica that needs a persistent session (e.g. server-initiated sampling/progress — Cerebro uses none). |
+| `STREAMABLE_HTTP_JSON_RESPONSE` | `true` | Plain-JSON responses (most proxy-friendly) instead of an SSE-framed stream. |
+
+### Run With SSE (legacy)
+
+Prefer `--http` above — it already serves the SSE routes too, so you only need
+`--sse` if you want an SSE-only process. SSE remains for back-compat:
 
 ```bash
 export MCP_AUTH_TOKEN=replace_me
@@ -1168,7 +1211,7 @@ SSE behavior:
 - `/health` is public
 - `/reports/{id}` accepts bearer auth or `?token=...`
 
-To disable auth for local testing only:
+To disable auth for local testing only (applies to both transports):
 
 ```dotenv
 ALLOW_INSECURE_REMOTE_TRANSPORT=True
@@ -1191,6 +1234,11 @@ docker run \
   -v "$(pwd)/data:/data" \
   cerebro-mcp
 ```
+
+The image `ENTRYPOINT` is `cerebro-mcp --http`, so the container serves
+Streamable HTTP at `/mcp` (plus the legacy `/sse` routes) on port 8000. Set
+`MCP_AUTH_TOKEN` in your `.env` for a remote-facing container. To run an
+SSE-only container, override the entrypoint: `docker run … cerebro-mcp --sse`.
 
 Important for Docker:
 
@@ -1249,7 +1297,60 @@ Using `uv` from a checked-out repo:
 }
 ```
 
-### Remote SSE Client
+### Remote Client (Streamable HTTP — recommended)
+
+For a remote deployment, connect to the `/mcp` endpoint. Pick the first option
+your client supports:
+
+**1. Native custom connector with a header (best).** In Claude Desktop →
+Settings → Connectors → *Add custom connector*, point at the `/mcp` URL and set
+the auth header. This drops the `mcp-remote` bridge entirely:
+
+```json
+{
+  "mcpServers": {
+    "cerebro": {
+      "url": "https://mcp.analytics.gnosis.io/mcp",
+      "headers": {
+        "Authorization": "Bearer <token>",
+        "X-Cerebro-Owner": "<you>"
+      }
+    }
+  }
+}
+```
+
+**2. Native connector, URL only** (connector UI has no header field) — put the
+token in the query string (less ideal; may appear in access logs):
+
+```
+https://mcp.analytics.gnosis.io/mcp?token=<token>
+```
+
+**3. Keep `mcp-remote`, but point it at `/mcp`** (if your client can't add a
+native remote connector). You keep the bridge, but gain the stateless /
+LB-safe transport — strictly more reliable than `mcp-remote -> /sse`:
+
+```json
+{
+  "mcpServers": {
+    "cerebro": {
+      "command": "npx",
+      "args": [
+        "mcp-remote", "https://mcp.analytics.gnosis.io/mcp",
+        "--header", "Authorization: Bearer <token>",
+        "--header", "X-Cerebro-Owner: <you>"
+      ]
+    }
+  }
+}
+```
+
+### Remote SSE Client (legacy)
+
+Still supported (the server dual-serves `/sse`), but prefer `/mcp` above —
+plain `mcp-remote -> /sse` is the configuration most prone to dropped
+connections:
 
 ```json
 {
@@ -1268,6 +1369,47 @@ Using `uv` from a checked-out repo:
 
 ## Deployment Notes
 
+### Remote Transport And Connection Stability
+
+The remote deployment (e.g. `https://mcp.analytics.gnosis.io`) runs behind an
+AWS ALB. If Claude Desktop "keeps disconnecting," it is almost always one of
+two structural issues with the legacy SSE path, both fixed by Streamable HTTP:
+
+1. **No session affinity across replicas.** Legacy `/sse` pins a session to one
+   pod's memory; the follow-up `POST /messages/?session_id=…` must return to
+   that same pod. With more than one replica and no sticky sessions, those
+   POSTs round-robin to a pod that never saw the session and the connection
+   breaks. Streamable HTTP with `STREAMABLE_HTTP_STATELESS=true` (the default)
+   has no such requirement — any replica can serve any request.
+2. **The `mcp-remote` bridge is fragile.** It reconnects on any hiccup (pod
+   recycle, redeploy, laptop sleep). The native `/mcp` connector removes it.
+
+**Cutover checklist (SSE → Streamable HTTP):**
+
+1. **App:** already done — the image `ENTRYPOINT` is `cerebro-mcp --http`, which
+   dual-serves `/mcp` **and** `/sse`, so this is zero-downtime.
+2. **ALB path allowlist:** add `/mcp` to the forwarded paths. The ingress only
+   proxies explicitly listed paths — a route missing from the allowlist returns
+   **404 at the ALB even though the app serves it**. In the MCP ingress
+   Terraform (`…/gnosis-analytics/mcp/preview/service.tf`) add:
+
+   ```hcl
+   path { path = "/mcp*" }   # methods POST, GET, DELETE
+   ```
+
+   then `terraform apply`. (Existing rules already cover `/sse`, `/messages/*`,
+   `/health`, `/reports/*`.)
+3. **Recommended alongside:** raise the ALB idle timeout (e.g. 3600s) and enable
+   target-group **stickiness** — this helps any clients still on `/sse` until
+   everyone moves to `/mcp`.
+4. **Redeploy:** bump `image_version` + the real `image_sha256` digest in
+   `preview/locals.tf`, `terraform apply`.
+5. **Clients:** switch Claude Desktop to the native `/mcp` connector (see
+   [Remote Client (Streamable HTTP)](#remote-client-streamable-http--recommended)).
+
+**Rollback** is non-destructive: revert the `ENTRYPOINT` to `--sse` (or redeploy
+the prior image pin) and clients fall back to `mcp-remote -> /sse`.
+
 ### Health Endpoint
 
 `/health` performs a real ClickHouse connectivity check and returns:
@@ -1279,7 +1421,7 @@ Using `uv` from a checked-out repo:
 
 ### Report Download Endpoint
 
-In SSE mode:
+In remote mode (`--http` or `--sse`):
 
 ```text
 GET /reports/{report_id}
@@ -1339,6 +1481,17 @@ The implementation environment can stay offline as long as the operator provides
 ## Configuration
 
 All settings are environment variables or `.env` values.
+
+### Remote transport (SSE / Streamable HTTP)
+
+| Variable | Default | Description |
+|---|---|---|
+| `MCP_AUTH_TOKEN` | empty | Bearer token required by `/mcp`, `/sse`, `/messages/`; also accepted as `?token=` on `/mcp`, `/reports/*`, `/app/*`. Empty disables auth (local only). |
+| `FASTMCP_HOST` | `0.0.0.0` | bind host for `--http` / `--sse` |
+| `FASTMCP_PORT` | `8000` | bind port for `--http` / `--sse` |
+| `STREAMABLE_HTTP_STATELESS` | `True` | `--http`: no per-request server session, so any replica serves any call (no LB stickiness needed). Set `False` only for a single replica needing a persistent session. |
+| `STREAMABLE_HTTP_JSON_RESPONSE` | `True` | `--http`: plain-JSON responses instead of SSE-framed streams (most proxy-friendly). |
+| `ALLOW_INSECURE_REMOTE_TRANSPORT` | `False` | allow `--http` / `--sse` to start with no `MCP_AUTH_TOKEN` (local testing only). |
 
 ### dbt and semantic artifacts
 

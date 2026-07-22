@@ -65,4 +65,8 @@ ENV CEREBRO_RESEARCH_DIR=/data/research_projects
 EXPOSE 8000
 USER cerebro
 
-ENTRYPOINT ["cerebro-mcp", "--sse"]
+# --http serves Streamable HTTP at /mcp AND the legacy SSE routes (/sse,
+# /messages/) from one process, so existing mcp-remote -> /sse clients keep
+# working while new clients use the native /mcp connector. Use "--sse" to
+# revert to SSE-only. See README "Transports & remote deployment".
+ENTRYPOINT ["cerebro-mcp", "--http"]

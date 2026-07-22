@@ -168,6 +168,23 @@ class Settings(BaseSettings):
     RESEARCH_PAGE_SIZE_MAX: int = 100
     ALLOW_INSECURE_REMOTE_TRANSPORT: bool = False
 
+    # --- Streamable HTTP transport (`cerebro-mcp --http`, endpoint /mcp) ---
+    # The modern, load-balancer-friendly MCP transport. Both default ON, which
+    # is the correct setup for a multi-replica remote deployment behind an ALB:
+    #   STREAMABLE_HTTP_STATELESS   No server-side session is retained between
+    #                               requests, so a POST can land on ANY pod —
+    #                               eliminating the session-affinity breakage
+    #                               that plagues legacy SSE across replicas.
+    #                               Safe here because no tool uses server-
+    #                               initiated MCP features (sampling / progress
+    #                               / elicitation). Set False only for a single
+    #                               replica that needs a persistent session.
+    #   STREAMABLE_HTTP_JSON_RESPONSE  Return plain JSON instead of an SSE-
+    #                               framed stream — simplest and most proxy-
+    #                               friendly for request/response tool calls.
+    STREAMABLE_HTTP_STATELESS: bool = True
+    STREAMABLE_HTTP_JSON_RESPONSE: bool = True
+
     # Security / audit
     MCP_SECURITY_POLICY_MODE: str = "log_only"  # future: "warn", "enforce"
     MCP_SECURITY_LOG_DIR: str = ".cerebro/security_audit"

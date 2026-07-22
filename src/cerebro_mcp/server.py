@@ -484,7 +484,17 @@ def main():
     import sys
 
     setup_logging()
-    transport = "sse" if "--sse" in sys.argv else "stdio"
+    # Transport selection (precedence: --http > --sse > stdio):
+    #   --http / --streamable-http  Streamable HTTP at /mcp (+ legacy /sse).
+    #                               The modern, LB-friendly remote transport.
+    #   --sse                       Legacy SSE only (/sse + /messages/).
+    #   (neither)                   stdio (local single-process).
+    if "--http" in sys.argv or "--streamable-http" in sys.argv:
+        transport = "streamable-http"
+    elif "--sse" in sys.argv:
+        transport = "sse"
+    else:
+        transport = "stdio"
     log_event(logger, "transport_selected", transport=transport)
     ensure_writable_dir(RESEARCH_DIR)
     manifest.load()
@@ -515,7 +525,10 @@ def main():
     except Exception:
         logger.exception("event store bootstrap failed (non-fatal)")
 
-    if transport == "sse":
+    if transport == "streamable-http":
+        validate_remote_transport_auth(os.environ.get("MCP_AUTH_TOKEN"))
+        _run_streamable_http_with_auth()
+    elif transport == "sse":
         validate_remote_transport_auth(os.environ.get("MCP_AUTH_TOKEN"))
         _run_sse_with_auth()
     else:
@@ -554,7 +567,29 @@ class BearerAuthMiddleware:
 
     def __init__(self, app: ASGIApp, auth_token: str) -> None:
         self.app = app
+        self._auth_token = auth_token
         self._expected = f"Bearer {auth_token}".encode("latin-1")
+
+    @staticmethod
+    def _path_allows_query_token(path: str) -> bool:
+        """Streamable HTTP (`/mcp`) additionally accepts a ``?token=`` param.
+
+        This mirrors the ``/reports`` and ``/app`` handlers: a browser
+        navigation — or a Claude Desktop *native* connector whose UI only
+        takes a URL and no custom ``Authorization`` header — can then
+        authenticate via the query string. The Bearer header stays the
+        preferred path (a query token can leak into access logs), so this
+        is a fallback, not a replacement.
+        """
+        return path == "/mcp" or path.startswith("/mcp/")
+
+    def _query_token_ok(self, scope: Scope) -> bool:
+        from urllib.parse import parse_qs
+
+        qs = scope.get("query_string", b"").decode("latin-1")
+        token = parse_qs(qs).get("token", [""])[0]
+        # Plain equality, same as the /reports and /app query-token check.
+        return bool(self._auth_token) and token == self._auth_token
 
     async def __call__(
         self, scope: Scope, receive: Receive, send: Send
@@ -587,11 +622,17 @@ class BearerAuthMiddleware:
                 break
 
         if header_value != self._expected:
-            unauthorized = JSONResponse(
-                {"error": "unauthorized"}, status_code=401
-            )
-            await unauthorized(scope, receive, send)
-            return
+            # /mcp additionally accepts ?token= (see _path_allows_query_token)
+            # so a URL-only native connector can still authenticate.
+            if not (
+                self._path_allows_query_token(path)
+                and self._query_token_ok(scope)
+            ):
+                unauthorized = JSONResponse(
+                    {"error": "unauthorized"}, status_code=401
+                )
+                await unauthorized(scope, receive, send)
+                return
 
         # Phase 3 multi-tenant: scope the per-request owner from the
         # `X-Cerebro-Owner` header. The bearer token authenticates the
@@ -632,6 +673,57 @@ def build_sse_app(auth_token: str | None = None):
     return starlette_app
 
 
+def build_streamable_http_app(
+    auth_token: str | None = None, *, include_sse: bool = True
+):
+    """Return the Streamable HTTP ASGI app (single ``/mcp`` endpoint).
+
+    Streamable HTTP is the modern, load-balancer-friendly MCP transport:
+    one endpoint, no long-lived idle stream for a proxy to reap, and — with
+    ``STREAMABLE_HTTP_STATELESS`` on (the default) — no per-pod session
+    affinity requirement. It is the transport Claude Desktop's *native*
+    remote connector speaks, so switching to it lets clients drop the
+    fragile ``mcp-remote`` bridge (the usual cause of "the connection keeps
+    breaking" against a remote SSE deployment behind an ALB).
+
+    When ``include_sse`` is True (the default for ``--http``), the legacy
+    ``/sse`` + ``/messages/`` routes are folded into the SAME app so existing
+    ``mcp-remote -> /sse`` clients keep working during migration — a
+    zero-downtime cutover rather than a hard switch.
+
+    ``mcp.streamable_http_app()`` already registers every ``@mcp.custom_route``
+    (``/health``, ``/metrics``, ``/reports/*``, ``/app/*``, ``/``, ``/apps``)
+    and wires the ``StreamableHTTPSessionManager`` lifespan, so here we only
+    fold in the SSE routes and add the auth + Prometheus middleware.
+    """
+    # These must be set BEFORE the app builds its session manager — that
+    # happens on the first streamable_http_app() call, which reads
+    # mcp.settings.{stateless_http,json_response}.
+    mcp.settings.stateless_http = settings.STREAMABLE_HTTP_STATELESS
+    mcp.settings.json_response = settings.STREAMABLE_HTTP_JSON_RESPONSE
+
+    starlette_app = mcp.streamable_http_app()
+
+    if include_sse:
+        # Fold the legacy SSE transport's own routes (/sse, /messages/) into
+        # this app so both transports serve from one process. The custom
+        # routes (/health, /, ...) are already present on both, so skip
+        # duplicates by path. Appending to router.routes before the server
+        # starts is safe — Starlette matches against this list per request.
+        sse_app = mcp.sse_app()
+        existing = {
+            getattr(r, "path", None) for r in starlette_app.router.routes
+        }
+        for route in sse_app.router.routes:
+            if getattr(route, "path", None) not in existing:
+                starlette_app.router.routes.append(route)
+
+    if auth_token:
+        starlette_app.add_middleware(BearerAuthMiddleware, auth_token=auth_token)
+    starlette_app.add_middleware(PrometheusMiddleware)
+    return starlette_app
+
+
 def _run_sse_with_auth():
     """Run SSE transport, optionally wrapped with Bearer token auth."""
     import anyio
@@ -659,6 +751,62 @@ def _run_sse_with_auth():
             "sse_server_starting",
             host=host,
             port=port,
+        )
+        config = uvicorn.Config(
+            starlette_app,
+            host=host,
+            port=port,
+            log_level=mcp.settings.log_level.lower(),
+            log_config=None,
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    try:
+        anyio.run(_serve)
+    finally:
+        _reasoning.stop_async_writer()
+
+
+def _run_streamable_http_with_auth():
+    """Run the Streamable HTTP transport, dual-served with legacy SSE.
+
+    Mirrors :func:`_run_sse_with_auth` — same auth validation, off-loop
+    trace writer, and uvicorn host/port — but serves the ``/mcp`` endpoint
+    (plus ``/sse`` + ``/messages/`` for back-compat).
+    """
+    import anyio
+    import uvicorn
+
+    os.environ["CEREBRO_TRANSPORT"] = "streamable-http"
+
+    auth_token = os.environ.get("MCP_AUTH_TOKEN")
+    validate_remote_transport_auth(auth_token)
+    log_event(
+        logger,
+        "auth_middleware_enabled",
+        enabled=bool(auth_token),
+        stateless=settings.STREAMABLE_HTTP_STATELESS,
+        json_response=settings.STREAMABLE_HTTP_JSON_RESPONSE,
+    )
+    starlette_app = build_streamable_http_app(auth_token, include_sse=True)
+
+    # Same off-loop hardening as SSE: keep per-call trace/audit disk writes
+    # off the single event loop. No-op unless THINKING_ASYNC_PERSIST is on.
+    from cerebro_mcp.tools.governance import reasoning as _reasoning
+
+    _reasoning.start_async_writer()
+
+    async def _serve():
+        host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
+        port = int(os.environ.get("FASTMCP_PORT", "8000"))
+        log_event(
+            logger,
+            "streamable_http_server_starting",
+            host=host,
+            port=port,
+            mcp_path=mcp.settings.streamable_http_path,
+            sse_dual=True,
         )
         config = uvicorn.Config(
             starlette_app,
