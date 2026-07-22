@@ -108,8 +108,15 @@ def test_mcp_rejects_wrong_query_token(server):
 def test_health_and_metrics_are_auth_exempt(server):
     app = _build(server)
     with TestClient(app) as client:
-        assert client.get("/health").status_code == 200
-        assert client.get("/metrics").status_code == 200
+        # Auth-exempt = NOT rejected with 401. /health runs a real ClickHouse
+        # connectivity check, so it is 200 (reachable) or 503 (not — e.g. in
+        # CI, which runs with no ClickHouse); either proves it got PAST auth.
+        health = client.get("/health")
+        assert health.status_code != 401
+        assert health.status_code in (200, 503)
+        # /metrics does not touch ClickHouse, so it is always reachable + 200.
+        metrics = client.get("/metrics")
+        assert metrics.status_code == 200
 
 
 def test_query_token_only_applies_to_mcp(server):
