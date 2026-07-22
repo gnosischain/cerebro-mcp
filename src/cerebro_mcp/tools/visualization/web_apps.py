@@ -545,10 +545,13 @@ _CATALOG_CSS = """
 body{margin:0;background:var(--bg);color:var(--text-primary);
   font-family:var(--font-body);-webkit-font-smoothing:antialiased}
 
-/* Chrome bar — same construction as .ma-bar in mini-app-chrome.css */
-.bar{display:flex;align-items:center;border-bottom:1px solid var(--border);
+/* Chrome bar — same construction as .ma-bar in mini-app-chrome.css. Height and
+ * brand text size are kept in lockstep with .ma-bar/.ma-brand there (min-height
+ * 45px; brand 0.8rem). Default align-items:stretch keeps each cell's side border
+ * a full-height divider while its own align-items:center centers the text. */
+.bar{display:flex;min-height:45px;border-bottom:1px solid var(--border);
   background:var(--surface)}
-.brand{padding:5px 12px;font-family:var(--font-mono);font-size:10.5px;
+.brand{padding:5px 12px;font-family:var(--font-mono);font-size:.8rem;
   letter-spacing:.06em;color:var(--primary);border-right:1px solid var(--border);
   white-space:nowrap;display:inline-flex;align-items:center}
 .bar-right{margin-left:auto;padding:5px 12px;border-left:1px solid var(--border);
