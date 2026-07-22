@@ -248,6 +248,39 @@ describe("GraphCanvas renderer isolation", () => {
     expect(constructGraph).toHaveBeenCalledTimes(2);
   });
 
+  it("updates an immutable model without recreating the WebGL renderer", async () => {
+    Object.defineProperty(window, "WebGLRenderingContext", {
+      configurable: true,
+      value: function WebGLRenderingContext() {},
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue({} as RenderingContext);
+
+    await act(async () => root.render(
+      <GraphCanvas
+        model={model()}
+        selectedNodeId=""
+        emptyHint="No graph rows"
+        onSelectNode={vi.fn()}
+        onSelectEdge={vi.fn()}
+        onExpandNode={vi.fn()}
+      />,
+    ));
+    expect(constructGraph).toHaveBeenCalledOnce();
+
+    await act(async () => root.render(
+      <GraphCanvas
+        model={model()}
+        selectedNodeId="0xa"
+        emptyHint="No graph rows"
+        onSelectNode={vi.fn()}
+        onSelectEdge={vi.fn()}
+        onExpandNode={vi.fn()}
+      />,
+    ));
+    expect(constructGraph).toHaveBeenCalledOnce();
+  });
+
   it("restores task-keyed canvas controls after the view unmounts", async () => {
     const render = () => (
       <GraphCanvas

@@ -24,7 +24,10 @@ from typing import Any
 
 from mcp.types import CallToolResult
 
-from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.clients.clickhouse import (
+    INTERACTIVE_QUERY_BUDGET,
+    ClickHouseManager,
+)
 from cerebro_mcp.semantic.flow_queries import (
     FLOWS_RELATION,
     LABELS_RELATION,
@@ -383,6 +386,7 @@ def _query(
         database="dbt",
         parameters=params,
         requested_max_rows=max(1, int(limit)),
+        query_budget=INTERACTIVE_QUERY_BUDGET,
     )
     return [list(row) for row in result.rows]
 
@@ -424,6 +428,17 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         investigate = dict(state.get("investigate") or {})
         warnings: list[str] = []
         request_id = max(0, int(request_id or 0))
+        reserved_request_id = mini_apps.reserve_view_request(
+            view_id, request_channel="timeline", request_id=request_id
+        )
+        if reserved_request_id is None:
+            current = mini_apps.snapshot_view(view_id)
+            assert current is not None
+            return mini_apps.payload_to_call_tool_result(
+                build_payload(current),
+                summary_text="Timeline request was superseded by a newer request.",
+            )
+        request_id = reserved_request_id
         scope_id = new_scope_id("timeline", request_id)
 
         grain = (grain or constants.TIMELINE_DEFAULT_GRAIN).strip().lower()
@@ -595,6 +610,24 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     f"source contract failed for dbt.{relation}: "
                     f"{contract.get('error') or 'unknown error'}"
                 )
+        primary_contract, metadata_contract, prices_contract = contracts
+        metadata_available = bool(metadata_contract["ok"])
+        prices_available = bool(prices_contract["ok"] and metadata_available)
+        if not metadata_available:
+            warnings.append(
+                "Token metadata is unavailable; raw transfer activity is "
+                "retained, while symbols and normalized amounts remain unknown."
+            )
+        if not prices_available:
+            warnings.append(
+                "Token price enrichment is unavailable; activity remains "
+                "unpriced and USD effects remain unknown."
+            )
+        if prices_contract["ok"] and not metadata_available:
+            sources[2]["status"] = "partial"
+            sources[2]["error"] = (
+                "not applied because token metadata is unavailable"
+            )
 
         # Address labels are presentation enrichment only. The transfer
         # narrative remains usable—and full addresses remain visible—when the
@@ -630,7 +663,7 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         bucket_total_rows: list[list[Any]] = []
         query_failures: list[str] = []
 
-        if all(contract["ok"] for contract in contracts):
+        if primary_contract["ok"]:
             queries = [
                 (
                     "full-range universe",
@@ -642,6 +675,8 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                         min_usd=effective_min_usd,
                         tokens=effective_tokens,
                         limit=budget,
+                        metadata_available=metadata_available,
+                        prices_available=prices_available,
                     ),
                     budget + 1,
                     "universe",
@@ -655,6 +690,8 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                         t1_exclusive=effective_t1,
                         min_usd=effective_min_usd,
                         tokens=effective_tokens,
+                        metadata_available=metadata_available,
+                        prices_available=prices_available,
                     ),
                     1,
                     "global",
@@ -675,7 +712,7 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         counterparties = [str(row[0]) for row in admitted_universe if row]
         universe_ids = list(dict.fromkeys([*seeds, *counterparties]))
 
-        if all(contract["ok"] for contract in contracts) and not query_failures:
+        if primary_contract["ok"] and not query_failures:
             bucket_queries = [
                 (
                     "fixed-universe buckets",
@@ -689,6 +726,8 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                         min_usd=effective_min_usd,
                         tokens=effective_tokens,
                         limit=row_cap,
+                        metadata_available=metadata_available,
+                        prices_available=prices_available,
                     ),
                     row_cap + 1,
                     "buckets",
@@ -703,6 +742,8 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                         grain=grain,
                         min_usd=effective_min_usd,
                         tokens=effective_tokens,
+                        metadata_available=metadata_available,
+                        prices_available=prices_available,
                     ),
                     bucket_count + 1,
                     "coverage",
@@ -943,11 +984,12 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 and len(counterparties) < global_total_counterparties
             )
         )
-        source_contract_failed = any(not contract["ok"] for contract in contracts)
-        if source_contract_failed or (query_failures and not edge_rows):
+        enrichment_contract_failed = not metadata_contract["ok"] or not prices_contract["ok"]
+        if not primary_contract["ok"] or (query_failures and not edge_rows):
             status = "failed"
         elif (
             query_failures
+            or enrichment_contract_failed
             or truncated
             or total_unknown_rows
             or global_unknown_usd_edges
@@ -961,7 +1003,7 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             (str(row[0]) for row in bucket_total_rows if row and row[0]),
             default=None,
         )
-        data_horizon = contracts[0].get("horizon") if contracts else None
+        data_horizon = primary_contract.get("horizon")
         complete_total_usd = (
             global_total_usd
             if (
@@ -1085,30 +1127,24 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             "trend_claims_enabled": False,
         }
 
-        mini_apps.attach_dataset(
+        accepted = mini_apps.commit_view_update(
             view_id,
-            "timeline_nodes",
-            dataset_from_rows(constants.NODES_COLUMNS, node_rows, "timeline_nodes"),
-        )
-        mini_apps.attach_dataset(
-            view_id,
-            "timeline_edges",
-            dataset_from_rows(
-                constants.TIMELINE_EDGES_COLUMNS, edge_rows, "timeline_edges"
-            ),
-        )
-        mini_apps.attach_dataset(
-            view_id,
-            "timeline_narrative",
-            dataset_from_rows(
-                constants.TIMELINE_NARRATIVE_COLUMNS,
-                narrative_rows,
-                "timeline_narrative",
-            ),
-        )
-        mini_apps.patch_view_state(
-            view_id,
-            {
+            request_channel="timeline",
+            request_id=request_id,
+            datasets={
+                "timeline_nodes": dataset_from_rows(
+                    constants.NODES_COLUMNS, node_rows, "timeline_nodes"
+                ),
+                "timeline_edges": dataset_from_rows(
+                    constants.TIMELINE_EDGES_COLUMNS, edge_rows, "timeline_edges"
+                ),
+                "timeline_narrative": dataset_from_rows(
+                    constants.TIMELINE_NARRATIVE_COLUMNS,
+                    narrative_rows,
+                    "timeline_narrative",
+                ),
+            },
+            state_patch={
                 "timeline": {
                     "anchor": {"id": seeds[0], "kind": "address"},
                     "seed_ids": seeds,
@@ -1138,16 +1174,20 @@ def register_timeline_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 "warnings": warnings,
             },
         )
-        updated = mini_apps.get_view(view_id)
+        updated = mini_apps.snapshot_view(view_id)
         assert updated is not None
         return mini_apps.payload_to_call_tool_result(
             build_payload(updated),
             summary_text=(
-                f"Over time loaded for {len(seeds)} Money Trail seed(s): "
-                f"{len(counterparties)} of "
-                f"{global_total_counterparties if global_total_counterparties is not None else '?'} "
-                f"counterparties, {len(edge_rows)} bucket edge row(s); trend "
-                "claims disabled pending reconciliation."
+                (
+                    f"Over time loaded for {len(seeds)} Money Trail seed(s): "
+                    f"{len(counterparties)} of "
+                    f"{global_total_counterparties if global_total_counterparties is not None else '?'} "
+                    f"counterparties, {len(edge_rows)} bucket edge row(s); trend "
+                    "claims disabled pending reconciliation."
+                )
+                if accepted
+                else f"Stale Over time request {request_id} ignored."
             ),
         )
 

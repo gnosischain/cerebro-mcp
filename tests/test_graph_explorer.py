@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from typing import Any
 from unittest.mock import patch
 
@@ -18,6 +20,7 @@ from cerebro_mcp.tools.semantic.graph_explorer import constants
 from cerebro_mcp.tools.semantic.graph_explorer.forensics import (
     reset_source_contract_cache_for_tests,
 )
+from cerebro_mcp.tools.semantic.graph_explorer.ui_tools import _edge_pivot_rows
 
 
 AVATAR = "0xaaaa000000000000000000000000000000000001"
@@ -412,6 +415,321 @@ def test_load_seed_with_explicit_profile(fake_snapshot):
     suggestions = sc["view_state"]["suggested_next_hops"]
     assert isinstance(suggestions, list)
     assert all(s.get("target_kind") != "circles_avatar" for s in suggestions)
+
+
+def test_relationship_seed_publishes_membership_annotations_and_fail_closed_pivots(
+    fake_snapshot,
+):
+    role_row = [
+        0, 0, 0, "", 1, "human", 0, 0, 0, "", 0, 0, 0, 1, "Known project",
+    ]
+    server = _server(
+        StubCH(
+            edge_rows={
+                "api_execution_circles_v2_trust_relations_current": [
+                    [AVATAR, TRUSTEE, 1.0, 1],
+                ],
+            },
+            roles={AVATAR: role_row},
+        )
+    )
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+
+    result = _call_tool(
+        server,
+        "load_graph_explorer_seed",
+        {
+            "view_id": view_id,
+            "seed_node_id": AVATAR,
+            "seed_model": "circles_trust",
+            "request_id": 8,
+        },
+    ).structuredContent
+    scope = result["view_state"]["investigate"]["scope"]
+
+    membership = result["view_state"]["catalog_membership"]
+    assert membership["subject"] == AVATAR
+    assert membership["scope_id"] == scope["scope_id"]
+    assert membership["checks"] == [
+        {
+            "profile": "circles_trust",
+            "subject": AVATAR,
+            "status": "found",
+            "reason": None,
+            "source_relation": "api_execution_circles_v2_trust_relations_current",
+            "direction": "both",
+            "source_column": "truster",
+            "target_column": "trustee",
+            "temporal_semantics": "current_snapshot",
+            "predicate": {
+                "t0": None,
+                "t1": None,
+                "as_of": scope["retrieved_at"],
+            },
+            "source_scope_id": scope["scope_id"],
+            "sample_based": False,
+        }
+    ]
+
+    annotations = result["datasets"]["node_annotations"]["preview_rows"]
+    avatar_annotation = next(row for row in annotations if row[1] == AVATAR)
+    assert avatar_annotation[0] == scope["scope_id"]
+    assert avatar_annotation[2] == AVATAR
+    assert avatar_annotation[4] == "Known project"
+    assert avatar_annotation[5] == "dbt.int_execution_address_roles_current"
+    assert avatar_annotation[6] == "reported"
+    assert avatar_annotation[7] is None
+    assert avatar_annotation[9] == "unknown"
+    assert avatar_annotation[10] is None
+
+    pivot = result["datasets"]["edge_pivots"]["preview_rows"][0]
+    assert pivot[0] == f"circles_trust:{AVATAR}->{TRUSTEE}"
+    assert pivot[1] is False
+    assert "not certified transfer evidence" in pivot[2]
+    assert pivot[3:5] == [AVATAR, TRUSTEE]
+    assert pivot[9] == scope["scope_id"]
+
+
+def test_edge_pivots_only_certify_explicit_transfer_profile():
+    scope = {
+        "scope_id": "investigate:9:scope",
+        "predicate": {"t0": "2026-01-01T00:00:00Z", "t1": "2026-02-01T00:00:00Z"},
+    }
+    zero = "0x0000000000000000000000000000000000000000"
+    rows = _edge_pivot_rows(
+        [
+            [
+                f"token_transfers:{zero}->{AVATAR}",
+                zero,
+                AVATAR,
+                "token_transfers",
+                12.0,
+                1,
+                True,
+            ],
+            [
+                f"safe_ownership:{OWNER}->{SAFE}",
+                OWNER,
+                SAFE,
+                "safe_ownership",
+                1.0,
+                1,
+                True,
+            ],
+        ],
+        scope,
+    )
+
+    assert rows[0] == [
+        f"token_transfers:{zero}->{AVATAR}",
+        True,
+        None,
+        zero,
+        AVATAR,
+        [],
+        "mint",
+        "2026-01-01T00:00:00Z",
+        "2026-02-01T00:00:00Z",
+        "investigate:9:scope",
+    ]
+    assert rows[1][1] is False
+    assert rows[1][6] is None
+
+
+def test_relationship_revision_is_reserved_before_query_completion(fake_snapshot):
+    class BlockingCH(StubCH):
+        def __init__(self):
+            super().__init__(
+                edge_rows={
+                    "api_execution_circles_v2_trust_relations_current": [
+                        [AVATAR, TRUSTEE, 1.0, 1]
+                    ]
+                }
+            )
+            self.started = Event()
+            self.release = Event()
+
+        def run_query(self, sql, database="dbt", **kwargs):
+            params = kwargs.get("parameters") or {}
+            if (
+                "GROUP BY source_id, target_id" in sql
+                and params.get("seed_ids") == [AVATAR]
+            ):
+                self.started.set()
+                assert self.release.wait(timeout=5)
+            return super().run_query(sql, database, **kwargs)
+
+    ch = BlockingCH()
+    server = _server(ch)
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        older = pool.submit(
+            _call_tool,
+            server,
+            "load_graph_explorer_seed",
+            {
+                "view_id": view_id,
+                "seed_node_id": AVATAR,
+                "seed_model": "circles_trust",
+                "request_id": 1,
+            },
+        )
+        assert ch.started.wait(timeout=5)
+        newer = _call_tool(
+            server,
+            "load_graph_explorer_seed",
+            {
+                "view_id": view_id,
+                "seed_node_id": OWNER,
+                "seed_model": "circles_trust",
+                "request_id": 2,
+            },
+        )
+        ch.release.set()
+        older_result = older.result(timeout=5)
+
+    assert newer.structuredContent["view_state"]["investigate"]["seed"]["id"] == OWNER
+    assert older_result.structuredContent["view_state"]["investigate"]["seed"]["id"] == OWNER
+    stored = mini_apps.snapshot_view(view_id)
+    assert stored is not None
+    assert stored.request_revisions["relationships"] == 2
+    assert stored.view_state["investigate"]["scope"]["request_id"] == 2
+
+
+def test_membership_zero_is_certified_from_exact_predicate_not_preview_sample(
+    fake_snapshot,
+):
+    server = _server(
+        StubCH(edge_rows={"api_execution_circles_v2_trust_relations_current": []})
+    )
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+    result = _call_tool(
+        server,
+        "load_graph_explorer_seed",
+        {
+            "view_id": view_id,
+            "seed_node_id": AVATAR,
+            "seed_model": "circles_trust",
+            "request_id": 5,
+        },
+    ).structuredContent
+
+    check = result["view_state"]["catalog_membership"]["checks"][0]
+    assert check["status"] == "certified_absent"
+    assert check["sample_based"] is False
+    assert check["source_scope_id"] == result["view_state"]["investigate"][
+        "scope"
+    ]["scope_id"]
+
+
+def test_relationship_and_focus_loaders_use_atomic_commit_not_per_key_mutations(
+    fake_snapshot,
+):
+    role_row = [
+        0, 0, 0, "", 1, "human", 0, 0, 0, "", 0, 0, 0, 0, "",
+    ]
+    server = _server(
+        StubCH(
+            edge_rows={
+                "api_execution_circles_v2_trust_relations_current": [
+                    [AVATAR, TRUSTEE, 1.0, 1]
+                ]
+            },
+            roles={AVATAR: role_row, TRUSTEE: role_row},
+        )
+    )
+    view_id = _call_tool(server, "open_graph_explorer", {}).structuredContent[
+        "view_id"
+    ]
+
+    with patch.object(
+        mini_apps,
+        "attach_dataset",
+        side_effect=AssertionError("per-key dataset mutation used"),
+    ), patch.object(
+        mini_apps,
+        "patch_view_state",
+        side_effect=AssertionError("non-atomic state mutation used"),
+    ):
+        sample = _call_tool(
+            server,
+            "load_graph_atlas_sample",
+            {
+                "view_id": view_id,
+                "profiles": ["circles_trust"],
+                "request_id": 1,
+            },
+        )
+        preview = _call_tool(
+            server,
+            "load_graph_atlas_preview",
+            {
+                "view_id": view_id,
+                "profile": "circles_trust",
+                "request_id": 1,
+            },
+        )
+        seeded = _call_tool(
+            server,
+            "load_graph_explorer_seed",
+            {
+                "view_id": view_id,
+                "seed_node_id": AVATAR,
+                "seed_model": "circles_trust",
+                "request_id": 2,
+            },
+        )
+        expanded = _call_tool(
+            server,
+            "expand_graph_explorer_node",
+            {
+                "view_id": view_id,
+                "node_id": TRUSTEE,
+                "relation_types": ["circles_trust"],
+                "request_id": 3,
+            },
+        )
+        focused = _call_tool(
+            server,
+            "update_graph_explorer_focus",
+            {
+                "view_id": view_id,
+                "selected_node_id": AVATAR,
+                "request_id": 4,
+            },
+        )
+        switched = _call_tool(
+            server,
+            "set_graph_explorer_view",
+            {"view_id": view_id, "patch": {"mode": "investigate"}},
+        )
+
+    assert sample.isError is not True
+    assert preview.isError is not True
+    assert seeded.isError is not True
+    assert expanded.isError is not True
+    assert focused.isError is not True
+    assert switched.isError is not True
+    focus_patch = focused.structuredContent["patch"]
+    focus_scope = focus_patch["view_state"]["focus_scope"]
+    annotation_rows = focus_patch["datasets"]["focus_node_annotations"][
+        "preview_rows"
+    ]
+    assert annotation_rows[0][0] == focus_scope["scope_id"]
+    assert annotation_rows[0][1] == AVATAR
+    assert focus_patch["view_state"]["selection"]["request_id"] == 4
+    assert switched.structuredContent["patch"]["view_state"]["selection"] == {
+        "node_id": "",
+        "edge_id": "",
+        "request_id": 5,
+    }
 
 
 def test_load_seed_auto_detects_via_roles(fake_snapshot):
@@ -1664,7 +1982,7 @@ def test_set_graph_explorer_view_schema(fake_snapshot):
     )
     switched_vs = switched.structuredContent["patch"]["view_state"]
     assert switched_vs["selection"] == {
-        "node_id": "", "edge_id": "", "request_id": 1,
+        "node_id": "", "edge_id": "", "request_id": 2,
     }
     assert switched_vs["mode_revision"] >= 1
     # timeline + flows are accepted modes.
@@ -1690,7 +2008,7 @@ def test_mode_switch_via_focus_clears_selection(fake_snapshot):
     vs_patch = result.structuredContent["patch"]["view_state"]
     assert vs_patch["mode"] == "investigate"
     assert vs_patch["selection"] == {
-        "node_id": "", "edge_id": "", "request_id": 1,
+        "node_id": "", "edge_id": "", "request_id": 2,
     }
     assert vs_patch["mode_revision"] >= 1  # explicit mode command bumps it
 

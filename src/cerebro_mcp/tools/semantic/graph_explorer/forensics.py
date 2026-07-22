@@ -10,6 +10,7 @@ the helper only normalises the contract and preserves unknown values as
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import threading
 import time
@@ -18,11 +19,15 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.clients.clickhouse import (
+    CONTRACT_PROBE_QUERY_BUDGET,
+    ClickHouseManager,
+)
 from cerebro_mcp.tools.visualization import mini_apps
 
 
-_SOURCE_CONTRACT_TTL_SECONDS = 60.0
+_SOURCE_CONTRACT_SUCCESS_TTL_SECONDS = 600.0
+_SOURCE_CONTRACT_FAILURE_TTL_SECONDS = 30.0
 _source_contract_cache: dict[
     tuple[int, str, tuple[str, ...], bool, str], tuple[float, dict[str, Any]]
 ] = {}
@@ -277,7 +282,8 @@ def validate_source_contract(
     relation: str,
     required_columns: Iterable[str],
     *,
-    ttl_seconds: float = _SOURCE_CONTRACT_TTL_SECONDS,
+    success_ttl_seconds: float = _SOURCE_CONTRACT_SUCCESS_TTL_SECONDS,
+    failure_ttl_seconds: float = _SOURCE_CONTRACT_FAILURE_TTL_SECONDS,
     probe_horizon: bool = False,
     horizon_column: str | None = None,
 ) -> dict[str, Any]:
@@ -321,8 +327,14 @@ def validate_source_contract(
     now = time.monotonic()
     with _source_contract_lock:
         cached = _source_contract_cache.get(cache_key)
-        if cached and now - cached[0] < max(0.0, ttl_seconds):
-            return dict(cached[1])
+        if cached:
+            cached_ttl = (
+                success_ttl_seconds
+                if bool(cached[1].get("ok"))
+                else failure_ttl_seconds
+            )
+            if now - cached[0] < max(0.0, cached_ttl):
+                return dict(cached[1])
 
     sql = """
         SELECT name, type
@@ -345,10 +357,8 @@ def validate_source_contract(
         # Keep a run_query fallback for the lightweight test doubles.
         execute_raw = getattr(ch, "execute_raw", None)
         if callable(execute_raw):
-            raw = execute_raw(
-                sql,
-                database=database,
-                parameters=parameters,
+            raw = _execute_raw_contract_probe(
+                execute_raw, sql, database=database, parameters=parameters
             )
             rows = list(raw.get("rows") or [])
         else:
@@ -399,7 +409,7 @@ def validate_source_contract(
                             f"{normalized_horizon_column}"
                         )
                     horizon_sql = (
-                        f"SELECT max(toString(`{normalized_horizon_column}`)) "
+                        f"SELECT toString(max(`{normalized_horizon_column}`)) "
                         f"AS source_horizon FROM `{database}`.`{table}`"
                     )
                     horizon_parameters = None
@@ -419,7 +429,8 @@ def validate_source_contract(
                     horizon_basis = "system.tables.metadata_modification_time"
 
                 if callable(execute_raw):
-                    horizon_raw = execute_raw(
+                    horizon_raw = _execute_raw_contract_probe(
+                        execute_raw,
                         horizon_sql,
                         database=database,
                         parameters=horizon_parameters,
@@ -514,8 +525,39 @@ def validate_source_contract(
         }
 
     with _source_contract_lock:
-        _source_contract_cache[cache_key] = (now, dict(checked))
+        _source_contract_cache[cache_key] = (time.monotonic(), dict(checked))
     return checked
+
+
+def _execute_raw_contract_probe(
+    execute_raw,
+    sql: str,
+    *,
+    database: str,
+    parameters: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Call production managers with a strict budget without breaking fakes.
+
+    Several small unit-test/source adapters intentionally implement only the
+    historical ``execute_raw(sql, database, parameters)`` protocol. Inspecting
+    the callable avoids a TypeError-and-retry pattern that could execute a
+    real metadata query twice.
+    """
+    try:
+        signature = inspect.signature(execute_raw)
+        supports_budget = "query_budget" in signature.parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+    except (TypeError, ValueError):
+        supports_budget = False
+    kwargs: dict[str, Any] = {
+        "database": database,
+        "parameters": parameters,
+    }
+    if supports_budget:
+        kwargs["query_budget"] = CONTRACT_PROBE_QUERY_BUDGET
+    return execute_raw(sql, **kwargs)
 
 
 def reset_source_contract_cache_for_tests() -> None:

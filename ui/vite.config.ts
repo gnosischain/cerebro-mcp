@@ -16,16 +16,19 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 //   graphExplorer
 //   contractExplorer
 //   modelLineage
+//   cowExplorer
 
 const ENTRY_MAP: Record<string, { html: string; out: string }> = {
   report:           { html: "index.html",            out: "index.html" },
   metricLab:        { html: "metric-lab.html",       out: "metric-lab.html" },
   portfolio:        { html: "portfolio.html",        out: "portfolio.html" },
   graphExplorer:    { html: "graph-explorer.html",   out: "graph-explorer.html" },
+  graphExplorerWeb: { html: "graph-explorer.html",   out: "graph-explorer.html" },
   contractExplorer: { html: "contract-explorer.html", out: "contract-explorer.html" },
   modelLineage:     { html: "model-lineage.html",    out: "model-lineage.html" },
   dataCatalog:      { html: "data-catalog.html",     out: "data-catalog.html" },
   reportStudio:     { html: "report-studio.html",    out: "report-studio.html" },
+  cowExplorer:      { html: "cow-explorer.html",     out: "cow-explorer.html" },
 };
 
 const entryName = process.env.CEREBRO_UI_ENTRY ?? "report";
@@ -36,18 +39,27 @@ if (!entry) {
   );
 }
 
-// The Data Catalog ships as a SPLIT bundle (hashed JS/CSS/woff2 emitted as
-// separate cacheable assets under /app/data_catalog/assets/) instead of one
-// inlined HTML — so the immutable code+fonts cache across visits while only the
-// tiny token-bearing HTML shell is re-fetched. All other apps stay single-file.
-const isSplit = entryName === "dataCatalog";
+// Chart-heavy apps can ship as split bundles (hashed JS/CSS assets under
+// /app/{app_id}/assets/) so immutable code and fonts cache across visits while
+// only the tiny token-bearing HTML shell is re-fetched.
+const SPLIT_BASE: Record<string, string> = {
+  dataCatalog: "/app/data_catalog/",
+  cowExplorer: "/app/cow_explorer/",
+  graphExplorerWeb: "/app/graph_explorer/",
+};
+const splitBase = SPLIT_BASE[entryName];
+const isSplit = Boolean(splitBase);
 
 export default defineConfig({
-  base: isSplit ? "/app/data_catalog/" : "./",
-  plugins: [react(), tailwindcss(), ...(isSplit ? [] : [viteSingleFile()])],
+  base: splitBase ?? "./",
+  plugins: [
+    react(),
+    tailwindcss(),
+    ...(isSplit ? [] : [viteSingleFile()]),
+  ],
   build: {
     target: "es2020",
-    outDir: "dist",
+    outDir: process.env.CEREBRO_UI_OUT_DIR ?? "dist",
     emptyOutDir: entryName === "report",
     assetsInlineLimit: isSplit ? 0 : undefined,
     rollupOptions: {

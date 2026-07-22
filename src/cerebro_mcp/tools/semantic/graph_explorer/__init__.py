@@ -51,12 +51,23 @@ _BUNDLED_HTML_SIGNATURE: tuple[int, int] | None = None
 _BUNDLED_HTML_SHA256: str | None = None
 _BUNDLED_HTML_MTIME: str | None = None
 _BUNDLE_LOCK = threading.Lock()
+_WEB_BUNDLED_HTML: str | None = None
+_WEB_BUNDLED_HTML_SIGNATURE: tuple[int, int] | None = None
+_WEB_BUNDLED_HTML_SHA256: str | None = None
+_WEB_BUNDLED_HTML_MTIME: str | None = None
+_WEB_BUNDLE_LOCK = threading.Lock()
 _APP_COMMIT: str | None = None
 
 
 def _bundle_resource():
     return importlib.resources.files("cerebro_mcp").joinpath(
         "static/graph_explorer.html"
+    )
+
+
+def _web_bundle_resource():
+    return importlib.resources.files("cerebro_mcp").joinpath(
+        "static/graph_explorer_web.html"
     )
 
 
@@ -125,13 +136,64 @@ def get_graph_explorer_html() -> str:
         return _BUNDLED_HTML
 
 
+def get_graph_explorer_web_html() -> str:
+    """Load the split standalone shell while keeping MCP HTML self-contained.
+
+    Source checkouts that have not run the new dual build yet fall back to the
+    inline artifact, preserving the existing developer workflow.
+    """
+    global _WEB_BUNDLED_HTML, _WEB_BUNDLED_HTML_SIGNATURE
+    global _WEB_BUNDLED_HTML_SHA256, _WEB_BUNDLED_HTML_MTIME
+    missing = False
+    with _WEB_BUNDLE_LOCK:
+        try:
+            resource = _web_bundle_resource()
+            with importlib.resources.as_file(resource) as path:
+                stat = path.stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+                if (
+                    _WEB_BUNDLED_HTML is not None
+                    and signature == _WEB_BUNDLED_HTML_SIGNATURE
+                ):
+                    return _WEB_BUNDLED_HTML
+                raw = path.read_bytes()
+                _WEB_BUNDLED_HTML = raw.decode("utf-8")
+                _WEB_BUNDLED_HTML_SIGNATURE = signature
+                _WEB_BUNDLED_HTML_SHA256 = hashlib.sha256(raw).hexdigest()
+                _WEB_BUNDLED_HTML_MTIME = _iso_mtime(stat.st_mtime)
+                return _WEB_BUNDLED_HTML
+        except (FileNotFoundError, ModuleNotFoundError):
+            missing = True
+
+    if missing:
+        inline = get_graph_explorer_html()
+        with _WEB_BUNDLE_LOCK:
+            _WEB_BUNDLED_HTML = inline
+            _WEB_BUNDLED_HTML_SIGNATURE = None
+            _WEB_BUNDLED_HTML_SHA256 = hashlib.sha256(
+                inline.encode("utf-8")
+            ).hexdigest()
+            _WEB_BUNDLED_HTML_MTIME = _BUNDLED_HTML_MTIME
+        return inline
+    raise RuntimeError("Graph Explorer standalone bundle could not be loaded")
+
+
 def get_graph_explorer_diagnostics() -> dict[str, Any]:
     """Identity injected into the app and exposed on its health route."""
     get_graph_explorer_html()
+    get_graph_explorer_web_html()
     return {
         "app_commit": _app_commit(),
-        "bundle_sha256": _BUNDLED_HTML_SHA256,
-        "bundle_mtime": _BUNDLED_HTML_MTIME,
+        # Standalone diagnostics identify the exact shell served by /app.
+        "bundle_sha256": _WEB_BUNDLED_HTML_SHA256,
+        "bundle_mtime": _WEB_BUNDLED_HTML_MTIME,
+        "bundle_kind": (
+            "split_web"
+            if _WEB_BUNDLED_HTML_SIGNATURE is not None
+            else "inline_fallback"
+        ),
+        "inline_bundle_sha256": _BUNDLED_HTML_SHA256,
+        "web_bundle_sha256": _WEB_BUNDLED_HTML_SHA256,
         "dbt_manifest_sha256": manifest.content_hash,
     }
 
@@ -159,7 +221,7 @@ def register_graph_explorer_tools(mcp, ch: ClickHouseManager) -> None:
     web_apps.register_web_app(
         app_id=constants.GRAPH_EXPLORER_APP_ID,
         open_tool="open_graph_explorer",
-        html_loader=get_graph_explorer_html,
+        html_loader=get_graph_explorer_web_html,
         tools=tools,
         title="Graph Explorer",
         description=(
@@ -179,6 +241,7 @@ __all__ = [
     "DEFAULT_MAX_NEIGHBORS",
     "constants",
     "get_graph_explorer_html",
+    "get_graph_explorer_web_html",
     "get_graph_explorer_diagnostics",
     "register_graph_explorer_tools",
     "_canonical_edge_id",

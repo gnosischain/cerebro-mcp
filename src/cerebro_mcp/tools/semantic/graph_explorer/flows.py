@@ -28,14 +28,21 @@ Traversal rules (pinned):
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable
 
 from mcp.types import CallToolResult
 
-from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.clients.clickhouse import (
+    CONTRACT_PROBE_QUERY_BUDGET,
+    INTERACTIVE_QUERY_BUDGET,
+    ClickHouseManager,
+)
 from cerebro_mcp.semantic.address_semantics import (
     is_structural_terminal,
     money_event_kind,
@@ -79,6 +86,10 @@ _BRIDGE_GATE_FIELDS = (
     "invalid_direction_rows",
     "endpoint_ambiguity_rows",
 )
+_BRIDGE_GATE_SUCCESS_TTL_SECONDS = 600.0
+_BRIDGE_GATE_FAILURE_TTL_SECONDS = 30.0
+_bridge_gate_cache: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+_bridge_gate_cache_lock = threading.Lock()
 
 
 @dataclass
@@ -102,11 +113,32 @@ class FlowWalk:
 
 def _run_query(ch: ClickHouseManager, sql: str, params: dict[str, Any], limit: int):
     return mini_apps.run_structured_query(
-        ch, sql, database="dbt", parameters=params, requested_max_rows=limit + 1
+        ch,
+        sql,
+        database="dbt",
+        parameters=params,
+        requested_max_rows=limit + 1,
+        query_budget=INTERACTIVE_QUERY_BUDGET,
     )
 
 
-def validate_bridge_relation_safety(ch: ClickHouseManager) -> dict[str, Any]:
+def _bridge_contract_fingerprint(contract: dict[str, Any] | None) -> str:
+    material = {
+        "relation": BRIDGES_RELATION,
+        "column_types": (contract or {}).get("column_types"),
+        "horizon": (contract or {}).get("horizon"),
+        "horizon_basis": (contract or {}).get("horizon_basis"),
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def validate_bridge_relation_safety(
+    ch: ClickHouseManager,
+    *,
+    contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Prove the deployed bridge relation clean before using enrichment.
 
     This gate is intentionally fail-closed.  It is an optional-enrichment
@@ -114,6 +146,22 @@ def validate_bridge_relation_safety(ch: ClickHouseManager) -> dict[str, Any]:
     any malformed result, timeout, or query exception while retaining the
     independently sourced transfer graph.
     """
+    fingerprint = _bridge_contract_fingerprint(contract)
+    cache_key = (id(ch), fingerprint)
+    use_cache = contract is not None
+    now = time.monotonic()
+    if use_cache:
+        with _bridge_gate_cache_lock:
+            cached = _bridge_gate_cache.get(cache_key)
+            if cached:
+                ttl = (
+                    _BRIDGE_GATE_SUCCESS_TTL_SECONDS
+                    if cached[1].get("ok")
+                    else _BRIDGE_GATE_FAILURE_TTL_SECONDS
+                )
+                if now - cached[0] < ttl:
+                    return dict(cached[1])
+
     sql, params = build_bridge_safety_gate_sql()
     base: dict[str, Any] = {
         "ok": False,
@@ -131,6 +179,7 @@ def validate_bridge_relation_safety(ch: ClickHouseManager) -> dict[str, Any]:
             database="dbt",
             parameters=params,
             requested_max_rows=1,
+            query_budget=CONTRACT_PROBE_QUERY_BUDGET,
         )
         if len(result.rows) != 1 or len(result.rows[0]) < 8:
             raise RuntimeError(
@@ -162,14 +211,26 @@ def validate_bridge_relation_safety(ch: ClickHouseManager) -> dict[str, Any]:
                 "bridge attribution disabled: deployed relation failed the "
                 "full-relation safety gate (" + ", ".join(failures) + ")"
             )
+            if use_cache:
+                with _bridge_gate_cache_lock:
+                    _bridge_gate_cache[cache_key] = (
+                        time.monotonic(),
+                        dict(base),
+                    )
             return base
         base.update({"ok": True, "status": "verified"})
+        if use_cache:
+            with _bridge_gate_cache_lock:
+                _bridge_gate_cache[cache_key] = (time.monotonic(), dict(base))
         return base
     except Exception as exc:
         base["error"] = (
             "bridge attribution disabled: full-relation safety could not be "
             f"proven ({exc})"
         )
+        if use_cache:
+            with _bridge_gate_cache_lock:
+                _bridge_gate_cache[cache_key] = (time.monotonic(), dict(base))
         return base
 
 
@@ -188,6 +249,8 @@ def flows_trace(
     node_cap: int,
     edge_cap: int,
     per_query_limit: int,
+    metadata_available: bool = True,
+    prices_available: bool = True,
     terminal_sectors: frozenset[str] | None = None,
     existing: FlowWalk | None = None,
     fetch_edges: Callable[..., Any] | None = None,
@@ -214,6 +277,8 @@ def flows_trace(
             min_usd=min_usd,
             tokens=tokens,
             limit=per_query_limit,
+            metadata_available=metadata_available,
+            prices_available=prices_available,
         )
         return _run_query(ch, sql, params, per_query_limit).rows
 
@@ -225,6 +290,8 @@ def flows_trace(
             t1_exclusive=t1,
             min_usd=min_usd,
             tokens=tokens,
+            metadata_available=metadata_available,
+            prices_available=prices_available,
         )
         result = mini_apps.run_structured_query(
             ch,
@@ -232,12 +299,15 @@ def flows_trace(
             database="dbt",
             parameters=params,
             requested_max_rows=2,
+            query_budget=INTERACTIVE_QUERY_BUDGET,
         )
         if not result.rows:
             return None
         row = result.rows[0]
         return {
-            "total_counterparties": int(row[0] or 0),
+            "total_counterparties": (
+                None if row[0] is None else int(row[0])
+            ),
             "total_edges": int(row[1] or 0),
             "known_usd": float(row[2] or 0),
             "total_usd": None if row[3] is None else float(row[3]),
@@ -246,8 +316,12 @@ def flows_trace(
                 int(row[5] or 0) if len(row) > 5 else 0
             ),
             "supply_event_edges": int(row[6] or 0) if len(row) > 6 else 0,
-            "contract_endpoint_edges": int(row[7] or 0) if len(row) > 7 else 0,
-            "exact": True,
+            "contract_endpoint_edges": (
+                None
+                if len(row) <= 7 or row[7] is None
+                else int(row[7])
+            ),
+            "exact": row[0] is not None,
         }
 
     def default_fetch_bridges(ids: list[str]):
@@ -410,7 +484,9 @@ def flows_trace(
         shown_known_usd = 0.0
         shown_unknown_usd_edges = 0
         budget_hit = False
-        for row in rows:  # USD-desc — biggest money first degradation
+        # SQL ranks by measured USD when available, then by transfer count for
+        # wholly unpriced fail-soft results.
+        for row in rows:
             src, tgt = str(row[0]), str(row[1])
             token_addr = str(row[2])
             parent, candidate = (src, tgt) if leg == "out" else (tgt, src)
@@ -462,7 +538,7 @@ def flows_trace(
                 "edge_class": event_kind,
                 "token_address": token_addr,
                 "symbol": str(row[3] or ""),
-                "amount": float(row[4] or 0),
+                "amount": None if row[4] is None else float(row[4]),
                 "amount_usd": None if row[5] is None else float(row[5]),
                 "transfer_count": int(row[6] or 0),
                 "first_seen": str(row[7] or ""),
@@ -501,7 +577,11 @@ def flows_trace(
                 "direction": leg,
                 "frontier_size": len(frontier),
                 "budget": per_hop_budget,
-                "ranking": "usd_desc",
+                "ranking": (
+                    "usd_desc"
+                    if prices_available and metadata_available
+                    else "transfer_count_desc_unpriced"
+                ),
                 "shown_counterparties": len(shown_counterparties),
                 "total_counterparties": total_counterparties,
                 "dropped_counterparties": (
@@ -693,6 +773,17 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         state_flows = dict(record.view_state.get("flows") or {})
         warnings: list[str] = []
         request_id = max(0, int(request_id or 0))
+        reserved_request_id = mini_apps.reserve_view_request(
+            view_id, request_channel="money", request_id=request_id
+        )
+        if reserved_request_id is None:
+            current = mini_apps.snapshot_view(view_id)
+            assert current is not None
+            return mini_apps.payload_to_call_tool_result(
+                build_payload(current),
+                summary_text="Money Trail request was superseded by a newer request.",
+            )
+        request_id = reserved_request_id
         scope_id = new_scope_id("flows", request_id)
 
         if merge:
@@ -776,6 +867,8 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             probe_horizon=True,
             horizon_column="date",
         )
+        metadata_available = bool(metadata_contract["ok"])
+        prices_available = bool(prices_contract["ok"] and metadata_available)
         token_universe_error: str | None = None
         token_universe: dict[str, Any] = {
             "addresses": [],
@@ -798,6 +891,7 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     database="dbt",
                     parameters=universe_params,
                     requested_max_rows=1001,
+                    query_budget=INTERACTIVE_QUERY_BUDGET,
                 )
                 if len(universe_result.rows) > 1000:
                     raise RuntimeError(
@@ -861,7 +955,9 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 )
                 use_bridges = False
             else:
-                bridge_gate = validate_bridge_relation_safety(ch)
+                bridge_gate = validate_bridge_relation_safety(
+                    ch, contract=bridge_contract
+                )
                 if not bridge_gate["ok"]:
                     bridge_issue = str(
                         bridge_gate.get("error")
@@ -873,28 +969,34 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     bridge_issue + "; primary transfer evidence remains usable."
                 )
 
-        required_contract_failures = [
+        enrichment_contract_failures = [
             contract
-            for contract in (primary_contract, metadata_contract, prices_contract)
+            for contract in (metadata_contract, prices_contract)
             if not contract["ok"]
         ]
-        if required_contract_failures:
+        if not primary_contract["ok"]:
             walk = FlowWalk(
                 warnings=[
                     "flow source contract failed: "
-                    + "; ".join(
-                        f"{contract['relation']}: "
-                        + str(contract.get("error") or "unknown source error")
-                        for contract in required_contract_failures
-                    )
+                    + f"{primary_contract['relation']}: "
+                    + str(primary_contract.get("error") or "unknown source error")
                 ],
                 source_failures=[
-                    f"{contract['relation']}: "
-                    + str(contract.get("error") or "flow source unavailable")
-                    for contract in required_contract_failures
+                    f"{primary_contract['relation']}: "
+                    + str(primary_contract.get("error") or "flow source unavailable")
                 ],
             )
         else:
+            if not metadata_available:
+                warnings.append(
+                    "Token metadata is unavailable; raw transfer adjacency is "
+                    "retained, while symbols and normalized amounts remain unknown."
+                )
+            if not prices_available:
+                warnings.append(
+                    "Token price enrichment is unavailable; movements remain in "
+                    "the unpriced lane and USD totals remain unknown."
+                )
             walk = flows_trace(
                 ch,
                 seeds=seeds,
@@ -909,11 +1011,12 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 node_cap=constants.FLOWS_MAX_NODES,
                 edge_cap=edge_cap,
                 per_query_limit=constants.FLOWS_EDGES_PER_QUERY,
+                metadata_available=metadata_available,
+                prices_available=prices_available,
                 existing=existing_walk,
             )
             if token_universe_error:
                 walk.warnings.append(token_universe_error)
-                walk.source_failures.append(token_universe_error)
         warnings.extend(walk.warnings)
         if walk.truncated_hops:
             warnings.append(
@@ -930,6 +1033,7 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 result = mini_apps.run_structured_query(
                     ch, sql, database="dbt", parameters=params,
                     requested_max_rows=len(node_ids) + 1,
+                    query_budget=INTERACTIVE_QUERY_BUDGET,
                 )
                 for row in result.rows:
                     if kind == "canonical":
@@ -1095,11 +1199,23 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 kind="dbt_aggregate",
                 name=f"dbt.{PRICES_RELATION}",
                 role="enrichment",
-                status="ok" if prices_contract["ok"] else "error",
+                status=(
+                    "error"
+                    if not prices_contract["ok"]
+                    else ("partial" if not metadata_available else "ok")
+                ),
+                contract_status="ok" if prices_contract["ok"] else "error",
                 horizon=prices_contract.get("horizon"),
                 horizon_basis=prices_contract.get("horizon_basis"),
                 fetched_at=prices_contract.get("freshness_checked_at"),
-                error=prices_contract.get("error"),
+                error=(
+                    prices_contract.get("error")
+                    or (
+                        "not applied because token metadata is unavailable"
+                        if not metadata_available
+                        else None
+                    )
+                ),
             ),
         ]
         if bridge_contract is not None:
@@ -1172,11 +1288,13 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 "enrichment; displayed USD values are known subtotals and "
                 "complete USD totals remain unknown."
             )
-        if required_contract_failures or (transfer_failures and not edge_rows):
+        if not primary_contract["ok"] or (transfer_failures and not edge_rows):
             scope_status = "failed"
         elif (
             walk.truncated
             or transfer_failures
+            or enrichment_contract_failures
+            or token_universe_error
             or bridge_issue
             or bridge_runtime_failures
             or unknown_usd_rows > 0
@@ -1191,7 +1309,7 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             coverage_exact
             and not walk.truncated
             and not transfer_failures
-            and not required_contract_failures
+            and primary_contract["ok"]
         )
         shown_counterparties = sum(
             int(item["shown_counterparties"]) for item in walk.hop_coverage
@@ -1249,7 +1367,11 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         )
         truncation_coverage = {
             "budget_per_hop": constants.FLOWS_PER_HOP_NODE_BUDGET,
-            "ranking": "usd_desc",
+            "ranking": (
+                "usd_desc"
+                if prices_available and metadata_available
+                else "transfer_count_desc_unpriced"
+            ),
             # A counterparty can legitimately appear in more than one hop.
             # State the counting basis rather than silently calling this a
             # global unique-address total.
@@ -1324,7 +1446,12 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             truncated=scope_truncated,
             truncation_rule=(
                 f"per-hop node budget {constants.FLOWS_PER_HOP_NODE_BUDGET}, "
-                f"USD-descending admission; node cap {constants.FLOWS_MAX_NODES}; "
+                + (
+                    "USD-descending admission"
+                    if prices_available and metadata_available
+                    else "transfer-count-descending unpriced admission"
+                )
+                + f"; node cap {constants.FLOWS_MAX_NODES}; "
                 f"edge cap {edge_cap}; "
                 + f"min_usd={eff_min_usd:g} filters priced edges only; "
                 "unpriced aggregates remain structurally admitted"
@@ -1368,18 +1495,6 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             "counting_basis": "sum_of_per_hop_aggregated_edges",
         }
 
-        # ---- Persist (per-key attach ONLY) -----------------------------------
-        mini_apps.attach_dataset(
-            view_id,
-            "flow_nodes",
-            dataset_from_rows(constants.FLOW_NODES_COLUMNS, node_rows, "flow_nodes"),
-        )
-        mini_apps.attach_dataset(
-            view_id,
-            "flow_edges",
-            dataset_from_rows(constants.FLOW_EDGES_COLUMNS, edge_rows, "flow_edges"),
-        )
-
         expanded = dict(state_flows.get("expanded") or {}) if merge else {}
         if merge:
             for s in seeds:
@@ -1392,9 +1507,19 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         # Data loader: writes ONLY the flows namespace + datasets. mode and
         # selection are owned by explicit mode commands (mode_revision) — a
         # trace must never flip the visible tab or clear the client selection.
-        mini_apps.patch_view_state(
+        accepted = mini_apps.commit_view_update(
             view_id,
-            {
+            request_channel="money",
+            request_id=request_id,
+            datasets={
+                "flow_nodes": dataset_from_rows(
+                    constants.FLOW_NODES_COLUMNS, node_rows, "flow_nodes"
+                ),
+                "flow_edges": dataset_from_rows(
+                    constants.FLOW_EDGES_COLUMNS, edge_rows, "flow_edges"
+                ),
+            },
+            state_patch={
                 "flows": {
                     "seeds": all_seeds,
                     "direction": state_flows.get("direction", direction) if merge else direction,
@@ -1421,14 +1546,18 @@ def register_flows_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 "warnings": warnings,
             },
         )
-        updated = mini_apps.get_view(view_id)
+        updated = mini_apps.snapshot_view(view_id)
         assert updated is not None
         return mini_apps.payload_to_call_tool_result(
             build_payload(updated),
             summary_text=(
-                f"Flows traced from {len(seeds)} seed(s) ({direction}, "
-                f"{eff_hops} hop(s)): {len(node_rows)} node(s), "
-                f"{len(edge_rows)} edge(s)."
+                (
+                    f"Flows traced from {len(seeds)} seed(s) ({direction}, "
+                    f"{eff_hops} hop(s)): {len(node_rows)} node(s), "
+                    f"{len(edge_rows)} edge(s)."
+                )
+                if accepted
+                else f"Stale Money Trail request {request_id} ignored."
             ),
         )
 

@@ -24,8 +24,10 @@ export function buildTransactionRequest(
   if (!viewId) return null;
   const applied = txState ?? {};
   const appliedRecord = applied as unknown as Record<string, unknown>;
+  const appliedQuery = objectValue(applied.query);
   const scope = objectValue(applied.scope);
   const window = objectValue(scope.window);
+  const queryWindow = objectValue(appliedQuery.window);
   const windowSource = String(window.source ?? scope.window_source ?? "");
   const appliedExplicit =
     String(scope.query_kind ?? appliedRecord.query_kind ?? "") === "explicit_hash" ||
@@ -47,18 +49,33 @@ export function buildTransactionRequest(
   const seed = settings.seed ?? applied.seed ?? "";
   if (!hashes.length && !seed && !expandNodeId) return null;
 
-  const counterparties = settings.counterparties ?? applied.counterparties ?? [];
-  const tokens = settings.tokens ?? applied.tokens ?? [];
-  const allHistoryAddress = Boolean(
-    !hashes.length && seed && (expandNodeId || (!counterparties.length && !tokens.length)),
-  );
-
   const changingRelativeRange = settings.rangeDays !== undefined;
-  const appliedExactWindow =
+  const appliedExactWindow = Boolean(queryWindow.t0 && queryWindow.t1) ||
     windowSource === "money_trail_applied_window" ||
     windowSource === "custom_utc_window";
-  const retainedT0 = String(applied.t0 ?? window.t0 ?? "");
-  const retainedT1 = String(applied.t1 ?? window.t1 ?? "");
+  const retainedT0 = String(queryWindow.t0 ?? applied.t0 ?? window.t0 ?? "");
+  const retainedT1 = String(queryWindow.t1 ?? applied.t1 ?? window.t1 ?? "");
+  const counterparties = settings.counterparties ??
+    (Array.isArray(appliedQuery.counterparties)
+      ? appliedQuery.counterparties.map(String)
+      : applied.counterparties ?? []);
+  const tokens = settings.tokens ??
+    (Array.isArray(appliedQuery.tokens)
+      ? appliedQuery.tokens.map(String)
+      : applied.tokens ?? []);
+  const requestedExactWindow = Boolean(settings.t0 && settings.t1);
+  const retainedExactWindow = Boolean(
+    appliedExactWindow && !changingRelativeRange && retainedT0 && retainedT1,
+  );
+  // Address discovery without an explicit UTC pair always means all stored
+  // history plus the RPC head. Token/activity filters refine that universe;
+  // they must never resurrect a legacy implicit 30/90-day range.
+  const allHistoryAddress = Boolean(
+    !hashes.length &&
+    (seed || expandNodeId) &&
+    !requestedExactWindow &&
+    !retainedExactWindow,
+  );
   const t0 = allHistoryAddress
     ? ""
     :
@@ -78,6 +95,7 @@ export function buildTransactionRequest(
 
   return {
     view_id: viewId,
+    operation: settings.operation ?? "legacy",
     tx_hashes: hashes,
     seed_node_id: hashes.length ? "" : seed,
     counterparty_ids: counterparties,
@@ -95,5 +113,12 @@ export function buildTransactionRequest(
     after_block: settings.afterBlock ?? 0,
     after_index: settings.afterIndex ?? -1,
     merge: settings.merge ?? false,
+    cursor: settings.cursor ?? "",
+    page_size: Math.max(1, Math.min(100, settings.pageSize ?? settings.maxTxs ?? 25)),
+    activity_kinds: settings.activityKinds ?? (
+      Array.isArray(appliedQuery.activity_kinds)
+        ? appliedQuery.activity_kinds.map(String)
+        : ["direct", "erc20"]
+    ),
   };
 }

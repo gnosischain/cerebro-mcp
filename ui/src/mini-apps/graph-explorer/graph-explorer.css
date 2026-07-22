@@ -2123,12 +2123,35 @@ body { overflow: hidden; }
   font-size: 0.68rem;
 }
 .ge-task-select { display: none; }
-.ge-filter-drawer { display: contents; }
-.ge-filter-drawer > summary { display: none; }
+.ge-filter-drawer {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.ge-filter-drawer__toggle { display: none; }
 
 @media (min-width: 900px) {
-  .ge-filter-drawer > .ge-topbar-filters {
+  .ge-filter-drawer:not(.ge-filter-drawer--desktop-collapsible) > .ge-topbar-filters {
     display: flex !important;
+  }
+
+  .ge-filter-drawer--desktop-collapsible .ge-filter-drawer__toggle {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-translucent);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.66rem;
+    cursor: pointer;
+  }
+
+  .ge-filter-drawer--desktop-collapsible.is-open .ge-filter-drawer__toggle {
+    color: var(--accent-text);
+    background: var(--accent-bg);
   }
 }
 
@@ -2187,20 +2210,24 @@ body { overflow: hidden; }
   .ge-filter-drawer {
     order: 4;
     width: 100%;
-    display: block;
+    display: flex;
+    align-items: flex-start;
+    flex-direction: column;
   }
-  .ge-filter-drawer > summary {
+  .ge-filter-drawer__toggle {
     width: max-content;
-    display: list-item;
+    display: inline-flex;
+    align-items: center;
     padding: 4px 9px;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--surface-translucent);
     color: var(--text-secondary);
+    font: inherit;
     font-size: 0.66rem;
     cursor: pointer;
   }
-  .ge-filter-drawer[open] > summary {
+  .ge-filter-drawer.is-open > .ge-filter-drawer__toggle {
     color: var(--accent-text);
     background: var(--accent-bg);
   }
@@ -3094,10 +3121,7 @@ button.ge-atlas-item {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  transition: opacity 150ms ease;
 }
-.ge-tx-workspace.is-stale { opacity: 0.58; }
-.ge-canvas.is-stale { opacity: 0.58; }
 .ge-tx-picker {
   display: flex;
   gap: 6px;
@@ -3327,6 +3351,17 @@ button.ge-atlas-item {
 .ge-timeline-narrative__scroll {
   max-height: min(46vh, 520px);
   overflow: auto;
+}
+.ge-timeline-narrative__pagination {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.64rem;
 }
 .ge-timeline-narrative table {
   width: 100%;
@@ -3795,9 +3830,8 @@ button.ge-atlas-item {
    semantic colors and produced the muddy preview background. */
 .ge-canvas.is-stale,
 .ge-tx-workspace.is-stale,
-.ge-timeline-canvas.is-stale {
-  opacity: 1;
-}
+.ge-timeline-canvas.is-stale,
+.ge-money-map.is-stale { opacity: 1; }
 
 @media (max-width: 899px) {
   .ge-graph-chrome { align-items: stretch; }
@@ -3924,7 +3958,7 @@ button.ge-atlas-item {
   color: var(--text-muted);
   font-size: 0.68rem;
 }
-.ge-timeline-canvas.is-stale { pointer-events: none; }
+.ge-timeline-canvas.is-stale { pointer-events: auto; }
 
 @media (max-width: 699px) {
   .ge-timeline-narrative,

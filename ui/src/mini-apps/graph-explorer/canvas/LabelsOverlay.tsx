@@ -35,12 +35,13 @@ export function LabelsOverlay({
   const labelLayerRef = useRef<HTMLDivElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const labelIndicesRef = useRef<number[]>([]);
+  const labelFrameRef = useRef<number | null>(null);
   const modelRef = useRef(model);
   useEffect(() => {
     modelRef.current = model;
   }, [model]);
 
-  const updateLabels = () => {
+  const paintLabels = () => {
     const graph = graphRef.current;
     const layer = labelLayerRef.current;
     if (!graph || !layer) return;
@@ -94,6 +95,14 @@ export function LabelsOverlay({
     }
   };
 
+  const updateLabels = () => {
+    if (labelFrameRef.current != null) return;
+    labelFrameRef.current = window.requestAnimationFrame(() => {
+      labelFrameRef.current = null;
+      paintLabels();
+    });
+  };
+
   // Re-track the currently-labelled indices against the graph's live point
   // positions, then repaint. Must run AFTER setPointPositions (Cosmos only
   // tracks points that already exist), so the engine's data-push effect calls
@@ -130,6 +139,10 @@ export function LabelsOverlay({
   });
   useEffect(() => {
     return () => {
+      if (labelFrameRef.current != null) {
+        window.cancelAnimationFrame(labelFrameRef.current);
+        labelFrameRef.current = null;
+      }
       overlayRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

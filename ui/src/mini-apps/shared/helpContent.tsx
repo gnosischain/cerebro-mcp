@@ -1,5 +1,54 @@
 import type { HelpContent } from "./HelpDialog";
 
+export const COW_EXPLORER_HELP: HelpContent = {
+  title: "CoW Data Explorer",
+  intro: "Explore the CoW activity currently indexed in cow_db, with source-specific coverage and freshness shown beside every result.",
+  sections: [
+    {
+      heading: "Prices and markets",
+      body: (
+        <p>
+          <strong>Execution prices</strong> come only from settled fills. Auction
+          price-vector ratios and native-price API observations are separate
+          reference series; they are never blended into the execution candles.
+        </p>
+      ),
+    },
+    {
+      heading: "Known intents",
+      body: (
+        <p>
+          The Orders section is an <strong>observed snapshot</strong> of indexed
+          open intents. It is not a live or complete orderbook. The snapshot
+          observation time and incomplete-source warning remain visible.
+        </p>
+      ),
+    },
+    {
+      heading: "Coverage",
+      body: (
+        <p>
+          Historical backfill differs by chain and source. Read the indexed
+          first/last timestamps, source observation time, checkpoint, row cap,
+          and warning codes shown with each chart and table before comparing
+          periods or networks.
+        </p>
+      ),
+    },
+    {
+      heading: "Solver roles",
+      body: (
+        <p>
+          Competition solvers and settlement executors are distinct roles.
+          The flow diagram links token pairs to observed settlement executors
+          by settled fill count and does not infer frontend, builder, OFA, PMM,
+          or liquidity-source attribution.
+        </p>
+      ),
+    },
+  ],
+};
+
 /**
  * Per-app usage guides shown by the ⓘ help button in each mini-app's nav bar.
  * Copy is intentionally concrete: what the view shows, what the symbols mean,

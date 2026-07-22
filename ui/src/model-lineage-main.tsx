@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import ModelLineageApp from "./mini-apps/model-lineage/ModelLineageApp";
 import { ThemeProvider } from "./hooks/useTheme";
+import "./themes/fonts.css";
 import "./themes/global.css";
 import "./mini-apps/shared/mini-apps.css";
 import "@xyflow/react/dist/style.css";

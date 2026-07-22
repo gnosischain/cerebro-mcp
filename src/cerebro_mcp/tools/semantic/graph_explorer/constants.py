@@ -75,6 +75,33 @@ EDGE_EVIDENCE_COLUMNS = [
 NODE_EVIDENCE_COLUMNS = [
     "node_id", "column", "value", "subject_kind", "request_id",
 ]
+NODE_ANNOTATION_COLUMNS = [
+    "scope_id",
+    "node_id",
+    "normalized_address",
+    "label_candidates",
+    "selected_label",
+    "label_source",
+    "label_status",
+    "label_confidence",
+    "label_as_of",
+    "address_kind",
+    "kind_source",
+    "semantic_kinds",
+    "warnings",
+]
+EDGE_PIVOT_COLUMNS = [
+    "edge_id",
+    "supported",
+    "reason",
+    "source",
+    "target",
+    "token_addresses",
+    "event_kind",
+    "t0",
+    "t1",
+    "source_scope_id",
+]
 METRICS_COLUMNS = ["metric", "value"]
 
 # Timeline caps + defaults. Per-profile budget is additionally bounded by
@@ -159,6 +186,9 @@ DATASET_TITLES = {
     "tx_raw_receipts": "Raw RPC Receipts",
     "node_evidence": "Node Evidence",
     "edge_evidence": "Edge Evidence",
+    "node_annotations": "Node Annotations",
+    "focus_node_annotations": "Selected Node Annotations",
+    "edge_pivots": "Relationship Edge Pivots",
     "graph_metrics": "Graph Metrics",
 }
 

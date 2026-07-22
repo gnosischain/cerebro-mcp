@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import DataCatalogApp from "./mini-apps/data-catalog/DataCatalogApp";
 import { ThemeProvider } from "./hooks/useTheme";
+import "./themes/fonts.css";
 import "./themes/global.css";
 import "./mini-apps/shared/mini-apps.css";
 // React Flow base styles + the model-lineage node/canvas styles powering the

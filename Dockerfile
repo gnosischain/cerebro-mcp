@@ -13,10 +13,13 @@ COPY ui/ .
 RUN CEREBRO_UI_ENTRY=report          npm run build \
  && CEREBRO_UI_ENTRY=metricLab       npm run build \
  && CEREBRO_UI_ENTRY=portfolio       npm run build \
- && CEREBRO_UI_ENTRY=graphExplorer   npm run build \
+ && CEREBRO_UI_ENTRY=graphExplorer CEREBRO_UI_OUT_DIR=dist-graph-explorer-inline npm run build \
+ && CEREBRO_UI_ENTRY=graphExplorerWeb CEREBRO_UI_OUT_DIR=dist-graph-explorer-web npm run build \
  && CEREBRO_UI_ENTRY=contractExplorer npm run build \
  && CEREBRO_UI_ENTRY=modelLineage    npm run build \
- && CEREBRO_UI_ENTRY=dataCatalog     npm run build
+ && CEREBRO_UI_ENTRY=reportStudio    npm run build \
+ && CEREBRO_UI_ENTRY=dataCatalog CEREBRO_UI_OUT_DIR=dist-data-catalog npm run build \
+ && CEREBRO_UI_ENTRY=cowExplorer CEREBRO_UI_OUT_DIR=dist-cow-explorer npm run build
 
 # Stage 2: Build the Python package
 FROM python:3.12-slim
@@ -33,11 +36,16 @@ RUN rm -rf src/cerebro_mcp/static/assets
 COPY --from=ui-builder /ui/dist/index.html             src/cerebro_mcp/static/report.html
 COPY --from=ui-builder /ui/dist/metric-lab.html        src/cerebro_mcp/static/metric_lab.html
 COPY --from=ui-builder /ui/dist/portfolio.html         src/cerebro_mcp/static/portfolio.html
-COPY --from=ui-builder /ui/dist/graph-explorer.html    src/cerebro_mcp/static/graph_explorer.html
+COPY --from=ui-builder /ui/dist-graph-explorer-inline/graph-explorer.html src/cerebro_mcp/static/graph_explorer.html
+COPY --from=ui-builder /ui/dist-graph-explorer-web/graph-explorer.html src/cerebro_mcp/static/graph_explorer_web.html
+COPY --from=ui-builder /ui/dist-graph-explorer-web/assets/ src/cerebro_mcp/static/assets/graph_explorer/
 COPY --from=ui-builder /ui/dist/contract-explorer.html src/cerebro_mcp/static/contract_explorer.html
 COPY --from=ui-builder /ui/dist/model-lineage.html     src/cerebro_mcp/static/model_lineage.html
-COPY --from=ui-builder /ui/dist/data-catalog.html      src/cerebro_mcp/static/data_catalog.html
-COPY --from=ui-builder /ui/dist/assets/                src/cerebro_mcp/static/assets/
+COPY --from=ui-builder /ui/dist/report-studio.html     src/cerebro_mcp/static/report_studio.html
+COPY --from=ui-builder /ui/dist-data-catalog/data-catalog.html src/cerebro_mcp/static/data_catalog.html
+COPY --from=ui-builder /ui/dist-data-catalog/assets/   src/cerebro_mcp/static/assets/data_catalog/
+COPY --from=ui-builder /ui/dist-cow-explorer/cow-explorer.html src/cerebro_mcp/static/cow_explorer.html
+COPY --from=ui-builder /ui/dist-cow-explorer/assets/   src/cerebro_mcp/static/assets/cow_explorer/
 
 RUN pip install --no-cache-dir . && \
     useradd -r -u 1000 cerebro && \

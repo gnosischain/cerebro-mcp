@@ -20,6 +20,7 @@ import type { DatasetDescriptor, PageRowsResponse } from "../miniAppTypes";
 interface PendingFetch {
   key: string;
   token: string;
+  options?: { datasetRevision?: number; pageSize?: number };
   resolve: (page: PageRowsResponse | null) => void;
   reject: (err: unknown) => void;
 }
@@ -30,21 +31,29 @@ function fetchRows(
   _viewId: string,
   key: string,
   token = "",
+  options?: { datasetRevision?: number; pageSize?: number },
 ): Promise<PageRowsResponse | null> {
   return new Promise((resolve, reject) => {
-    pending.push({ key, token, resolve, reject });
+    pending.push({ key, token, options, resolve, reject });
   });
 }
 
-function page(key: string, rows: unknown[][], next: string): PageRowsResponse {
+function page(
+  key: string,
+  rows: unknown[][],
+  next: string,
+  revision = 1,
+  total = Number.NaN,
+): PageRowsResponse {
   return {
     view_id: "v1",
     dataset_key: key,
+    dataset_revision: revision,
     columns: ["c"],
     column_types: ["String"],
     rows,
     next_page_token: next,
-    total_rows: 0,
+    total_rows: total,
     stats: { row_count: 0, rows_returned: rows.length, mode: "exact_bounded", warnings: [] },
   };
 }
@@ -55,7 +64,14 @@ async function servePage(key: string, count: number, next: string) {
   expect(idx).toBeGreaterThanOrEqual(0);
   const [req] = pending.splice(idx, 1);
   await act(async () => {
-    req.resolve(page(key, Array.from({ length: count }, (_, i) => [i]), next));
+    req.resolve(
+      page(
+        key,
+        Array.from({ length: count }, (_, i) => [i]),
+        next,
+        req.options?.datasetRevision ?? 1,
+      ),
+    );
     // let the loop's awaits settle
     await Promise.resolve();
     await Promise.resolve();
@@ -135,6 +151,14 @@ async function render(
 // ---- tests ------------------------------------------------------------------
 
 describe("useHydratedDatasets (per-key + geometric)", () => {
+  it("requests pages against the descriptor revision with a bounded page size", async () => {
+    await render({ a: descriptor("a", 500, 12_000) }, { a: 7 });
+    expect(pending[0]?.options).toEqual({
+      datasetRevision: 7,
+      pageSize: 5_000,
+    });
+  });
+
   it("geometric publication: doubles between publishes, always flushes final", async () => {
     await render({ a: descriptor("a", 500, 3000) }, { a: 1 });
     // pages of 500 rows: 500 -> 1000 -> 1500 -> 2000 -> 2500 -> 3000
@@ -198,7 +222,14 @@ describe("useHydratedDatasets (per-key + geometric)", () => {
       const req = pending.splice(pending.findIndex((p) => p.key === "a"), 1)[0];
       const next = req.token === "offset:500" ? "offset:1000" : "";
       await act(async () => {
-        req.resolve(page("a", Array.from({ length: 500 }, (_, i) => [i]), next));
+        req.resolve(
+          page(
+            "a",
+            Array.from({ length: 500 }, (_, i) => [i]),
+            next,
+            req.options?.datasetRevision ?? 1,
+          ),
+        );
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -286,5 +317,33 @@ describe("useHydratedDatasets (per-key + geometric)", () => {
     expect(latest.a.phase).toBe("failed");
     expect(latest.a.hydrating).toBe(false);
     expect(latest.a.error).toContain("Hydration ended early");
+  });
+
+  it("fails when a page repeats its continuation token even with rows", async () => {
+    await render({ a: descriptor("a", 10, 30) }, { a: 1 });
+    const req = pending.shift();
+    expect(req).toBeDefined();
+    await act(async () => {
+      req!.resolve(page("a", [[10]], req!.token, 1, 30));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(latest.a.phase).toBe("failed");
+    expect(latest.a.error).toContain("Hydration made no progress");
+  });
+
+  it("fails when accumulated rows exceed the server total", async () => {
+    await render({ a: descriptor("a", 10, 30) }, { a: 1 });
+    const req = pending.shift();
+    expect(req).toBeDefined();
+    await act(async () => {
+      req!.resolve(page("a", [[10], [11]], "", 1, 11));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(latest.a.phase).toBe("failed");
+    expect(latest.a.error).toContain("exceeded advertised total");
   });
 });

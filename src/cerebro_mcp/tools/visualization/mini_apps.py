@@ -22,15 +22,23 @@ from __future__ import annotations
 
 import logging
 import math
+import json
+import inspect
+import re
 import threading
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from mcp.types import CallToolResult, TextContent
 
-from cerebro_mcp.clients.clickhouse import ClickHouseManager, ExecutedQuery
+from cerebro_mcp.clients.clickhouse import (
+    ClickHouseManager,
+    ExecutedQuery,
+    QueryBudget,
+)
 from cerebro_mcp.runtime.mini_app_cache import (
     CachedDataset,
     get_cache,
@@ -92,6 +100,11 @@ def list_apps() -> list[MiniAppDefinition]:
 _VIEW_TTL = timedelta(minutes=15)
 _VIEW_MAX = 50
 _VIEW_PAGE_SIZE = 500
+_VIEW_MAX_PAGE_SIZE = 10_000
+# Keep a single hydration response bounded even when a caller asks for a very
+# large page of wide forensic rows.  The row-count limit remains authoritative;
+# this byte budget merely selects a smaller safe page when needed.
+_VIEW_PAGE_BYTES = 2_000_000
 
 
 @dataclass
@@ -107,6 +120,9 @@ class ViewRecord:
     # Frontends key hydration / draft reseeding on this — NOT on SQL text,
     # which stays identical across param changes and forced reruns.
     dataset_revisions: dict[str, int] = field(default_factory=dict)
+    # Independent newest-wins channels. A focus request must not supersede a
+    # receipt load, and pagination must not supersede Money Trail state.
+    request_revisions: dict[str, int] = field(default_factory=dict)
 
 
 _views: dict[str, ViewRecord] = {}
@@ -153,6 +169,146 @@ def get_view(view_id: str) -> ViewRecord | None:
             return None
         _touch_view_locked(record)
         return record
+
+
+def snapshot_view(view_id: str) -> ViewRecord | None:
+    """Return a coherent, detached snapshot of one live view.
+
+    CachedDataset objects are immutable for a dataset revision, so the dataset
+    mapping is copied shallowly while mutable state/revision maps are detached.
+    """
+    with _views_lock:
+        record = _views.get(view_id)
+        if record is None or datetime.now(timezone.utc) > record.expires_at:
+            if record is not None:
+                del _views[view_id]
+            return None
+        _touch_view_locked(record)
+        return ViewRecord(
+            view_id=record.view_id,
+            app_id=record.app_id,
+            title=record.title,
+            created_at=record.created_at,
+            expires_at=record.expires_at,
+            view_state=deepcopy(record.view_state),
+            datasets=dict(record.datasets),
+            dataset_revisions=dict(record.dataset_revisions),
+            request_revisions=dict(record.request_revisions),
+        )
+
+
+def commit_view_update(
+    view_id: str,
+    *,
+    request_channel: str = "",
+    request_id: int = 0,
+    guard_channels: tuple[str, ...] | list[str] = (),
+    datasets: dict[str, CachedDataset] | None = None,
+    remove_datasets: tuple[str, ...] | list[str] = (),
+    state_patch: dict[str, Any] | None = None,
+) -> bool:
+    """Atomically commit datasets and state if a request is not stale.
+
+    Heavy queries run before this call. Only the final newest-wins comparison,
+    revision bumps, dataset replacement, and state merge occur under the view
+    lock. Legacy request id ``0`` remains accepted without advancing a channel.
+    """
+    normalized_channel = str(request_channel or "").strip()
+    normalized_request_id = max(0, int(request_id or 0))
+    with _views_lock:
+        record = _views.get(view_id)
+        if record is None:
+            raise KeyError(f"Unknown view_id: {view_id}")
+        if normalized_channel and normalized_request_id:
+            current = int(record.request_revisions.get(normalized_channel, 0))
+            if normalized_request_id < current:
+                return False
+            for channel in guard_channels:
+                guarded = str(channel or "").strip()
+                if guarded and normalized_request_id < int(
+                    record.request_revisions.get(guarded, 0)
+                ):
+                    return False
+            record.request_revisions[normalized_channel] = normalized_request_id
+        elif normalized_channel:
+            # A legacy request that never reserved an effective revision must
+            # not overwrite evidence after any revisioned request has begun.
+            if int(record.request_revisions.get(normalized_channel, 0)) > 0:
+                return False
+        for key in remove_datasets:
+            record.datasets.pop(key, None)
+            record.dataset_revisions.pop(key, None)
+        for key, dataset in (datasets or {}).items():
+            record.datasets[key] = dataset
+            record.dataset_revisions[key] = (
+                record.dataset_revisions.get(key, 0) + 1
+            )
+        if state_patch:
+            record.view_state = _deep_merge(record.view_state, state_patch)
+        _touch_view_locked(record)
+        return True
+
+
+def begin_view_request(
+    view_id: str,
+    *,
+    request_channel: str,
+    request_id: int,
+) -> bool:
+    """Reserve a loader revision before doing expensive work.
+
+    Advancing a channel only when its result commits leaves a race where an
+    older request can publish after a newer request has started. Loaders call
+    this immediately after validating arguments, run their queries outside the
+    lock, and finally call :func:`commit_view_update` for the same channel.
+    Request id ``0`` retains the legacy unversioned behavior.
+    """
+    normalized_channel = str(request_channel or "").strip()
+    normalized_request_id = max(0, int(request_id or 0))
+    if not normalized_channel:
+        raise ValueError("request_channel is required")
+    if normalized_request_id == 0:
+        return True
+    with _views_lock:
+        record = _views.get(view_id)
+        if record is None:
+            raise KeyError(f"Unknown view_id: {view_id}")
+        current = int(record.request_revisions.get(normalized_channel, 0))
+        if normalized_request_id < current:
+            return False
+        record.request_revisions[normalized_channel] = normalized_request_id
+        _touch_view_locked(record)
+        return True
+
+
+def reserve_view_request(
+    view_id: str,
+    *,
+    request_channel: str,
+    request_id: int = 0,
+) -> int | None:
+    """Reserve and return an effective positive request revision.
+
+    Public/legacy tool callers may omit ``request_id``. Allocating that call a
+    server-side revision is essential: treating zero as permanently
+    unversioned lets a slow legacy query overwrite a newer browser request.
+    ``None`` means the supplied nonzero id was already stale.
+    """
+    normalized_channel = str(request_channel or "").strip()
+    if not normalized_channel:
+        raise ValueError("request_channel is required")
+    requested = max(0, int(request_id or 0))
+    with _views_lock:
+        record = _views.get(view_id)
+        if record is None:
+            raise KeyError(f"Unknown view_id: {view_id}")
+        current = int(record.request_revisions.get(normalized_channel, 0))
+        if requested and requested < current:
+            return None
+        effective = requested or (current + 1)
+        record.request_revisions[normalized_channel] = effective
+        _touch_view_locked(record)
+        return effective
 
 
 def get_view_title(view_id: str) -> str:
@@ -226,6 +382,24 @@ def replace_view_datasets(
         _touch_view_locked(record)
 
 
+def remove_view_datasets(view_id: str, keys: list[str] | tuple[str, ...]) -> None:
+    """Detach the named datasets from a view.
+
+    Revisions for removed keys are dropped so a later re-attach restarts the
+    revision counter for that key at 1 — frontends key hydration on the
+    (key, revision) pair, so a fresh attach always re-hydrates.
+    Unknown keys are ignored (idempotent eviction).
+    """
+    with _views_lock:
+        record = _views.get(view_id)
+        if record is None:
+            raise KeyError(f"Unknown view_id: {view_id}")
+        for key in keys:
+            record.datasets.pop(key, None)
+            record.dataset_revisions.pop(key, None)
+        _touch_view_locked(record)
+
+
 def reset_views_for_tests() -> None:
     with _views_lock:
         _views.clear()
@@ -279,16 +453,27 @@ def run_structured_query(
     database: str = "dbt",
     parameters: dict[str, Any] | None = None,
     requested_max_rows: int = 5000,
+    query_budget: QueryBudget | None = None,
 ) -> StructuredResult:
     """Run ``sql`` and return raw rows / columns without markdown formatting."""
-    executed = ch.run_query(
-        sql,
-        database,
-        requested_max_rows=requested_max_rows,
-        audience="internal",
-        fetch_mode="auto",
-        parameters=parameters,
-    )
+    run_kwargs: dict[str, Any] = {
+        "requested_max_rows": requested_max_rows,
+        "audience": "internal",
+        "fetch_mode": "auto",
+        "parameters": parameters,
+    }
+    if query_budget is not None:
+        try:
+            signature = inspect.signature(ch.run_query)
+            supports_budget = "query_budget" in signature.parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+        except (TypeError, ValueError):
+            supports_budget = False
+        if supports_budget:
+            run_kwargs["query_budget"] = query_budget
+    executed = ch.run_query(sql, database, **run_kwargs)
     return StructuredResult(
         columns=list(executed.columns),
         column_types=_column_types_from_executed(executed),
@@ -509,6 +694,134 @@ def load_bounded_dataset(
     return _load_preview_only(ch, sql, database, parameters, source_rows=total)
 
 
+def load_exact_capped_dataset(
+    ch: ClickHouseManager,
+    sql: str,
+    database: str = "dbt",
+    parameters: dict[str, Any] | None = None,
+    force_refresh: bool = False,
+    cache_ttl_seconds: int = 300,
+    row_cap: int = SAMPLE_TARGET,
+    exact_source_rows: bool = True,
+) -> CachedDataset:
+    """Load the newest deterministic rows without random sampling.
+
+    ``sql`` must be an unbounded, deterministically ordered SELECT.  A window
+    count is attached to the same capped query, so ClickHouse executes the
+    filtered/aggregated statement once while still reporting the exact source
+    row count.  This is intended for forensic/analyst tables where a random
+    sample would destroy ordering and make pagination misleading.
+
+    ``exact_source_rows=False`` (opt-in, for HEAVY queries) skips the
+    ``count() OVER ()`` window column entirely.  An empty-frame window
+    aggregate forces ClickHouse to materialize the FULL inner result set
+    before the outer ``LIMIT`` can drop a single row — over an unbounded
+    scan that is a guaranteed memory blowup, and it defeats the bounded
+    top-N heap sort that makes ``ORDER BY … LIMIT`` memory-safe.  In this
+    mode ``source_rows`` equals the returned row count and hitting the cap
+    is reported as "at least cap" truncation.
+
+    Existing ``load_bounded_dataset`` behavior remains unchanged for every
+    current mini app.
+    """
+    if not re.search(r"\bORDER\s+BY\b", sql, flags=re.IGNORECASE):
+        raise MiniAppQueryError(
+            "exact_capped datasets require an explicit deterministic ORDER BY"
+        )
+    cap = max(1, min(int(row_cap), SAMPLE_TARGET))
+    ttl_seconds = max(1, int(cache_ttl_seconds))
+    count_key = "exact" if exact_source_rows else "capped_count"
+    mode_key = f"exact_capped:{cap}:{ttl_seconds}:{count_key}"
+    cache_key = make_cache_key(sql, database, parameters, mode_key)
+    cache = get_cache()
+    if not force_refresh:
+        hit = cache.get(cache_key)
+        if hit is not None:
+            logger.info(
+                "mini_app exact_capped cache_hit database=%s row_cap=%s",
+                database,
+                cap,
+            )
+            return hit
+    logger.info(
+        "mini_app exact_capped cache_miss database=%s row_cap=%s force_refresh=%s",
+        database,
+        cap,
+        force_refresh,
+    )
+
+    if exact_source_rows:
+        wrapped = (
+            "SELECT *,count() OVER () AS __source_rows FROM (\n"
+            f"{sql.rstrip()}\n) AS _ml_exact\nLIMIT {cap}"
+        )
+    else:
+        # No window column: the inner ORDER BY … LIMIT stays a bounded top-N
+        # heap. The outer LIMIT is a harmless cap for specs that already
+        # limit internally.
+        wrapped = f"SELECT * FROM (\n{sql.rstrip()}\n) AS _ml_exact\nLIMIT {cap}"
+    try:
+        rows_result = run_structured_query(
+            ch,
+            wrapped,
+            database,
+            parameters,
+            requested_max_rows=cap,
+        )
+    except Exception as exc:
+        logger.warning("mini_app exact capped load failed: %s", exc)
+        raise MiniAppQueryError(_friendly_query_error(exc)) from exc
+
+    columns = list(rows_result.columns)
+    column_types = list(rows_result.column_types)
+    rows = [list(row) for row in rows_result.rows]
+    source_index = columns.index("__source_rows") if "__source_rows" in columns else -1
+    total = int(rows[0][source_index]) if rows and source_index >= 0 else len(rows)
+    if source_index >= 0:
+        columns.pop(source_index)
+        if source_index < len(column_types):
+            column_types.pop(source_index)
+        rows = [row[:source_index] + row[source_index + 1 :] for row in rows]
+    truncated = total > len(rows)
+    warnings = []
+    if not exact_source_rows and len(rows) >= cap:
+        # Source total was deliberately not counted; hitting the cap means
+        # "at least cap" rows matched.
+        truncated = True
+        warnings.append(
+            f"Showing the newest {len(rows):,} rows (at least; the full "
+            "matching set was not counted for this heavy dataset). "
+            "Narrow the filters to inspect the full matching set."
+        )
+    elif truncated:
+        warnings.append(
+            f"Showing the newest {len(rows):,} of {total:,} rows. "
+            "Narrow the filters to inspect the full matching set."
+        )
+    fetched_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    dataset = CachedDataset(
+        columns=columns,
+        column_types=column_types,
+        rows=rows,
+        stats=DatasetStats(
+            row_count=len(rows),
+            rows_returned=len(rows),
+            mode="exact_capped",
+            source_rows=total,
+            row_cap=cap,
+            truncated=truncated,
+            fetched_at=fetched_at,
+            elapsed_seconds=rows_result.elapsed_seconds,
+            warnings=warnings,
+        ),
+        sql=sql,
+        database=database,
+        parameters=parameters,
+    )
+    cache.put(cache_key, dataset, ttl=timedelta(seconds=ttl_seconds))
+    return dataset
+
+
 def _load_preview_only(
     ch: ClickHouseManager,
     sql: str,
@@ -589,39 +902,86 @@ def _encode_page_token(offset: int) -> str:
 def _decode_page_token(token: str) -> int:
     if not token:
         return 0
-    if token.startswith("offset:"):
-        try:
-            return int(token.split(":", 1)[1])
-        except ValueError:
-            return 0
-    return 0
+    match = re.fullmatch(r"offset:(0|[1-9][0-9]*)", token)
+    if match is None:
+        raise ValueError("Invalid dataset page token")
+    return int(match.group(1))
 
 
 def get_view_dataset_page(
-    view_id: str, dataset_key: str, page_token: str = ""
+    view_id: str,
+    dataset_key: str,
+    page_token: str = "",
+    *,
+    page_size: int | None = None,
+    dataset_revision: int | None = None,
 ) -> dict[str, Any]:
-    """Return ``{columns, rows, next_page_token, total_rows}`` for one page."""
-    record = get_view(view_id)
-    if record is None:
-        raise KeyError(f"Unknown or expired view_id: {view_id}")
-    dataset = record.datasets.get(dataset_key)
-    if dataset is None:
-        raise KeyError(f"Unknown dataset_key: {dataset_key}")
+    """Return one revision-safe, byte-bounded page of cached dataset rows.
+
+    ``dataset_revision`` is an optimistic read guard.  A hydration loop must
+    never concatenate pages from two replacements of the same dataset key.
+    Older callers may omit it and retain the legacy behavior.
+    """
+    requested_size = _VIEW_PAGE_SIZE if page_size is None else int(page_size)
+    if requested_size < 1:
+        raise ValueError("page_size must be at least 1")
+    selected_size = min(requested_size, _VIEW_MAX_PAGE_SIZE)
+
+    # Snapshot the rows and metadata under the view-store lock.  The stored
+    # CachedDataset is immutable for a revision, but the mapping can be
+    # replaced concurrently by another app action.
+    with _views_lock:
+        record = _views.get(view_id)
+        if record is None or datetime.now(timezone.utc) > record.expires_at:
+            if record is not None:
+                del _views[view_id]
+            raise KeyError(f"Unknown or expired view_id: {view_id}")
+        dataset = record.datasets.get(dataset_key)
+        if dataset is None:
+            raise KeyError(f"Unknown dataset_key: {dataset_key}")
+        revision = record.dataset_revisions.get(dataset_key, 0)
+        if dataset_revision is not None and int(dataset_revision) != revision:
+            raise ValueError(
+                f"Dataset revision changed for {dataset_key}: "
+                f"requested {dataset_revision}, current {revision}"
+            )
+        rows = dataset.rows
+        columns = list(dataset.columns)
+        column_types = list(dataset.column_types)
+        stats = dataset.stats.model_dump(exclude_none=True)
+        _touch_view_locked(record)
 
     offset = _decode_page_token(page_token)
-    end = offset + _VIEW_PAGE_SIZE
-    page_rows = dataset.rows[offset:end]
-    next_token = _encode_page_token(end) if end < len(dataset.rows) else ""
+    if offset < 0 or offset > len(rows):
+        raise ValueError(f"Invalid page offset for {dataset_key}: {offset}")
+    candidates = rows[offset : offset + selected_size]
+    page_rows: list[list[Any]] = []
+    encoded_bytes = 0
+    for row in candidates:
+        row_bytes = len(
+            json.dumps(row, ensure_ascii=False, default=str, separators=(",", ":"))
+            .encode("utf-8")
+        )
+        # Always return at least one row so a wide row cannot deadlock the
+        # continuation chain.
+        if page_rows and encoded_bytes + row_bytes > _VIEW_PAGE_BYTES:
+            break
+        page_rows.append(row)
+        encoded_bytes += row_bytes
+    end = offset + len(page_rows)
+    next_token = _encode_page_token(end) if end < len(rows) else ""
 
     return {
         "view_id": view_id,
         "dataset_key": dataset_key,
-        "columns": dataset.columns,
-        "column_types": dataset.column_types,
+        "dataset_revision": revision,
+        "page_size": len(page_rows),
+        "columns": columns,
+        "column_types": column_types,
         "rows": page_rows,
         "next_page_token": next_token,
-        "total_rows": len(dataset.rows),
-        "stats": dataset.stats.model_dump(exclude_none=True),
+        "total_rows": len(rows),
+        "stats": stats,
     }
 
 
@@ -909,7 +1269,11 @@ def register_mini_app_infra(mcp, ch: ClickHouseManager) -> None:
 
     @mcp.tool(meta=APP_ONLY_META)
     def get_mini_app_rows(
-        view_id: str, dataset_key: str, page_token: str = ""
+        view_id: str,
+        dataset_key: str,
+        page_token: str = "",
+        page_size: int | None = None,
+        dataset_revision: int | None = None,
     ) -> CallToolResult:
         """[App-only] Fetch the next page of rows for a mini-app dataset.
 
@@ -917,8 +1281,14 @@ def register_mini_app_infra(mcp, ch: ClickHouseManager) -> None:
         the ext-apps SDK to hydrate datasets attached to a live view.
         """
         try:
-            page = get_view_dataset_page(view_id, dataset_key, page_token)
-        except KeyError as exc:
+            page = get_view_dataset_page(
+                view_id,
+                dataset_key,
+                page_token,
+                page_size=page_size,
+                dataset_revision=dataset_revision,
+            )
+        except (KeyError, ValueError) as exc:
             return error_call_tool_result(str(exc))
         return CallToolResult(
             content=[
@@ -987,6 +1357,7 @@ __all__ = [
     "replace_view_datasets",
     "run_structured_query",
     "load_bounded_dataset",
+    "load_exact_capped_dataset",
     "get_view_dataset_page",
     "build_dataset_descriptor",
     "collect_dataset_warnings",

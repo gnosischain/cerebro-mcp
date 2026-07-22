@@ -20,6 +20,7 @@ import {
 import { shortAddr } from "../../../utils/format";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
 import { DetailsPanel } from "../DetailsPanel";
+import { FilterDrawer } from "../FilterDrawer";
 import { EvidencePanel, EvidenceTrigger } from "../ForensicScopeDisclosure";
 import { TokenMenu } from "../TokenMenu";
 import { MoneySankey } from "../canvas/MoneySankey";
@@ -457,9 +458,7 @@ export function FlowsView({
             </div>
           ) : null}
         </div>
-        <details className="ge-filter-drawer">
-          <summary>Filters</summary>
-          <div className="ge-topbar-filters ge-flow-filters">
+        <FilterDrawer panelClassName="ge-topbar-filters ge-flow-filters">
           <div className="ge-segment" role="tablist" aria-label="Trace direction">
             {DIRECTION_OPTIONS.map((d) => (
               <button
@@ -555,8 +554,7 @@ export function FlowsView({
           >
             Bridges
           </button>
-          </div>
-        </details>
+        </FilterDrawer>
         <div className="ge-topbar-right">
           {controlsStale ? (
             <span className="ge-pending-chip" role="status" title={`Showing applied ${flows?.range_days ?? "?"}d ${flows?.direction ?? "out"} Money Trail`}>

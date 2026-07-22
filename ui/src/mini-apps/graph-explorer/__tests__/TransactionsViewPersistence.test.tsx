@@ -97,7 +97,7 @@ function serverFor(
         window: {
           t0: seed ? null : "2026-07-19 00:00:00",
           t1: seed ? null : "2026-07-19 13:00:00",
-          source: seed ? "execution_logs_plus_rpc_head" : "ignored_for_explicit_hash",
+          source: seed ? "execution_tables_plus_rpc_head" : "ignored_for_explicit_hash",
         },
         coverage: {
           rows: { shown: hashes.length, total: hashes.length },
@@ -110,7 +110,7 @@ function serverFor(
           : hashes.length
             ? "explicit_hash"
             : "",
-        discovery_path: seed ? "execution_logs_rpc_tail" : "rpc_receipt",
+        discovery_path: seed ? "execution_tables_rpc_tail" : "rpc_receipt",
         sources: [],
         residuals: [],
         warnings: [],
@@ -170,6 +170,84 @@ function renderTransactions(
 }
 
 describe("TransactionsView task persistence", () => {
+  it("submits explicit UTC, activity, and token filters as one discovery snapshot", async () => {
+    const requestTransactions = vi.fn();
+    await act(async () => renderTransactions(serverFor([]), requestTransactions));
+
+    await act(async () => {
+      container.querySelectorAll<HTMLButtonElement>(".ge-tx-query-kind button")[1]?.click();
+      [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.includes("Filters"))
+        ?.click();
+    });
+
+    const setInput = (input: HTMLInputElement | null, value: string) => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+      input?.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+
+    await act(async () => {
+      setInput(
+        container.querySelector<HTMLInputElement>("input[aria-label='Token address filter']"),
+        TOKEN,
+      );
+      container.querySelector<HTMLInputElement>("input[type=radio][value=custom]")?.click();
+    });
+    await act(async () => {
+      setInput(
+        container.querySelector<HTMLInputElement>("input[aria-label='From UTC']"),
+        "2026-07-01T00:00",
+      );
+      setInput(
+        container.querySelector<HTMLInputElement>("input[aria-label='To UTC']"),
+        "2026-07-19T12:30",
+      );
+      setInput(container.querySelector<HTMLInputElement>("input.ge-tx-input"), SOURCE);
+    });
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Search activity →")
+        ?.click();
+    });
+
+    expect(requestTransactions).toHaveBeenCalledTimes(1);
+    expect(requestTransactions).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "discover",
+      seed: SOURCE,
+      txHashes: [],
+      tokens: [TOKEN],
+      activityKinds: ["erc20"],
+      t0: "2026-07-01T00:00:00.000Z",
+      t1: "2026-07-19T12:30:00.000Z",
+      rangeDays: 0,
+      cursor: "",
+    }));
+  });
+
+  it("requires a paired, ordered UTC window before address discovery", async () => {
+    await act(async () => renderTransactions(serverFor([])));
+    await act(async () => {
+      container.querySelectorAll<HTMLButtonElement>(".ge-tx-query-kind button")[1]?.click();
+      [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.includes("Filters"))
+        ?.click();
+    });
+    await act(async () => {
+      container.querySelector<HTMLInputElement>("input[type=radio][value=custom]")?.click();
+    });
+    expect(container.textContent).toContain("Enter both UTC bounds");
+    expect(
+      [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Search activity →")
+        ?.disabled,
+    ).toBe(true);
+  });
+
   it("restores selected receipt, pending controls, canvas, and details after remount", async () => {
     const server = serverFor([HASH_A, HASH_B], 30, 25, SOURCE);
     const requestTransactions = vi.fn();
@@ -200,7 +278,8 @@ describe("TransactionsView task persistence", () => {
     expect(
       container.querySelector("button[title='Show details']")?.getAttribute("aria-pressed"),
     ).toBe("false");
-    expect(requestTransactions).toHaveBeenCalledWith({
+    expect(requestTransactions).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "discover",
       txHashes: [],
       seed: SOURCE,
       counterparties: [],
@@ -209,7 +288,9 @@ describe("TransactionsView task persistence", () => {
       t0: "",
       t1: "",
       maxTxs: 50,
-    });
+      pageSize: 50,
+      cursor: "",
+    }));
   });
 
   it("resets cached UI only when the loaded transaction subject changes", async () => {
@@ -244,13 +325,14 @@ describe("TransactionsView task persistence", () => {
     await act(async () =>
       renderTransactions(discovery, requestTransactions, "view-a", "timed out"),
     );
-    expect(container.textContent).toContain("Address search");
+    expect(container.textContent).toContain("Filters");
     await act(async () =>
       [...container.querySelectorAll<HTMLButtonElement>("button")]
         .find((button) => button.textContent === "Retry")
         ?.click(),
     );
-    expect(requestTransactions).toHaveBeenLastCalledWith({
+    expect(requestTransactions).toHaveBeenLastCalledWith(expect.objectContaining({
+      operation: "discover",
       txHashes: [],
       seed: SOURCE,
       counterparties: [],
@@ -259,7 +341,7 @@ describe("TransactionsView task persistence", () => {
       t0: "",
       t1: "",
       maxTxs: 25,
-    });
+    }));
   });
 
   it("keeps the exact Money Trail window when only Txs changes", async () => {
@@ -278,16 +360,19 @@ describe("TransactionsView task persistence", () => {
       txs.value = "50";
       txs.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    expect(requestTransactions).toHaveBeenLastCalledWith({
+    expect(requestTransactions).toHaveBeenLastCalledWith(expect.objectContaining({
+      operation: "discover",
       txHashes: [],
       seed: SOURCE,
       counterparties: [],
       tokens: [],
       minUsd: 0,
-      t0: "2026-07-01 00:00:00",
-      t1: "2026-07-19 00:00:00",
+      t0: "2026-07-01T00:00:00.000Z",
+      t1: "2026-07-19T00:00:00.000Z",
       maxTxs: 50,
-    });
+      pageSize: 50,
+      cursor: "",
+    }));
   });
 
   it("submits a pasted explicit hash exactly once", async () => {
@@ -310,6 +395,7 @@ describe("TransactionsView task persistence", () => {
     );
     expect(requestTransactions).toHaveBeenCalledTimes(1);
     expect(requestTransactions).toHaveBeenCalledWith({
+      operation: "receipt",
       txHashes: [HASH_A],
       seed: "",
     });
@@ -349,8 +435,10 @@ describe("TransactionsView task persistence", () => {
       }),
     );
 
-    const row = container.querySelector<HTMLTableRowElement>("tbody tr");
-    await act(async () => row?.click());
+    const inspect = container.querySelector<HTMLButtonElement>(
+      "button[aria-label^='Inspect transfer']",
+    );
+    await act(async () => inspect?.click());
 
     const inspector = container.querySelector<HTMLElement>(
       "aside[aria-label='Transaction details']",
@@ -385,8 +473,11 @@ describe("TransactionsView task persistence", () => {
     await act(async () => hideGraph?.click());
     expect(container.querySelector("svg[aria-label^='Transfer graph']")).toBeNull();
 
-    const row = container.querySelector<HTMLTableRowElement>("tbody tr");
-    await act(async () => row?.click());
+    const row = container.querySelector<HTMLTableRowElement>(".ge-tx-table tbody tr");
+    const inspect = row?.querySelector<HTMLButtonElement>(
+      "button[aria-label^='Inspect transfer']",
+    );
+    await act(async () => inspect?.click());
     expect(row?.classList.contains("is-selected")).toBe(true);
     const showSelected = [...container.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Show in graph");
@@ -410,23 +501,47 @@ describe("TransactionsView task persistence", () => {
     expect(onSelectNode).not.toHaveBeenCalled();
   });
 
-  it("makes ordered transfer rows keyboard selectable", async () => {
+  it("makes ordered transfers keyboard selectable through a real button", async () => {
     await act(async () => renderTransactions(serverFor([HASH_A])));
     const row = container.querySelector<HTMLTableRowElement>("tbody tr");
-    expect(row?.tabIndex).toBe(0);
-    await act(async () =>
-      row?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+    expect(row?.tabIndex).toBe(-1);
+    const inspect = row?.querySelector<HTMLButtonElement>(
+      "button[aria-label^='Inspect transfer']",
     );
-    expect(row?.getAttribute("aria-selected")).toBe("true");
+    expect(inspect?.tabIndex).toBe(0);
+    await act(async () => inspect?.click());
+    expect(inspect?.getAttribute("aria-pressed")).toBe("true");
     expect(
       container.querySelector("[data-inspector-context=transfer-leg]"),
     ).not.toBeNull();
   });
 
+  it("uses legacy cursor expansion for Follow without misrouting it to discover", async () => {
+    const requestTransactions = vi.fn();
+    await act(async () =>
+      renderTransactions(serverFor([HASH_A]), requestTransactions),
+    );
+
+    const follow = container.querySelector<HTMLButtonElement>(
+      `button[aria-label="Follow ${SOURCE} forward"]`,
+    );
+    await act(async () => follow?.click());
+
+    expect(requestTransactions).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "legacy",
+      expandNodeId: SOURCE,
+      afterBlock: 47_000_000,
+      afterIndex: 0,
+      merge: true,
+    }));
+  });
+
   it("clears a leg from another receipt when the active transaction changes", async () => {
     await act(async () => renderTransactions(serverFor([HASH_A, HASH_B])));
-    const rows = container.querySelectorAll<HTMLTableRowElement>(".ge-tx-table tbody tr");
-    await act(async () => rows[0]?.click());
+    const inspect = container.querySelector<HTMLButtonElement>(
+      ".ge-tx-table button[aria-label^='Inspect transfer']",
+    );
+    await act(async () => inspect?.click());
     expect(
       container.querySelector(`button[title="${HASH_B}"]`)?.classList.contains("active"),
     ).toBe(true);
@@ -503,8 +618,17 @@ describe("TransactionsView task persistence", () => {
     if (scope) {
       scope.coverage.rows = { shown: 0, total: 0 };
       scope.query_kind = "address_discovery";
-      scope.window = { t0: null, t1: null, source: "execution_logs_plus_rpc_head" };
-      scope.discovery_path = "execution_logs_rpc_tail";
+      scope.window = { t0: null, t1: null, source: "execution_tables_plus_rpc_head" };
+      scope.discovery_path = "execution_tables_rpc_tail";
+      scope.discovery_coverage = {
+        complete: true,
+        total_exact: 0,
+        total_lower_bound: 0,
+        next_cursor: null,
+        scanned_ranges: [],
+        uncovered_ranges: [],
+        older_history_unscanned: false,
+      };
     }
     await act(async () =>
       renderTransactions(emptyDiscovery, vi.fn(), "view-a", null, {
@@ -541,10 +665,14 @@ describe("TransactionsView task persistence", () => {
     );
     expect(resultRows).toHaveLength(2);
     expect(resultRows[0].textContent).toContain(HASH_B);
-    expect(resultRows[0].getAttribute("aria-selected")).toBe("false");
+    expect(
+      resultRows[0].querySelector("button[aria-current]")?.getAttribute("aria-current"),
+    ).not.toBe("true");
     expect(container.querySelector(".ge-tx-table-region")).toBeNull();
 
-    await act(async () => resultRows[0].click());
+    await act(async () =>
+      resultRows[0].querySelector<HTMLButtonElement>("button")?.click(),
+    );
 
     expect(container.querySelector(".ge-tx-discovery-results")).toBeNull();
     expect(container.querySelector(".ge-tx-table-region")).not.toBeNull();
@@ -555,17 +683,388 @@ describe("TransactionsView task persistence", () => {
       "← Address activity",
     );
     await act(async () =>
-      [...container.querySelectorAll<HTMLButtonElement>("button")]
-        .find((button) => button.textContent?.includes("Address activity"))
-        ?.click(),
+      container.querySelector<HTMLButtonElement>(".ge-tx-receipt-nav button")?.click(),
     );
     const restoredRows = container.querySelectorAll<HTMLTableRowElement>(
       ".ge-tx-discovery-results tbody tr",
     );
-    expect(restoredRows[0]?.getAttribute("aria-selected")).toBe("true");
+    expect(
+      restoredRows[0]?.querySelector("button[aria-current]")?.getAttribute("aria-current"),
+    ).toBe("true");
   });
 
-  it("keeps applied receipt rows visible when a later discovery attempt fails", async () => {
+  it("keeps keyset pagination on the candidate-only discover operation", async () => {
+    const requestTransactions = vi.fn();
+    const discovery = serverFor([HASH_A], 30, 25, SOURCE);
+    const transactions = discovery.transactions as unknown as Record<string, unknown>;
+    transactions.discovery_coverage = {
+      complete: false,
+      total_exact: null,
+      total_lower_bound: 1,
+      next_cursor: "opaque-next-page",
+      scanned_ranges: [],
+      uncovered_ranges: [],
+      older_history_unscanned: true,
+    };
+    transactions.query = {
+      kind: "address",
+      address: SOURCE,
+      tokens: [TOKEN],
+      counterparties: [],
+      activity_kinds: ["erc20"],
+      page_size: 25,
+    };
+
+    await act(async () =>
+      renderTransactions(discovery, requestTransactions, "view-a", null, {
+        txListRows: [[HASH_A, 47_000_000, 1, "2026-07-18 10:00:00", 1, 1]],
+      }),
+    );
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Continue older history")
+        ?.click(),
+    );
+
+    expect(requestTransactions).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "discover",
+      seed: SOURCE,
+      txHashes: [],
+      tokens: [TOKEN],
+      cursor: "opaque-next-page",
+      pageSize: 25,
+      activityKinds: ["erc20"],
+    }));
+  });
+
+  it("offers and sends a coverage continuation for a zero-row partial page", async () => {
+    const requestTransactions = vi.fn();
+    const discovery = serverFor([], 0, 25, SOURCE);
+    const transactions = discovery.transactions as unknown as Record<string, unknown>;
+    transactions.discovery_coverage = {
+      complete: false,
+      total_exact: null,
+      total_lower_bound: 0,
+      next_cursor: "opaque-coverage-cursor",
+      scanned_ranges: [
+        { t0: "2026-07-12T00:00:00Z", t1: "2026-07-19T01:00:01Z" },
+      ],
+      uncovered_ranges: [
+        {
+          t0: "2018-10-08T00:00:00Z",
+          t1: "2026-07-12T00:00:00Z",
+          reason: "interactive discovery wall-time budget reached",
+        },
+      ],
+      older_history_unscanned: true,
+    };
+    transactions.query = {
+      kind: "address",
+      address: SOURCE,
+      tokens: [],
+      counterparties: [],
+      activity_kinds: ["direct", "erc20"],
+      page_size: 25,
+    };
+    const scope = discovery.transactions?.scope;
+    if (scope) {
+      scope.status = "partial";
+      scope.verification = { status: "unverified", method: "partial coverage" };
+      scope.discovery_coverage = transactions.discovery_coverage as never;
+      scope.more_transactions_available = true;
+    }
+
+    await act(async () =>
+      renderTransactions(discovery, requestTransactions, "view-a", null, {
+        txListRows: [],
+        legRows: [],
+      }),
+    );
+    const loadOlder = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Continue older history");
+    expect(loadOlder).toBeDefined();
+    await act(async () => loadOlder?.click());
+
+    expect(requestTransactions).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "discover",
+      seed: SOURCE,
+      txHashes: [],
+      cursor: "opaque-coverage-cursor",
+      pageSize: 25,
+      activityKinds: ["direct", "erc20"],
+    }));
+  });
+
+  it("automatically advances empty safe slices after an analyst starts an all-history search", async () => {
+    const requestTransactions = vi.fn();
+    await act(async () => renderTransactions(serverFor([]), requestTransactions));
+
+    const setValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      container.querySelectorAll<HTMLButtonElement>(".ge-tx-query-kind button")[1]?.click();
+    });
+    await act(async () => {
+      const addressInput = container.querySelector<HTMLInputElement>("input.ge-tx-input");
+      setValue?.call(addressInput, SOURCE);
+      addressInput?.dispatchEvent(new Event("input", { bubbles: true }));
+      addressInput?.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Search activity →")
+        ?.click();
+    });
+    expect(requestTransactions).toHaveBeenCalledTimes(1);
+
+    const partial = serverFor([], 0, 25, SOURCE);
+    const transactions = partial.transactions as unknown as Record<string, unknown>;
+    transactions.query = {
+      kind: "address",
+      address: SOURCE,
+      tokens: [],
+      counterparties: [],
+      activity_kinds: ["direct", "erc20"],
+      page_size: 25,
+    };
+    transactions.discovery_coverage = {
+      complete: false,
+      total_exact: null,
+      total_lower_bound: 0,
+      next_cursor: "automatic-coverage-cursor",
+      scanned_ranges: [],
+      uncovered_ranges: [{
+        t0: "2018-10-08T00:00:00Z",
+        t1: "2026-07-12T00:00:00Z",
+        reason: "interactive budget reached",
+      }],
+      older_history_unscanned: true,
+    };
+    const scope = partial.transactions?.scope;
+    if (scope) {
+      scope.scope_id = "transactions:2:automatic";
+      scope.request_id = 2;
+      scope.status = "partial";
+      scope.verification = { status: "unverified", method: "partial coverage" };
+      scope.discovery_coverage = transactions.discovery_coverage as never;
+      scope.more_transactions_available = true;
+    }
+
+    await act(async () => renderTransactions(partial, requestTransactions, "view-a", null, {
+      txListRows: [],
+      legRows: [],
+    }));
+
+    expect(requestTransactions).toHaveBeenCalledTimes(2);
+    expect(requestTransactions).toHaveBeenLastCalledWith(expect.objectContaining({
+      operation: "discover",
+      seed: SOURCE,
+      cursor: "automatic-coverage-cursor",
+      pageSize: 25,
+      activityKinds: ["direct", "erc20"],
+    }));
+    expect(container.textContent).toContain("Searching address history");
+    expect(container.textContent).not.toContain("No matches in the scanned portion yet");
+  });
+
+  it("continues after early matches until the requested candidate page is full", async () => {
+    const requestTransactions = vi.fn();
+    await act(async () => renderTransactions(serverFor([]), requestTransactions));
+
+    const setValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      container.querySelectorAll<HTMLButtonElement>(".ge-tx-query-kind button")[1]?.click();
+    });
+    await act(async () => {
+      const addressInput = container.querySelector<HTMLInputElement>("input.ge-tx-input");
+      setValue?.call(addressInput, SOURCE);
+      addressInput?.dispatchEvent(new Event("input", { bubbles: true }));
+      addressInput?.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Search activity →")
+        ?.click();
+    });
+    expect(requestTransactions).toHaveBeenCalledTimes(1);
+
+    const partial = serverFor([HASH_A], 1, 25, SOURCE);
+    const transactions = partial.transactions as unknown as Record<string, unknown>;
+    transactions.query = {
+      kind: "address",
+      address: SOURCE,
+      tokens: [],
+      counterparties: [],
+      activity_kinds: ["direct", "erc20"],
+      page_size: 25,
+    };
+    transactions.discovery_coverage = {
+      complete: false,
+      total_exact: null,
+      total_lower_bound: 1,
+      next_cursor: "continue-after-first-match",
+      scanned_ranges: [],
+      uncovered_ranges: [],
+      older_history_unscanned: true,
+    };
+    const scope = partial.transactions?.scope;
+    if (scope) {
+      scope.scope_id = "transactions:2:early-match";
+      scope.request_id = 2;
+      scope.status = "partial";
+      scope.verification = { status: "unverified", method: "partial coverage" };
+      scope.discovery_coverage = transactions.discovery_coverage as never;
+      scope.more_transactions_available = true;
+    }
+
+    await act(async () => renderTransactions(partial, requestTransactions, "view-a", null, {
+      txListRows: [[HASH_A, 47_000_000, 1, "2026-07-18 10:00:00", 1, 1]],
+      legRows: [],
+    }));
+
+    expect(requestTransactions).toHaveBeenCalledTimes(2);
+    expect(requestTransactions).toHaveBeenLastCalledWith(expect.objectContaining({
+      operation: "discover",
+      cursor: "continue-after-first-match",
+      pageSize: 25,
+    }));
+    expect(container.textContent).toContain("1 of 25 loaded");
+    expect(container.textContent).not.toContain("Open receipt evidence or search address activity");
+  });
+
+  it("renders one actionable partial-empty state and no generic empty card", async () => {
+    const discovery = serverFor([], 0, 25, SOURCE);
+    const transactions = discovery.transactions as unknown as Record<string, unknown>;
+    transactions.discovery_coverage = {
+      complete: false,
+      total_exact: null,
+      total_lower_bound: 0,
+      next_cursor: "opaque-coverage-cursor",
+      scanned_ranges: [],
+      uncovered_ranges: [{
+        t0: "2018-10-08T00:00:00Z",
+        t1: "2026-07-12T00:00:00Z",
+        reason: "interactive budget reached",
+      }],
+      older_history_unscanned: true,
+    };
+    const scope = discovery.transactions?.scope;
+    if (scope) {
+      scope.status = "partial";
+      scope.verification = { status: "unverified", method: "partial coverage" };
+      scope.discovery_coverage = transactions.discovery_coverage as never;
+    }
+
+    await act(async () => renderTransactions(discovery, vi.fn(), "view-a", null, {
+      legRows: [],
+      txListRows: [],
+    }));
+
+    expect(container.querySelectorAll(".ge-tx-discovery-results")).toHaveLength(1);
+    expect(container.textContent).toContain("No matches in the scanned portion yet");
+    expect(container.textContent).toContain("Continue older history");
+    expect(container.querySelector(".ge-tx-empty-discovery")).toBeNull();
+    expect(container.textContent).not.toContain(
+      "No matching transactions observed in the covered data",
+    );
+    expect(container.querySelector(".ge-tx-start-state")).toBeNull();
+  });
+
+  it("shows a failed address search without any neutral empty state", async () => {
+    const failed = serverFor([], 0, 25, SOURCE);
+    const transactions = failed.transactions as unknown as Record<string, unknown>;
+    transactions.last_attempt = {
+      request_id: 8,
+      status: "failed",
+      query_kind: "address_discovery",
+      error: "address query timed out",
+      retryable: true,
+    };
+    await act(async () => renderTransactions(failed, vi.fn(), "view-a", "address query timed out", {
+      legRows: [],
+      txListRows: [],
+    }));
+
+    expect(container.querySelector(".ge-load-error")?.textContent).toContain(
+      "Address discovery failed",
+    );
+    expect(container.querySelector(".ge-tx-discovery-results")).toBeNull();
+    expect(container.querySelector(".ge-tx-empty-discovery")).toBeNull();
+    expect(container.querySelector(".ge-tx-start-state")).toBeNull();
+  });
+
+  it("hides an address failure immediately when switching to a clean hash query", async () => {
+    const failed = serverFor([], 0, 25, SOURCE);
+    const transactions = failed.transactions as unknown as Record<string, unknown>;
+    transactions.last_attempt = {
+      request_id: 9,
+      status: "failed",
+      query_kind: "address_discovery",
+      error: "address query timed out",
+      retryable: true,
+    };
+    await act(async () => renderTransactions(failed, vi.fn(), "view-a", "address query timed out", {
+      legRows: [],
+      txListRows: [],
+    }));
+    await act(async () => {
+      container.querySelectorAll<HTMLButtonElement>(".ge-tx-query-kind button")[0]?.click();
+    });
+
+    expect(container.querySelector(".ge-load-error")).toBeNull();
+    expect(container.textContent).not.toContain("FAILED RECEIPT INSPECTION");
+    expect(container.querySelector(".ge-evidence-trigger")).toBeNull();
+    expect(container.querySelector(".ge-tx-start-state")?.textContent).toContain(
+      "Open receipt evidence",
+    );
+  });
+
+  it("adopts an explicit-hash receipt even when the generic scope is stale discovery", async () => {
+    await act(async () => renderTransactions(serverFor([], 0, 25, SOURCE), vi.fn()));
+
+    const explicit = serverFor([HASH_A]);
+    const transactions = explicit.transactions as unknown as Record<string, unknown>;
+    const receiptScope = structuredClone(explicit.transactions?.scope ?? {});
+    transactions.query = {
+      kind: "hash",
+      hashes: [HASH_A],
+      address: null,
+      counterparties: [],
+      tokens: [],
+      window: null,
+    };
+    transactions.result_hashes = [HASH_A];
+    transactions.receipt_scope = receiptScope;
+    if (explicit.transactions?.scope) {
+      explicit.transactions.scope.query_kind = "address_discovery";
+      explicit.transactions.scope.window = {
+        t0: null,
+        t1: null,
+        source: "execution_tables_plus_rpc_head",
+      };
+    }
+    const legRows = Array.from({ length: 21 }, (_, index) => {
+      const row = txLeg(HASH_A, index);
+      row[0] = `leg:${HASH_A}:${index}`;
+      return row;
+    });
+
+    await act(async () => renderTransactions(explicit, vi.fn(), "view-a", null, {
+      legRows,
+    }));
+
+    expect(container.querySelector(".ge-tx-table-region")).not.toBeNull();
+    expect(container.querySelectorAll(".ge-tx-table tbody tr")).toHaveLength(21);
+    expect(container.querySelector(".ge-tx-start-state")).toBeNull();
+    expect(container.querySelector(`code[title='${HASH_A}']`)).not.toBeNull();
+  });
+
+  it("keeps applied receipt rows visible without relabelling an address failure", async () => {
     const applied = serverFor([HASH_A]);
     const transactions = applied.transactions as unknown as Record<string, unknown>;
     transactions.last_attempt = {
@@ -578,8 +1077,8 @@ describe("TransactionsView task persistence", () => {
     await act(async () => renderTransactions(applied));
 
     expect(container.querySelectorAll(".ge-tx-table tbody tr")).toHaveLength(1);
-    expect(container.textContent).toContain("Address discovery failed");
-    expect(container.textContent).toContain("last applied evidence remains on screen");
+    expect(container.textContent).not.toContain("FAILED RECEIPT INSPECTION");
+    expect(container.textContent).not.toContain("Address discovery failed");
     expect(container.textContent).toContain(HASH_A);
   });
 
@@ -611,6 +1110,7 @@ describe("TransactionsView task persistence", () => {
         ?.click(),
     );
     expect(requestTransactions).toHaveBeenLastCalledWith({
+      operation: "receipt",
       txHashes: [HASH_A],
       seed: "",
     });

@@ -1,0 +1,4392 @@
+"""CoW Data Explorer mini app.
+
+Read-only analyst surface over the ``cow_db`` ClickHouse database.  The app
+intentionally distinguishes settled execution data, auction/native reference
+prices, and the indexer's observed open-order snapshot. Blockscout remains an
+outbound-link provider only; CoinGecko token lists are the optional, cached
+source for decorative token imagery.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.resources
+import logging
+import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal
+from urllib.parse import urlparse
+
+import requests
+from mcp.types import CallToolResult
+
+from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.models.mini_app import DatasetStats, MiniAppPayload, SummaryCard
+from cerebro_mcp.runtime.mini_app_cache import CachedDataset
+from cerebro_mcp.tools.visualization import mini_apps, web_apps
+
+logger = logging.getLogger(__name__)
+
+COW_APP_ID = "cow_explorer"
+COW_TITLE = "CoW Data Explorer"
+COW_URI = "ui://cerebro/cow_explorer"
+COW_DB = "cow_db"
+COW_APP_META = {
+    "ui": {"resourceUri": COW_URI},
+    "ui/resourceUri": COW_URI,
+}
+ROW_CAP = 10_000
+NATIVE_TOKEN = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+DEFAULT_CHAIN_ID = 1
+VALID_SCOPES = {"production", "testnet"}
+VALID_SECTIONS = {
+    "overview", "markets", "trades", "orders", "auctions", "solvers",
+    "traders", "patterns", "live",
+}
+#: Sections that support the all-networks scope (chain_id=0). Every other
+#: section coerces to a concrete chain WITH an explicit warning.
+ALL_NETWORK_SECTIONS = {"overview", "trades", "solvers", "traders", "auctions"}
+#: Per-arm over-fetch for top-N tape arms: 3x the row cap absorbs the <0.1%
+#: ReplacingMergeTree duplicate rate so the post-dedup global top-ROW_CAP is
+#: correct. Each arm is a bounded heap sort — memory-safe at any window.
+TAPE_ARM_LIMIT = 3 * ROW_CAP
+#: Per-fill execution surplus vs the order's limit price, in basis points.
+#: (exec_buy x limit_sell)/(exec_sell x limit_buy) - 1 is KIND-INDEPENDENT:
+#: for sell orders it is exec_rate/limit_rate - 1, for buy orders
+#: limit_rate/exec_rate - 1 - positive always means better than limit.
+#: Ratios are decimals-free within a pair, so no token metadata is needed.
+SURPLUS_BPS = (
+    "((toFloat64({eb})*toFloat64({ls}))"
+    "/nullIf(toFloat64({es})*toFloat64({lb}),0)-1)*1e4"
+)
+#: Default chain for the Live section. Gnosis currently has the freshest
+#: indexing (checkpoint lag ~minutes); the pulse panel shows every chain's lag
+#: so users can switch when another chain catches up.
+LIVE_DEFAULT_CHAIN_ID = 100
+#: Live feed window — the base tables are NOT time-sorted, so live queries
+#: must stay tightly bounded. Never widen beyond one hour.
+LIVE_WINDOW_SQL = "now() - INTERVAL 1 HOUR"
+#: NOTE: block_number is NOT in the trades/settlements sort key
+#: (ORDER BY (environment, chain_id, tx_hash, log_index, …)), so a block_number
+#: floor does NOT prune those tables — only `chain_blocks` has block_number in
+#: its key. Live feeds stay memory-safe via the 1h block_timestamp bound, which
+#: keeps the GROUP BY hash to an hour of rows; the scan is full either way.
+ENTITY_TYPES = {"order", "transaction", "address", "token", "auction", "solver"}
+SECTION_DEFAULT_DAYS = {
+    "overview": 30,
+    "markets": 30,
+    "trades": 7,
+    "orders": 30,
+    "auctions": 30,
+    "solvers": 30,
+    "traders": 30,
+    "patterns": 30,
+    "live": 1,
+}
+#: Datasets per section, split into load groups. The section apply loads only
+#: ``core`` synchronously; every other group is fetched afterwards by the
+#: frontend through ``load_cow_explorer_datasets`` — this is what makes the
+#: open path and section switches fast. Every dataset key of a section MUST
+#: appear in exactly one group (tested).
+SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
+    "overview": {
+        "core": ("network_summary", "coverage_matrix"),
+        "breakdown": ("network_activity", "top_pairs", "fee_policy_counts"),
+    },
+    "markets": {
+        "core": ("market_summary", "pair_options"),
+        "charts": ("price_candles", "auction_reference_prices", "native_reference_prices"),
+        "tape": ("recent_market_trades",),
+    },
+    "trades": {
+        "core": ("trade_activity", "trade_pair_breakdown"),
+        "tape": ("trades",),
+    },
+    "orders": {
+        "core": ("order_status_summary", "order_activity"),
+        "intents": ("known_orders", "known_intents", "intent_depth"),
+        "quality": ("order_quality_summary", "fill_latency_distribution", "surplus_distribution"),
+    },
+    "auctions": {
+        "core": ("auction_activity",),
+        "list": ("auctions",),
+    },
+    "solvers": {
+        "core": ("solver_stats", "solver_activity"),
+        # execution_flow exists only single-chain; solver_cross_chain only in
+        # the all-networks rollup — a group load simply skips absent keys.
+        "detail": ("ranking_distribution", "execution_flow", "solver_cross_chain"),
+    },
+    "traders": {
+        "core": ("trader_leaderboard", "trader_activity"),
+    },
+    "patterns": {
+        "core": ("solver_pair_matrix",),
+        "affinity": ("trader_solver_affinity",),
+        "quality": ("fee_policy_quality",),
+    },
+    "live": {
+        "core": ("live_pulse",),
+        "feed": ("live_trades", "live_settlements"),
+        "intents": ("live_open_orders", "live_order_events"),
+    },
+}
+#: Retain at most this many sections' datasets on a view before evicting the
+#: least recently used one (keeps tab-return instant without unbounded memory).
+MAX_RETAINED_SECTIONS = 4
+CANDLE_BUCKETS = {
+    "5m": "toStartOfInterval(block_timestamp, INTERVAL 5 MINUTE)",
+    "15m": "toStartOfInterval(block_timestamp, INTERVAL 15 MINUTE)",
+    "30m": "toStartOfInterval(block_timestamp, INTERVAL 30 MINUTE)",
+    "1h": "toStartOfInterval(block_timestamp, INTERVAL 1 HOUR)",
+    "2h": "toStartOfInterval(block_timestamp, INTERVAL 2 HOUR)",
+    "4h": "toStartOfInterval(block_timestamp, INTERVAL 4 HOUR)",
+    "12h": "toStartOfInterval(block_timestamp, INTERVAL 12 HOUR)",
+    "1d": "toStartOfDay(block_timestamp)",
+    "1w": "toStartOfWeek(block_timestamp)",
+}
+COINGECKO_PLATFORM_IDS = {
+    1: "ethereum",
+    56: "binance-smart-chain",
+    100: "xdai",
+    137: "polygon-pos",
+    8453: "base",
+    9745: "plasma",
+    42161: "arbitrum-one",
+    43114: "avalanche",
+    57073: "ink",
+    59144: "linea",
+}
+COINGECKO_TOKEN_LIST_URL = "https://tokens.coingecko.com/{platform}/all.json"
+COINGECKO_NATIVE_ICON_URLS = {
+    1: "https://coin-images.coingecko.com/asset_platforms/images/279/thumb/ethereum.png?1706606803",
+    56: "https://coin-images.coingecko.com/asset_platforms/images/1/thumb/bnb_smart_chain.png?1706606721",
+    100: "https://coin-images.coingecko.com/asset_platforms/images/11062/thumb/Aatar_green_white.png?1706606458",
+    137: "https://coin-images.coingecko.com/asset_platforms/images/15/thumb/polygon_pos.png?1706606645",
+    8453: "https://coin-images.coingecko.com/asset_platforms/images/131/thumb/base.png?1759905869",
+    9745: "https://coin-images.coingecko.com/asset_platforms/images/32256/thumb/plasma.jpg?1758000963",
+    42161: "https://coin-images.coingecko.com/asset_platforms/images/33/thumb/AO_logomark.png?1706606717",
+    43114: "https://coin-images.coingecko.com/asset_platforms/images/12/thumb/avalanche.png?1706606775",
+    57073: "https://coin-images.coingecko.com/asset_platforms/images/22194/thumb/ink.jpg?1737600222",
+    59144: "https://coin-images.coingecko.com/asset_platforms/images/135/thumb/linea.jpeg?1706606705",
+}
+COINGECKO_ICON_CACHE_TTL_SECONDS = 30 * 60
+_COINGECKO_IMAGE_HOSTS = {"assets.coingecko.com", "coin-images.coingecko.com"}
+_COINGECKO_ICON_CACHE: dict[int, tuple[float, dict[str, str]]] = {}
+_COINGECKO_ICON_LOCK = threading.RLock()
+_TOKEN_COLUMN_RE = re.compile(r"^(?:token|token[01]|(?:base|quote|sell|buy|fee)_token)$")
+ORDER_UID_RE = re.compile(r"^0x[0-9a-f]{112}$")
+HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
+ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
+INTEGER_RE = re.compile(r"^[0-9]+$")
+
+
+@dataclass(frozen=True)
+class ExplorerInfo:
+    provider: Literal["blockscout", "bscscan", "avalanche", "plasmascan"]
+    brand: str
+    base_url: str
+    transaction_url_template: str
+    address_url_template: str
+    token_url_template: str
+
+
+@dataclass(frozen=True)
+class ChainInfo:
+    chain_id: int
+    name: str
+    native_symbol: str
+    environment: Literal["production", "testnet"]
+    explorer: ExplorerInfo
+
+
+def _explorer(
+    provider: Literal["blockscout", "bscscan", "avalanche", "plasmascan"],
+    brand: str,
+    base: str,
+    *,
+    token_as_address: bool = False,
+) -> ExplorerInfo:
+    base = base.rstrip("/")
+    return ExplorerInfo(
+        provider=provider,
+        brand=brand,
+        base_url=base,
+        transaction_url_template=f"{base}/tx/{{hash}}",
+        address_url_template=f"{base}/address/{{address}}",
+        token_url_template=(
+            f"{base}/address/{{address}}" if token_as_address else f"{base}/token/{{address}}"
+        ),
+    )
+
+
+COW_CHAINS: dict[int, ChainInfo] = {
+    1: ChainInfo(1, "Ethereum", "ETH", "production", _explorer("blockscout", "Blockscout", "https://eth.blockscout.com")),
+    100: ChainInfo(100, "Gnosis", "xDAI", "production", _explorer("blockscout", "Blockscout", "https://gnosis.blockscout.com")),
+    42161: ChainInfo(42161, "Arbitrum One", "ETH", "production", _explorer("blockscout", "Blockscout", "https://arbitrum.blockscout.com")),
+    8453: ChainInfo(8453, "Base", "ETH", "production", _explorer("blockscout", "Blockscout", "https://base.blockscout.com")),
+    56: ChainInfo(56, "BNB Smart Chain", "BNB", "production", _explorer("bscscan", "BscScan", "https://bscscan.com")),
+    137: ChainInfo(137, "Polygon PoS", "POL", "production", _explorer("blockscout", "Blockscout", "https://polygon.blockscout.com")),
+    43114: ChainInfo(43114, "Avalanche C-Chain", "AVAX", "production", _explorer("avalanche", "Avalanche Explorer", "https://subnets.avax.network/c-chain", token_as_address=True)),
+    59144: ChainInfo(59144, "Linea", "ETH", "production", _explorer("blockscout", "Blockscout", "https://explorer.linea.build")),
+    57073: ChainInfo(57073, "Ink", "ETH", "production", _explorer("blockscout", "Blockscout", "https://explorer.inkonchain.com")),
+    9745: ChainInfo(9745, "Plasma", "XPL", "production", _explorer("plasmascan", "Plasmascan", "https://plasmascan.to")),
+    11155111: ChainInfo(11155111, "Ethereum Sepolia", "ETH", "testnet", _explorer("blockscout", "Blockscout", "https://eth-sepolia.blockscout.com")),
+}
+
+
+@dataclass(frozen=True)
+class QuerySpec:
+    key: str
+    title: str
+    sql: str
+    parameters: dict[str, Any]
+    basis: str
+    coverage_mode: str
+    cache_ttl_seconds: int = 300
+    #: False for heavy row-tapes that carry their own inner LIMIT: skips the
+    #: loader's ``count() OVER ()`` wrapper, whose empty-frame window forces
+    #: full materialization of the inner result before LIMIT (the proven OOM
+    #: mechanism on unbounded scans). Aggregate specs keep the exact count —
+    #: their result cardinality is inherently bounded by the GROUP BY.
+    exact_count: bool = True
+
+
+_BUNDLED_HTML: str | None = None
+_BUNDLE_SIGNATURE: tuple[int, int] | None = None
+_BUNDLE_SHA256: str | None = None
+_BUNDLE_MTIME: str | None = None
+_BUNDLE_LOCK = threading.Lock()
+
+
+def _bundle_resource():
+    return importlib.resources.files("cerebro_mcp").joinpath("static/cow_explorer.html")
+
+
+def get_cow_explorer_html() -> str:
+    global _BUNDLED_HTML, _BUNDLE_SIGNATURE, _BUNDLE_SHA256, _BUNDLE_MTIME
+    with _BUNDLE_LOCK:
+        try:
+            resource = _bundle_resource()
+            with importlib.resources.as_file(resource) as path:
+                stat = path.stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+                if _BUNDLED_HTML is not None and signature == _BUNDLE_SIGNATURE:
+                    return _BUNDLED_HTML
+                raw = path.read_bytes()
+                _BUNDLED_HTML = raw.decode("utf-8")
+                _BUNDLE_SIGNATURE = signature
+                _BUNDLE_SHA256 = hashlib.sha256(raw).hexdigest()
+                _BUNDLE_MTIME = datetime.fromtimestamp(
+                    stat.st_mtime, timezone.utc
+                ).isoformat().replace("+00:00", "Z")
+        except (FileNotFoundError, ModuleNotFoundError, OSError):
+            _BUNDLED_HTML = (
+                "<!doctype html><html><body><div id='root'>"
+                "cow_explorer.html not built — run "
+                "<code>make build-ui-cow-explorer</code></div></body></html>"
+            )
+            _BUNDLE_SIGNATURE = None
+            _BUNDLE_SHA256 = hashlib.sha256(_BUNDLED_HTML.encode()).hexdigest()
+            _BUNDLE_MTIME = None
+        return _BUNDLED_HTML
+
+
+def get_cow_explorer_diagnostics() -> dict[str, Any]:
+    get_cow_explorer_html()
+    assets: list[str] = []
+    try:
+        root = importlib.resources.files("cerebro_mcp").joinpath(
+            "static/assets/cow_explorer"
+        )
+        assets = sorted(entry.name for entry in root.iterdir() if entry.is_file())
+    except (FileNotFoundError, ModuleNotFoundError, OSError, NotADirectoryError):
+        pass
+    return {
+        "bundle_sha256": _BUNDLE_SHA256,
+        "bundle_mtime": _BUNDLE_MTIME,
+        "assets": assets,
+    }
+
+
+#: Static per-chain data caveats surfaced in the chain selector and coverage
+#: matrix. BSC's indexed trades carry NULL block timestamps (verified live),
+#: so every time-bounded view silently excludes them — say so explicitly.
+CHAIN_DATA_NOTES: dict[int, str] = {
+    56: (
+        "Indexed BNB Chain trades have no block timestamps; time-bounded "
+        "views exclude them — use entity lookups (ordered by block number) "
+        "or all-history aggregates."
+    ),
+}
+
+
+def _chain_dict(chain: ChainInfo) -> dict[str, Any]:
+    return {
+        "chain_id": chain.chain_id,
+        "name": chain.name,
+        "native_symbol": chain.native_symbol,
+        "environment": chain.environment,
+        "explorer": asdict(chain.explorer),
+        # CoinGecko asset-platform image (static registry; monogram fallback
+        # client-side for chains without one, e.g. Sepolia).
+        "icon_url": COINGECKO_NATIVE_ICON_URLS.get(chain.chain_id, ""),
+        "data_note": CHAIN_DATA_NOTES.get(chain.chain_id, ""),
+    }
+
+
+def _chains_for_scope(scope: str) -> list[ChainInfo]:
+    return [c for c in COW_CHAINS.values() if c.environment == scope]
+
+
+def _normalize_hex(value: str) -> str:
+    return value.strip().lower()
+
+
+def _safe_coingecko_logo_url(value: Any) -> str:
+    url = str(value or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in _COINGECKO_IMAGE_HOSTS:
+        return ""
+    return url
+
+
+def _fetch_coingecko_icon_map(chain_id: int) -> dict[str, str]:
+    platform = COINGECKO_PLATFORM_IDS.get(chain_id)
+    if not platform:
+        return {}
+    response = requests.get(
+        COINGECKO_TOKEN_LIST_URL.format(platform=platform),
+        timeout=(2, 8),
+        headers={"Accept": "application/json", "User-Agent": "cerebro-cow-explorer/1"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    tokens = payload.get("tokens", []) if isinstance(payload, dict) else []
+    icons: dict[str, str] = {}
+    for item in tokens:
+        if not isinstance(item, dict):
+            continue
+        address = _normalize_hex(str(item.get("address") or ""))
+        logo_url = _safe_coingecko_logo_url(item.get("logoURI"))
+        if ADDRESS_RE.fullmatch(address) and logo_url:
+            icons[address] = logo_url
+    return icons
+
+
+#: Background fetcher for CoinGecko token lists. Two workers are plenty — a
+#: fetch per chain runs at most once per cache TTL, and NOTHING ever waits on
+#: it: data loads read the cache as-is and the frontend patches icons in later.
+_COINGECKO_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cow-icons")
+_COINGECKO_PENDING: set[int] = set()
+
+
+def _coingecko_icon_map_nowait(chain_id: int) -> tuple[dict[str, str], bool]:
+    """Return ``(cached icon map, pending)`` without ever blocking.
+
+    On a cache miss the fetch is submitted to the background executor and
+    ``pending=True`` signals the caller (the icon-overlay tool) that a retry
+    will find more icons. Data-loading paths never call this.
+    """
+    now = time.monotonic()
+    with _COINGECKO_ICON_LOCK:
+        cached = _COINGECKO_ICON_CACHE.get(chain_id)
+        if cached and now - cached[0] < COINGECKO_ICON_CACHE_TTL_SECONDS:
+            return cached[1], False
+        if chain_id not in COINGECKO_PLATFORM_IDS:
+            return {}, False
+        if chain_id in _COINGECKO_PENDING:
+            return (cached[1] if cached else {}), True
+        _COINGECKO_PENDING.add(chain_id)
+
+    def fetch() -> None:
+        icons: dict[str, str] = {}
+        try:
+            icons = _fetch_coingecko_icon_map(chain_id)
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            logger.warning(
+                "CoinGecko token icons unavailable for chain %s: %s", chain_id, exc
+            )
+        finally:
+            with _COINGECKO_ICON_LOCK:
+                _COINGECKO_ICON_CACHE[chain_id] = (time.monotonic(), icons)
+                _COINGECKO_PENDING.discard(chain_id)
+
+    try:
+        _COINGECKO_EXECUTOR.submit(fetch)
+    except RuntimeError:  # interpreter shutdown
+        with _COINGECKO_ICON_LOCK:
+            _COINGECKO_PENDING.discard(chain_id)
+        return (cached[1] if cached else {}), False
+    return (cached[1] if cached else {}), True
+
+
+def _dataset_token_addresses(
+    datasets: dict[str, CachedDataset],
+    cap_per_chain: int = 500,
+) -> dict[int, set[str]]:
+    """Collect distinct token addresses per chain from attached datasets."""
+    per_chain: dict[int, set[str]] = {}
+    for dataset in datasets.values():
+        token_indexes = [
+            index for index, name in enumerate(dataset.columns)
+            if _TOKEN_COLUMN_RE.fullmatch(name)
+        ]
+        if not token_indexes:
+            continue
+        chain_index = (
+            dataset.columns.index("chain_id") if "chain_id" in dataset.columns else -1
+        )
+        fallback_chain = int(dataset.parameters.get("chain_id") or 0) if dataset.parameters else 0
+        for row in dataset.rows:
+            chain_id = fallback_chain
+            if 0 <= chain_index < len(row) and row[chain_index] is not None:
+                try:
+                    chain_id = int(row[chain_index])
+                except (TypeError, ValueError):
+                    chain_id = fallback_chain
+            if chain_id <= 0:
+                continue
+            bucket = per_chain.setdefault(chain_id, set())
+            if len(bucket) >= cap_per_chain:
+                continue
+            for index in token_indexes:
+                if index < len(row):
+                    value = _normalize_hex(str(row[index] or ""))
+                    if value == NATIVE_TOKEN or ADDRESS_RE.fullmatch(value):
+                        bucket.add(value)
+    return per_chain
+
+
+def _build_icon_overlay(
+    datasets: dict[str, CachedDataset],
+) -> tuple[dict[str, dict[str, str]], bool]:
+    """Resolve icon URLs for every token visible in the attached datasets.
+
+    Returns ``(overlay, pending)`` where overlay is ``{chain_id: {token: url}}``
+    and ``pending`` means at least one chain's CoinGecko list is still being
+    fetched in the background (the frontend retries once shortly after).
+    """
+    overlay: dict[str, dict[str, str]] = {}
+    any_pending = False
+    for chain_id, tokens in _dataset_token_addresses(datasets).items():
+        icon_map, pending = _coingecko_icon_map_nowait(chain_id)
+        any_pending = any_pending or pending
+        chain_icons: dict[str, str] = {}
+        for token in tokens:
+            if token == NATIVE_TOKEN:
+                url = COINGECKO_NATIVE_ICON_URLS.get(chain_id, "")
+            else:
+                url = icon_map.get(token, "")
+            if url:
+                chain_icons[token] = url
+        if chain_icons:
+            overlay[str(chain_id)] = chain_icons
+    return overlay, any_pending
+
+
+def _validate_scope(scope: str) -> str:
+    value = scope.strip().lower() or "production"
+    if value not in VALID_SCOPES:
+        raise ValueError("environment_scope must be 'production' or 'testnet'")
+    return value
+
+
+def _resolve_chain(scope: str, chain_id: int, section: str) -> ChainInfo | None:
+    if chain_id == 0 and section in ALL_NETWORK_SECTIONS:
+        return None
+    if chain_id == 0:
+        if section == "live":
+            chain_id = LIVE_DEFAULT_CHAIN_ID if scope == "production" else 11155111
+        else:
+            chain_id = DEFAULT_CHAIN_ID if scope == "production" else 11155111
+    chain = COW_CHAINS.get(int(chain_id))
+    if chain is None:
+        raise ValueError(f"Unsupported CoW chain_id: {chain_id}")
+    if chain.environment != scope:
+        raise ValueError(f"chain_id {chain_id} is not in the {scope} scope")
+    return chain
+
+
+def _resolve_interval(interval: str, window_days: int) -> tuple[str, list[str]]:
+    value = interval.strip().lower() or "1h"
+    warnings: list[str] = []
+    if value not in CANDLE_BUCKETS:
+        value = "1h"
+        warnings.append("coarsened_interval")
+    if value == "5m" and (window_days == 0 or window_days > 7):
+        value = "1h" if window_days <= 365 and window_days != 0 else "1d"
+        warnings.append("coarsened_interval")
+    if value == "1h" and (window_days == 0 or window_days > 365):
+        value = "1d"
+        warnings.append("coarsened_interval")
+    return value, warnings
+
+
+def _range_state(
+    section: str,
+    window_days: int,
+    start_at: str,
+    end_at: str,
+) -> dict[str, Any]:
+    if bool(start_at.strip()) != bool(end_at.strip()):
+        raise ValueError("start_at and end_at must be provided together")
+    if start_at and end_at:
+        try:
+            start = datetime.fromisoformat(start_at.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(end_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("start_at/end_at must be ISO-8601 timestamps") from exc
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if start >= end:
+            raise ValueError("start_at must be earlier than end_at")
+        return {
+            "kind": "absolute",
+            "anchor": "explicit",
+            "window_days": None,
+            "start_at": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "end_at": end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+    days = SECTION_DEFAULT_DAYS[section] if window_days < 0 else int(window_days)
+    if days < 0:
+        raise ValueError("window_days must be -1, 0, or a positive integer")
+    return {
+        "kind": "all" if days == 0 else "relative",
+        "anchor": "latest_indexed",
+        "window_days": days,
+        "start_at": "",
+        "end_at": "",
+    }
+
+
+def _scope_parameters(scope: str, chain: ChainInfo | None) -> dict[str, Any]:
+    return {
+        "env": scope,
+        "chain_id": chain.chain_id if chain else 0,
+        "native_symbol": chain.native_symbol if chain else "",
+    }
+
+
+def _scope_predicate(chain: ChainInfo | None, alias: str = "", scope: str = "production") -> str:
+    prefix = f"{alias}." if alias else ""
+    if chain is not None:
+        return f"{prefix}environment={{env:String}} AND {prefix}chain_id={{chain_id:UInt64}}"
+    ids = ",".join(str(c.chain_id) for c in COW_CHAINS.values() if c.environment == scope)
+    return f"{prefix}environment={{env:String}} AND {prefix}chain_id IN ({ids})"
+
+
+def _time_predicate(
+    column: str,
+    range_state: dict[str, Any],
+    anchor_sql: str,
+) -> tuple[str, dict[str, Any]]:
+    if range_state["kind"] == "all":
+        return "1", {}
+    if range_state["kind"] == "absolute":
+        return (
+            f"{column} >= parseDateTime64BestEffort({{start_at:String}}) "
+            f"AND {column} <= parseDateTime64BestEffort({{end_at:String}})",
+            {"start_at": range_state["start_at"], "end_at": range_state["end_at"]},
+        )
+    return (
+        f"{column} >= ({anchor_sql}) - toIntervalDay({{window_days:UInt32}})",
+        {"window_days": int(range_state["window_days"])},
+    )
+
+
+def _token_metadata_cte() -> str:
+    return """
+tm AS (
+    SELECT token,
+           argMax(symbol, observed_at) AS symbol,
+           argMax(name, observed_at) AS name,
+           argMax(decimals, observed_at) AS decimals,
+           max(observed_at) AS metadata_observed_at
+    FROM cow_db.token_metadata
+    WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+    GROUP BY token
+    UNION ALL
+    SELECT '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+           {native_symbol:String}, {native_symbol:String}, toUInt8(18),
+           toDateTime64(0, 3, 'UTC')
+)"""
+
+
+def _token_metadata_cte_multi(scope: str, chain: ChainInfo | None = None) -> str:
+    """Multi-chain sibling of ``_token_metadata_cte`` at (chain_id, token) grain.
+
+    Native-symbol rows come from the static chain registry (no user input is
+    interpolated). Join with ``ON tmx.chain_id=<alias>.chain_id AND tmx.token=…``.
+    """
+    chains = [chain] if chain is not None else _chains_for_scope(scope)
+    ids = ",".join(str(c.chain_id) for c in chains)
+    native_tuples = ",".join(
+        f"(toUInt64({c.chain_id}),'{c.native_symbol}')" for c in chains
+    )
+    return f"""
+tmx AS (
+    SELECT chain_id, token,
+           argMax(symbol, observed_at) AS symbol,
+           argMax(name, observed_at) AS name,
+           argMax(decimals, observed_at) AS decimals,
+           max(observed_at) AS metadata_observed_at
+    FROM cow_db.token_metadata
+    WHERE environment={{env:String}} AND chain_id IN ({ids})
+    GROUP BY chain_id, token
+    UNION ALL
+    SELECT nt.1 AS chain_id,'{NATIVE_TOKEN}' AS token,nt.2 AS symbol,
+           nt.2 AS name,toUInt8(18) AS decimals,
+           toDateTime64(0,3,'UTC') AS metadata_observed_at
+    FROM (SELECT arrayJoin([{native_tuples}]) AS nt)
+)"""
+
+
+def _trade_anchor(chain: ChainInfo | None) -> str:
+    return (
+        "SELECT max(block_timestamp) FROM cow_db.trades "
+        f"WHERE {_scope_predicate(chain)} AND block_timestamp IS NOT NULL"
+    )
+
+
+#: Correlation/flow queries JOIN two big tables (trades ⋈ settlements), so
+#: their peak memory is the hash-join build of the SMALLER side over the
+#: window — unbounded at all-history that build is ~2.6M rows (~320 MB) and
+#: OOMs the shared ClickHouse instance when it is already near its ceiling.
+#: These specific analytical matrices are capped to a rolling window (90d hash
+#: ≈ 27 MB on the busiest chain). This is NOT the history-tape clamp the user
+#: rejected — the Trades/Markets tapes stay fully unclamped; only the
+#: solver/trader CORRELATION views (which are meaningless over "all time"
+#: anyway) are bounded, and the cap is disclosed in each dataset's (i) note.
+CORRELATION_MAX_WINDOW_DAYS = 90
+
+
+def _capped_analytical_range(range_state: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Clamp a correlation query's window to CORRELATION_MAX_WINDOW_DAYS.
+
+    Returns ``(range_state, was_capped)``. Absolute ranges are left as-is
+    (the user picked explicit bounds); only ``all`` and long relative windows
+    are pulled back to the rolling cap.
+    """
+    kind = range_state.get("kind")
+    if kind == "all" or (
+        kind == "relative"
+        and int(range_state.get("window_days") or 0) > CORRELATION_MAX_WINDOW_DAYS
+    ):
+        return (
+            {
+                "kind": "relative",
+                "anchor": "latest_indexed",
+                "window_days": CORRELATION_MAX_WINDOW_DAYS,
+                "start_at": "",
+                "end_at": "",
+            },
+            True,
+        )
+    return range_state, False
+
+
+def _settlement_time_bound(range_state: dict[str, Any]) -> str:
+    """Time predicate for a settlements CTE, anchored on the settlements table.
+
+    The ``exec`` CTE (settlement executor per tx) and similar joins previously
+    aggregated the ENTIRE per-chain settlements table (~2M rows) as the
+    hash-join build side — two of those concurrent tipped the shared
+    ClickHouse instance over its 10.8 GiB ceiling (code 241). Bounding to the
+    query window shrinks the build to the window's settlements (e.g. ~44k for
+    30 days on Gnosis). Reuses the caller's already-bound window_days/start_at/
+    end_at params (settlements share block_timestamp semantics with trades)."""
+    anchor = (
+        "SELECT max(block_timestamp) FROM cow_db.settlements "
+        "WHERE environment={env:String} AND chain_id={chain_id:UInt64}"
+    )
+    pred, _ = _time_predicate("block_timestamp", range_state, anchor)
+    return pred
+
+
+def _grouped_time(column: str, anchor_alias: str, range_state: dict[str, Any]) -> str:
+    """Time predicate for grouped multi-chain scans.
+
+    Relative windows anchor per chain via an ``anchors``-style CTE joined on
+    chain_id (``anchor_alias.anchor``) instead of one scalar subquery per chain.
+    """
+    if range_state["kind"] == "all":
+        return "1"
+    if range_state["kind"] == "absolute":
+        return (
+            f"{column}>=parseDateTime64BestEffort({{start_at:String}}) AND "
+            f"{column}<=parseDateTime64BestEffort({{end_at:String}})"
+        )
+    return f"{column}>={anchor_alias}.anchor-toIntervalDay({{window_days:UInt32}})"
+
+
+def _time_params(range_state: dict[str, Any]) -> dict[str, Any]:
+    if range_state["kind"] == "all":
+        return {}
+    if range_state["kind"] == "absolute":
+        return {"start_at": range_state["start_at"], "end_at": range_state["end_at"]}
+    return {"window_days": int(range_state["window_days"])}
+
+
+def _per_chain_time(range_state: dict[str, Any]):
+    """Per-chain-arm time predicate factory (scalar anchor subqueries).
+
+    Multi-chain scans over ``trades_canonical`` MUST stay per-chain-bounded:
+    expanding the reorg-safe view (FINAL + chain_blocks join + checkpoint
+    subquery) for ten chains in one pass exceeds ClickHouse's server memory
+    (observed ~11 GiB). UNION arms keep each expansion single-chain.
+    """
+    def predicate(column: str, anchor: str) -> str:
+        if range_state["kind"] == "all":
+            return "1"
+        if range_state["kind"] == "absolute":
+            return (
+                f"{column}>=parseDateTime64BestEffort({{start_at:String}}) AND "
+                f"{column}<=parseDateTime64BestEffort({{end_at:String}})"
+            )
+        return f"{column}>={anchor}-toIntervalDay({{window_days:UInt32}})"
+
+    return predicate
+
+
+def _chain_trade_anchor(cid: int) -> str:
+    # Anchor on the BASE trades table: max() over duplicate RMT versions is
+    # identical to max() over the deduped view, and skipping the canonical
+    # view's chain_blocks join keeps the scalar subquery cheap.
+    return (
+        "(SELECT max(block_timestamp) FROM cow_db.trades "
+        f"WHERE environment={{env:String}} AND chain_id={cid})"
+    )
+
+
+def _chain_checkpoint(cid: int) -> str:
+    """Committed-checkpoint scalar for one chain (bounds base-table scans)."""
+    return (
+        "(SELECT argMax(block_number,updated_at) FROM cow_db.indexing_checkpoints "
+        f"WHERE environment={{env:String}} AND chain_id={cid} AND source='rpc')"
+    )
+
+
+#: Aggregate scans over many chains use the BASE trades table with
+#: dedup-invariant aggregates instead of the reorg-safe canonical view:
+#: ``uniq((tx_hash,log_index,order_uid))`` deduplicates ReplacingMergeTree
+#: versions in CONSTANT memory (HLL, ~0.8% max error; the RMT is >99.9%
+#: merged anyway) without FINAL, and skipping the view's chain_blocks join
+#: (millions of rows per chain) is what keeps ten-chain aggregates inside the
+#: ClickHouse instance's memory/time budget — uniqExact retains every distinct
+#: key and was a memory risk at all-history. Small bounded tables
+#: (competition_*, orders) keep uniqExact. Rows from orphaned (reorged)
+#: blocks may be counted — a marginal overcount the coverage mode discloses.
+TRADE_KEY = "(tx_hash,log_index,order_uid)"
+BASE_DEDUP_MODE = "checkpoint_bounded_base_dedup"
+
+
+def _shared_arm_ctes(ids: str) -> str:
+    """Shared per-chain scalar lookups for multi-arm statements.
+
+    ``cp`` = committed RPC checkpoint block, ``ta`` = latest trade timestamp
+    (window anchor). One grouped scan each instead of a scalar subquery per
+    arm — smaller SQL (the assembled statement must stay under the length
+    cap) and fewer scans.
+    """
+    return f"""
+cp AS (
+  SELECT chain_id, argMax(block_number,updated_at) AS b
+  FROM cow_db.indexing_checkpoints
+  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND source='rpc'
+  GROUP BY chain_id
+), ta AS (
+  SELECT chain_id, max(block_timestamp) AS a
+  FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+  GROUP BY chain_id
+)"""
+
+
+def _arm_checkpoint(cid: int) -> str:
+    return f"t.block_number<=(SELECT b FROM cp WHERE cp.chain_id={cid})"
+
+
+def _arm_window(cid: int, range_state: dict[str, Any]) -> str:
+    if range_state["kind"] == "all":
+        return "1"
+    if range_state["kind"] == "absolute":
+        return (
+            "t.block_timestamp>=parseDateTime64BestEffort({start_at:String}) AND "
+            "t.block_timestamp<=parseDateTime64BestEffort({end_at:String})"
+        )
+    # GLOBAL anchor (max over every in-scope chain): a stale chain (e.g.
+    # mainnet, months behind) must NOT render its own final days inside an
+    # all-networks "last N days" view as if it were current — with the global
+    # anchor its rows predate the window and fall out naturally, and the
+    # exclusion self-heals the moment its indexer catches up. Single-chain
+    # sections pass exactly one chain, where max(a) == that chain's own
+    # anchor, so a stopped indexer still renders its trailing window there.
+    del cid  # anchor is deliberately scope-global, not per-arm
+    return (
+        "t.block_timestamp>=(SELECT max(a) FROM ta)"
+        "-toIntervalDay({window_days:UInt32})"
+    )
+
+
+def _overview_specs(
+    scope: str,
+    range_state: dict[str, Any],
+    chain: ChainInfo | None = None,
+) -> list[QuerySpec]:
+    params = _scope_parameters(scope, None)
+    chain_ids = [chain.chain_id] if chain else [c.chain_id for c in _chains_for_scope(scope)]
+    ids = ",".join(str(chain_id) for chain_id in chain_ids)
+    scope_pred = f"environment={{env:String}} AND chain_id IN ({ids})"
+    p = {**params, **_time_params(range_state)}
+    per_chain_time = _per_chain_time(range_state)
+
+    network_columns = (
+        "chain_id", "trade_count", "settlement_transactions", "order_count",
+        "observed_open_orders", "competition_count_all_indexed", "indexed_from",
+        "indexed_to", "source_observed_at", "order_indexed_from",
+        "order_indexed_to", "order_observed_at", "competition_observed_at",
+    )
+    shared_ctes = _shared_arm_ctes(ids)
+    order_anchor_cte = f"""
+oa AS (
+  SELECT chain_id, max(creation_date) AS a
+  FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+  GROUP BY chain_id
+)"""
+
+    def order_window(cid: int) -> str:
+        if range_state["kind"] == "all":
+            return "1"
+        if range_state["kind"] == "absolute":
+            return (
+                "creation_date>=parseDateTime64BestEffort({start_at:String}) AND "
+                "creation_date<=parseDateTime64BestEffort({end_at:String})"
+            )
+        # Global anchor — same stale-chain semantics as _arm_window.
+        del cid
+        return (
+            "creation_date>=(SELECT max(a) FROM oa)"
+            "-toIntervalDay({window_days:UInt32})"
+        )
+
+    competitions_cte = f"""
+cc AS (
+  SELECT chain_id, count() AS a, maxOrNull(observed_at) AS b
+  FROM cow_db.solver_competitions FINAL
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+  GROUP BY chain_id
+)"""
+    # Grouped single-pass shape: one trades scan and one orders scan, each
+    # GROUP BY chain_id, joined onto an arrayJoin chain spine — replaces the
+    # per-chain cross-join arms (10x the scans AND over the SQL length cap).
+    # orders: argMax dedup grouped on the sort-key prefix streams, replacing
+    # FINAL, whose k-way merge was the memory-heavy part of the all-network
+    # summary; status/creation_date are latest-version exact.
+    trades_cte = f"""
+tr AS (
+  SELECT t.chain_id AS chain_id,uniq({TRADE_KEY}) AS a,uniq(tx_hash) AS b,
+         minOrNull(block_timestamp) AS c,maxOrNull(block_timestamp) AS d,
+         maxOrNull(observed_at) AS e
+  FROM cow_db.trades AS t
+  INNER JOIN cp ON cp.chain_id=t.chain_id
+  WHERE t.environment={{env:String}} AND t.chain_id IN ({ids})
+    AND t.block_number<=cp.b AND {_arm_window(0, range_state)}
+  GROUP BY t.chain_id
+)"""
+    orders_cte = f"""
+og AS (
+  SELECT chain_id,count() AS a,countIf(status='open') AS b,
+         minOrNull(creation_date) AS c,maxOrNull(creation_date) AS d,
+         maxOrNull(obs_at) AS e
+  FROM (
+    SELECT chain_id,order_uid,argMax(status,observed_at) AS status,
+           argMax(creation_date,observed_at) AS creation_date,
+           max(observed_at) AS obs_at
+    FROM cow_db.orders
+    WHERE environment={{env:String}} AND chain_id IN ({ids})
+    GROUP BY chain_id,order_uid
+  ) WHERE {order_window(0)}
+  GROUP BY chain_id
+)"""
+    network_summary = (
+        f"WITH {shared_ctes},{order_anchor_cte},{competitions_cte},"
+        f"{trades_cte},{orders_cte}\n"
+        f"SELECT spine.chain_id AS chain_id,coalesce(tr.a,0) AS trade_count,"
+        "coalesce(tr.b,0) AS settlement_transactions,coalesce(og.a,0) AS order_count,"
+        "coalesce(og.b,0) AS observed_open_orders,"
+        "coalesce(cc.a,0) AS competition_count_all_indexed,"
+        "tr.c AS indexed_from,tr.d AS indexed_to,"
+        "tr.e AS source_observed_at,og.c AS order_indexed_from,"
+        "og.d AS order_indexed_to,og.e AS order_observed_at,"
+        "cc.b AS competition_observed_at\n"
+        f"FROM (SELECT arrayJoin([{ids}]) AS chain_id) AS spine\n"
+        "LEFT JOIN tr ON tr.chain_id=spine.chain_id\n"
+        "LEFT JOIN og ON og.chain_id=spine.chain_id\n"
+        "LEFT JOIN cc ON cc.chain_id=spine.chain_id\n"
+        "ORDER BY spine.chain_id"
+    )
+    coverage = f"""
+WITH cp AS (
+  SELECT chain_id, argMax(block_number, updated_at) AS checkpoint_block,
+         max(updated_at) AS checkpoint_updated_at
+  FROM cow_db.indexing_checkpoints
+  WHERE {scope_pred} AND source='rpc'
+  GROUP BY chain_id
+), blocks AS (
+  -- block_number IS the sort key → this IN-set prunes chain_blocks from the
+  -- whole ~9.2M-row table to the ~10 checkpoint blocks. Without it the JOIN
+  -- condition alone forces a full-table scan + hash. (No FINAL: argMax dedups.)
+  SELECT b.chain_id,b.block_number,
+         argMax(b.block_timestamp,b.observed_at) AS checkpoint_timestamp
+  FROM cow_db.chain_blocks AS b
+  INNER JOIN cp
+    ON b.chain_id=cp.chain_id AND b.block_number=cp.checkpoint_block
+  WHERE b.environment={{env:String}} AND b.chain_id IN ({ids})
+    AND b.block_number IN (SELECT checkpoint_block FROM cp)
+  GROUP BY b.chain_id,b.block_number
+), obs AS (
+  -- max(observed_at) is dedup-invariant; the base table avoids expanding the
+  -- canonical view (FINAL + chain_blocks join) once per chain.
+  SELECT chain_id, max(observed_at) AS trade_observed_at
+  FROM cow_db.trades WHERE {scope_pred} GROUP BY chain_id
+), ord AS (
+  -- max(observed_at) is FINAL-invariant on a ReplacingMergeTree(observed_at);
+  -- skipping FINAL avoids the merge cost on the largest per-chain table.
+  SELECT chain_id, max(observed_at) AS order_observed_at
+  FROM cow_db.orders WHERE {scope_pred} GROUP BY chain_id
+), comp AS (
+  SELECT chain_id, max(auction_block) AS max_competition_block,
+         max(observed_at) AS competition_observed_at
+  FROM cow_db.solver_competitions FINAL WHERE {scope_pred} GROUP BY chain_id
+), np AS (
+  -- native_prices keeps observed_at in its sort key (time series); FINAL does
+  -- not collapse snapshots there, so a plain max() is the correct read.
+  SELECT chain_id, max(observed_at) AS native_price_observed_at
+  FROM cow_db.native_prices WHERE {scope_pred} GROUP BY chain_id
+)
+SELECT n.chain_id AS chain_id, cp.checkpoint_block,
+       nullIf(blocks.checkpoint_timestamp,toDateTime(0)) AS checkpoint_timestamp,
+       cp.checkpoint_updated_at, obs.trade_observed_at, ord.order_observed_at,
+       comp.max_competition_block,comp.competition_observed_at,
+       np.native_price_observed_at,
+       greatest(obs.trade_observed_at,ord.order_observed_at,
+                comp.competition_observed_at,np.native_price_observed_at) AS source_observed_at
+FROM (SELECT arrayJoin([{ids}]) AS chain_id) AS n
+LEFT JOIN cp ON n.chain_id=cp.chain_id
+LEFT JOIN blocks ON cp.chain_id=blocks.chain_id AND cp.checkpoint_block=blocks.block_number
+LEFT JOIN obs ON n.chain_id=obs.chain_id
+LEFT JOIN ord ON n.chain_id=ord.chain_id
+LEFT JOIN comp ON n.chain_id=comp.chain_id
+LEFT JOIN np ON n.chain_id=np.chain_id
+ORDER BY n.chain_id"""
+    tmx = _token_metadata_cte_multi(scope, chain)
+    activity_parts: list[str] = []
+    pair_parts: list[str] = []
+    fee_parts: list[str] = []
+    for cid in chain_ids:
+        base_where = (
+            f"t.environment={{env:String}} AND t.chain_id={cid}"
+            f" AND {_arm_checkpoint(cid)}"
+            f" AND t.block_timestamp IS NOT NULL AND {_arm_window(cid, range_state)}"
+        )
+        activity_parts.append(f"""
+SELECT toStartOfDay(t.block_timestamp) AS bucket,{cid} AS chain_id,
+       uniq({TRADE_KEY}) AS trade_count,uniq(t.tx_hash) AS settlement_transactions,
+       min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
+       max(t.observed_at) AS source_observed_at
+FROM cow_db.trades AS t
+WHERE {base_where}
+GROUP BY bucket""")
+        pair_parts.append(f"""
+SELECT {cid} AS chain_id,least(t.sell_token,t.buy_token) AS token0,
+       greatest(t.sell_token,t.buy_token) AS token1,
+       uniq({TRADE_KEY}) AS fill_count,
+       uniq(t.tx_hash) AS settlement_transactions,
+       min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
+       max(t.observed_at) AS source_observed_at
+FROM cow_db.trades AS t
+WHERE {base_where}
+GROUP BY token0,token1""")
+        # Fees stand alone on protocol_fees (small, API-enriched): joining the
+        # trades view only supplied block timestamps and was the memory/time
+        # hog; observed_at is the honest basis for API-sourced fee rows.
+        fee_window = per_chain_time(
+            "f.observed_at",
+            "(SELECT max(observed_at) FROM cow_db.protocol_fees "
+            f"WHERE environment={{env:String}} AND chain_id={cid})",
+        )
+        fee_parts.append(f"""
+SELECT {cid} AS chain_id,f.token AS token,f.policy AS policy_raw,
+       count() AS fee_entries,uniqExact(f.order_uid) AS orders,
+       sum(f.amount) AS amount_sum,
+       min(f.observed_at) AS indexed_from,max(f.observed_at) AS indexed_to,
+       max(f.observed_at) AS source_observed_at
+FROM cow_db.protocol_fees AS f FINAL
+WHERE f.environment={{env:String}} AND f.chain_id={cid} AND {fee_window}
+GROUP BY f.token,f.policy""")
+    activity = (
+        f"WITH {shared_ctes}\n"
+        "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
+        + "\n) ORDER BY bucket,chain_id"
+    )
+    pair_union = "\nUNION ALL\n".join(pair_parts)
+    top_pairs = f"""WITH {shared_ctes},{tmx}
+SELECT p.chain_id AS chain_id, p.token0 AS token0, p.token1 AS token1,
+       if(m0.token='','',m0.symbol) AS token0_symbol,
+       if(m1.token='','',m1.symbol) AS token1_symbol,
+       if(m0.token='',NULL,m0.decimals) AS token0_decimals,
+       if(m1.token='',NULL,m1.decimals) AS token1_decimals,
+       p.fill_count AS fill_count, p.settlement_transactions AS settlement_transactions,
+       p.indexed_from AS indexed_from, p.indexed_to AS indexed_to,
+       p.source_observed_at AS source_observed_at
+FROM ({pair_union}) AS p
+LEFT JOIN tmx AS m0 ON m0.chain_id=p.chain_id AND m0.token=p.token0
+LEFT JOIN tmx AS m1 ON m1.chain_id=p.chain_id AND m1.token=p.token1
+ORDER BY p.fill_count DESC, p.chain_id, p.token0, p.token1
+LIMIT 500"""
+    fee_union = "\nUNION ALL\n".join(fee_parts)
+    fees = f"""WITH {tmx}
+SELECT u.chain_id AS chain_id, u.token AS token,
+       if(tm.token='','',tm.symbol) AS token_symbol,
+       u.policy_raw AS policy_raw,
+       multiIf(positionCaseInsensitive(u.policy_raw,'priceImprovement')>0,'price_improvement',
+               positionCaseInsensitive(u.policy_raw,'surplus')>0,'surplus',
+               positionCaseInsensitive(u.policy_raw,'volume')>0,'volume','other') AS policy_family,
+       u.fee_entries AS fee_entries, u.orders AS orders,
+       toString(u.amount_sum) AS amount_raw,
+       if(tm.token='',NULL,tm.decimals) AS token_decimals,
+       if(tm.token='',NULL,toFloat64(u.amount_sum)/pow(10,toFloat64(tm.decimals))) AS amount,
+       u.indexed_from AS indexed_from, u.indexed_to AS indexed_to,
+       u.source_observed_at AS source_observed_at
+FROM ({fee_union}) AS u
+LEFT JOIN tmx AS tm ON tm.chain_id=u.chain_id AND tm.token=u.token
+ORDER BY u.fee_entries DESC, u.chain_id, u.token, u.policy_raw"""
+    return [
+        QuerySpec("network_summary", "Indexed network summary", network_summary, p, "block_timestamp", BASE_DEDUP_MODE),
+        QuerySpec("coverage_matrix", "Coverage matrix", coverage, params, "observed_at", "observed_series", 60),
+        QuerySpec("network_activity", "Execution activity", activity, p, "block_timestamp", BASE_DEDUP_MODE),
+        QuerySpec("top_pairs", "Top token pairs", top_pairs, p, "block_timestamp", BASE_DEDUP_MODE, 900),
+        QuerySpec("fee_policy_counts", "Indexed fee-policy counts", fees, p, "observed_at", "observed_series", 900),
+    ]
+
+
+def _validate_token(value: str, label: str) -> str:
+    token = _normalize_hex(value)
+    if not ADDRESS_RE.fullmatch(token):
+        raise ValueError(f"{label} must be a 0x-prefixed EVM token address")
+    return token
+
+
+def _resolve_pair(
+    ch: ClickHouseManager,
+    chain: ChainInfo,
+    base_token: str,
+    quote_token: str,
+) -> tuple[str, str]:
+    if bool(base_token.strip()) != bool(quote_token.strip()):
+        raise ValueError("base_token and quote_token must be provided together")
+    if base_token and quote_token:
+        base = _validate_token(base_token, "base_token")
+        quote = _validate_token(quote_token, "quote_token")
+        if base == quote:
+            raise ValueError("base_token and quote_token must differ")
+        return base, quote
+    # Default-pair probe: the busiest pair of the last 30 indexed days is more
+    # than enough signal — an unbounded probe through the canonical view paid
+    # a FINAL + chain_blocks join on EVERY markets/orders/solvers load. Falls
+    # back to all-history (still base-table, dedup-free counts) only when the
+    # recent window is empty (e.g. a stale chain).
+    recent_sql = """
+SELECT least(sell_token,buy_token) AS token0,
+       greatest(sell_token,buy_token) AS token1, count() AS fills
+FROM cow_db.trades
+WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+  AND sell_token != buy_token
+  AND block_timestamp >= now() - INTERVAL 30 DAY
+GROUP BY token0, token1
+ORDER BY fills DESC, token0, token1
+LIMIT 1"""
+    fallback_sql = """
+SELECT least(sell_token,buy_token) AS token0,
+       greatest(sell_token,buy_token) AS token1, count() AS fills
+FROM cow_db.trades
+WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+  AND sell_token != buy_token
+GROUP BY token0, token1
+ORDER BY fills DESC, token0, token1
+LIMIT 1"""
+    params = {"env": chain.environment, "chain_id": chain.chain_id}
+    result = mini_apps.run_structured_query(
+        ch, recent_sql, COW_DB, params, requested_max_rows=1
+    )
+    if not result.rows:
+        result = mini_apps.run_structured_query(
+            ch, fallback_sql, COW_DB, params, requested_max_rows=1
+        )
+    if not result.rows:
+        return "", ""
+    return str(result.rows[0][0]).lower(), str(result.rows[0][1]).lower()
+
+
+def _pair_time_predicate(
+    range_state: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    # max() needs no dedup and no reorg filtering — read the base table
+    # directly instead of paying the canonical view's FINAL + chain_blocks
+    # join on every market query.
+    anchor = """SELECT max(block_timestamp) FROM cow_db.trades
+WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+  AND ((sell_token={base:String} AND buy_token={quote:String})
+       OR (sell_token={quote:String} AND buy_token={base:String}))
+  AND block_timestamp IS NOT NULL"""
+    return _time_predicate("t.block_timestamp", range_state, anchor)
+
+
+def _market_specs(
+    chain: ChainInfo,
+    pair: tuple[str, str],
+    interval: str,
+    range_state: dict[str, Any],
+) -> list[QuerySpec]:
+    base, quote = pair
+    # Pair picker options: the 50 busiest pairs of the last 30 days with
+    # symbols AND addresses — feeds the base/quote dropdowns so users are not
+    # typing raw token addresses. Cheap streaming aggregate; exists even when
+    # no pair could be resolved so the picker can still offer choices.
+    options_params = _scope_parameters(chain.environment, chain)
+    pair_options = f"""
+WITH {_token_metadata_cte()},
+p AS (
+  SELECT least(sell_token,buy_token) AS token0,greatest(sell_token,buy_token) AS token1,
+         uniq((tx_hash,log_index,order_uid)) AS fill_count,
+         min(block_timestamp) AS indexed_from,max(block_timestamp) AS indexed_to,
+         max(observed_at) AS source_observed_at
+  FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND sell_token != buy_token AND block_timestamp IS NOT NULL
+    AND block_timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY token0,token1
+  ORDER BY fill_count DESC,token0,token1
+  LIMIT 50
+)
+SELECT p.token0 AS token0,p.token1 AS token1,
+       if(m0.token='','',m0.symbol) AS token0_symbol,
+       if(m1.token='','',m1.symbol) AS token1_symbol,
+       p.fill_count AS fill_count,
+       p.indexed_from AS indexed_from,p.indexed_to AS indexed_to,
+       p.source_observed_at AS source_observed_at
+FROM p
+LEFT JOIN tm AS m0 ON m0.token=p.token0
+LEFT JOIN tm AS m1 ON m1.token=p.token1
+ORDER BY p.fill_count DESC,p.token0,p.token1"""
+    pair_options_spec = QuerySpec(
+        "pair_options", "Pair picker options", pair_options, options_params,
+        "block_timestamp", BASE_DEDUP_MODE, 900,
+    )
+    if not base or not quote:
+        return [pair_options_spec]
+    params = {
+        **_scope_parameters(chain.environment, chain),
+        "base": base,
+        "quote": quote,
+    }
+    time_pred, time_params = _pair_time_predicate(range_state)
+    params.update(time_params)
+    token_cte = _token_metadata_cte()
+    pair_filter = """((t.sell_token={base:String} AND t.buy_token={quote:String})
+                    OR (t.sell_token={quote:String} AND t.buy_token={base:String}))"""
+    market_summary = f"""
+WITH {token_cte}
+SELECT {{base:String}} AS base_token, {{quote:String}} AS quote_token,
+       (SELECT anyOrNull(symbol) FROM tm WHERE token={{base:String}}) AS base_symbol,
+       (SELECT anyOrNull(symbol) FROM tm WHERE token={{quote:String}}) AS quote_symbol,
+       (SELECT anyOrNull(decimals) FROM tm WHERE token={{base:String}}) AS base_decimals,
+       (SELECT anyOrNull(decimals) FROM tm WHERE token={{quote:String}}) AS quote_decimals,
+       uniq((t.tx_hash,t.log_index,t.order_uid)) AS fill_count,
+       uniq(t.tx_hash) AS settlement_transactions,
+       min(t.block_timestamp) AS indexed_from, max(t.block_timestamp) AS indexed_to,
+       max(t.observed_at) AS source_observed_at
+FROM cow_db.trades AS t
+WHERE {_scope_predicate(chain, 't')} AND {pair_filter}
+  AND t.block_timestamp IS NOT NULL AND {time_pred}
+ORDER BY base_token,quote_token"""
+    bucket = CANDLE_BUCKETS[interval]
+    # The dedup subquery matters for VOLUME correctness: recent fills sit in
+    # unmerged ReplacingMergeTree parts (and API+RPC dual-source rows), so a
+    # raw read double-counts sums. Pair-filtered sets are small enough that
+    # the argMax GROUP BY streams cheaply.
+    candles = f"""
+WITH {token_cte}, dedup AS (
+  SELECT t.tx_hash AS tx_hash, t.log_index AS log_index, t.order_uid AS order_uid,
+         argMax(t.block_timestamp,t.observed_at) AS block_timestamp,
+         argMax(t.sell_token,t.observed_at) AS sell_token,
+         argMax(t.sell_amount,t.observed_at) AS sell_amount,
+         argMax(t.buy_amount,t.observed_at) AS buy_amount,
+         max(t.observed_at) AS observed_at
+  FROM cow_db.trades AS t
+  WHERE {_scope_predicate(chain, 't')} AND {pair_filter}
+    AND t.block_timestamp IS NOT NULL AND {time_pred}
+  GROUP BY t.tx_hash, t.log_index, t.order_uid
+), fills AS (
+  SELECT d.block_timestamp, d.log_index, d.tx_hash, d.order_uid,
+         if(d.sell_token={{base:String}},
+            toFloat64(d.sell_amount)/pow(10,toFloat64(b.decimals)),
+            toFloat64(d.buy_amount)/pow(10,toFloat64(b.decimals))) AS base_qty,
+         if(d.sell_token={{base:String}},
+            toFloat64(d.buy_amount)/pow(10,toFloat64(q.decimals)),
+            toFloat64(d.sell_amount)/pow(10,toFloat64(q.decimals))) AS quote_qty,
+         d.observed_at
+  FROM dedup AS d
+  INNER JOIN tm AS b ON b.token={{base:String}}
+  INNER JOIN tm AS q ON q.token={{quote:String}}
+), priced AS (
+  SELECT *, quote_qty/nullIf(base_qty,0) AS price
+  FROM fills WHERE base_qty>0 AND quote_qty>=0
+)
+SELECT {bucket} AS bucket,
+       argMin(price, tuple(block_timestamp,log_index,tx_hash,order_uid)) AS open,
+       max(price) AS high, min(price) AS low,
+       argMax(price, tuple(block_timestamp,log_index,tx_hash,order_uid)) AS close,
+       sum(quote_qty)/nullIf(sum(base_qty),0) AS vwap,
+       sum(base_qty) AS base_volume, sum(quote_qty) AS quote_volume,
+       count() AS fill_count, min(block_timestamp) AS indexed_from,
+       max(block_timestamp) AS indexed_to, max(observed_at) AS source_observed_at
+FROM priced
+GROUP BY bucket
+ORDER BY bucket"""
+    # Top-N-first tape (see _trade_specs): a plain ORDER BY … LIMIT over the
+    # base table is a bounded heap sort, memory-safe at any window; dedup
+    # happens over the selected set only, and metadata joins only the capped
+    # rows. The checkpoint CTE replaces the canonical view's chain_blocks join.
+    recent = f"""
+WITH {token_cte}, cp AS (
+  SELECT argMax(block_number,updated_at) AS b
+  FROM cow_db.indexing_checkpoints
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc'
+)
+SELECT u.block_timestamp AS block_timestamp, u.tx_hash AS tx_hash, u.order_uid AS order_uid,
+       u.log_index AS log_index, u.owner AS owner,
+       u.sell_token AS sell_token, if(s.token='',u.sell_token,s.symbol) AS sell_symbol,
+       if(s.token='',NULL,s.decimals) AS sell_decimals,
+       toString(u.sell_amount) AS sell_amount_raw,
+       if(s.token='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       u.buy_token AS buy_token, if(b.token='',u.buy_token,b.symbol) AS buy_symbol,
+       if(b.token='',NULL,b.decimals) AS buy_decimals,
+       toString(u.buy_amount) AS buy_amount_raw,
+       if(b.token='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       toString(u.fee_amount) AS fee_amount_raw,
+       if(s.token='',NULL,toFloat64(u.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
+       u.source AS source,
+       u.obs_at AS source_observed_at
+FROM (
+  SELECT tx_hash,log_index,order_uid,
+         argMax(block_timestamp,observed_at) AS block_timestamp,
+         argMax(owner,observed_at) AS owner,
+         argMax(sell_token,observed_at) AS sell_token,
+         argMax(buy_token,observed_at) AS buy_token,
+         argMax(sell_amount,observed_at) AS sell_amount,
+         argMax(buy_amount,observed_at) AS buy_amount,
+         argMax(fee_amount,observed_at) AS fee_amount,
+         argMax(source,observed_at) AS source,
+         max(observed_at) AS obs_at
+  FROM (
+    SELECT t.tx_hash,t.log_index,t.order_uid,t.block_timestamp,t.owner,
+           t.sell_token,t.buy_token,t.sell_amount,t.buy_amount,t.fee_amount,
+           t.source,t.observed_at
+    FROM cow_db.trades AS t
+    WHERE {_scope_predicate(chain, 't')} AND {pair_filter}
+      AND t.block_number<=(SELECT b FROM cp)
+      AND t.block_timestamp IS NOT NULL AND {time_pred}
+    ORDER BY t.block_timestamp DESC
+    LIMIT {TAPE_ARM_LIMIT}
+  )
+  GROUP BY tx_hash,log_index,order_uid
+  ORDER BY block_timestamp DESC
+  LIMIT {ROW_CAP}
+) AS u
+LEFT JOIN tm AS s ON s.token=u.sell_token
+LEFT JOIN tm AS b ON b.token=u.buy_token
+ORDER BY u.block_timestamp DESC, u.log_index DESC, u.tx_hash DESC, u.order_uid DESC"""
+    # Window anchor without a chain_blocks-FINAL triple join: max block time
+    # over the (few thousand) competition auction blocks, index-looked-up.
+    auction_anchor = """SELECT max(block_timestamp) FROM cow_db.chain_blocks
+WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+  AND block_number IN (
+    SELECT argMax(auction_block, observed_at) FROM cow_db.solver_competitions FINAL
+    WHERE environment={env:String} AND chain_id={chain_id:UInt64} GROUP BY auction_id)"""
+    auction_time, _ = _time_predicate(
+        "blocks.auction_timestamp", range_state, auction_anchor
+    )
+    auction_reference = f"""
+WITH {token_cte}, bp AS (
+  SELECT auction_id, argMax(price,observed_at) AS base_price,
+         max(observed_at) AS base_observed_at
+  FROM cow_db.auction_prices
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{base:String}}
+  GROUP BY auction_id
+), qp AS (
+  SELECT auction_id, argMax(price,observed_at) AS quote_price,
+         max(observed_at) AS quote_observed_at
+  FROM cow_db.auction_prices
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{quote:String}}
+  GROUP BY auction_id
+), comp AS (
+  SELECT auction_id, argMax(auction_block,observed_at) AS auction_block,
+         max(observed_at) AS competition_observed_at
+  FROM cow_db.solver_competitions FINAL
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+  GROUP BY auction_id
+), blocks AS (
+  -- Only the auction blocks (thousands, index-lookup) instead of the whole
+  -- chain_blocks table with FINAL (millions of rows — a prior OOM source).
+  SELECT block_number,argMax(block_timestamp,observed_at) AS auction_timestamp
+  FROM cow_db.chain_blocks
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND block_number IN (SELECT auction_block FROM comp)
+  GROUP BY block_number
+)
+SELECT bp.auction_id, blocks.auction_timestamp,
+       toFloat64(bp.base_price)/nullIf(toFloat64(qp.quote_price),0)
+         * pow(10,toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={{base:String}}))
+                  -toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={{quote:String}}))) AS price,
+       greatest(bp.base_observed_at,qp.quote_observed_at,comp.competition_observed_at) AS source_observed_at,
+       blocks.auction_timestamp AS indexed_from, blocks.auction_timestamp AS indexed_to
+FROM bp INNER JOIN qp USING auction_id
+LEFT JOIN comp USING auction_id
+LEFT JOIN blocks ON comp.auction_block=blocks.block_number
+WHERE blocks.block_number!=0 AND {auction_time}
+ORDER BY blocks.auction_timestamp"""
+    native_reference = _native_reference_sql(chain, base, quote, range_state)
+    return [
+        pair_options_spec,
+        QuerySpec("market_summary", "Market summary", market_summary, params, "block_timestamp", "checkpoint_bounded"),
+        QuerySpec("price_candles", "Execution prices (settled fills)", candles, params, "block_timestamp", "checkpoint_bounded"),
+        QuerySpec("recent_market_trades", "Recent settled fills", recent, params, "block_timestamp", "checkpoint_bounded", 60, exact_count=False),
+        QuerySpec("auction_reference_prices", "Auction reference prices", auction_reference, params, "auction_block_timestamp", "observed_series"),
+        QuerySpec("native_reference_prices", "Native-price API observations", native_reference, params, "observed_at", "observed_series", 60),
+    ]
+
+
+def _native_reference_sql(
+    chain: ChainInfo,
+    base: str,
+    quote: str,
+    range_state: dict[str, Any],
+) -> str:
+    token_cte = _token_metadata_cte()
+    decimal_factor = """pow(10,toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={base:String}))
+                                  -toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={quote:String})))"""
+    if range_state["kind"] == "all":
+        native_time = "1"
+    elif range_state["kind"] == "absolute":
+        native_time = (
+            "observed_at>=parseDateTime64BestEffort({start_at:String}) AND "
+            "observed_at<=parseDateTime64BestEffort({end_at:String})"
+        )
+    else:
+        native_time = """observed_at>=(
+          SELECT max(observed_at) FROM cow_db.native_prices FINAL
+          WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+            AND token IN ({base:String},{quote:String})
+        )-toIntervalDay({window_days:UInt32})"""
+    if base == NATIVE_TOKEN:
+        return f"""
+WITH {token_cte}
+SELECT observed_at AS bucket, 1/nullIf(toFloat64OrNull(native_price),0)*{decimal_factor} AS price,
+       observed_at AS indexed_from, observed_at AS indexed_to, observed_at AS source_observed_at
+FROM cow_db.native_prices FINAL
+WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{quote:String}}
+  AND {native_time}
+ORDER BY observed_at"""
+    if quote == NATIVE_TOKEN:
+        return f"""
+WITH {token_cte}
+SELECT observed_at AS bucket, toFloat64OrNull(native_price)*{decimal_factor} AS price,
+       observed_at AS indexed_from, observed_at AS indexed_to, observed_at AS source_observed_at
+FROM cow_db.native_prices FINAL
+WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{base:String}}
+  AND {native_time}
+ORDER BY observed_at"""
+    return f"""
+WITH {token_cte}, bp AS (
+  SELECT toStartOfMinute(observed_at) AS bucket,
+         argMax(toFloat64OrNull(native_price),observed_at) AS base_native_price,
+         max(observed_at) AS base_observed_at
+  FROM cow_db.native_prices FINAL
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{base:String}}
+    AND {native_time}
+  GROUP BY bucket
+), qp AS (
+  SELECT toStartOfMinute(observed_at) AS bucket,
+         argMax(toFloat64OrNull(native_price),observed_at) AS quote_native_price,
+         max(observed_at) AS quote_observed_at
+  FROM cow_db.native_prices FINAL
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{quote:String}}
+    AND {native_time}
+  GROUP BY bucket
+)
+SELECT bp.bucket, bp.base_native_price/nullIf(qp.quote_native_price,0)*{decimal_factor} AS price,
+       least(bp.base_observed_at,qp.quote_observed_at) AS indexed_from,
+       greatest(bp.base_observed_at,qp.quote_observed_at) AS indexed_to,
+       greatest(bp.base_observed_at,qp.quote_observed_at) AS source_observed_at
+FROM bp INNER JOIN qp USING bucket
+ORDER BY bucket"""
+
+
+def _trade_specs(
+    scope: str,
+    chain: ChainInfo | None,
+    range_state: dict[str, Any],
+    filters: dict[str, str],
+) -> list[QuerySpec]:
+    """Trades section — single-chain, or all-networks via per-chain arms.
+
+    Multi-chain scans stay per-chain-bounded UNION arms (see
+    ``_per_chain_time``); token-symbol enrichment joins the multi-chain
+    metadata CTE once around the assembled arms.
+    """
+    params = _scope_parameters(scope, None)
+    chains = [chain] if chain is not None else _chains_for_scope(scope)
+    ids = ",".join(str(c.chain_id) for c in chains)
+    params.update(_time_params(range_state))
+    shared_ctes = _shared_arm_ctes(ids)
+    owner = _normalize_hex(filters.get("owner", ""))
+    token = _normalize_hex(filters.get("token", ""))
+    extra_predicates: list[str] = []
+    if owner:
+        if not ADDRESS_RE.fullmatch(owner):
+            raise ValueError("owner filter must be an EVM address")
+        params["owner"] = owner
+        extra_predicates.append("t.owner={owner:String}")
+    if token:
+        token = _validate_token(token, "token filter")
+        params["token"] = token
+        extra_predicates.append("(t.sell_token={token:String} OR t.buy_token={token:String})")
+    extra = "".join(f" AND {predicate}" for predicate in extra_predicates)
+    tmx = _token_metadata_cte_multi(scope, chain)
+
+    activity_parts: list[str] = []
+    pair_parts: list[str] = []
+    for c in chains:
+        cid = c.chain_id
+        arm_where = (
+            f"t.environment={{env:String}} AND t.chain_id={cid} "
+            f"AND {_arm_checkpoint(cid)} "
+            f"AND t.block_timestamp IS NOT NULL AND {_arm_window(cid, range_state)}{extra}"
+        )
+        activity_parts.append(f"""
+SELECT toStartOfDay(t.block_timestamp) AS bucket,{cid} AS chain_id,
+       uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
+       uniq(t.owner) AS owners,min(t.block_timestamp) AS indexed_from,
+       max(t.block_timestamp) AS indexed_to,max(t.observed_at) AS source_observed_at
+FROM cow_db.trades AS t
+WHERE {arm_where}
+GROUP BY bucket""")
+        pair_parts.append(f"""
+SELECT {cid} AS chain_id,least(t.sell_token,t.buy_token) AS token0,
+       greatest(t.sell_token,t.buy_token) AS token1,
+       uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
+       min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
+       max(t.observed_at) AS source_observed_at
+FROM cow_db.trades AS t
+WHERE {arm_where}
+GROUP BY token0,token1""")
+    activity = (
+        f"WITH {shared_ctes}\n"
+        "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
+        + "\n) ORDER BY bucket,chain_id"
+    )
+    breakdown = f"""WITH {shared_ctes},{tmx}
+SELECT p.chain_id AS chain_id, p.token0 AS token0, p.token1 AS token1,
+       if(m0.token='','',m0.symbol) AS token0_symbol,
+       if(m1.token='','',m1.symbol) AS token1_symbol,
+       p.fill_count AS fill_count, p.settlement_transactions AS settlement_transactions,
+       p.indexed_from AS indexed_from, p.indexed_to AS indexed_to,
+       p.source_observed_at AS source_observed_at
+FROM ({"UNION ALL".join(pair_parts)}) AS p
+LEFT JOIN tmx AS m0 ON m0.chain_id=p.chain_id AND m0.token=p.token0
+LEFT JOIN tmx AS m1 ON m1.chain_id=p.chain_id AND m1.token=p.token1
+ORDER BY p.fill_count DESC,p.chain_id,p.token0,p.token1
+LIMIT 500"""
+    # Top-N-first tape: ONE plain scan over the base table with a bounded
+    # heap sort (PartialSorting) — constant memory even at all-history across
+    # all networks (proven live: 6.3s where the previous shape OOMed at
+    # 10.8 GiB; a per-arm UNION variant measured 7.9s and blew the SQL
+    # length cap). No dedup, no join, no window function inside the heap.
+    # The checkpoint filter runs on the SELECTED set (uncommitted-tail rows
+    # are only the newest blocks; the 3x over-fetch absorbs them along with
+    # the <0.1% ReplacingMergeTree duplicate rate), then argMax dedups and
+    # the global top-ROW_CAP is taken.
+    time_window = _arm_window(0, range_state)
+    deduped_tape = f"""
+SELECT u.chain_id AS chain_id,u.tx_hash AS tx_hash,u.log_index AS log_index,
+       u.order_uid AS order_uid,
+       argMax(u.block_timestamp,u.observed_at) AS block_timestamp,
+       argMax(u.owner,u.observed_at) AS owner,
+       argMax(u.sell_token,u.observed_at) AS sell_token,
+       argMax(u.buy_token,u.observed_at) AS buy_token,
+       argMax(u.sell_amount,u.observed_at) AS sell_amount,
+       argMax(u.buy_amount,u.observed_at) AS buy_amount,
+       argMax(u.fee_amount,u.observed_at) AS fee_amount,
+       argMax(u.source,u.observed_at) AS source,
+       max(u.observed_at) AS obs_at
+FROM (
+  SELECT chain_id,tx_hash,log_index,order_uid,block_timestamp,block_number,
+         owner,sell_token,buy_token,sell_amount,buy_amount,fee_amount,
+         source,observed_at
+  FROM cow_db.trades AS t
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+    AND block_timestamp IS NOT NULL AND {time_window}{extra}
+  ORDER BY block_timestamp DESC
+  LIMIT {TAPE_ARM_LIMIT}
+) AS u
+INNER JOIN cp ON cp.chain_id=u.chain_id
+WHERE u.block_number<=cp.b
+GROUP BY u.chain_id,u.tx_hash,u.log_index,u.order_uid
+ORDER BY block_timestamp DESC
+LIMIT {ROW_CAP}"""
+    trades = f"""WITH {shared_ctes},{tmx}
+SELECT u.block_timestamp AS block_timestamp,u.chain_id AS chain_id,u.tx_hash AS tx_hash,
+       u.log_index AS log_index,u.order_uid AS order_uid,u.owner AS owner,
+       u.sell_token AS sell_token,if(s.symbol='',u.sell_token,s.symbol) AS sell_symbol,
+       if(s.token='',NULL,s.decimals) AS sell_decimals,
+       toString(u.sell_amount) AS sell_amount_raw,
+       if(s.symbol='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       u.buy_token AS buy_token,if(b.symbol='',u.buy_token,b.symbol) AS buy_symbol,
+       if(b.token='',NULL,b.decimals) AS buy_decimals,
+       toString(u.buy_amount) AS buy_amount_raw,
+       if(b.symbol='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       toString(u.fee_amount) AS fee_amount_raw,
+       if(s.token='',NULL,toFloat64(u.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
+       u.source AS source,u.obs_at AS source_observed_at
+FROM ({deduped_tape}) AS u
+LEFT JOIN tmx AS s ON s.chain_id=u.chain_id AND s.token=u.sell_token
+LEFT JOIN tmx AS b ON b.chain_id=u.chain_id AND b.token=u.buy_token
+ORDER BY u.block_timestamp DESC,u.log_index DESC,u.tx_hash DESC,u.order_uid DESC"""
+    return [
+        QuerySpec("trade_activity", "Settled fill activity", activity, params, "block_timestamp", "checkpoint_bounded"),
+        QuerySpec("trade_pair_breakdown", "Settled fills by pair", breakdown, params, "block_timestamp", "checkpoint_bounded", 900),
+        QuerySpec("trades", "Settled fills", trades, params, "block_timestamp", "checkpoint_bounded", 60, exact_count=False),
+    ]
+
+
+def _traders_specs(
+    scope: str,
+    chain: ChainInfo | None,
+    range_state: dict[str, Any],
+) -> list[QuerySpec]:
+    """Traders section — per-owner stats, single-chain or cross-chain.
+
+    Cross-chain mode assembles per-chain arms (memory-bounded view expansion)
+    and re-aggregates per trader: fills/settlements sum exactly;
+    ``distinct_pairs`` is the SUM of per-chain distinct pairs;
+    ``chains_active`` counts the chains a trader appears on.
+    """
+    params = _scope_parameters(scope, None)
+    chains = [chain] if chain is not None else _chains_for_scope(scope)
+    ids = ",".join(str(c.chain_id) for c in chains)
+    params.update(_time_params(range_state))
+    shared_ctes = _shared_arm_ctes(ids)
+    # Cap the first-seen build to the correlation window: unbounded, it is a
+    # hash of EVERY trader ever (all-history) used as the INNER-JOIN build side
+    # for each arm — an OOM driver. `ta` (latest-trade anchor) is emitted by
+    # _shared_arm_ctes and precedes this CTE. "new_traders" then means "first
+    # seen within the window" — the same disclosed tradeoff as the other caps.
+    firsts_cte = f"""
+fs AS (
+  SELECT chain_id, owner, min(block_timestamp) AS first_seen
+  FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+    AND block_timestamp IS NOT NULL
+    AND block_timestamp >= (SELECT max(a) FROM ta) - toIntervalDay({CORRELATION_MAX_WINDOW_DAYS})
+  GROUP BY chain_id, owner
+)"""
+    leader_parts: list[str] = []
+    activity_parts: list[str] = []
+    for c in chains:
+        cid = c.chain_id
+        arm_where = (
+            f"t.environment={{env:String}} AND t.chain_id={cid} "
+            f"AND {_arm_checkpoint(cid)} "
+            f"AND t.block_timestamp IS NOT NULL AND {_arm_window(cid, range_state)}"
+        )
+        leader_parts.append(f"""
+SELECT {cid} AS chain_id,t.owner AS trader,
+       uniq({TRADE_KEY}) AS fill_count,
+       uniq(t.tx_hash) AS settlement_transactions,
+       uniq(tuple(least(t.sell_token,t.buy_token),greatest(t.sell_token,t.buy_token))) AS distinct_pairs,
+       min(t.block_timestamp) AS fs_arm,
+       max(t.block_timestamp) AS ls_arm,
+       max(t.observed_at) AS obs_arm
+FROM cow_db.trades AS t
+WHERE {arm_where}
+GROUP BY trader""")
+        activity_parts.append(f"""
+SELECT toStartOfDay(t.block_timestamp) AS bucket,{cid} AS chain_id,
+       uniq(t.owner) AS active_traders,
+       uniqIf(t.owner, toStartOfDay(f.first_seen)=toStartOfDay(t.block_timestamp)) AS new_traders,
+       uniq({TRADE_KEY}) AS fill_count,
+       min(t.block_timestamp) AS indexed_from,
+       max(t.block_timestamp) AS indexed_to,
+       max(t.observed_at) AS source_observed_at
+FROM cow_db.trades AS t
+INNER JOIN fs AS f ON f.chain_id={cid} AND f.owner=t.owner
+WHERE {arm_where}
+GROUP BY bucket""")
+    leaderboard = f"""
+WITH {shared_ctes}
+SELECT trader,
+       sum(fill_count) AS fill_count,
+       sum(settlement_transactions) AS settlement_transactions,
+       count() AS chains_active,
+       sum(distinct_pairs) AS distinct_pairs,
+       min(fs_arm) AS first_seen,
+       max(ls_arm) AS last_seen,
+       min(fs_arm) AS indexed_from,
+       max(ls_arm) AS indexed_to,
+       max(obs_arm) AS source_observed_at
+FROM (
+{"UNION ALL".join(leader_parts)}
+) GROUP BY trader
+ORDER BY fill_count DESC, trader
+LIMIT 200"""
+    activity = (
+        f"WITH {shared_ctes},{firsts_cte}\n"
+        "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
+        + "\n) ORDER BY bucket,chain_id"
+    )
+    return [
+        QuerySpec("trader_leaderboard", "Trader leaderboard", leaderboard, dict(params), "block_timestamp", BASE_DEDUP_MODE, 900),
+        QuerySpec("trader_activity", "Active and new traders", activity, dict(params), "block_timestamp", BASE_DEDUP_MODE, 900),
+    ]
+
+
+def _order_specs(
+    chain: ChainInfo,
+    pair: tuple[str, str],
+    range_state: dict[str, Any],
+    filters: dict[str, str],
+) -> list[QuerySpec]:
+    base, quote = pair
+    params = _scope_parameters(chain.environment, chain)
+    anchor = (
+        "SELECT max(creation_date) FROM cow_db.orders FINAL "
+        "WHERE environment={env:String} AND chain_id={chain_id:UInt64}"
+    )
+    time_pred, time_params = _time_predicate("o.creation_date", range_state, anchor)
+    params.update(time_params)
+    predicates = [_scope_predicate(chain, "o"), time_pred]
+    status = filters.get("status", "").strip()
+    owner = _normalize_hex(filters.get("owner", ""))
+    if status:
+        params["status"] = status
+        predicates.append("o.status={status:String}")
+    if owner:
+        if not ADDRESS_RE.fullmatch(owner):
+            raise ValueError("owner filter must be an EVM address")
+        params["owner"] = owner
+        predicates.append("o.owner={owner:String}")
+    where = " AND ".join(predicates)
+    summary = f"""
+SELECT o.status,count() AS order_count,uniqExact(o.owner) AS owners,
+       min(o.creation_date) AS indexed_from,max(o.creation_date) AS indexed_to,
+       max(o.observed_at) AS source_observed_at
+FROM cow_db.orders AS o FINAL
+WHERE {where}
+GROUP BY o.status
+ORDER BY order_count DESC,o.status"""
+    activity = f"""
+SELECT toStartOfDay(o.creation_date) AS bucket,count() AS order_count,
+       countIf(o.status='open') AS currently_open,
+       min(o.creation_date) AS indexed_from,max(o.creation_date) AS indexed_to,
+       max(o.observed_at) AS source_observed_at
+FROM cow_db.orders AS o FINAL
+WHERE {where}
+GROUP BY bucket
+ORDER BY bucket"""
+    surplus = SURPLUS_BPS.format(
+        eb="t.buy_amount", ls="o.sell_amount", es="t.sell_amount", lb="o.buy_amount",
+    )
+    # Streaming shape: base trades (checkpoint-bounded, dedup-free — <0.1%
+    # duplicate fills, disclosed) hash-joined against the SMALL deduped orders
+    # set. The previous trades_canonical FINAL x orders FINAL double-merge was
+    # the memory-heavy part; the argMax subquery streams on the sort key.
+    quality_join = """
+FROM cow_db.trades AS t
+INNER JOIN (
+  SELECT order_uid,
+         argMax(sell_amount,observed_at) AS sell_amount,
+         argMax(buy_amount,observed_at) AS buy_amount,
+         argMax(creation_date,observed_at) AS creation_date
+  FROM cow_db.orders
+  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+  GROUP BY order_uid
+) AS o ON o.order_uid=t.order_uid
+WHERE t.environment={env:String} AND t.chain_id={chain_id:UInt64}
+  AND t.block_number<=(
+    SELECT argMax(block_number,updated_at) FROM cow_db.indexing_checkpoints
+    WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND source='rpc')
+  AND t.block_timestamp IS NOT NULL"""
+    # Cap the window: the three quality distributions load CONCURRENTLY and
+    # each streams the full trades partition through per-day quantile state at
+    # kind='all' — three unbounded aggregations at once is a concurrent-OOM
+    # contributor. Same 90d analytical cap the correlation views use.
+    quality_range, _ = _capped_analytical_range(range_state)
+    quality_time, quality_params = _time_predicate(
+        "t.block_timestamp", quality_range, _trade_anchor(chain)
+    )
+    quality_source = f"""
+SELECT toStartOfDay(t.block_timestamp) AS bucket,
+       {surplus} AS surplus_bps,
+       if(o.creation_date<=t.block_timestamp,
+          dateDiff('second', o.creation_date, t.block_timestamp), NULL) AS latency_seconds,
+       t.block_timestamp, t.observed_at
+{quality_join} AND {quality_time}"""
+    quality_summary = f"""
+SELECT bucket, count() AS fills,
+       avg(surplus_bps) AS avg_surplus_bps,
+       quantile(0.5)(surplus_bps) AS median_surplus_bps,
+       avgIf(latency_seconds, latency_seconds IS NOT NULL) AS avg_latency_seconds,
+       quantileIf(0.5)(latency_seconds, latency_seconds IS NOT NULL) AS median_latency_seconds,
+       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
+       max(observed_at) AS source_observed_at
+FROM ({quality_source})
+GROUP BY bucket
+ORDER BY bucket"""
+    latency_distribution = f"""
+SELECT multiIf(latency_seconds IS NULL,'unknown',
+               latency_seconds<10,'<10s',
+               latency_seconds<60,'10-60s',
+               latency_seconds<300,'1-5m',
+               latency_seconds<3600,'5-60m','>1h') AS latency_bucket,
+       count() AS fills,
+       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
+       max(observed_at) AS source_observed_at
+FROM ({quality_source})
+GROUP BY latency_bucket
+ORDER BY latency_bucket"""
+    surplus_distribution = f"""
+SELECT multiIf(surplus_bps IS NULL,'unknown',
+               surplus_bps< -50,'< -50 bps',
+               surplus_bps<0,'-50-0 bps',
+               surplus_bps<10,'0-10 bps',
+               surplus_bps<50,'10-50 bps',
+               surplus_bps<200,'50-200 bps','> 200 bps') AS surplus_bucket,
+       count() AS fills,
+       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
+       max(observed_at) AS source_observed_at
+FROM ({quality_source})
+GROUP BY surplus_bucket
+ORDER BY surplus_bucket"""
+    quality_full_params = {**params, **quality_params}
+    specs = [
+        QuerySpec("order_status_summary", "Observed order lifecycle", summary, dict(params), "creation_date", "observed_snapshot", 60),
+        QuerySpec("order_activity", "Order creation activity", activity, dict(params), "creation_date", "observed_snapshot", 60),
+        QuerySpec("order_quality_summary", "Execution quality (surplus vs limit)", quality_summary, dict(quality_full_params), "block_timestamp", "checkpoint_bounded", 900),
+        QuerySpec("fill_latency_distribution", "Creation-to-fill latency", latency_distribution, dict(quality_full_params), "block_timestamp", "checkpoint_bounded", 900),
+        QuerySpec("surplus_distribution", "Surplus distribution (bps vs limit)", surplus_distribution, dict(quality_full_params), "block_timestamp", "checkpoint_bounded", 900),
+    ]
+    if not base or not quote:
+        return specs
+    server_as_of = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    intent_params = {
+        **_scope_parameters(chain.environment, chain),
+        "base": base,
+        "quote": quote,
+        "server_as_of": server_as_of.isoformat().replace("+00:00", "Z"),
+    }
+    owner_predicate = ""
+    if owner:
+        intent_params["owner"] = owner
+        owner_predicate = "AND o.owner={owner:String}"
+    token_cte = _token_metadata_cte()
+    remaining_cte = f"""
+{token_cte}, open_orders AS (
+ SELECT o.*,
+   if(o.executed_sell_amount<o.sell_amount,
+      toUInt256(o.sell_amount-o.executed_sell_amount),toUInt256(0)) AS residual_sell_raw,
+   if(o.executed_buy_amount<o.buy_amount,
+      toUInt256(o.buy_amount-o.executed_buy_amount),toUInt256(0)) AS residual_buy_raw,
+   if(o.kind='buy',
+      toFloat64(o.sell_amount)*toFloat64(residual_buy_raw)
+        /nullIf(toFloat64(o.buy_amount),0),
+      toFloat64(residual_sell_raw)) AS remaining_sell_float,
+   if(o.kind='buy',
+      toFloat64(residual_buy_raw),
+      toFloat64(o.buy_amount)*toFloat64(residual_sell_raw)
+        /nullIf(toFloat64(o.sell_amount),0)) AS remaining_buy_float
+ FROM cow_db.orders AS o FINAL
+ WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+   AND o.status='open' AND o.valid_to>toUnixTimestamp(parseDateTime64BestEffort({{server_as_of:String}}))
+   AND o.status!='presignaturePending'
+   {owner_predicate}
+   AND ((o.sell_token={{base:String}} AND o.buy_token={{quote:String}})
+        OR (o.sell_token={{quote:String}} AND o.buy_token={{base:String}}))
+), enriched AS (
+ SELECT o.*,
+   if(s.token='','',s.symbol) AS sell_symbol,
+   if(b.token='','',b.symbol) AS buy_symbol,
+   if(s.token='',NULL,s.decimals) AS sell_decimals,
+   if(b.token='',NULL,b.decimals) AS buy_decimals,
+   if(s.token='',NULL,toFloat64(o.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount_normalized,
+   if(b.token='',NULL,toFloat64(o.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount_normalized,
+   if(s.token='',NULL,remaining_sell_float/pow(10,toFloat64(s.decimals))) AS remaining_sell,
+   if(b.token='',NULL,remaining_buy_float/pow(10,toFloat64(b.decimals))) AS remaining_buy,
+   if(o.sell_token={{base:String}},'ask','bid') AS side,
+   if(s.token='' OR b.token='',NULL,if(o.sell_token={{base:String}},
+      (remaining_buy_float/pow(10,toFloat64(b.decimals)))
+        /nullIf(remaining_sell_float/pow(10,toFloat64(s.decimals)),0),
+      (remaining_sell_float/pow(10,toFloat64(s.decimals)))
+        /nullIf(remaining_buy_float/pow(10,toFloat64(b.decimals)),0))) AS limit_price,
+   if(s.token='' OR b.token='',NULL,if(o.sell_token={{base:String}},
+      remaining_sell_float/pow(10,toFloat64(s.decimals)),
+      remaining_buy_float/pow(10,toFloat64(b.decimals)))) AS base_remaining
+ FROM open_orders o
+ LEFT JOIN tm s ON s.token=o.sell_token
+ LEFT JOIN tm b ON b.token=o.buy_token
+ WHERE remaining_sell_float>0 AND remaining_buy_float>0
+), normalized AS (
+ SELECT * FROM enriched
+ WHERE sell_decimals IS NOT NULL AND buy_decimals IS NOT NULL
+)"""
+    known_orders = f"""
+WITH {remaining_cte}
+SELECT order_uid,owner,kind,side,status,creation_date,valid_to,sell_token,buy_token,
+       sell_symbol,buy_symbol,
+       toString(sell_amount) AS sell_amount_raw,toString(buy_amount) AS buy_amount_raw,
+       sell_decimals,buy_decimals,sell_amount_normalized,buy_amount_normalized,
+       toString(executed_sell_amount) AS executed_sell_amount_raw,
+       toString(executed_buy_amount) AS executed_buy_amount_raw,
+       toString(residual_sell_raw) AS residual_sell_amount_raw,
+       toString(residual_buy_raw) AS residual_buy_amount_raw,
+       remaining_sell,remaining_buy,limit_price,observed_at AS source_observed_at
+FROM enriched
+ORDER BY creation_date DESC,order_uid DESC"""
+    intent_summary = f"""
+WITH {remaining_cte}
+SELECT side,count() AS intent_count,sum(base_remaining) AS base_remaining,
+       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
+       max(observed_at) AS source_observed_at
+FROM normalized
+GROUP BY side
+ORDER BY side"""
+    depth = f"""
+WITH {remaining_cte}
+SELECT side,limit_price,sum(base_remaining) AS base_quantity,count() AS intent_count,
+       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
+       max(observed_at) AS source_observed_at
+FROM normalized
+WHERE isFinite(limit_price) AND limit_price>0
+GROUP BY side,limit_price
+ORDER BY side,if(side='bid',-limit_price,limit_price)"""
+    specs.extend([
+        QuerySpec("known_orders", "Known open intents (observed snapshot)", known_orders, dict(intent_params), "creation_date", "observed_snapshot", 60),
+        QuerySpec("known_intents", "Known intent summary", intent_summary, dict(intent_params), "creation_date", "observed_snapshot", 60),
+        QuerySpec("intent_depth", "Known intents", depth, dict(intent_params), "creation_date", "observed_snapshot", 60),
+    ])
+    return specs
+
+
+def _auction_specs(
+    chain: ChainInfo | None,
+    range_state: dict[str, Any],
+    scope: str = "production",
+) -> list[QuerySpec]:
+    """Auctions section — single-chain or all-networks (competition tables are
+    small, so grouped multi-chain scans are cheap; auction_id is only unique
+    PER chain, so every join carries chain_id)."""
+    if chain is not None:
+        scope = chain.environment
+    params = _scope_parameters(scope, chain)
+    scope_pred_c = _scope_predicate(chain, "c", scope)
+    scope_pred_bare = _scope_predicate(chain, "", scope)
+    # Bounded chain_blocks: `block_number IN (auction blocks)` prunes the whole
+    # ~9.2M-row table (block_number is the sort key) down to the ~15k auction
+    # blocks, and argMax dedups so NO FINAL. Replaces the unbounded
+    # `chain_blocks FINAL` LEFT-JOIN build side that OOMed at 639 MiB.
+    blk_cte = f"""blk AS (
+  SELECT chain_id, block_number, argMax(block_timestamp, observed_at) AS block_timestamp
+  FROM cow_db.chain_blocks
+  WHERE {scope_pred_bare}
+    AND block_number IN (SELECT auction_block FROM cow_db.solver_competitions FINAL
+                         WHERE {scope_pred_bare})
+  GROUP BY chain_id, block_number
+)"""
+    anchor = f"""SELECT max(block_timestamp) FROM cow_db.chain_blocks
+WHERE {scope_pred_bare}
+  AND block_number IN (SELECT auction_block FROM cow_db.solver_competitions FINAL WHERE {scope_pred_bare})"""
+    time_pred, time_params = _time_predicate("b.block_timestamp", range_state, anchor)
+    params.update(time_params)
+    common = f"""FROM cow_db.solver_competitions AS c FINAL
+LEFT JOIN blk AS b ON b.chain_id=c.chain_id AND b.block_number=c.auction_block
+WHERE {scope_pred_c} AND b.block_number!=0 AND {time_pred}"""
+    activity = f"""
+WITH {blk_cte}
+SELECT toStartOfDay(b.block_timestamp) AS bucket,c.chain_id AS chain_id,
+       count() AS competition_count,
+       uniqExact(c.winner) AS winners,min(b.block_timestamp) AS indexed_from,
+       max(b.block_timestamp) AS indexed_to,max(c.observed_at) AS source_observed_at
+{common}
+GROUP BY bucket,chain_id
+ORDER BY bucket,chain_id"""
+    auctions = f"""
+WITH {blk_cte},
+sols AS (
+ SELECT chain_id,auction_id,count() AS solution_count,countIf(is_winner) AS winner_rows,
+        min(ranking) AS best_ranking
+ FROM cow_db.competition_solutions FINAL
+ WHERE {scope_pred_bare}
+ GROUP BY chain_id,auction_id
+), txs AS (
+ SELECT chain_id,auction_id,count() AS transaction_count,groupUniqArray(tx_hash) AS tx_hashes
+ FROM cow_db.competition_transactions FINAL
+ WHERE {scope_pred_bare}
+ GROUP BY chain_id,auction_id
+)
+SELECT c.chain_id AS chain_id,c.auction_id,b.block_timestamp AS auction_timestamp,c.auction_block,
+       c.winner AS competition_winner,c.reference_score,
+       coalesce(sols.solution_count,0) AS solution_count,
+       coalesce(txs.transaction_count,0) AS transaction_count,txs.tx_hashes,
+       b.block_timestamp AS indexed_from,b.block_timestamp AS indexed_to,
+       c.observed_at AS source_observed_at
+FROM cow_db.solver_competitions AS c FINAL
+LEFT JOIN blk AS b ON b.chain_id=c.chain_id AND b.block_number=c.auction_block
+LEFT JOIN sols ON c.chain_id=sols.chain_id AND c.auction_id=sols.auction_id
+LEFT JOIN txs ON c.chain_id=txs.chain_id AND c.auction_id=txs.auction_id
+WHERE {scope_pred_c} AND b.block_number!=0 AND {time_pred}
+ORDER BY b.block_timestamp DESC,c.auction_id DESC"""
+    return [
+        QuerySpec("auction_activity", "Indexed settled competitions", activity, params, "auction_block_timestamp", "observed_series"),
+        QuerySpec("auctions", "Indexed settled competitions", auctions, params, "auction_block_timestamp", "observed_series"),
+    ]
+
+
+def _solver_specs(
+    scope: str,
+    chain: ChainInfo | None,
+    range_state: dict[str, Any],
+    pair: tuple[str, str] = ("", ""),
+    filters: dict[str, str] | None = None,
+) -> list[QuerySpec]:
+    """Solvers section — single-chain, or an all-networks rollup.
+
+    All-networks mode adds ``chains_active``/``executed_settlements`` to the
+    stats table and a ``solver_cross_chain`` (solver x chain) dataset the
+    frontend pivots into the comparison matrix; the pair->executor flow
+    remains single-chain only.
+    """
+    params = _scope_parameters(scope, chain)
+    chains = [chain] if chain is not None else _chains_for_scope(scope)
+    ids = ",".join(str(c.chain_id) for c in chains)
+    filters = filters or {}
+    competition_filter = ""
+    flow_filters: list[str] = []
+    solver = _normalize_hex(filters.get("solver", ""))
+    if solver:
+        if not ADDRESS_RE.fullmatch(solver):
+            raise ValueError("solver filter must be an EVM address")
+        params["solver"] = solver
+        competition_filter = " AND s.solver={solver:String}"
+        flow_filters.append("exec.settlement_executor={solver:String}")
+    base, quote = pair
+    if base and quote:
+        params.update({"base": base, "quote": quote})
+        flow_filters.append(
+            "((t.sell_token={base:String} AND t.buy_token={quote:String}) OR "
+            "(t.sell_token={quote:String} AND t.buy_token={base:String}))"
+        )
+    scope_s = f"s.environment={{env:String}} AND s.chain_id IN ({ids})"
+    # Prefiltered block-time lookup: joining the full chain_blocks table (with
+    # FINAL) builds a hash table of millions of rows per chain; restricting to
+    # blocks that actually appear as auction blocks keeps the join tiny in
+    # both single-chain and all-networks mode.
+    blocks_cte = f"""
+blk AS (
+  SELECT chain_id, block_number,
+         argMax(block_timestamp, observed_at) AS block_timestamp
+  FROM cow_db.chain_blocks
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+    AND block_number IN (
+      SELECT auction_block FROM cow_db.solver_competitions FINAL
+      WHERE environment={{env:String}} AND chain_id IN ({ids})
+    )
+  GROUP BY chain_id, block_number
+)"""
+    anchor = f"""SELECT max(block_timestamp)
+FROM cow_db.chain_blocks
+WHERE environment={{env:String}} AND chain_id IN ({ids})
+  AND block_number IN (
+    SELECT max(auction_block) FROM cow_db.solver_competitions FINAL
+    WHERE environment={{env:String}} AND chain_id IN ({ids})
+    GROUP BY chain_id
+  )"""
+    time_pred, time_params = _time_predicate("b.block_timestamp", range_state, anchor)
+    params.update(time_params)
+    common_joins = """FROM cow_db.competition_solutions AS s FINAL
+INNER JOIN cow_db.solver_competitions AS c FINAL
+  ON s.environment=c.environment AND s.chain_id=c.chain_id AND s.auction_id=c.auction_id
+LEFT JOIN blk AS b
+  ON b.chain_id=c.chain_id AND b.block_number=c.auction_block"""
+    common_where = f"WHERE {scope_s} AND b.block_number!=0 AND {time_pred}{competition_filter}"
+    common = f"{common_joins}\n{common_where}"
+    if range_state["kind"] == "relative":
+        settlement_time = (
+            "block_timestamp IS NOT NULL AND block_timestamp >= ("
+            "SELECT max(block_timestamp) FROM cow_db.settlements "
+            f"WHERE environment={{env:String}} AND chain_id IN ({ids})"
+            ") - toIntervalDay({window_days:UInt32})"
+        )
+    elif range_state["kind"] == "absolute":
+        settlement_time = (
+            "block_timestamp>=parseDateTime64BestEffort({start_at:String}) "
+            "AND block_timestamp<=parseDateTime64BestEffort({end_at:String})"
+        )
+    else:
+        settlement_time = "block_timestamp IS NOT NULL"
+    stats = f"""
+WITH {blocks_cte},
+exec AS (
+  SELECT solver, uniq(tx_hash) AS executed_settlements
+  FROM cow_db.settlements
+  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND {settlement_time}
+  GROUP BY solver
+)
+SELECT s.solver AS competition_solver,count() AS solutions,
+       uniqExact(s.auction_id) AS competitions,countIf(s.is_winner) AS wins,
+       countIf(s.is_winner)/nullIf(uniqExact(s.auction_id),0) AS win_rate,
+       uniqExact(s.chain_id) AS chains_active,
+       any(exec.executed_settlements) AS executed_settlements,
+       avg(toFloat64(s.ranking)) AS average_ranking,min(s.ranking) AS best_ranking,
+       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
+       max(s.observed_at) AS source_observed_at
+{common_joins}
+LEFT JOIN exec ON exec.solver=s.solver
+{common_where}
+GROUP BY competition_solver
+ORDER BY wins DESC,competitions DESC,competition_solver
+LIMIT 200"""
+    activity = f"""
+WITH {blocks_cte}
+SELECT toStartOfDay(b.block_timestamp) AS bucket,s.solver AS competition_solver,
+       uniqExact(s.auction_id) AS competitions,countIf(s.is_winner) AS wins,
+       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
+       max(s.observed_at) AS source_observed_at
+{common}
+GROUP BY bucket,competition_solver
+ORDER BY bucket,competition_solver"""
+    ranking = f"""
+WITH {blocks_cte}
+SELECT s.ranking,count() AS solution_count,countIf(s.is_winner) AS winners,
+       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
+       max(s.observed_at) AS source_observed_at
+{common}
+GROUP BY s.ranking
+ORDER BY s.ranking"""
+    specs = [
+        QuerySpec("solver_stats", "Competition solver statistics", stats, params, "auction_block_timestamp", "observed_series"),
+        QuerySpec("solver_activity", "Competition solver activity", activity, params, "auction_block_timestamp", "observed_series"),
+        QuerySpec("ranking_distribution", "Solution ranking distribution", ranking, params, "auction_block_timestamp", "observed_series"),
+    ]
+    if chain is None:
+        cross_chain = f"""
+WITH {blocks_cte}
+SELECT s.solver AS competition_solver, s.chain_id AS chain_id,
+       count() AS solutions, uniqExact(s.auction_id) AS competitions,
+       countIf(s.is_winner) AS wins,
+       countIf(s.is_winner)/nullIf(uniqExact(s.auction_id),0) AS win_rate,
+       min(s.ranking) AS best_ranking,
+       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
+       max(s.observed_at) AS source_observed_at
+{common}
+GROUP BY competition_solver, chain_id
+ORDER BY competition_solver, chain_id
+LIMIT 2000"""
+        specs.append(QuerySpec(
+            "solver_cross_chain", "Solver cross-chain comparison", cross_chain,
+            params, "auction_block_timestamp", "observed_series", 900,
+        ))
+        return specs
+    # Same trades ⋈ settlements join as the patterns matrices — cap the
+    # window so the executor hash-join build stays small at any selection.
+    flow_range, _ = _capped_analytical_range(range_state)
+    flow_time, flow_params = _time_predicate("t.block_timestamp", flow_range, _trade_anchor(chain))
+    flow_params_all = {**params, **flow_params}
+    flow_settle_time = _settlement_time_bound(flow_range)
+    flow = f"""
+WITH {_token_metadata_cte()},
+exec AS (
+ SELECT tx_hash,argMax(solver,tuple(block_timestamp,log_index)) AS settlement_executor
+ FROM cow_db.settlements
+ WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+   AND block_timestamp IS NOT NULL AND {flow_settle_time}
+ GROUP BY tx_hash
+),
+flows AS (
+  SELECT least(t.sell_token,t.buy_token) AS token0,
+         greatest(t.sell_token,t.buy_token) AS token1,
+         exec.settlement_executor,count() AS fill_count,
+         min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
+         max(t.observed_at) AS source_observed_at
+  FROM cow_db.trades AS t
+  INNER JOIN exec ON exec.tx_hash=t.tx_hash
+  WHERE {_scope_predicate(chain, 't')} AND t.block_timestamp IS NOT NULL AND {flow_time}
+    {''.join(f' AND {predicate}' for predicate in flow_filters)}
+  GROUP BY token0,token1,settlement_executor
+)
+SELECT f.token0 AS token0,f.token1 AS token1,
+       if(m0.token='','',m0.symbol) AS token0_symbol,
+       if(m1.token='','',m1.symbol) AS token1_symbol,
+       f.settlement_executor AS settlement_executor,f.fill_count AS fill_count,
+       f.indexed_from AS indexed_from,f.indexed_to AS indexed_to,
+       f.source_observed_at AS source_observed_at
+FROM flows AS f
+LEFT JOIN tm AS m0 ON m0.token=f.token0
+LEFT JOIN tm AS m1 ON m1.token=f.token1
+ORDER BY f.fill_count DESC,f.token0,f.token1,f.settlement_executor"""
+    specs.append(QuerySpec(
+        "execution_flow", "Pair to settlement executor flow", flow,
+        flow_params_all, "block_timestamp", "checkpoint_bounded", 900,
+    ))
+    return specs
+
+
+def _patterns_specs(
+    scope: str,
+    chain: ChainInfo,
+    range_state: dict[str, Any],
+) -> list[QuerySpec]:
+    """Patterns section — correlations the official explorer does not show.
+
+    Single-chain by design: solver-pair specialization, trader-solver
+    affinity, and fee-policy impact on execution quality. The cross-chain
+    solver comparison lives in the Solvers all-networks rollup.
+    """
+    params = _scope_parameters(scope, chain)
+    # Correlation matrices join two big tables — cap the analytical window so
+    # the hash-join build stays small at any global window selection (incl.
+    # "all history"). Disclosed in each dataset's (i) note.
+    corr_range, _ = _capped_analytical_range(range_state)
+    time_pred, time_params = _time_predicate(
+        "t.block_timestamp", corr_range, _trade_anchor(chain)
+    )
+    params.update(time_params)
+    # Bound the settlement-executor hash-join build to the query window — an
+    # unbounded per-chain aggregation (~2.6M rows) was the patterns OOM source.
+    settle_time = _settlement_time_bound(corr_range)
+    exec_cte = f"""
+exec AS (
+  SELECT tx_hash, argMax(solver,tuple(block_timestamp,log_index)) AS settlement_executor
+  FROM cow_db.settlements
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND block_timestamp IS NOT NULL AND {settle_time}
+  GROUP BY tx_hash
+)"""
+    trade_where = (
+        "t.environment={env:String} AND t.chain_id={chain_id:UInt64} "
+        f"AND t.block_timestamp IS NOT NULL AND {time_pred}"
+    )
+    pair_matrix = f"""
+WITH {_token_metadata_cte()},{exec_cte},
+pf AS (
+  SELECT least(t.sell_token,t.buy_token) AS token0,
+         greatest(t.sell_token,t.buy_token) AS token1,
+         exec.settlement_executor AS settlement_executor,
+         count() AS fill_count,
+         min(t.block_timestamp) AS indexed_from, max(t.block_timestamp) AS indexed_to,
+         max(t.observed_at) AS source_observed_at
+  FROM cow_db.trades AS t
+  INNER JOIN exec ON exec.tx_hash=t.tx_hash
+  WHERE {trade_where}
+  GROUP BY token0, token1, settlement_executor
+),
+tp AS (
+  SELECT token0, token1 FROM pf GROUP BY token0, token1
+  ORDER BY sum(fill_count) DESC LIMIT 30
+)
+SELECT p.token0 AS token0, p.token1 AS token1,
+       if(m0.token='','',m0.symbol) AS token0_symbol,
+       if(m1.token='','',m1.symbol) AS token1_symbol,
+       p.settlement_executor AS settlement_executor,
+       p.fill_count AS fill_count,
+       p.fill_count/sum(p.fill_count) OVER (PARTITION BY p.token0,p.token1) AS pair_share,
+       p.indexed_from AS indexed_from, p.indexed_to AS indexed_to,
+       p.source_observed_at AS source_observed_at
+FROM pf AS p
+INNER JOIN tp USING (token0, token1)
+LEFT JOIN tm AS m0 ON m0.token=p.token0
+LEFT JOIN tm AS m1 ON m1.token=p.token1
+ORDER BY p.token0, p.token1, p.fill_count DESC
+LIMIT 1000"""
+    affinity = f"""
+WITH {exec_cte},
+tt AS (
+  SELECT t.owner AS trader, exec.settlement_executor AS settlement_executor,
+         count() AS fill_count,
+         min(t.block_timestamp) AS indexed_from, max(t.block_timestamp) AS indexed_to,
+         max(t.observed_at) AS source_observed_at
+  FROM cow_db.trades AS t
+  INNER JOIN exec ON exec.tx_hash=t.tx_hash
+  WHERE {trade_where}
+  GROUP BY trader, settlement_executor
+),
+topt AS (
+  SELECT trader FROM tt GROUP BY trader
+  ORDER BY sum(fill_count) DESC LIMIT 100
+),
+tot AS (SELECT sum(fill_count) AS all_fills FROM tt),
+sol AS (
+  SELECT settlement_executor, sum(fill_count) AS solver_fills
+  FROM tt GROUP BY settlement_executor
+)
+SELECT tt.trader AS trader, tt.settlement_executor AS settlement_executor,
+       tt.fill_count AS fill_count,
+       tt.fill_count/sum(tt.fill_count) OVER (PARTITION BY tt.trader) AS trader_share,
+       sol.solver_fills/(SELECT all_fills FROM tot) AS solver_global_share,
+       tt.indexed_from AS indexed_from, tt.indexed_to AS indexed_to,
+       tt.source_observed_at AS source_observed_at
+FROM tt
+INNER JOIN topt USING (trader)
+INNER JOIN sol USING (settlement_executor)
+ORDER BY tt.trader, tt.fill_count DESC
+LIMIT 2000"""
+    fill_surplus = SURPLUS_BPS.format(
+        eb="f.buy_amount", ls="o.sell_amount", es="f.sell_amount", lb="o.buy_amount",
+    )
+    fee_quality = f"""
+WITH pol AS (
+  SELECT order_uid, tx_hash, log_index, any(policy) AS policy
+  FROM cow_db.protocol_fees FINAL
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+  GROUP BY order_uid, tx_hash, log_index
+)
+SELECT multiIf(positionCaseInsensitive(q.policy,'priceImprovement')>0,'price_improvement',
+               positionCaseInsensitive(q.policy,'surplus')>0,'surplus',
+               positionCaseInsensitive(q.policy,'volume')>0,'volume','other') AS policy_family,
+       count() AS fills, uniqExact(q.order_uid) AS orders,
+       avg(q.surplus_bps) AS avg_surplus_bps,
+       quantile(0.5)(q.surplus_bps) AS median_surplus_bps,
+       quantile(0.9)(q.surplus_bps) AS p90_surplus_bps,
+       min(q.block_timestamp) AS indexed_from, max(q.block_timestamp) AS indexed_to,
+       max(q.observed_at) AS source_observed_at
+FROM (
+  SELECT f.order_uid AS order_uid, pol.policy AS policy,
+         {fill_surplus} AS surplus_bps,
+         f.block_timestamp AS block_timestamp, f.observed_at AS observed_at
+  FROM cow_db.trades AS f
+  INNER JOIN pol ON pol.order_uid=f.order_uid AND pol.tx_hash=f.tx_hash
+   AND pol.log_index=f.log_index
+  INNER JOIN (
+    SELECT order_uid,
+           argMax(sell_amount,observed_at) AS sell_amount,
+           argMax(buy_amount,observed_at) AS buy_amount
+    FROM cow_db.orders
+    WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    GROUP BY order_uid
+  ) AS o ON o.order_uid=f.order_uid
+  WHERE f.environment={{env:String}} AND f.chain_id={{chain_id:UInt64}}
+    AND f.block_timestamp IS NOT NULL
+    AND {time_pred.replace('t.block_timestamp', 'f.block_timestamp')}
+) AS q
+GROUP BY policy_family
+ORDER BY fills DESC
+LIMIT 20"""
+    return [
+        QuerySpec("solver_pair_matrix", "Solver-pair specialization", pair_matrix, dict(params), "block_timestamp", "checkpoint_bounded", 900),
+        QuerySpec("trader_solver_affinity", "Trader-solver affinity", affinity, dict(params), "block_timestamp", "checkpoint_bounded", 900),
+        QuerySpec("fee_policy_quality", "Fee-policy impact on execution quality", fee_quality, dict(params), "block_timestamp", "checkpoint_bounded", 900),
+    ]
+
+
+def _live_specs(scope: str, chain: ChainInfo) -> list[QuerySpec]:
+    """Live section: tight, short-TTL queries the frontend polls.
+
+    ``live_pulse`` reads checkpoints for EVERY chain in scope (cheap; powers
+    the per-chain lag/catch-up bars); the feed datasets are single-chain and
+    hard-bounded to the last hour + small LIMITs — the base tables are not
+    time-sorted, so wide live scans are never acceptable.
+    """
+    params = _scope_parameters(scope, chain)
+    ids = ",".join(str(c.chain_id) for c in _chains_for_scope(scope))
+    token_cte = _token_metadata_cte()
+    pulse = f"""
+WITH cp AS (
+  SELECT chain_id, argMax(block_number, updated_at) AS checkpoint_block,
+         max(updated_at) AS checkpoint_updated_at
+  FROM cow_db.indexing_checkpoints
+  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND source='rpc'
+  GROUP BY chain_id
+), blocks AS (
+  -- block_number IN prunes chain_blocks (sort key) from ~9.2M to ~10 rows;
+  -- this runs every 10s, so the full-table join was constant instance load.
+  SELECT b.chain_id, argMax(b.block_timestamp, b.observed_at) AS checkpoint_timestamp
+  FROM cow_db.chain_blocks AS b
+  INNER JOIN cp ON b.chain_id=cp.chain_id AND b.block_number=cp.checkpoint_block
+  WHERE b.environment={{env:String}} AND b.chain_id IN ({ids})
+    AND b.block_number IN (SELECT checkpoint_block FROM cp)
+  GROUP BY b.chain_id
+)
+SELECT n.chain_id AS chain_id, cp.checkpoint_block,
+       nullIf(blocks.checkpoint_timestamp,toDateTime(0)) AS checkpoint_timestamp,
+       cp.checkpoint_updated_at,
+       if(blocks.checkpoint_timestamp IS NULL OR blocks.checkpoint_timestamp=toDateTime(0),
+          NULL,
+          dateDiff('second', blocks.checkpoint_timestamp, now())) AS lag_seconds
+FROM (SELECT arrayJoin([{ids}]) AS chain_id) AS n
+LEFT JOIN cp ON n.chain_id=cp.chain_id
+LEFT JOIN blocks ON n.chain_id=blocks.chain_id
+ORDER BY n.chain_id"""
+    # Live feeds MUST dedup indexer versions: the last hour is exactly where
+    # ReplacingMergeTree parts are still unmerged (and API+RPC dual-source rows
+    # coexist), so a raw base-table read shows every fresh fill twice. The
+    # 1-hour bound keeps the argMax GROUP BY tiny.
+    trades = f"""
+WITH {token_cte}
+SELECT u.block_ts AS block_timestamp,u.tx_hash,u.log_index,u.order_uid,u.owner,
+       u.sell_token,if(s.token='','',s.symbol) AS sell_symbol,
+       if(s.token='',NULL,s.decimals) AS sell_decimals,
+       toString(u.sell_amount) AS sell_amount_raw,
+       if(s.token='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       u.buy_token,if(b.token='','',b.symbol) AS buy_symbol,
+       if(b.token='',NULL,b.decimals) AS buy_decimals,
+       toString(u.buy_amount) AS buy_amount_raw,
+       if(b.token='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       u.obs_at AS source_observed_at
+FROM (
+  SELECT tx_hash,log_index,order_uid,
+         argMax(block_timestamp,observed_at) AS block_ts,
+         argMax(owner,observed_at) AS owner,
+         argMax(sell_token,observed_at) AS sell_token,
+         argMax(buy_token,observed_at) AS buy_token,
+         argMax(sell_amount,observed_at) AS sell_amount,
+         argMax(buy_amount,observed_at) AS buy_amount,
+         max(observed_at) AS obs_at
+  FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND block_timestamp >= {LIVE_WINDOW_SQL}
+  GROUP BY tx_hash,log_index,order_uid
+  ORDER BY block_ts DESC,log_index DESC
+  LIMIT 50
+) AS u
+LEFT JOIN tm AS s ON s.token=u.sell_token
+LEFT JOIN tm AS b ON b.token=u.buy_token
+ORDER BY u.block_ts DESC,u.log_index DESC
+LIMIT 50"""
+    settlements = f"""
+WITH fills AS (
+  SELECT tx_hash, uniq(tuple(log_index,order_uid)) AS fill_count
+  FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND block_timestamp >= {LIVE_WINDOW_SQL}
+  GROUP BY tx_hash
+)
+SELECT u.block_ts AS block_timestamp,u.tx_hash,u.block_num AS block_number,
+       u.settlement_executor,
+       coalesce(fills.fill_count,0) AS fill_count,
+       u.obs_at AS source_observed_at
+FROM (
+  -- block_num, NOT block_number: aliasing an aggregate to a column name that
+  -- also appears in a same-level WHERE makes ClickHouse bind the WHERE
+  -- identifier to the aggregate → ILLEGAL_AGGREGATION (code 184). A distinct
+  -- alias keeps this safe even if a block_number predicate is added later.
+  SELECT tx_hash,log_index,
+         argMax(block_timestamp,observed_at) AS block_ts,
+         argMax(block_number,observed_at) AS block_num,
+         argMax(solver,observed_at) AS settlement_executor,
+         max(observed_at) AS obs_at
+  FROM cow_db.settlements
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND block_timestamp >= {LIVE_WINDOW_SQL}
+  GROUP BY tx_hash,log_index
+  ORDER BY block_ts DESC,log_index DESC
+  LIMIT 30
+) AS u
+LEFT JOIN fills ON fills.tx_hash=u.tx_hash
+ORDER BY u.block_ts DESC,u.log_index DESC
+LIMIT 30"""
+    open_orders = f"""
+WITH {token_cte}
+SELECT o.order_uid,o.owner,o.kind,o.status,o.creation_date,o.valid_to,
+       o.partially_fillable,
+       o.sell_token,if(s.token='','',s.symbol) AS sell_symbol,
+       if(s.token='',NULL,s.decimals) AS sell_decimals,
+       toString(o.sell_amount) AS sell_amount_raw,
+       if(s.token='',NULL,toFloat64(o.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       o.buy_token,if(b.token='','',b.symbol) AS buy_symbol,
+       if(b.token='',NULL,b.decimals) AS buy_decimals,
+       toString(o.buy_amount) AS buy_amount_raw,
+       if(b.token='',NULL,toFloat64(o.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       if(o.sell_amount>0,
+          least(1,toFloat64(o.executed_sell_amount)/toFloat64(o.sell_amount)),0) AS fill_ratio,
+       o.observed_at AS source_observed_at
+FROM cow_db.orders AS o FINAL
+LEFT JOIN tm AS s ON s.token=o.sell_token
+LEFT JOIN tm AS b ON b.token=o.buy_token
+WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}}
+  AND o.status='open' AND o.valid_to>toUnixTimestamp(now())
+ORDER BY o.creation_date DESC,o.order_uid DESC
+LIMIT 100"""
+    events = """
+SELECT event_type,order_uid,owner,block_number,transaction_hash,event_timestamp,
+       observed_at AS source_observed_at
+FROM cow_db.order_events FINAL
+WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+  AND observed_at >= now() - INTERVAL 1 HOUR
+ORDER BY observed_at DESC,event_id DESC
+LIMIT 50"""
+    return [
+        QuerySpec("live_pulse", "Indexing pulse", pulse, {"env": scope}, "observed_at", "observed_series", 10),
+        QuerySpec("live_trades", "Latest settled fills", trades, dict(params), "block_timestamp", "checkpoint_bounded", 15),
+        QuerySpec("live_settlements", "Latest settlements", settlements, dict(params), "block_timestamp", "checkpoint_bounded", 15),
+        QuerySpec("live_open_orders", "Waiting to execute (observed open intents)", open_orders, dict(params), "creation_date", "observed_snapshot", 30),
+        QuerySpec("live_order_events", "Order lifecycle stream", events, dict(params), "observed_at", "observed_series", 30),
+    ]
+
+
+def _entity_specs(
+    entity_type: str,
+    identifier: str,
+    chain: ChainInfo,
+) -> list[QuerySpec]:
+    params = _scope_parameters(chain.environment, chain)
+    if entity_type == "order":
+        uid = _normalize_hex(identifier)
+        if not ORDER_UID_RE.fullmatch(uid):
+            raise ValueError("Order UID must contain 112 hexadecimal characters")
+        params["id"] = uid
+        return _order_entity_specs(params)
+    if entity_type == "transaction":
+        tx = _normalize_hex(identifier)
+        if not HASH_RE.fullmatch(tx):
+            raise ValueError("Transaction hash must contain 64 hexadecimal characters")
+        params["id"] = tx
+        return _transaction_entity_specs(params)
+    if entity_type in {"address", "token", "solver"}:
+        address = _validate_token(identifier, entity_type)
+        params["id"] = address
+        if entity_type == "address":
+            return _address_entity_specs(params)
+        if entity_type == "token":
+            return _token_entity_specs(params)
+        return _solver_entity_specs(params)
+    if entity_type == "auction":
+        if not INTEGER_RE.fullmatch(identifier.strip()):
+            raise ValueError("Auction identifier must be an integer")
+        params["id"] = int(identifier)
+        return _auction_entity_specs(params)
+    raise ValueError(f"Unsupported entity_type: {entity_type}")
+
+
+def _order_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
+    detail = f"""
+WITH {_token_metadata_cte()}
+SELECT o.order_uid,o.owner,o.sell_token,o.buy_token,o.receiver,
+       if(s.token='','',s.symbol) AS sell_symbol,
+       if(b.token='','',b.symbol) AS buy_symbol,
+       if(s.token='',NULL,s.decimals) AS sell_decimals,
+       if(b.token='',NULL,b.decimals) AS buy_decimals,
+       toString(o.sell_amount) AS sell_amount_raw,
+       if(s.token='',NULL,toFloat64(o.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       toString(o.buy_amount) AS buy_amount_raw,
+       if(b.token='',NULL,toFloat64(o.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       toString(o.fee_amount) AS fee_amount_raw,
+       if(s.token='',NULL,toFloat64(o.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
+       toString(o.executed_sell_amount) AS executed_sell_amount_raw,
+       if(s.token='',NULL,toFloat64(o.executed_sell_amount)/pow(10,toFloat64(s.decimals))) AS executed_sell_amount,
+       toString(o.executed_buy_amount) AS executed_buy_amount_raw,
+       if(b.token='',NULL,toFloat64(o.executed_buy_amount)/pow(10,toFloat64(b.decimals))) AS executed_buy_amount,
+       toString(o.executed_fee_amount) AS executed_fee_amount_raw,
+       if(s.token='',NULL,toFloat64(o.executed_fee_amount)/pow(10,toFloat64(s.decimals))) AS executed_fee_amount,
+       o.valid_to,o.kind,o.partially_fillable,o.signing_scheme,o.creation_date,o.status,o.class,
+       o.app_data_hash,o.source,o.source_updated_at,o.observed_at AS source_observed_at
+FROM cow_db.orders AS o FINAL
+LEFT JOIN tm AS s ON s.token=o.sell_token
+LEFT JOIN tm AS b ON b.token=o.buy_token
+WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}} AND o.order_uid={{id:String}}
+ORDER BY o.observed_at DESC"""
+    trades = f"""
+WITH {_token_metadata_cte()}
+SELECT t.block_timestamp,t.tx_hash,t.log_index,t.owner,t.sell_token,t.buy_token,
+       if(s.token='','',s.symbol) AS sell_symbol,
+       if(b.token='','',b.symbol) AS buy_symbol,
+       if(s.token='',NULL,s.decimals) AS sell_decimals,
+       if(b.token='',NULL,b.decimals) AS buy_decimals,
+       toString(t.sell_amount) AS sell_amount_raw,
+       if(s.token='',NULL,toFloat64(t.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       toString(t.buy_amount) AS buy_amount_raw,
+       if(b.token='',NULL,toFloat64(t.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       toString(t.fee_amount) AS fee_amount_raw,
+       if(s.token='',NULL,toFloat64(t.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
+       t.source,t.observed_at AS source_observed_at
+FROM cow_db.trades AS t
+LEFT JOIN tm AS s ON s.token=t.sell_token
+LEFT JOIN tm AS b ON b.token=t.buy_token
+WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}} AND t.order_uid={{id:String}}
+ORDER BY t.block_timestamp DESC,t.log_index DESC,t.tx_hash DESC"""
+    events = """
+SELECT event_id,event_type,owner,block_number,transaction_hash,log_index,event_timestamp,
+       payload,source,observed_at AS source_observed_at
+FROM cow_db.order_events FINAL
+WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND order_uid={id:String}
+ORDER BY coalesce(event_timestamp,observed_at),event_id"""
+    fees = f"""
+WITH {_token_metadata_cte()}
+SELECT f.tx_hash,f.log_index,f.fee_index,f.token,
+       if(tm.token='','',tm.symbol) AS token_symbol,
+       toString(f.amount) AS amount_raw,
+       if(tm.token='',NULL,tm.decimals) AS token_decimals,
+       if(tm.token='',NULL,toFloat64(f.amount)/pow(10,toFloat64(tm.decimals))) AS amount,
+       f.policy,
+       multiIf(positionCaseInsensitive(f.policy,'priceImprovement')>0,'price_improvement',
+               positionCaseInsensitive(f.policy,'surplus')>0,'surplus',
+               positionCaseInsensitive(f.policy,'volume')>0,'volume','other') AS policy_family,
+       f.source,f.observed_at AS source_observed_at
+FROM cow_db.protocol_fees AS f FINAL
+LEFT JOIN tm ON tm.token=f.token
+WHERE f.environment={{env:String}} AND f.chain_id={{chain_id:UInt64}} AND f.order_uid={{id:String}}
+ORDER BY f.observed_at,f.tx_hash,f.log_index,f.fee_index"""
+    app_data = """
+WITH ord AS (
+ SELECT app_data_hash FROM cow_db.orders FINAL
+ WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND order_uid={id:String}
+ LIMIT 1
+)
+SELECT a.app_data_hash,a.full_app_data,a.source,a.observed_at AS source_observed_at
+FROM cow_db.app_data AS a FINAL
+INNER JOIN ord ON a.app_data_hash=ord.app_data_hash
+WHERE a.environment={env:String} AND a.chain_id={chain_id:UInt64}
+ORDER BY a.observed_at DESC"""
+    realized_surplus = SURPLUS_BPS.format(
+        eb="any(o.executed_buy_amount)", ls="any(o.sell_amount)",
+        es="any(o.executed_sell_amount)", lb="any(o.buy_amount)",
+    )
+    quality = f"""
+WITH o AS (
+  SELECT * FROM cow_db.orders FINAL
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND order_uid={{id:String}}
+  LIMIT 1
+)
+SELECT
+ (SELECT count() FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND order_uid={{id:String}}) AS fills,
+ any(o.kind) AS kind,
+ {realized_surplus} AS realized_surplus_bps,
+ if(any(o.kind)='buy',
+    toFloat64(any(o.executed_buy_amount))/nullIf(toFloat64(any(o.buy_amount)),0),
+    toFloat64(any(o.executed_sell_amount))/nullIf(toFloat64(any(o.sell_amount)),0)) AS fill_ratio,
+ any(o.creation_date) AS creation_date,
+ (SELECT min(block_timestamp) FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND order_uid={{id:String}}) AS first_fill_at,
+ max(o.observed_at) AS source_observed_at
+FROM o
+ORDER BY fills"""
+    return _entity_query_specs([
+        ("order_detail", "Order", detail, "creation_date"),
+        ("order_quality", "Execution quality vs limit", quality, "observed_at"),
+        ("order_trades", "Settled fills", trades, "block_timestamp"),
+        ("order_events", "Observed order lifecycle", events, "observed_at"),
+        ("order_fees", "Indexed fee-policy amounts", fees, "observed_at"),
+        ("order_app_data", "App data", app_data, "observed_at"),
+    ], params)
+
+
+def _transaction_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
+    detail = """
+WITH comp AS (
+ SELECT auction_id FROM cow_db.competition_transactions FINAL
+ WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND tx_hash={id:String}
+)
+SELECT s.tx_hash,s.block_number,s.block_hash,s.block_timestamp,
+       s.solver AS settlement_executor,s.log_index,comp.auction_id,
+       s.observed_at AS source_observed_at
+FROM cow_db.settlements_canonical s
+LEFT JOIN comp ON 1
+WHERE s.environment={env:String} AND s.chain_id={chain_id:UInt64} AND s.tx_hash={id:String}
+ORDER BY s.log_index"""
+    trades = f"""
+WITH {_token_metadata_cte()}
+SELECT t.block_timestamp,t.log_index,t.order_uid,t.owner,t.sell_token,t.buy_token,
+       if(s.symbol='',t.sell_token,s.symbol) AS sell_symbol,
+       if(b.symbol='',t.buy_token,b.symbol) AS buy_symbol,
+       if(s.token='',NULL,s.decimals) AS sell_decimals,
+       if(b.token='',NULL,b.decimals) AS buy_decimals,
+       toString(t.sell_amount) AS sell_amount_raw,
+       if(s.token='',NULL,toFloat64(t.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       toString(t.buy_amount) AS buy_amount_raw,
+       if(b.token='',NULL,toFloat64(t.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       toString(t.fee_amount) AS fee_amount_raw,
+       if(s.token='',NULL,toFloat64(t.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
+       t.source,t.observed_at AS source_observed_at
+FROM cow_db.trades_canonical AS t
+LEFT JOIN tm AS s ON s.token=t.sell_token
+LEFT JOIN tm AS b ON b.token=t.buy_token
+WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}} AND t.tx_hash={{id:String}}
+ORDER BY t.log_index,t.order_uid"""
+    interactions = """
+SELECT block_timestamp,log_index,target,toString(value) AS value_raw,selector,
+       observed_at AS source_observed_at
+FROM cow_db.interactions_canonical
+WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND tx_hash={id:String}
+ORDER BY log_index,target"""
+    competition = """
+SELECT ct.auction_id,ct.tx_index,c.winner AS competition_winner,c.reference_score,
+       c.auction_block,ws.solver AS winning_solution_solver,
+       ws.tx_hash AS solution_tx_hash,ws.solution_index,
+       greatest(ct.observed_at,c.observed_at,ws.observed_at) AS source_observed_at
+FROM cow_db.competition_transactions AS ct FINAL
+LEFT JOIN cow_db.solver_competitions AS c FINAL
+ ON ct.environment=c.environment AND ct.chain_id=c.chain_id AND ct.auction_id=c.auction_id
+LEFT JOIN cow_db.competition_solutions AS ws FINAL
+ ON ct.environment=ws.environment AND ct.chain_id=ws.chain_id
+ AND ct.auction_id=ws.auction_id AND ws.is_winner
+WHERE ct.environment={env:String} AND ct.chain_id={chain_id:UInt64} AND ct.tx_hash={id:String}
+ORDER BY ct.auction_id,ct.tx_index,ws.solution_index"""
+    return _entity_query_specs([
+        ("transaction_detail", "Settlement transaction", detail, "block_timestamp"),
+        ("transaction_trades", "Settled fills", trades, "block_timestamp"),
+        ("transaction_interactions", "Settlement interactions", interactions, "block_timestamp"),
+        ("transaction_competition", "Competition mapping", competition, "observed_at"),
+    ], params)
+
+
+def _address_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
+    # Counts read the base tables dedup-free (<0.1% RMT duplicate rate,
+    # disclosed) — counting through the canonical views pays a FINAL +
+    # chain_blocks join per subquery, which made entity opens multi-second.
+    summary = """
+SELECT
+ (SELECT count() FROM cow_db.trades PREWHERE owner={id:String} WHERE environment={env:String} AND chain_id={chain_id:UInt64}) AS owned_fills,
+ (SELECT count() FROM cow_db.orders FINAL WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND owner={id:String}) AS owned_orders,
+ (SELECT count() FROM cow_db.settlements PREWHERE solver={id:String} WHERE environment={env:String} AND chain_id={chain_id:UInt64}) AS executed_settlements,
+ (SELECT count() FROM cow_db.competition_solutions FINAL WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}) AS submitted_solutions,
+ (SELECT max(observed_at) FROM cow_db.orders FINAL WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND owner={id:String}) AS source_observed_at
+ORDER BY owned_fills"""
+    # Top-N-first owner tape: PREWHERE prunes column reads before the wide
+    # SELECT list materializes (owner is not in the sort key, so this is a
+    # full-partition scan either way — PREWHERE + bounded heap keep it cheap
+    # and memory-safe at the entity view's all-history default).
+    trades = f"""
+WITH {_token_metadata_cte()}, cp AS (
+  SELECT argMax(block_number,updated_at) AS b
+  FROM cow_db.indexing_checkpoints
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc'
+)
+SELECT u.block_timestamp,u.tx_hash,u.log_index,u.order_uid,u.sell_token,u.buy_token,
+       if(s.token='','',s.symbol) AS sell_symbol,
+       if(b.token='','',b.symbol) AS buy_symbol,
+       if(s.token='',NULL,s.decimals) AS sell_decimals,
+       if(b.token='',NULL,b.decimals) AS buy_decimals,
+       toString(u.sell_amount) AS sell_amount_raw,
+       if(s.token='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       toString(u.buy_amount) AS buy_amount_raw,
+       if(b.token='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       u.obs_at AS source_observed_at
+FROM (
+  SELECT tx_hash,log_index,order_uid,
+         argMax(block_timestamp,observed_at) AS block_timestamp,
+         argMax(sell_token,observed_at) AS sell_token,
+         argMax(buy_token,observed_at) AS buy_token,
+         argMax(sell_amount,observed_at) AS sell_amount,
+         argMax(buy_amount,observed_at) AS buy_amount,
+         max(observed_at) AS obs_at
+  FROM (
+    SELECT t.tx_hash,t.log_index,t.order_uid,t.block_timestamp,
+           t.sell_token,t.buy_token,t.sell_amount,t.buy_amount,t.observed_at
+    FROM cow_db.trades AS t
+    PREWHERE t.owner={{id:String}}
+    WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}}
+      AND t.block_number<=(SELECT b FROM cp)
+    ORDER BY t.block_timestamp DESC
+    LIMIT {TAPE_ARM_LIMIT}
+  )
+  GROUP BY tx_hash,log_index,order_uid
+  ORDER BY block_timestamp DESC
+  LIMIT {ROW_CAP}
+) AS u
+LEFT JOIN tm AS s ON s.token=u.sell_token
+LEFT JOIN tm AS b ON b.token=u.buy_token
+ORDER BY u.block_timestamp DESC,u.log_index DESC"""
+    orders = f"""
+WITH {_token_metadata_cte()}
+SELECT o.order_uid,o.creation_date,o.status,o.kind,o.sell_token,o.buy_token,
+       if(s.token='','',s.symbol) AS sell_symbol,
+       if(b.token='','',b.symbol) AS buy_symbol,
+       if(s.token='',NULL,s.decimals) AS sell_decimals,
+       if(b.token='',NULL,b.decimals) AS buy_decimals,
+       toString(o.sell_amount) AS sell_amount_raw,
+       if(s.token='',NULL,toFloat64(o.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       toString(o.buy_amount) AS buy_amount_raw,
+       if(b.token='',NULL,toFloat64(o.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       o.valid_to,o.observed_at AS source_observed_at
+FROM cow_db.orders AS o FINAL
+LEFT JOIN tm AS s ON s.token=o.sell_token
+LEFT JOIN tm AS b ON b.token=o.buy_token
+WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}} AND o.owner={{id:String}}
+ORDER BY o.creation_date DESC,o.order_uid DESC"""
+    solver = f"""
+SELECT * FROM (
+  SELECT 'settlement_executor' AS role,tx_hash AS identifier,
+         toNullable(block_timestamp) AS event_time,observed_at AS source_observed_at
+  FROM cow_db.settlements
+  PREWHERE solver={{id:String}}
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+  ORDER BY block_timestamp DESC
+  LIMIT {ROW_CAP}
+  UNION ALL
+  SELECT 'competition_solver',toString(auction_id),CAST(NULL AS Nullable(DateTime64(3))),
+         observed_at
+  FROM cow_db.competition_solutions FINAL
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND solver={{id:String}}
+)
+ORDER BY event_time DESC,identifier DESC
+LIMIT {ROW_CAP}"""
+    return _entity_query_specs([
+        ("address_summary", "Address activity summary", summary, "observed_at"),
+        ("address_trades", "Owned settled fills", trades, "block_timestamp"),
+        ("address_orders", "Owned orders", orders, "creation_date"),
+        ("address_solver_activity", "Solver and executor roles", solver, "observed_at"),
+    ], params)
+
+
+def _token_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
+    detail = f"""
+WITH {_token_metadata_cte()}
+SELECT token,symbol,name,decimals,
+       if(token='{NATIVE_TOKEN}','synthetic_native','token_metadata') AS source,
+       metadata_observed_at AS source_observed_at
+FROM tm
+WHERE token={{id:String}}
+ORDER BY token"""
+    pairs = f"""
+WITH {_token_metadata_cte()}, cp AS (
+  SELECT argMax(block_number,updated_at) AS b
+  FROM cow_db.indexing_checkpoints
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc'
+),
+p AS (
+  SELECT least(sell_token,buy_token) AS token0,greatest(sell_token,buy_token) AS token1,
+         count() AS fill_count,uniq(tx_hash) AS settlement_transactions,
+         min(block_timestamp) AS indexed_from,max(block_timestamp) AS indexed_to,
+         max(observed_at) AS source_observed_at
+  FROM cow_db.trades
+  PREWHERE (sell_token={{id:String}} OR buy_token={{id:String}})
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+   AND block_number<=(SELECT b FROM cp) AND block_timestamp IS NOT NULL
+  GROUP BY token0,token1
+)
+SELECT p.token0 AS token0,p.token1 AS token1,
+       if(m0.token='','',m0.symbol) AS token0_symbol,
+       if(m1.token='','',m1.symbol) AS token1_symbol,
+       p.fill_count AS fill_count,p.settlement_transactions AS settlement_transactions,
+       p.indexed_from AS indexed_from,p.indexed_to AS indexed_to,
+       p.source_observed_at AS source_observed_at
+FROM p
+LEFT JOIN tm AS m0 ON m0.token=p.token0
+LEFT JOIN tm AS m1 ON m1.token=p.token1
+ORDER BY p.fill_count DESC,p.token0,p.token1"""
+    executions = f"""
+WITH {_token_metadata_cte()}, fills AS (
+ SELECT t.block_timestamp,t.tx_hash,t.observed_at,
+        if(t.sell_token={{id:String}},t.buy_token,t.sell_token) AS quote_token,
+        if(t.sell_token={{id:String}},qbuy.symbol,qsell.symbol) AS quote_symbol,
+        if(t.sell_token={{id:String}},
+           toFloat64(t.sell_amount)/pow(10,toFloat64(base.decimals)),
+           toFloat64(t.buy_amount)/pow(10,toFloat64(base.decimals))) AS base_qty,
+        if(t.sell_token={{id:String}},
+           toFloat64(t.buy_amount)/pow(10,toFloat64(qbuy.decimals)),
+           toFloat64(t.sell_amount)/pow(10,toFloat64(qsell.decimals))) AS quote_qty
+ FROM cow_db.trades AS t
+ INNER JOIN tm AS base ON base.token={{id:String}}
+ INNER JOIN tm AS qbuy ON qbuy.token=t.buy_token
+ INNER JOIN tm AS qsell ON qsell.token=t.sell_token
+ PREWHERE (t.sell_token={{id:String}} OR t.buy_token={{id:String}})
+ WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}}
+  AND t.block_timestamp IS NOT NULL
+  AND t.block_number<=(SELECT argMax(block_number,updated_at) FROM cow_db.indexing_checkpoints
+                       WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc')
+)
+SELECT toStartOfDay(block_timestamp) AS bucket,quote_token,any(quote_symbol) AS quote_symbol,
+       sum(quote_qty)/nullIf(sum(base_qty),0) AS vwap_quote_per_token,
+       sum(base_qty) AS base_volume,count() AS fill_count,
+       uniq(tx_hash) AS settlement_transactions,min(block_timestamp) AS indexed_from,
+       max(block_timestamp) AS indexed_to,max(observed_at) AS source_observed_at
+FROM fills
+WHERE base_qty>0 AND quote_qty>=0
+GROUP BY bucket,quote_token
+ORDER BY bucket,quote_token"""
+    native = """
+SELECT observed_at,native_price,source,observed_at AS indexed_from,
+       observed_at AS indexed_to,observed_at AS source_observed_at
+FROM cow_db.native_prices FINAL
+WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND token={id:String}
+ORDER BY observed_at"""
+    return _entity_query_specs([
+        ("token_detail", "Token metadata", detail, "observed_at"),
+        ("token_pairs", "Indexed execution pairs", pairs, "block_timestamp"),
+        ("token_execution_prices", "Execution prices (settled fills)", executions, "block_timestamp"),
+        ("token_native_prices", "Native-price API observations", native, "observed_at"),
+    ], params)
+
+
+def _auction_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
+    # chain_blocks pruned to this auction's block (block_number IN, sort-key
+    # pruned; argMax dedups → no FINAL). The prior `chain_blocks FINAL` LEFT
+    # JOIN materialized the whole ~2.3M-row table for a single-auction lookup.
+    detail = """
+SELECT c.auction_id,c.winner AS competition_winner,c.reference_score,c.auction_block,
+       nullIf(b.block_timestamp,toDateTime(0)) AS auction_timestamp,
+       c.source,c.observed_at AS source_observed_at
+FROM cow_db.solver_competitions AS c FINAL
+LEFT JOIN (
+  SELECT chain_id, block_number, argMax(block_timestamp, observed_at) AS block_timestamp
+  FROM cow_db.chain_blocks
+  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+    AND block_number IN (SELECT auction_block FROM cow_db.solver_competitions FINAL
+                         WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND auction_id={id:UInt64})
+  GROUP BY chain_id, block_number
+) AS b ON b.chain_id=c.chain_id AND b.block_number=c.auction_block
+WHERE c.environment={env:String} AND c.chain_id={chain_id:UInt64} AND c.auction_id={id:UInt64}
+ORDER BY c.observed_at DESC"""
+    orders = """
+SELECT order_uid,payload,observed_at AS source_observed_at
+FROM cow_db.auction_orders FINAL
+WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND auction_id={id:UInt64}
+ORDER BY order_uid"""
+    prices = f"""
+WITH {_token_metadata_cte()}
+SELECT p.token,
+       if(tm.token='','',tm.symbol) AS token_symbol,
+       toString(p.price) AS price_raw,p.observed_at AS source_observed_at
+FROM cow_db.auction_prices AS p FINAL
+LEFT JOIN tm ON tm.token=p.token
+WHERE p.environment={{env:String}} AND p.chain_id={{chain_id:UInt64}} AND p.auction_id={{id:UInt64}}
+ORDER BY p.token"""
+    solutions = """
+SELECT solution_index,solver AS competition_solver,score,ranking,is_winner,tx_hash,
+       payload,observed_at AS source_observed_at
+FROM cow_db.competition_solutions FINAL
+WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND auction_id={id:UInt64}
+ORDER BY ranking,solution_index"""
+    transactions = """
+SELECT tx_index,tx_hash,source,observed_at AS source_observed_at
+FROM cow_db.competition_transactions FINAL
+WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND auction_id={id:UInt64}
+ORDER BY tx_index,tx_hash"""
+    return _entity_query_specs([
+        ("auction_detail", "Auction", detail, "auction_block_timestamp"),
+        ("auction_orders", "Auction orders", orders, "observed_at"),
+        ("auction_prices", "Auction price vector", prices, "observed_at"),
+        ("auction_solutions", "Competition solutions", solutions, "observed_at"),
+        ("auction_transactions", "Settlement transactions", transactions, "observed_at"),
+    ], params)
+
+
+def _solver_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
+    summary = """
+SELECT uniqExact(auction_id) AS competitions,
+       count() AS solutions,
+       countIf(is_winner) AS wins,
+       countIf(is_winner)/nullIf(uniqExact(auction_id),0) AS win_rate,
+       countIf(is_winner AND ranking!=1) AS multi_winner_solutions,
+       countIf(is_winner AND ranking!=1)/nullIf(countIf(is_winner),0) AS multi_winner_share,
+       countIf(toUInt256OrZero(score)=0 AND score NOT IN ('','0')) AS score_parse_failures,
+       avg(toFloat64(ranking)) AS average_ranking,
+       min(ranking) AS best_ranking,
+       (SELECT uniq(tx_hash) FROM cow_db.settlements
+        WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}) AS executed_settlements,
+       max(observed_at) AS source_observed_at
+FROM cow_db.competition_solutions FINAL
+WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}
+ORDER BY competitions"""
+    competitions = """
+SELECT auction_id,solution_index,score,ranking,is_winner,tx_hash,
+       observed_at AS source_observed_at
+FROM cow_db.competition_solutions FINAL
+WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}
+ORDER BY observed_at DESC,auction_id DESC,ranking"""
+    solutions = """
+SELECT ranking,count() AS solution_count,countIf(is_winner) AS wins,
+       max(observed_at) AS source_observed_at
+FROM cow_db.competition_solutions FINAL
+WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}
+GROUP BY ranking
+ORDER BY ranking"""
+    # Top-N-first executor tape on the base table (solver is not in the sort
+    # key — full-partition scan either way; PREWHERE + bounded heap keep it
+    # cheap and memory-safe at all-history).
+    settlements = f"""
+SELECT tx_hash,log_index,
+       argMax(block_number,observed_at) AS block_number,
+       argMax(block_timestamp,observed_at) AS block_timestamp,
+       any({{id:String}}) AS settlement_executor,
+       max(observed_at) AS source_observed_at
+FROM (
+  SELECT tx_hash,log_index,block_number,block_timestamp,observed_at
+  FROM cow_db.settlements
+  PREWHERE solver={{id:String}}
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+  ORDER BY block_timestamp DESC
+  LIMIT {TAPE_ARM_LIMIT}
+)
+GROUP BY tx_hash,log_index
+ORDER BY block_timestamp DESC,log_index DESC
+LIMIT {ROW_CAP}"""
+    # Shared accounting CTEs: this solver's settlements over the last 30
+    # indexed days, and the per-token net flow between traders and the
+    # settlement contract in each of those batches. This is ORDER-LEVEL,
+    # TRADE-IMPLIED accounting — AMM leg amounts, plain ERC20 transfers, and
+    # buffer balances are NOT in cow_db, so it shows what the solver had to
+    # source externally (or what accrued), not audited buffer books.
+    accounting_ctes = """
+exec AS (
+  -- Base settlements (NOT the settlements_canonical view, whose FINAL +
+  -- chain_blocks materialization OOMed the box). The block_timestamp bound
+  -- keeps the GROUP BY tx_hash hash to ~30d of txs (small); the scan streams.
+  -- The resulting tx_hash set is this solver's settlement txs — and tx_hash IS
+  -- in the trades sort key (environment, chain_id, tx_hash, log_index), so it
+  -- PRUNES the trades_canonical scan in `flows` (block_number would NOT — it is
+  -- not in the sort key).
+  SELECT tx_hash, argMax(solver,tuple(block_timestamp,log_index)) AS s
+  FROM cow_db.settlements
+  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+    AND block_timestamp >= (
+      SELECT max(block_timestamp) FROM cow_db.settlements
+      WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+    ) - toIntervalDay(30)
+  GROUP BY tx_hash
+  HAVING s={id:String}
+),
+fills_d AS (
+  -- Deduped base trades for this solver's settlement txs. tx_hash IN (…) PRUNES
+  -- (tx_hash is in the sort key) to ~125k rows; argMax over the RMT version key
+  -- dedups WITHOUT touching trades_canonical (whose internal chain_blocks-FINAL
+  -- reorg-join would scan ~2.2M chain_blocks regardless). Settlements 30d back
+  -- are committed/final, so the reorg-safe view buys nothing here.
+  SELECT tx_hash, log_index, order_uid,
+         argMax(block_timestamp,observed_at) AS block_timestamp,
+         argMax(sell_token,observed_at) AS sell_token,
+         argMax(buy_token,observed_at) AS buy_token,
+         argMax(sell_amount,observed_at) AS sell_amount,
+         argMax(buy_amount,observed_at) AS buy_amount
+  FROM cow_db.trades
+  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+    AND tx_hash IN (SELECT tx_hash FROM exec)
+  GROUP BY tx_hash, log_index, order_uid
+),
+flows AS (
+  SELECT u.tx_hash AS tx_hash, any(u.block_timestamp) AS block_timestamp,
+         u.token AS token, sum(u.amt) AS net_atoms
+  FROM (
+    SELECT tx_hash, block_timestamp, sell_token AS token, toInt256(sell_amount) AS amt FROM fills_d
+    UNION ALL
+    SELECT tx_hash, block_timestamp, buy_token, -toInt256(buy_amount) FROM fills_d
+  ) AS u
+  GROUP BY u.tx_hash, u.token
+),
+am AS (
+  SELECT tx_hash, argMax(auction_id,observed_at) AS auction_id
+  FROM cow_db.competition_transactions FINAL
+  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+  GROUP BY tx_hash
+),
+pr AS (
+  SELECT auction_id, token, argMax(price,observed_at) AS price
+  FROM cow_db.auction_prices FINAL
+  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+  GROUP BY auction_id, token
+)"""
+    imbalance_settlements = f"""
+WITH {accounting_ctes}
+SELECT f.tx_hash AS tx_hash, any(f.block_timestamp) AS block_timestamp,
+       count() AS tokens_touched,
+       countIf(toFloat64(pr.price)=0) AS unpriced_tokens,
+       sum(if(toFloat64(pr.price)>0,
+              toFloat64(f.net_atoms)*toFloat64(pr.price)/1e18, 0)) AS net_native_wei_known,
+       max(f.block_timestamp) AS source_observed_at
+FROM flows AS f
+LEFT JOIN am ON am.tx_hash=f.tx_hash
+LEFT JOIN pr ON pr.auction_id=am.auction_id AND pr.token=f.token
+GROUP BY f.tx_hash
+ORDER BY block_timestamp DESC, tx_hash
+LIMIT 500"""
+    imbalance_tokens = f"""
+WITH {_token_metadata_cte()},{accounting_ctes}
+SELECT f.token AS token,
+       if(tm.token='','',tm.symbol) AS token_symbol,
+       if(any(tm.token)='',NULL,any(tm.decimals)) AS token_decimals,
+       count() AS settlements,
+       toString(sum(f.net_atoms)) AS net_amount_raw,
+       if(any(tm.token)='',NULL,
+          toFloat64(sum(f.net_atoms))/pow(10,toFloat64(any(tm.decimals)))) AS net_amount,
+       sum(if(toFloat64(pr.price)>0,
+              toFloat64(f.net_atoms)*toFloat64(pr.price)/1e18, 0)) AS net_native_wei_known,
+       max(f.block_timestamp) AS source_observed_at
+FROM flows AS f
+LEFT JOIN am ON am.tx_hash=f.tx_hash
+LEFT JOIN pr ON pr.auction_id=am.auction_id AND pr.token=f.token
+LEFT JOIN tm ON tm.token=f.token
+GROUP BY f.token, token_symbol
+ORDER BY abs(sum(if(toFloat64(pr.price)>0,toFloat64(f.net_atoms)*toFloat64(pr.price)/1e18,0))) DESC, token
+LIMIT 200"""
+    # reference_score is ALWAYS a JSON map keyed by solver address (verified
+    # live 2026-07-21): JSONExtractString is the only parse path.
+    score_gap = """
+WITH blk AS (
+  SELECT chain_id, block_number,
+         argMax(block_timestamp, observed_at) AS block_timestamp
+  FROM cow_db.chain_blocks
+  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+    AND block_number IN (
+      SELECT auction_block FROM cow_db.solver_competitions FINAL
+      WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+    )
+  GROUP BY chain_id, block_number
+)
+SELECT c.auction_id AS auction_id,
+       b.block_timestamp AS auction_timestamp,
+       toFloat64OrNull(s.score) AS winning_score,
+       toFloat64OrNull(JSONExtractString(c.reference_score,{id:String})) AS reference_score,
+       toFloat64OrNull(s.score)
+         - toFloat64OrNull(JSONExtractString(c.reference_score,{id:String})) AS score_gap,
+       (toFloat64OrNull(s.score) IS NOT NULL
+        AND toFloat64OrNull(JSONExtractString(c.reference_score,{id:String})) IS NOT NULL) AS scores_parsed,
+       s.observed_at AS source_observed_at
+FROM cow_db.solver_competitions AS c FINAL
+INNER JOIN cow_db.competition_solutions AS s FINAL
+  ON s.environment=c.environment AND s.chain_id=c.chain_id
+ AND s.auction_id=c.auction_id AND s.is_winner AND s.solver={id:String}
+LEFT JOIN blk AS b ON b.chain_id=c.chain_id AND b.block_number=c.auction_block
+WHERE c.environment={env:String} AND c.chain_id={chain_id:UInt64}
+ORDER BY auction_timestamp DESC, auction_id DESC
+LIMIT 500"""
+    return _entity_query_specs([
+        ("solver_summary", "Solver dashboard summary", summary, "observed_at"),
+        ("solver_competitions", "Competition solver entries", competitions, "observed_at"),
+        ("solver_solutions", "Ranking distribution", solutions, "observed_at"),
+        ("solver_settlements", "Settlement executor transactions", settlements, "block_timestamp"),
+        ("solver_imbalance_settlements", "Settlement imbalance (order-level, trade-implied, 30d)", imbalance_settlements, "block_timestamp"),
+        ("solver_imbalance_tokens", "Token imbalance (order-level, trade-implied, 30d)", imbalance_tokens, "block_timestamp"),
+        ("solver_score_gap", "Winning vs reference score (where parseable)", score_gap, "observed_at"),
+    ], params)
+
+
+def _entity_query_specs(
+    rows: list[tuple[str, str, str, str]],
+    parameters: dict[str, Any],
+) -> list[QuerySpec]:
+    return [
+        QuerySpec(key, title, sql, dict(parameters), basis, "observed_series", 300)
+        for key, title, sql, basis in rows
+    ]
+
+
+def _section_specs(
+    section: str,
+    scope: str,
+    chain: ChainInfo | None,
+    pair: tuple[str, str],
+    interval: str,
+    range_state: dict[str, Any],
+    filters: dict[str, str],
+) -> list[QuerySpec]:
+    if section == "overview":
+        return _overview_specs(scope, range_state, chain)
+    if section == "trades":
+        return _trade_specs(scope, chain, range_state, filters)
+    if section == "solvers":
+        return _solver_specs(scope, chain, range_state, pair, filters)
+    if section == "traders":
+        return _traders_specs(scope, chain, range_state)
+    if section == "auctions":
+        return _auction_specs(chain, range_state, scope)
+    assert chain is not None
+    if section == "markets":
+        return _market_specs(chain, pair, interval, range_state)
+    if section == "orders":
+        return _order_specs(chain, pair, range_state, filters)
+    if section == "patterns":
+        return _patterns_specs(scope, chain, range_state)
+    if section == "live":
+        return _live_specs(scope, chain)
+    raise ValueError(f"Unsupported section: {section}")
+
+
+def _iso_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return value
+
+
+def _coverage_from_dataset(
+    dataset: CachedDataset,
+    spec: QuerySpec,
+    range_state: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    columns = {name: idx for idx, name in enumerate(dataset.columns)}
+    warning_codes: list[str] = []
+
+    def values(name: str) -> list[Any]:
+        idx = columns.get(name)
+        if idx is None:
+            return []
+        return [row[idx] for row in dataset.rows if idx < len(row) and row[idx] is not None]
+
+    starts = values("indexed_from")
+    ends = values("indexed_to")
+    if not starts or not ends:
+        basis_columns = {
+            "block_timestamp": ("block_timestamp",),
+            "creation_date": ("creation_date",),
+            "auction_block_timestamp": ("auction_timestamp", "block_timestamp"),
+            "observed_at": ("observed_at", "source_observed_at"),
+        }.get(spec.basis, ())
+        basis_values: list[Any] = []
+        for name in basis_columns:
+            basis_values = values(name)
+            if basis_values:
+                break
+        if not starts:
+            starts = basis_values
+        if not ends:
+            ends = basis_values
+    observed = values("source_observed_at")
+    checkpoints = values("checkpoint_block")
+    checkpoint_times = values("checkpoint_timestamp")
+    if not dataset.rows:
+        warning_codes.append("no_indexed_data")
+    if dataset.stats.truncated:
+        warning_codes.append("result_truncated")
+    if spec.key in {"known_orders", "known_intents", "intent_depth"}:
+        warning_codes.append("known_intents_incomplete")
+    if spec.key == "coverage_matrix":
+        checkpoint_idx = columns.get("checkpoint_block")
+        if checkpoint_idx is None or any(
+            checkpoint_idx >= len(row) or row[checkpoint_idx] in (None, "")
+            for row in dataset.rows
+        ):
+            warning_codes.append("missing_checkpoint")
+        checkpoint_time_idx = columns.get("checkpoint_timestamp")
+        if checkpoint_time_idx is None or any(
+            checkpoint_time_idx >= len(row) or row[checkpoint_time_idx] in (None, "")
+            for row in dataset.rows
+        ):
+            warning_codes.append("missing_block_timestamp")
+        competition_idx = columns.get("max_competition_block")
+        if checkpoint_idx is not None and competition_idx is not None and any(
+            row[competition_idx] not in (None, "")
+            and row[checkpoint_idx] not in (None, "")
+            and int(row[competition_idx]) > int(row[checkpoint_idx])
+            for row in dataset.rows
+            if competition_idx < len(row) and checkpoint_idx < len(row)
+        ):
+            warning_codes.append("missing_block_timestamp")
+            warning_codes.append("partial_backfill")
+    if spec.key == "market_summary" and dataset.rows:
+        for name in ("base_decimals", "quote_decimals"):
+            idx = columns.get(name)
+            if idx is None or dataset.rows[0][idx] is None:
+                warning_codes.append("missing_token_metadata")
+                break
+    for name, decimals_idx in columns.items():
+        if not (name == "token_decimals" or name.endswith("_decimals")):
+            continue
+        if any(
+            decimals_idx >= len(row) or row[decimals_idx] is None
+            for row in dataset.rows
+        ):
+            warning_codes.append("missing_token_metadata")
+            break
+    latest_observed = max(observed) if observed else None
+    stale_threshold = 1800 if spec.key == "native_reference_prices" else 600
+    if isinstance(latest_observed, datetime):
+        if (datetime.now(timezone.utc) - latest_observed.astimezone(timezone.utc)).total_seconds() > stale_threshold:
+            warning_codes.append("stale_source")
+    warning_codes = list(dict.fromkeys(warning_codes))
+    requested_start = range_state.get("start_at") or None
+    requested_end = range_state.get("end_at") or None
+    if range_state.get("kind") == "relative" and ends:
+        anchor_value = max(ends)
+        if isinstance(anchor_value, datetime):
+            requested_end = _iso_value(anchor_value)
+            requested_start = _iso_value(
+                anchor_value - timedelta(days=int(range_state.get("window_days") or 0))
+            )
+    coverage = {
+        "basis": spec.basis,
+        "requested_start": requested_start,
+        "requested_end": requested_end,
+        "actual_start": _iso_value(min(starts)) if starts else None,
+        "actual_end": _iso_value(max(ends)) if ends else None,
+        "anchor": range_state.get("anchor"),
+        "latest_source_observation": _iso_value(latest_observed),
+        "fetched_at": dataset.stats.fetched_at,
+        "checkpoint_block": max(checkpoints) if checkpoints else None,
+        "checkpoint_timestamp": _iso_value(max(checkpoint_times)) if checkpoint_times else None,
+        "returned_rows": dataset.stats.rows_returned,
+        "source_rows": dataset.stats.source_rows,
+        "row_cap": dataset.stats.row_cap,
+        "truncated": bool(dataset.stats.truncated),
+        "mode": spec.coverage_mode,
+        "warning_codes": warning_codes,
+    }
+    return coverage, warning_codes
+
+
+#: Negative-result cache: a dataset whose query failed is remembered for this
+#: long so a manual Retry within the window returns the cached failure
+#: INSTANTLY instead of re-running a query known to blow up or time out.
+#: force_refresh bypasses the read (an explicit refresh may genuinely retry).
+_FAILURE_TTL_SECONDS = 120
+_FAILURE_CACHE: dict[str, tuple[float, str]] = {}
+_FAILURE_CACHE_LOCK = threading.Lock()
+_FAILURE_CACHE_MAX = 256
+
+
+class _CachedFailure(RuntimeError):
+    """A query failure replayed from the negative cache (not re-executed)."""
+
+
+def _failure_cache_key(spec: QuerySpec) -> str:
+    from cerebro_mcp.runtime.mini_app_cache import make_cache_key
+
+    return make_cache_key(spec.sql, COW_DB, spec.parameters, "failure")
+
+
+def _failure_cache_get(spec: QuerySpec) -> str | None:
+    key = _failure_cache_key(spec)
+    with _FAILURE_CACHE_LOCK:
+        hit = _FAILURE_CACHE.get(key)
+        if hit is None:
+            return None
+        expires, message = hit
+        if time.monotonic() > expires:
+            _FAILURE_CACHE.pop(key, None)
+            return None
+        return message
+
+
+def _failure_cache_put(spec: QuerySpec, message: str) -> None:
+    key = _failure_cache_key(spec)
+    with _FAILURE_CACHE_LOCK:
+        if len(_FAILURE_CACHE) >= _FAILURE_CACHE_MAX:
+            now = time.monotonic()
+            for stale_key in [k for k, (exp, _) in _FAILURE_CACHE.items() if exp < now]:
+                _FAILURE_CACHE.pop(stale_key, None)
+            if len(_FAILURE_CACHE) >= _FAILURE_CACHE_MAX:
+                _FAILURE_CACHE.pop(next(iter(_FAILURE_CACHE)), None)
+        _FAILURE_CACHE[key] = (time.monotonic() + _FAILURE_TTL_SECONDS, message)
+
+
+def reset_failure_cache_for_tests() -> None:
+    with _FAILURE_CACHE_LOCK:
+        _FAILURE_CACHE.clear()
+
+
+def _load_specs_safe(
+    ch: ClickHouseManager,
+    specs: list[QuerySpec],
+    range_state: dict[str, Any],
+    *,
+    force_refresh: bool,
+) -> tuple[dict[str, CachedDataset], dict[str, Any], list[str]]:
+    datasets: dict[str, CachedDataset] = {}
+    coverage: dict[str, Any] = {}
+    warnings: list[str] = []
+
+    def load_one(spec: QuerySpec) -> tuple[CachedDataset, dict[str, Any], list[str], float]:
+        started = time.monotonic()
+        if "ORDER BY" not in spec.sql.upper():
+            raise ValueError(f"{spec.key} must define a deterministic ORDER BY")
+        if not force_refresh:
+            cached_failure = _failure_cache_get(spec)
+            if cached_failure is not None:
+                raise _CachedFailure(
+                    f"{cached_failure} (cached failure; retry in up to "
+                    f"{_FAILURE_TTL_SECONDS}s, use Refresh to force, or "
+                    "narrow the window)"
+                )
+        dataset = mini_apps.load_exact_capped_dataset(
+            ch,
+            spec.sql,
+            database=COW_DB,
+            parameters=spec.parameters,
+            force_refresh=force_refresh,
+            cache_ttl_seconds=spec.cache_ttl_seconds,
+            row_cap=ROW_CAP,
+            exact_source_rows=spec.exact_count,
+        )
+        cov, codes = _coverage_from_dataset(dataset, spec, range_state)
+        return dataset, cov, codes, time.monotonic() - started
+
+    # ClickHouseManager maintains thread-local clients. All-network bundles
+    # stay at two workers: their per-chain UNION arms are individually
+    # memory-bounded, but running three ten-arm expansions at once can still
+    # push the ClickHouse server's TOTAL memory over its limit (observed
+    # live: code 241 "(total) memory limit exceeded" at ~11 GiB).
+    all_network = any(
+        int((spec.parameters or {}).get("chain_id") or 0) == 0 for spec in specs
+    )
+    worker_limit = 2 if all_network else 3
+    max_workers = min(len(specs), worker_limit)
+    results: dict[int, tuple[CachedDataset, dict[str, Any], list[str], float] | Exception] = {}
+    if max_workers <= 1:
+        for index, spec in enumerate(specs):
+            try:
+                results[index] = load_one(spec)
+            except Exception as exc:  # one dataset must not fail the section
+                results[index] = exc
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cow-data") as pool:
+            futures = {pool.submit(load_one, spec): index for index, spec in enumerate(specs)}
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:  # one dataset must not fail the section
+                    results[index] = exc
+
+    for index, spec in enumerate(specs):
+        result = results[index]
+        if not isinstance(result, Exception):
+            dataset, cov, codes, elapsed = result
+            datasets[spec.key] = dataset
+            coverage[spec.key] = cov
+            warnings.extend(codes)
+            logger.info(
+                "cow_explorer_dataset key=%s environment=%s chain=%s window=%s rows=%s source_rows=%s truncated=%s elapsed=%.3f",
+                spec.key,
+                spec.parameters.get("env", ""),
+                spec.parameters.get("chain_id", 0),
+                range_state.get("window_days", range_state.get("kind")),
+                dataset.stats.rows_returned,
+                dataset.stats.source_rows,
+                dataset.stats.truncated,
+                elapsed,
+            )
+        else:
+            logger.warning("cow_explorer dataset %s failed: %s", spec.key, result)
+            if not isinstance(result, _CachedFailure):
+                # Remember the failure so immediate retries replay it instead
+                # of re-running a query that just OOMed/timed out.
+                _failure_cache_put(spec, str(result))
+            message = f"{spec.title} unavailable: {result}"
+            warnings.extend(["query_failed", message])
+            fetched_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            coverage[spec.key] = {
+                "basis": spec.basis,
+                "requested_start": range_state.get("start_at") or None,
+                "requested_end": range_state.get("end_at") or None,
+                "actual_start": None,
+                "actual_end": None,
+                "anchor": range_state.get("anchor"),
+                "latest_source_observation": None,
+                "fetched_at": fetched_at,
+                "checkpoint_block": None,
+                "checkpoint_timestamp": None,
+                "returned_rows": 0,
+                "source_rows": None,
+                "row_cap": ROW_CAP,
+                "truncated": False,
+                "mode": spec.coverage_mode,
+                "warning_codes": ["query_failed"],
+                # The frontend renders an explicit error card from this —
+                # a failed dataset must stay VISIBLE, never silently vanish.
+                "error": str(result)[:400],
+            }
+            # Stub dataset so the key survives into descriptors/attach: the
+            # payload keeps the panel present (zero rows + provenance error)
+            # instead of dropping it, which blanked whole sections in v2.
+            datasets[spec.key] = CachedDataset(
+                columns=[],
+                column_types=[],
+                rows=[],
+                stats=DatasetStats(
+                    row_count=0,
+                    rows_returned=0,
+                    mode="exact_capped",
+                    source_rows=0,
+                    row_cap=ROW_CAP,
+                    truncated=False,
+                    fetched_at=fetched_at,
+                    elapsed_seconds=0.0,
+                    warnings=[message],
+                ),
+                sql=spec.sql,
+                database=COW_DB,
+                parameters=spec.parameters,
+            )
+    return datasets, coverage, list(dict.fromkeys(warnings))
+
+
+def _empty_loaded_groups() -> dict[str, Any]:
+    return {
+        f"{section}.{group}": False
+        for section, groups in SECTION_GROUPS.items()
+        for group in groups
+    }
+
+
+def _empty_state(
+    scope: str,
+    chain: ChainInfo | None,
+    title: str,
+    section: str = "overview",
+) -> dict[str, Any]:
+    return {
+        "section": section,
+        "environment_scope": scope,
+        "environment": chain.environment if chain else scope,
+        "chain_id": chain.chain_id if chain else 0,
+        "chain_name": chain.name if chain else "All networks",
+        "chain_options": [_chain_dict(c) for c in _chains_for_scope(scope)],
+        "explorer": asdict(chain.explorer) if chain else None,
+        "pair": {"base": "", "quote": "", "base_symbol": "", "quote_symbol": ""},
+        "interval": "1h",
+        "date_range": _range_state(section if section in SECTION_DEFAULT_DAYS else "overview", -1, "", ""),
+        "filters": {"status": "", "owner": "", "solver": "", "token": ""},
+        "selected_entity": None,
+        "breadcrumbs": [],
+        "search": {"query": "", "candidates": []},
+        "applied_request_id": 0,
+        "scope_id": f"{scope}:{chain.chain_id if chain else 0}:{section}:0",
+        "coverage": {},
+        "coverage_warnings": [],
+        "warnings": [],
+        "dataset_revisions": {},
+        # Deferred-load bookkeeping (v2): which section.group bundles are loaded
+        # (False | True | "error"), the scope fingerprint each section's cached
+        # datasets were loaded under, the keys each section currently retains,
+        # LRU order for eviction, and the async token-icon overlay.
+        "loaded_groups": _empty_loaded_groups(),
+        "section_fingerprints": {},
+        "section_datasets": {},
+        "section_lru": [],
+        "icon_overlay": {},
+        "title": title,
+    }
+
+
+def _dataset_titles(specs: list[QuerySpec]) -> dict[str, str]:
+    return {spec.key: spec.title for spec in specs}
+
+
+def _summary_cards(record: mini_apps.ViewRecord) -> list[SummaryCard]:
+    state = record.view_state
+    cards = [
+        SummaryCard(label="Scope", value=str(state.get("chain_name") or "All networks")),
+        SummaryCard(label="Window", value=(
+            "All indexed history" if (state.get("date_range") or {}).get("kind") == "all"
+            else f"{(state.get('date_range') or {}).get('window_days') or 'Custom'} days"
+        )),
+    ]
+    for key, label in (("network_summary", "Networks"), ("trades", "Fills"), ("known_orders", "Known intents"), ("auctions", "Competitions")):
+        dataset = record.datasets.get(key)
+        if dataset is not None:
+            cards.append(SummaryCard(label=label, value=f"{dataset.stats.source_rows or dataset.stats.row_count:,}"))
+    return cards[:5]
+
+
+def _payload_from_record(
+    record: mini_apps.ViewRecord,
+    titles: dict[str, str] | None = None,
+) -> MiniAppPayload:
+    # Retained sections' datasets outlive the specs that created them, so the
+    # persisted title map is the fallback for keys the caller didn't pass.
+    titles = {
+        **(record.view_state.get("dataset_titles") or {}),
+        **(titles or {}),
+    }
+    scope_id = str(record.view_state.get("scope_id") or "")
+    coverage = record.view_state.get("coverage") or {}
+    descriptors = {
+        key: mini_apps.build_dataset_descriptor(
+            key=key,
+            dataset=dataset,
+            title=titles.get(key, key.replace("_", " ").title()),
+            scope_id=scope_id,
+            provenance={"source": COW_DB, "coverage": coverage.get(key, {})},
+        )
+        for key, dataset in record.datasets.items()
+    }
+    return MiniAppPayload(
+        type="INITIAL_LOAD",
+        view_id=record.view_id,
+        app_id=COW_APP_ID,
+        title=record.title,
+        status="ready",
+        summary_cards=_summary_cards(record),
+        datasets=descriptors,
+        view_state=record.view_state,
+        provenance={"source": COW_DB, "coverage": coverage},
+        warnings=list(record.view_state.get("warnings") or []),
+    )
+
+
+def _search_scope(scope: str, chain_id: int) -> tuple[str, dict[str, Any]]:
+    if chain_id:
+        chain = COW_CHAINS.get(chain_id)
+        if chain is None or chain.environment != scope:
+            raise ValueError("Search chain is not in the selected scope")
+        return "environment={env:String} AND chain_id={chain_id:UInt64}", {"env": scope, "chain_id": chain_id}
+    ids = ",".join(str(c.chain_id) for c in _chains_for_scope(scope))
+    return f"environment={{env:String}} AND chain_id IN ({ids})", {"env": scope}
+
+
+def _search_candidates(
+    ch: ClickHouseManager,
+    query: str,
+    scope: str,
+    chain_id: int,
+) -> list[dict[str, Any]]:
+    q = _normalize_hex(query)
+    if len(q) > 114:
+        raise ValueError("Search query is too long")
+    where, params = _search_scope(scope, chain_id)
+    params["q"] = q
+    if ORDER_UID_RE.fullmatch(q):
+        sql = f"""SELECT chain_id,'order' AS entity_type,'order' AS role,count() AS evidence_count
+FROM cow_db.orders FINAL WHERE {where} AND order_uid={{q:String}}
+GROUP BY chain_id ORDER BY chain_id"""
+        identifier = q
+    elif HASH_RE.fullmatch(q):
+        sql = f"""SELECT chain_id,'transaction' AS entity_type,'transaction' AS role,sum(evidence_count) AS evidence_count
+FROM (
+ SELECT chain_id,count() AS evidence_count FROM cow_db.trades WHERE {where} AND tx_hash={{q:String}} GROUP BY chain_id
+ UNION ALL
+ SELECT chain_id,count() FROM cow_db.settlements WHERE {where} AND tx_hash={{q:String}} GROUP BY chain_id
+ UNION ALL
+ SELECT chain_id,count() FROM cow_db.competition_transactions FINAL WHERE {where} AND tx_hash={{q:String}} GROUP BY chain_id
+) GROUP BY chain_id ORDER BY chain_id"""
+        identifier = q
+    elif ADDRESS_RE.fullmatch(q):
+        sql = f"""SELECT chain_id,role,sum(evidence_count) AS evidence_count
+FROM (
+ SELECT chain_id,'owner' AS role,count() AS evidence_count FROM cow_db.orders FINAL WHERE {where} AND owner={{q:String}} GROUP BY chain_id
+ UNION ALL
+ SELECT chain_id,'token',count() FROM cow_db.token_metadata FINAL WHERE {where} AND token={{q:String}} GROUP BY chain_id
+ UNION ALL
+ SELECT chain_id,'settlement_executor',count() FROM cow_db.settlements WHERE {where} AND solver={{q:String}} GROUP BY chain_id
+ UNION ALL
+ SELECT chain_id,'competition_solver',count() FROM cow_db.competition_solutions FINAL WHERE {where} AND solver={{q:String}} GROUP BY chain_id
+ UNION ALL
+ SELECT chain_id,'competition_winner',count() FROM cow_db.solver_competitions FINAL WHERE {where} AND winner={{q:String}} GROUP BY chain_id
+ UNION ALL
+ SELECT chain_id,'interaction_target',count() FROM cow_db.interactions_canonical WHERE {where} AND target={{q:String}} GROUP BY chain_id
+) GROUP BY chain_id,role HAVING evidence_count>0 ORDER BY chain_id,role"""
+        identifier = q
+    elif INTEGER_RE.fullmatch(q):
+        params["auction_id"] = int(q)
+        sql = f"""SELECT chain_id,'auction' AS entity_type,'auction' AS role,count() AS evidence_count
+FROM cow_db.solver_competitions FINAL WHERE {where} AND auction_id={{auction_id:UInt64}}
+GROUP BY chain_id ORDER BY chain_id"""
+        identifier = q
+    else:
+        params["symbol"] = query.strip()
+        sql = f"""SELECT chain_id,token AS identifier,'token' AS entity_type,'token_symbol' AS role,count() AS evidence_count
+FROM cow_db.token_metadata FINAL
+WHERE {where} AND lower(symbol)=lower({{symbol:String}})
+GROUP BY chain_id,token ORDER BY chain_id,token"""
+        identifier = ""
+    result = mini_apps.run_structured_query(
+        ch, sql, COW_DB, params, requested_max_rows=100
+    )
+    columns = {name: idx for idx, name in enumerate(result.columns)}
+    candidates: list[dict[str, Any]] = []
+    for row in result.rows:
+        cid = int(row[columns["chain_id"]])
+        role = str(row[columns["role"]])
+        entity_type = (
+            str(row[columns["entity_type"]])
+            if "entity_type" in columns
+            else ("token" if role == "token" else "solver" if role in {"settlement_executor", "competition_solver", "competition_winner"} else "address")
+        )
+        resolved_id = (
+            str(row[columns["identifier"]]).lower()
+            if "identifier" in columns else identifier
+        )
+        chain = COW_CHAINS[cid]
+        candidates.append({
+            "entity_type": entity_type,
+            "identifier": resolved_id,
+            "chain_id": cid,
+            "chain_name": chain.name,
+            "role": role,
+            "evidence_count": int(row[columns["evidence_count"]]),
+        })
+    return candidates
+
+
+def _display_token(token: str, chain: ChainInfo | None) -> str:
+    if token == NATIVE_TOKEN and chain is not None:
+        return chain.native_symbol
+    return f"{token[:6]}…{token[-4:]}" if token else ""
+
+
+def _pair_state(
+    pair: tuple[str, str],
+    chain: ChainInfo | None,
+    datasets: dict[str, CachedDataset],
+) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "base": pair[0],
+        "quote": pair[1],
+        "base_symbol": _display_token(pair[0], chain),
+        "quote_symbol": _display_token(pair[1], chain),
+        "base_decimals": None,
+        "quote_decimals": None,
+    }
+    summary = datasets.get("market_summary")
+    if summary is None or not summary.rows:
+        return state
+    columns = {name: index for index, name in enumerate(summary.columns)}
+    row = summary.rows[0]
+    for key in ("base_symbol", "quote_symbol", "base_decimals", "quote_decimals"):
+        index = columns.get(key)
+        if index is not None and index < len(row) and row[index] not in (None, ""):
+            state[key] = row[index]
+    return state
+
+
+def _section_fingerprint(
+    section: str,
+    scope: str,
+    chain: ChainInfo | None,
+    requested_base: str,
+    requested_quote: str,
+    interval: str,
+    range_state: dict[str, Any],
+    filters: dict[str, str],
+) -> str:
+    """Deterministic identity of a section's load scope.
+
+    Built from REQUESTED inputs (pre pair-resolution) so a fingerprint match on
+    a tab return can short-circuit with zero ClickHouse round trips.
+    """
+    return ":".join([
+        scope,
+        str(chain.chain_id if chain else 0),
+        section,
+        requested_base,
+        requested_quote,
+        interval,
+        str(range_state.get("kind")),
+        str(range_state.get("window_days")),
+        str(range_state.get("start_at") or ""),
+        str(range_state.get("end_at") or ""),
+        filters.get("status", ""),
+        filters.get("owner", ""),
+        filters.get("solver", ""),
+        filters.get("token", ""),
+    ])
+
+
+def _touch_section_lru(view_id: str, state: dict[str, Any], keep_section: str) -> None:
+    """Mark ``keep_section`` most-recent and evict retained sections above cap.
+
+    Mutates ``state`` in place (section_lru / section_datasets /
+    section_fingerprints / loaded_groups) and detaches evicted datasets.
+    """
+    lru = [s for s in (state.get("section_lru") or []) if s != keep_section]
+    lru.append(keep_section)
+    section_datasets = dict(state.get("section_datasets") or {})
+    fingerprints = dict(state.get("section_fingerprints") or {})
+    loaded = dict(state.get("loaded_groups") or {})
+    while len(lru) > MAX_RETAINED_SECTIONS:
+        victim = lru.pop(0)
+        keys = list(section_datasets.pop(victim, []) or [])
+        if keys:
+            mini_apps.remove_view_datasets(view_id, keys)
+        fingerprints.pop(victim, None)
+        for group in SECTION_GROUPS.get(victim, {}):
+            loaded[f"{victim}.{group}"] = False
+    state["section_lru"] = lru
+    state["section_datasets"] = section_datasets
+    state["section_fingerprints"] = fingerprints
+    state["loaded_groups"] = loaded
+
+
+def _apply_section_load(
+    ch: ClickHouseManager,
+    view_id: str,
+    request_id: int,
+    section: str,
+    environment_scope: str,
+    chain_id: int,
+    base_token: str,
+    quote_token: str,
+    interval: str,
+    window_days: int,
+    start_at: str,
+    end_at: str,
+    status: str,
+    owner: str,
+    solver: str,
+    token: str,
+    force_refresh: bool,
+) -> tuple[MiniAppPayload, str]:
+    """Apply a section scope: validate, evict stale data, load the CORE group.
+
+    Non-core groups are deliberately NOT loaded here — the frontend fetches
+    them afterwards through ``load_cow_explorer_datasets`` while skeletons
+    show. A fingerprint match returns the retained datasets with zero queries.
+    """
+    record = mini_apps.get_view(view_id)
+    if record is None:
+        raise KeyError(f"Unknown or expired view_id: {view_id}")
+    current = dict(record.view_state)
+    if request_id < int(current.get("applied_request_id") or 0):
+        return _payload_from_record(record), "Ignored stale CoW Explorer request."
+    section_key = section.strip().lower()
+    if section_key not in VALID_SECTIONS:
+        raise ValueError(f"section must be one of {sorted(VALID_SECTIONS)}")
+    scope = _validate_scope(environment_scope or str(current.get("environment_scope") or "production"))
+    effective_chain_id = int(chain_id or 0)
+    if not effective_chain_id and int(current.get("chain_id") or 0):
+        current_chain = COW_CHAINS.get(int(current["chain_id"]))
+        if current_chain and current_chain.environment == scope and section_key != "overview":
+            effective_chain_id = current_chain.chain_id
+    chain = _resolve_chain(scope, effective_chain_id, section_key)
+    range_warnings: list[str] = []
+    if effective_chain_id == 0 and chain is not None and section_key != "live":
+        # The user asked for all networks but this section is single-chain;
+        # a concrete chain was substituted — say so instead of silently lying.
+        range_warnings.append("all_networks_unsupported")
+    range_state = _range_state(section_key, int(window_days), start_at, end_at)
+    # No window clamping: "All history" must return real full history (user
+    # requirement). Memory safety comes from the query SHAPES instead —
+    # top-N-first tapes, streaming uniq aggregates, no count() OVER () on
+    # heavy specs — all proven live at window=0 across all networks.
+    resolution_days = int(range_state.get("window_days") or 0)
+    if range_state["kind"] == "absolute":
+        start_dt = datetime.fromisoformat(str(range_state["start_at"]).replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(str(range_state["end_at"]).replace("Z", "+00:00"))
+        resolution_days = max(
+            1,
+            int(((end_dt - start_dt).total_seconds() + 86_399) // 86_400),
+        )
+    resolved_interval, interval_warnings = _resolve_interval(
+        interval or str(current.get("interval") or "1h"),
+        resolution_days,
+    )
+    current_pair = current.get("pair") or {}
+    same_chain = chain is not None and int(current.get("chain_id") or 0) == chain.chain_id
+    requested_base = ""
+    requested_quote = ""
+    if chain is not None and section_key in {"markets", "orders", "solvers"}:
+        requested_base = base_token or (str(current_pair.get("base") or "") if same_chain else "")
+        requested_quote = quote_token or (str(current_pair.get("quote") or "") if same_chain else "")
+    filters = {
+        "status": status.strip(),
+        "owner": owner.strip(),
+        "solver": solver.strip(),
+        "token": token.strip(),
+    }
+    fingerprint = _section_fingerprint(
+        section_key, scope, chain, requested_base, requested_quote,
+        interval or str(current.get("interval") or "1h"), range_state, filters,
+    )
+    stored_fingerprints = dict(current.get("section_fingerprints") or {})
+    core_loaded = bool((current.get("loaded_groups") or {}).get(f"{section_key}.core"))
+    if (
+        not force_refresh
+        and stored_fingerprints.get(section_key) == fingerprint
+        and core_loaded
+    ):
+        # Tab return with unchanged scope: retained datasets are still valid.
+        next_state = {
+            **current,
+            "section": section_key,
+            "selected_entity": None,
+            "applied_request_id": int(request_id),
+        }
+        _touch_section_lru(view_id, next_state, section_key)
+        mini_apps.set_view_state(view_id, next_state)
+        updated = mini_apps.get_view(view_id)
+        assert updated is not None
+        return (
+            _payload_from_record(updated),
+            f"CoW Explorer {section_key} restored from retained datasets.",
+        )
+    pair = ("", "")
+    if chain is not None and section_key in {"markets", "orders", "solvers"}:
+        pair = _resolve_pair(ch, chain, requested_base, requested_quote)
+    specs = _section_specs(
+        section_key, scope, chain, pair, resolved_interval, range_state, filters
+    )
+    core_keys = SECTION_GROUPS[section_key]["core"]
+    core_specs = [spec for spec in specs if spec.key in core_keys]
+    datasets, coverage, load_warnings = _load_specs_safe(
+        ch, core_specs, range_state, force_refresh=force_refresh
+    )
+    warnings = [*range_warnings, *interval_warnings, *load_warnings]
+    if section_key in {"markets", "orders", "solvers"} and chain is not None and not all(pair):
+        warnings.extend(["no_indexed_data", "No indexed token pair is available for this chain."])
+    warnings = list(dict.fromkeys(warnings))
+    scope_id = f"{scope}:{chain.chain_id if chain else 0}:{section_key}:{request_id}"
+    core_failed = any(
+        "query_failed" in (coverage.get(k, {}).get("warning_codes") or [])
+        for k in core_keys
+    )
+    loaded_groups = dict(current.get("loaded_groups") or _empty_loaded_groups())
+    for group in SECTION_GROUPS[section_key]:
+        if group == "core":
+            loaded_groups[f"{section_key}.{group}"] = "partial" if core_failed else True
+        else:
+            loaded_groups[f"{section_key}.{group}"] = False
+    titles = dict(current.get("dataset_titles") or {})
+    titles.update(_dataset_titles(specs))
+    next_state = {
+        **current,
+        "section": section_key,
+        "environment_scope": scope,
+        "environment": chain.environment if chain else scope,
+        "chain_id": chain.chain_id if chain else 0,
+        "chain_name": chain.name if chain else "All networks",
+        "chain_options": [_chain_dict(c) for c in _chains_for_scope(scope)],
+        "explorer": asdict(chain.explorer) if chain else None,
+        "pair": _pair_state(pair, chain, datasets),
+        "interval": resolved_interval,
+        "date_range": range_state,
+        "filters": filters,
+        "selected_entity": None,
+        "breadcrumbs": [],
+        "applied_request_id": int(request_id),
+        "scope_id": scope_id,
+        "coverage": {**(current.get("coverage") or {}), **coverage},
+        "coverage_warnings": [w for w in warnings if " " not in w],
+        "warnings": warnings,
+        "loaded_groups": loaded_groups,
+        "dataset_titles": titles,
+    }
+    # Evict this section's previous datasets (scope changed), then attach the
+    # fresh core bundle. Other retained sections stay untouched.
+    previous_keys = list((current.get("section_datasets") or {}).get(section_key, []) or [])
+    stale = [key for key in previous_keys if key not in datasets]
+    if stale:
+        mini_apps.remove_view_datasets(view_id, stale)
+    for key, dataset in datasets.items():
+        mini_apps.attach_dataset(view_id, key, dataset)
+    section_datasets = dict(current.get("section_datasets") or {})
+    section_datasets[section_key] = sorted(datasets)
+    next_state["section_datasets"] = section_datasets
+    fingerprints = dict(stored_fingerprints)
+    fingerprints[section_key] = fingerprint
+    next_state["section_fingerprints"] = fingerprints
+    _touch_section_lru(view_id, next_state, section_key)
+    updated = mini_apps.get_view(view_id)
+    assert updated is not None
+    next_state["dataset_revisions"] = dict(updated.dataset_revisions)
+    mini_apps.set_view_state(view_id, next_state)
+    updated = mini_apps.get_view(view_id)
+    assert updated is not None
+    return _payload_from_record(updated, titles), f"CoW Explorer {section_key} loaded."
+
+
+def _apply_entity_load(
+    ch: ClickHouseManager,
+    view_id: str,
+    request_id: int,
+    entity_type: str,
+    identifier: str,
+    chain_id: int,
+) -> tuple[MiniAppPayload, str]:
+    record = mini_apps.get_view(view_id)
+    if record is None:
+        raise KeyError(f"Unknown or expired view_id: {view_id}")
+    current = dict(record.view_state)
+    if request_id < int(current.get("applied_request_id") or 0):
+        return _payload_from_record(record), "Ignored stale CoW entity request."
+    kind = entity_type.strip().lower()
+    if kind not in ENTITY_TYPES:
+        raise ValueError(f"entity_type must be one of {sorted(ENTITY_TYPES)}")
+    scope = _validate_scope(str(current.get("environment_scope") or "production"))
+    effective_chain_id = int(chain_id or current.get("chain_id") or 0)
+    if not effective_chain_id:
+        raise ValueError("chain_id is required when loading an entity from all-network scope")
+    chain = _resolve_chain(scope, effective_chain_id, "markets")
+    assert chain is not None
+    normalized_id = _normalize_hex(identifier) if kind != "auction" else identifier.strip()
+    specs = _entity_specs(kind, normalized_id, chain)
+    range_state = {
+        "kind": "all",
+        "anchor": "latest_indexed",
+        "window_days": 0,
+        "start_at": "",
+        "end_at": "",
+    }
+    datasets, coverage, warnings = _load_specs_safe(
+        ch, specs, range_state, force_refresh=False
+    )
+    scope_id = f"{scope}:{chain.chain_id}:entity:{request_id}"
+    breadcrumb = {
+        "label": f"{kind.title()} {normalized_id[:12]}",
+        "entity_type": kind,
+        "identifier": normalized_id,
+        "chain_id": chain.chain_id,
+    }
+    breadcrumbs = list(current.get("breadcrumbs") or []) if current.get("section") == "entity" else []
+    existing_index = next(
+        (
+            index for index, item in enumerate(breadcrumbs)
+            if item.get("entity_type") == kind
+            and item.get("identifier") == normalized_id
+            and int(item.get("chain_id") or 0) == chain.chain_id
+        ),
+        None,
+    )
+    if existing_index is None:
+        breadcrumbs.append(breadcrumb)
+    else:
+        breadcrumbs = breadcrumbs[:existing_index + 1]
+    breadcrumbs = breadcrumbs[-8:]
+    titles = dict(current.get("dataset_titles") or {})
+    titles.update(_dataset_titles(specs))
+    next_state = {
+        **current,
+        "section": "entity",
+        "environment": chain.environment,
+        "chain_id": chain.chain_id,
+        "chain_name": chain.name,
+        "explorer": asdict(chain.explorer),
+        "selected_entity": {
+            "entity_type": kind,
+            "identifier": normalized_id,
+            "chain_id": chain.chain_id,
+            "chain_name": chain.name,
+        },
+        "breadcrumbs": breadcrumbs,
+        "search": {"query": normalized_id, "candidates": []},
+        "date_range": range_state,
+        "applied_request_id": int(request_id),
+        "scope_id": scope_id,
+        "coverage": {**(current.get("coverage") or {}), **coverage},
+        "coverage_warnings": [w for w in warnings if " " not in w],
+        "warnings": warnings,
+        "dataset_titles": titles,
+    }
+    # Entity bundles participate in the same per-section retention as tabs:
+    # evict only the PREVIOUS entity's datasets, keep other sections cached.
+    previous_keys = list((current.get("section_datasets") or {}).get("entity", []) or [])
+    stale = [key for key in previous_keys if key not in datasets]
+    if stale:
+        mini_apps.remove_view_datasets(view_id, stale)
+    for key, dataset in datasets.items():
+        mini_apps.attach_dataset(view_id, key, dataset)
+    section_datasets = dict(current.get("section_datasets") or {})
+    section_datasets["entity"] = sorted(datasets)
+    next_state["section_datasets"] = section_datasets
+    fingerprints = dict(current.get("section_fingerprints") or {})
+    fingerprints["entity"] = f"{kind}:{normalized_id}:{chain.chain_id}"
+    next_state["section_fingerprints"] = fingerprints
+    _touch_section_lru(view_id, next_state, "entity")
+    updated = mini_apps.get_view(view_id)
+    assert updated is not None
+    next_state["dataset_revisions"] = dict(updated.dataset_revisions)
+    mini_apps.set_view_state(view_id, next_state)
+    updated = mini_apps.get_view(view_id)
+    assert updated is not None
+    return _payload_from_record(updated, titles), f"Loaded CoW {kind} detail."
+
+
+def _apply_group_load(
+    ch: ClickHouseManager,
+    view_id: str,
+    section: str,
+    group: str,
+    scope_id: str,
+    force_refresh: bool,
+) -> tuple[MiniAppPayload, str]:
+    """Load ONE deferred dataset group additively and return a PATCH payload.
+
+    Group loads never bump ``applied_request_id`` — they are additive and
+    order-independent. The ``scope_id`` guard makes a late-arriving group load
+    for a superseded scope a harmless no-op instead of a data corruption.
+    """
+    record = mini_apps.get_view(view_id)
+    if record is None:
+        raise KeyError(f"Unknown or expired view_id: {view_id}")
+    state = dict(record.view_state)
+    current_scope_id = str(state.get("scope_id") or "")
+    if scope_id and scope_id != current_scope_id:
+        payload = MiniAppPayload(
+            type="PATCH_VIEW_STATE", view_id=view_id, app_id=COW_APP_ID,
+            title=record.title, patch={}, warnings=["stale_scope"],
+        )
+        return payload, "Ignored stale CoW group request."
+    section_key = section.strip().lower()
+    groups = SECTION_GROUPS.get(section_key)
+    if groups is None:
+        raise ValueError(f"section must be one of {sorted(SECTION_GROUPS)}")
+    group_key = group.strip().lower()
+    if group_key not in groups:
+        raise ValueError(
+            f"group must be one of {sorted(groups)} for section {section_key}"
+        )
+    group_keys = groups[group_key]
+    scope = _validate_scope(str(state.get("environment_scope") or "production"))
+    state_chain_id = int(state.get("chain_id") or 0)
+    chain = COW_CHAINS.get(state_chain_id) if state_chain_id else None
+    if chain is None and section_key not in ALL_NETWORK_SECTIONS:
+        raise ValueError("This section requires a selected chain")
+    range_state = dict(state.get("date_range") or _range_state(section_key, -1, "", ""))
+    pair_state = state.get("pair") or {}
+    pair = (str(pair_state.get("base") or ""), str(pair_state.get("quote") or ""))
+    interval = str(state.get("interval") or "1h")
+    if interval not in CANDLE_BUCKETS:
+        interval = "1h"
+    filters = {
+        key: str((state.get("filters") or {}).get(key) or "")
+        for key in ("status", "owner", "solver", "token")
+    }
+    specs = _section_specs(
+        section_key, scope, chain, pair, interval, range_state, filters
+    )
+    group_specs = [spec for spec in specs if spec.key in group_keys]
+    datasets, coverage, load_warnings = _load_specs_safe(
+        ch, group_specs, range_state, force_refresh=force_refresh
+    )
+    for key, dataset in datasets.items():
+        mini_apps.attach_dataset(view_id, key, dataset)
+    updated = mini_apps.get_view(view_id)
+    assert updated is not None
+    titles = dict(state.get("dataset_titles") or {})
+    titles.update({spec.key: spec.title for spec in group_specs})
+    tracked = sorted(
+        set((state.get("section_datasets") or {}).get(section_key, []) or [])
+        | set(datasets)
+    )
+    combined_warnings = list(dict.fromkeys([
+        *(state.get("warnings") or []),
+        *load_warnings,
+    ]))
+    # "partial" (truthy — no skeleton) marks a group where at least one
+    # dataset failed: the frontend shows error cards + a retry affordance
+    # and the group loader treats it as retryable.
+    group_failed = any(
+        "query_failed" in (coverage.get(k, {}).get("warning_codes") or [])
+        for k in group_keys
+    )
+    patch: dict[str, Any] = {
+        "loaded_groups": {f"{section_key}.{group_key}": "partial" if group_failed else True},
+        "coverage": coverage,
+        "dataset_revisions": {
+            key: updated.dataset_revisions.get(key, 0) for key in datasets
+        },
+        "section_datasets": {section_key: tracked},
+        "dataset_titles": {spec.key: spec.title for spec in group_specs},
+        "warnings": combined_warnings,
+        "coverage_warnings": [w for w in combined_warnings if " " not in w],
+    }
+    mini_apps.patch_view_state(view_id, patch)
+    descriptors = {
+        key: mini_apps.build_dataset_descriptor(
+            key=key,
+            dataset=dataset,
+            title=titles.get(key, key.replace("_", " ").title()),
+            scope_id=current_scope_id,
+            provenance={"source": COW_DB, "coverage": coverage.get(key, {})},
+        )
+        for key, dataset in datasets.items()
+    }
+    payload = MiniAppPayload(
+        type="PATCH_VIEW_STATE",
+        view_id=view_id,
+        app_id=COW_APP_ID,
+        title=record.title,
+        datasets=descriptors,
+        patch=patch,
+        warnings=load_warnings,
+    )
+    return payload, f"CoW Explorer {section_key}.{group_key} loaded."
+
+
+def register_cow_explorer_tools(mcp, ch: ClickHouseManager) -> None:
+    """Register the CoW Explorer resource, tools, and standalone web app."""
+    mini_apps.register_app(COW_APP_ID, title=COW_TITLE, resource_uri=COW_URI)
+
+    @mcp.resource(
+        COW_URI,
+        mime_type="text/html;profile=mcp-app",
+        meta={
+            "ui": {
+                "csp": {
+                    "resourceDomains": [
+                        "https://assets.coingecko.com",
+                        "https://coin-images.coingecko.com",
+                    ]
+                }
+            }
+        },
+    )
+    def serve_cow_explorer_app() -> str:
+        return get_cow_explorer_html()
+
+    @mcp.tool(meta=COW_APP_META)
+    def open_cow_explorer(
+        environment_scope: str = "production",
+        chain_id: int = 0,
+        section: str = "overview",
+        query: str = "",
+        base_token: str = "",
+        quote_token: str = "",
+        interval: str = "",
+        window_days: int = -1,
+        start_at: str = "",
+        end_at: str = "",
+        entity_type: str = "",
+        identifier: str = "",
+    ) -> CallToolResult:
+        """Open the read-only CoW Data Explorer over indexed ``cow_db`` data.
+
+        Defaults to an all-production-network coverage overview. Use this for
+        historical CoW fills/prices, observed order lifecycles and known open
+        intents, settled competitions, solver analysis, or order/transaction/
+        address/token/auction/solver drill-downs. The app discloses the indexed
+        time window on every surface and does not claim a complete live book.
+        """
+        try:
+            scope = _validate_scope(environment_scope)
+            section_key = section.strip().lower() or "overview"
+            if section_key not in VALID_SECTIONS:
+                raise ValueError(f"section must be one of {sorted(VALID_SECTIONS)}")
+            initial_chain = _resolve_chain(scope, int(chain_id), section_key)
+            view_id = mini_apps.create_view(COW_APP_ID, COW_TITLE)
+            state = _empty_state(scope, initial_chain, COW_TITLE, section_key)
+            # Deep-link scope seeds: validated, stored, but NOT loaded here —
+            # the frontend applies the section (core group) and then streams
+            # the remaining groups. This keeps the open path free of any
+            # ClickHouse round trip, which is what makes it fast.
+            state["date_range"] = _range_state(section_key, int(window_days), start_at, end_at)
+            requested_interval = interval.strip().lower()
+            if requested_interval in CANDLE_BUCKETS:
+                state["interval"] = requested_interval
+            if base_token.strip() and quote_token.strip():
+                state["pair"] = {
+                    **state["pair"],
+                    "base": _validate_token(base_token, "base_token"),
+                    "quote": _validate_token(quote_token, "quote_token"),
+                }
+            mini_apps.set_view_state(view_id, state)
+            if entity_type.strip() or identifier.strip():
+                if not entity_type.strip() or not identifier.strip():
+                    raise ValueError("entity_type and identifier must be provided together")
+                payload, summary = _apply_entity_load(
+                    ch, view_id, 0, entity_type, identifier, int(chain_id)
+                )
+            elif query.strip():
+                candidates = _search_candidates(ch, query, scope, int(chain_id))
+                if len(candidates) == 1:
+                    candidate = candidates[0]
+                    payload, summary = _apply_entity_load(
+                        ch, view_id, 0, candidate["entity_type"],
+                        candidate["identifier"], candidate["chain_id"]
+                    )
+                else:
+                    record = mini_apps.get_view(view_id)
+                    assert record is not None
+                    state = {
+                        **record.view_state,
+                        "search": {"query": query.strip(), "candidates": candidates},
+                        "warnings": ([] if candidates else ["no_indexed_data"]),
+                    }
+                    mini_apps.set_view_state(view_id, state)
+                    record = mini_apps.get_view(view_id)
+                    assert record is not None
+                    payload = _payload_from_record(record)
+                    summary = f"CoW search returned {len(candidates)} candidate(s)."
+            else:
+                record = mini_apps.get_view(view_id)
+                assert record is not None
+                payload = _payload_from_record(record)
+                summary = (
+                    f"CoW Explorer opened on {section_key} — datasets load in "
+                    "the app (deferred groups)."
+                )
+            return mini_apps.payload_to_call_tool_result(payload, summary)
+        except Exception as exc:
+            return mini_apps.error_call_tool_result(str(exc))
+
+    @mcp.tool(meta=mini_apps.APP_ONLY_META)
+    def load_cow_explorer_section(
+        view_id: str,
+        request_id: int,
+        section: str,
+        environment_scope: str = "",
+        chain_id: int = 0,
+        base_token: str = "",
+        quote_token: str = "",
+        interval: str = "",
+        window_days: int = -1,
+        start_at: str = "",
+        end_at: str = "",
+        status: str = "",
+        owner: str = "",
+        solver: str = "",
+        token: str = "",
+        force_refresh: bool = False,
+    ) -> CallToolResult:
+        """[App-only] Atomically load one CoW Explorer section."""
+        try:
+            payload, summary = _apply_section_load(
+                ch, view_id, request_id, section, environment_scope, chain_id,
+                base_token, quote_token, interval, window_days, start_at, end_at,
+                status, owner, solver, token, force_refresh,
+            )
+            return mini_apps.payload_to_call_tool_result(payload, summary)
+        except Exception as exc:
+            return mini_apps.error_call_tool_result(str(exc))
+
+    @mcp.tool(meta=mini_apps.APP_ONLY_META)
+    def search_cow_explorer(
+        view_id: str,
+        request_id: int,
+        query: str,
+        chain_id: int = 0,
+    ) -> CallToolResult:
+        """[App-only] Resolve a CoW order, transaction, address, auction, or token."""
+        record = mini_apps.get_view(view_id)
+        if record is None:
+            return mini_apps.error_call_tool_result(f"Unknown or expired view_id: {view_id}")
+        if not query.strip():
+            return mini_apps.error_call_tool_result("query is required")
+        try:
+            if request_id < int(record.view_state.get("applied_request_id") or 0):
+                return mini_apps.payload_to_call_tool_result(
+                    _payload_from_record(record), "Ignored stale CoW search request."
+                )
+            scope = _validate_scope(str(record.view_state.get("environment_scope") or "production"))
+            candidates = _search_candidates(ch, query, scope, int(chain_id))
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                payload, summary = _apply_entity_load(
+                    ch, view_id, request_id, candidate["entity_type"],
+                    candidate["identifier"], candidate["chain_id"]
+                )
+                return mini_apps.payload_to_call_tool_result(payload, summary)
+            patch = {
+                "search": {"query": query.strip(), "candidates": candidates},
+                "applied_request_id": int(request_id),
+            }
+            mini_apps.patch_view_state(view_id, patch)
+            payload = MiniAppPayload(
+                type="PATCH_VIEW_STATE", view_id=view_id, app_id=COW_APP_ID,
+                title=record.title, patch=patch,
+                warnings=[] if candidates else ["no_indexed_data"],
+            )
+            return mini_apps.payload_to_call_tool_result(
+                payload, f"CoW search returned {len(candidates)} candidate(s)."
+            )
+        except Exception as exc:
+            return mini_apps.error_call_tool_result(str(exc))
+
+    @mcp.tool(meta=mini_apps.APP_ONLY_META)
+    def load_cow_entity(
+        view_id: str,
+        request_id: int,
+        entity_type: str,
+        identifier: str,
+        chain_id: int = 0,
+    ) -> CallToolResult:
+        """[App-only] Load a resolved CoW entity bundle."""
+        try:
+            payload, summary = _apply_entity_load(
+                ch, view_id, request_id, entity_type, identifier, chain_id
+            )
+            return mini_apps.payload_to_call_tool_result(payload, summary)
+        except Exception as exc:
+            return mini_apps.error_call_tool_result(str(exc))
+
+    @mcp.tool(meta=mini_apps.APP_ONLY_META)
+    def load_cow_explorer_datasets(
+        view_id: str,
+        request_id: int,
+        section: str,
+        group: str,
+        scope_id: str = "",
+        force_refresh: bool = False,
+    ) -> CallToolResult:
+        """[App-only] Load one deferred CoW dataset group (additive)."""
+        try:
+            payload, summary = _apply_group_load(
+                ch, view_id, section, group, scope_id, force_refresh
+            )
+            return mini_apps.payload_to_call_tool_result(payload, summary)
+        except Exception as exc:
+            return mini_apps.error_call_tool_result(str(exc))
+
+    @mcp.tool(meta=mini_apps.APP_ONLY_META)
+    def load_cow_icon_overlay(
+        view_id: str,
+        request_id: int = 0,
+    ) -> CallToolResult:
+        """[App-only] Resolve CoinGecko icons for tokens visible in the view.
+
+        Never blocks on the network: returns whatever is cached and kicks off
+        background fetches for missing chains; ``icon_overlay_pending`` in the
+        warnings tells the frontend one retry (a few seconds later) will find
+        more icons.
+        """
+        try:
+            record = mini_apps.get_view(view_id)
+            if record is None:
+                return mini_apps.error_call_tool_result(
+                    f"Unknown or expired view_id: {view_id}"
+                )
+            overlay, pending = _build_icon_overlay(record.datasets)
+            patch = {"icon_overlay": overlay}
+            mini_apps.patch_view_state(view_id, patch)
+            payload = MiniAppPayload(
+                type="PATCH_VIEW_STATE", view_id=view_id, app_id=COW_APP_ID,
+                title=record.title, patch=patch,
+                warnings=(["icon_overlay_pending"] if pending else []),
+            )
+            chains = len(overlay)
+            icons = sum(len(v) for v in overlay.values())
+            return mini_apps.payload_to_call_tool_result(
+                payload,
+                f"Icon overlay: {icons} icon(s) across {chains} chain(s)"
+                + (" — more pending." if pending else "."),
+            )
+        except Exception as exc:
+            return mini_apps.error_call_tool_result(str(exc))
+
+    for name in (
+        "load_cow_explorer_section", "search_cow_explorer", "load_cow_entity",
+        "load_cow_explorer_datasets", "load_cow_icon_overlay",
+    ):
+        mini_apps.mark_app_only(name)
+
+    web_apps.register_web_app(
+        app_id=COW_APP_ID,
+        open_tool="open_cow_explorer",
+        html_loader=get_cow_explorer_html,
+        title=COW_TITLE,
+        description=(
+            "Explore indexed CoW fills, execution and reference prices, known "
+            "open intents, auctions, solver competitions, and entity history."
+        ),
+        icon="◒",
+        diagnostics_loader=get_cow_explorer_diagnostics,
+        tools={
+            "open_cow_explorer": open_cow_explorer,
+            "load_cow_explorer_section": load_cow_explorer_section,
+            "search_cow_explorer": search_cow_explorer,
+            "load_cow_entity": load_cow_entity,
+            "load_cow_explorer_datasets": load_cow_explorer_datasets,
+            "load_cow_icon_overlay": load_cow_icon_overlay,
+        },
+    )
+
+
+__all__ = [
+    "COW_APP_ID", "COW_TITLE", "COW_URI", "COW_CHAINS", "NATIVE_TOKEN",
+    "get_cow_explorer_html", "get_cow_explorer_diagnostics",
+    "register_cow_explorer_tools", "_search_candidates",
+]

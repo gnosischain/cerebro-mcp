@@ -5,6 +5,7 @@
 // or a canvas double-click) — never silently on stepper change (WS10-F).
 
 import type { ReactNode } from "react";
+import { FilterDrawer } from "./FilterDrawer";
 import type { Limits } from "./types";
 
 interface Props {
@@ -56,9 +57,7 @@ export function FilterBar({
   return (
     <header className="ge-topbar">
       {leftSlot}
-      <details className="ge-filter-drawer">
-        <summary>Filters</summary>
-        <div className="ge-topbar-filters">
+      <FilterDrawer>
         <label className="ge-pill" title="Time window (days)">
           <span className="ge-pill-icon" aria-hidden>🕑</span>
           <input
@@ -87,8 +86,7 @@ export function FilterBar({
         {/* Layout toggle removed — force is the only layout (tunable live
             via the canvas "⚙ Forces" panel). The semantic-status filter
             moved into the Edge types popover. */}
-        </div>
-      </details>
+      </FilterDrawer>
 
       {/* Outside .ge-topbar-filters — its overflow-x scroll would clip the
           absolutely-positioned dropdown panel. */}

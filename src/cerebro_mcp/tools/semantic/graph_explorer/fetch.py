@@ -7,10 +7,16 @@ sample fetches share it.
 from __future__ import annotations
 
 import logging
+import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
-from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.clients.clickhouse import (
+    INTERACTIVE_QUERY_BUDGET,
+    ClickHouseManager,
+)
 from cerebro_mcp.semantic.graph_profiles import (
     GraphProfile,
     build_evidence_sql,
@@ -44,6 +50,58 @@ ADDRESS_ROLE_COLUMNS = (
     "has_dune_label",
     "dune_project",
 )
+
+# Role rows describe the current classification relation and can be reused for
+# a short interactive session.  Verified absence gets a deliberately shorter
+# TTL: a newly classified address should become discoverable promptly.  The
+# two outcomes are stored separately so an empty result can never be confused
+# with a lookup exception.
+_ADDRESS_ROLE_CACHE_TTL_SECONDS = 600.0
+_ADDRESS_ROLE_ABSENCE_CACHE_TTL_SECONDS = 60.0
+_ADDRESS_ROLE_CACHE_MAX_ENTRIES = 2_048
+_ADDRESS_ROLE_ABSENCE_CACHE_MAX_ENTRIES = 2_048
+
+_AddressRoleCacheKey = tuple[object, str, str, str]
+_CachedRoleItems = tuple[tuple[str, Any], ...]
+
+_address_role_cache: OrderedDict[
+    _AddressRoleCacheKey, tuple[float, _CachedRoleItems]
+] = OrderedDict()
+_address_role_absence_cache: OrderedDict[
+    _AddressRoleCacheKey, float
+] = OrderedDict()
+_address_role_cache_lock = threading.RLock()
+
+
+def _address_role_cache_key(
+    ch: ClickHouseManager, address: str
+) -> _AddressRoleCacheKey:
+    """Scope cached evidence to the concrete source manager and relation.
+
+    Keeping the manager object in the bounded cache avoids cross-source reuse
+    (including tests or multi-source deployments) and prevents an ``id()``
+    reuse collision while an entry is live.
+    """
+
+    return (ch, "dbt", ADDRESS_ROLES_RELATION, address.lower())
+
+
+def _trim_address_role_cache_locked() -> None:
+    while len(_address_role_cache) > _ADDRESS_ROLE_CACHE_MAX_ENTRIES:
+        _address_role_cache.popitem(last=False)
+    while (
+        len(_address_role_absence_cache)
+        > _ADDRESS_ROLE_ABSENCE_CACHE_MAX_ENTRIES
+    ):
+        _address_role_absence_cache.popitem(last=False)
+
+
+def reset_address_role_cache_for_tests() -> None:
+    """Clear positive and verified-absence role caches."""
+
+    with _address_role_cache_lock:
+        _address_role_cache.clear()
+        _address_role_absence_cache.clear()
 
 
 @dataclass(frozen=True)
@@ -85,26 +143,72 @@ def resolve_address_roles_with_status(
             succeeded=False,
             error="address role evidence requires a selected address",
         )
+
+    normalized_address = address.lower()
+    cache_key = _address_role_cache_key(ch, normalized_address)
+    now = time.monotonic()
+    with _address_role_cache_lock:
+        cached_roles = _address_role_cache.get(cache_key)
+        if cached_roles is not None:
+            cached_at, role_items = cached_roles
+            if now - cached_at < _ADDRESS_ROLE_CACHE_TTL_SECONDS:
+                _address_role_cache.move_to_end(cache_key)
+                return dict(role_items), EvidenceQueryStatus(
+                    succeeded=True,
+                    source_rows_returned=1,
+                    complete=True,
+                )
+            _address_role_cache.pop(cache_key, None)
+
+        cached_absence_at = _address_role_absence_cache.get(cache_key)
+        if cached_absence_at is not None:
+            if (
+                now - cached_absence_at
+                < _ADDRESS_ROLE_ABSENCE_CACHE_TTL_SECONDS
+            ):
+                _address_role_absence_cache.move_to_end(cache_key)
+                return {}, EvidenceQueryStatus(
+                    succeeded=True,
+                    source_rows_returned=0,
+                    complete=True,
+                )
+            _address_role_absence_cache.pop(cache_key, None)
+
     try:
         result = mini_apps.run_structured_query(
             ch,
             _ROLES_SQL,
             database="dbt",
-            parameters={"addr": address.lower()},
+            parameters={"addr": normalized_address},
             requested_max_rows=1,
+            query_budget=INTERACTIVE_QUERY_BUDGET,
         )
     except Exception as exc:
         logger.info("graph_explorer: roles lookup failed for %s: %s", address, exc)
         return {}, EvidenceQueryStatus(succeeded=False, error=str(exc))
     if not result.rows:
+        with _address_role_cache_lock:
+            _address_role_cache.pop(cache_key, None)
+            _address_role_absence_cache[cache_key] = time.monotonic()
+            _address_role_absence_cache.move_to_end(cache_key)
+            _trim_address_role_cache_locked()
         return {}, EvidenceQueryStatus(
             succeeded=True,
             source_rows_returned=0,
             complete=True,
         )
     row = result.rows[0]
+    roles = {col: value for col, value in zip(result.columns, row)}
+    with _address_role_cache_lock:
+        _address_role_absence_cache.pop(cache_key, None)
+        _address_role_cache[cache_key] = (
+            time.monotonic(),
+            tuple(roles.items()),
+        )
+        _address_role_cache.move_to_end(cache_key)
+        _trim_address_role_cache_locked()
     return (
-        {col: value for col, value in zip(result.columns, row)},
+        roles,
         EvidenceQueryStatus(
             succeeded=True,
             source_rows_returned=1,
@@ -182,7 +286,12 @@ def flow_evidence_rows_with_status(
             limit=limit,
         )
         result = mini_apps.run_structured_query(
-            ch, sql, database="dbt", parameters=params, requested_max_rows=limit
+            ch,
+            sql,
+            database="dbt",
+            parameters=params,
+            requested_max_rows=limit,
+            query_budget=INTERACTIVE_QUERY_BUDGET,
         )
     except Exception as exc:
         logger.info("graph_explorer: flow evidence failed for %s: %s", edge_id, exc)
@@ -269,7 +378,12 @@ def edge_evidence_rows_with_status(
             window_days=int(window_days) if window_days else None,
         )
         result = mini_apps.run_structured_query(
-            ch, sql, database="dbt", parameters=params, requested_max_rows=limit
+            ch,
+            sql,
+            database="dbt",
+            parameters=params,
+            requested_max_rows=limit,
+            query_budget=INTERACTIVE_QUERY_BUDGET,
         )
     except Exception as exc:
         logger.info("graph_explorer: edge evidence failed for %s: %s", edge_id, exc)
@@ -410,7 +524,12 @@ def fetch_profile_edges(
     warnings: list[str] = []
     try:
         result = mini_apps.run_structured_query(
-            ch, sql, database="dbt", parameters=params, requested_max_rows=limit
+            ch,
+            sql,
+            database="dbt",
+            parameters=params,
+            requested_max_rows=limit,
+            query_budget=INTERACTIVE_QUERY_BUDGET,
         )
     except Exception as exc:
         logger.info(
@@ -461,7 +580,12 @@ def fetch_timeline_edges(
     warnings: list[str] = []
     try:
         result = mini_apps.run_structured_query(
-            ch, sql, database="dbt", parameters=params, requested_max_rows=limit + 1
+            ch,
+            sql,
+            database="dbt",
+            parameters=params,
+            requested_max_rows=limit + 1,
+            query_budget=INTERACTIVE_QUERY_BUDGET,
         )
     except Exception as exc:
         logger.info(

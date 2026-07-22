@@ -200,9 +200,11 @@ export function composeLinkVisuals(
   >,
   linkOverride?: { alpha: Float32Array; width: Float32Array },
   selectedEdgeId?: string,
+  edgeToLinkIndex?: ReadonlyMap<string, number>,
 ): { colors: Float32Array; widths: Float32Array } {
   const selectedLinkIndex = selectedEdgeId
-    ? model.linkEdgeIds.findIndex((edgeIds) => edgeIds.includes(selectedEdgeId))
+    ? edgeToLinkIndex?.get(selectedEdgeId) ??
+      model.linkEdgeIds.findIndex((edgeIds) => edgeIds.includes(selectedEdgeId))
     : -1;
   if (!linkOverride && selectedLinkIndex < 0) {
     return { colors: model.linkColors, widths: model.linkWidths };
@@ -230,6 +232,17 @@ export function composeLinkVisuals(
     }
   }
   return { colors, widths };
+}
+
+export function sameNodeUniverse(
+  previous: readonly string[],
+  next: readonly string[],
+): boolean {
+  if (previous.length !== next.length) return false;
+  for (let index = 0; index < next.length; index++) {
+    if (previous[index] !== next[index]) return false;
+  }
+  return true;
 }
 
 /** Pure reheat-alpha (vitest target): a no-op republish gets 0; a fresh/
@@ -361,24 +374,47 @@ export function CosmosCanvas({
   // Compute node colors honoring seed highlight + hidden-kind dimming. Returns
   // a Float32Array(n*4). Recomputed whenever the model, seed, or hidden kinds
   // change so the legend toggles take effect without a full rebuild.
-  const colors = useMemo(() => {
+  const baseColors = useMemo(() => {
     const out = new Float32Array(model.n * 4);
     for (let i = 0; i < model.n; i++) {
       const node = model.nodeRows[i];
       const isSeed = seedNodeId && node.id === seedNodeId;
       const hex = isSeed ? SEED_COLOR : COLOR_BY_KIND[node.kind] ?? FALLBACK_COLOR;
       const hidden = hiddenKinds.has(node.kind) && !isSeed;
-      let [r, g, b, a] = hexToRgba(hex, hidden ? 0.04 : 1);
-      if (pointAlphaOverride && i < pointAlphaOverride.length) {
-        a *= pointAlphaOverride[i];
-      }
+      const [r, g, b, a] = hexToRgba(hex, hidden ? 0.04 : 1);
       out[i * 4] = r;
       out[i * 4 + 1] = g;
       out[i * 4 + 2] = b;
       out[i * 4 + 3] = a;
     }
     return out;
-  }, [model, seedNodeId, hiddenKinds, pointAlphaOverride]);
+  }, [model, seedNodeId, hiddenKinds]);
+
+  const pointColorBuffersRef = useRef<[Float32Array, Float32Array]>([
+    new Float32Array(0),
+    new Float32Array(0),
+  ]);
+  const pointColorBufferIndexRef = useRef(0);
+  const colors = useMemo(() => {
+    if (!pointAlphaOverride) return baseColors;
+    let buffers = pointColorBuffersRef.current;
+    if (buffers[0].length !== baseColors.length) {
+      buffers = [
+        new Float32Array(baseColors.length),
+        new Float32Array(baseColors.length),
+      ];
+      pointColorBuffersRef.current = buffers;
+      pointColorBufferIndexRef.current = 0;
+    }
+    pointColorBufferIndexRef.current = 1 - pointColorBufferIndexRef.current;
+    const out = buffers[pointColorBufferIndexRef.current];
+    out.set(baseColors);
+    const count = Math.min(model.n, pointAlphaOverride.length);
+    for (let index = 0; index < count; index++) {
+      out[index * 4 + 3] *= pointAlphaOverride[index];
+    }
+    return out;
+  }, [baseColors, model.n, pointAlphaOverride]);
 
   // Node sizes with a distinct seed marker: the seed is forced to a large
   // floor so it pops out of the cloud even when it isn't the top-degree hub.
@@ -745,8 +781,8 @@ export function CosmosCanvas({
     return true;
   };
 
-  const prevPushRef = useRef<{ idsKey: string; model: GraphModel | null }>({
-    idsKey: "",
+  const prevPushRef = useRef<{ ids: readonly string[]; model: GraphModel | null }>({
+    ids: [],
     model: null,
   });
   useEffect(() => {
@@ -777,9 +813,8 @@ export function CosmosCanvas({
       if (!restoreInitialCameraOnce(graph, model)) frameGraph();
         return;
       }
-      const idsKey = model.indexToId.join(" ");
       const prev = prevPushRef.current;
-      const sameGraph = prev.idsKey === idsKey;
+      const sameGraph = sameNodeUniverse(prev.ids, model.indexToId);
     // Topology churn measured on RETAINED ids (not count delta — a same-sized
     // but completely different graph must read as full churn). Drives the
     // re-energize alpha below.
@@ -802,7 +837,7 @@ export function CosmosCanvas({
         /* keep seeded positions */
       }
       }
-      prevPushRef.current = { idsKey, model };
+      prevPushRef.current = { ids: model.indexToId, model };
       if (!sameGraph) {
         graph.setPointPositions(
           cachedCamera
@@ -883,6 +918,24 @@ export function CosmosCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, staticLayout]);
 
+  const edgeToLinkIndex = useMemo(() => {
+    const index = new Map<string, number>();
+    model.linkEdgeIds.forEach((edgeIds, linkIndex) => {
+      edgeIds.forEach((edgeId) => index.set(edgeId, linkIndex));
+    });
+    return index;
+  }, [model.linkEdgeIds]);
+
+  const linkVisuals = useMemo(
+    () => composeLinkVisuals(
+      model,
+      linkOverride,
+      selectedEdgeId,
+      edgeToLinkIndex,
+    ),
+    [edgeToLinkIndex, linkOverride, model, selectedEdgeId],
+  );
+
   // Recolor on seed/hidden-kind change without rebuilding the whole graph.
   useEffect(() => {
     const graph = graphRef.current;
@@ -904,11 +957,7 @@ export function CosmosCanvas({
     const graph = graphRef.current;
     if (!graph || !model.n) return;
     try {
-      const { colors, widths } = composeLinkVisuals(
-        model,
-        linkOverride,
-        selectedEdgeId,
-      );
+      const { colors, widths } = linkVisuals;
       graph.setLinkColors(colors);
       graph.setLinkWidths(widths);
       graph.render();
@@ -916,7 +965,7 @@ export function CosmosCanvas({
       reportRendererError(error, "link visibility update failed");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [linkOverride, selectedEdgeId, model]);
+  }, [linkVisuals, model.n]);
 
   // Resize the seed marker on seed change without rebuilding the whole graph.
   useEffect(() => {

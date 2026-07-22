@@ -45,8 +45,6 @@ describe("buildTransactionRequest", () => {
       counterparties: [],
       tokens: [],
       rangeDays: 1,
-      t0: "2026-07-18 00:00:00",
-      t1: "2026-07-19 00:00:00",
     });
 
     expect(request).toMatchObject({
@@ -60,7 +58,85 @@ describe("buildTransactionRequest", () => {
     });
   });
 
-  it("never promotes address-discovered hashes into an explicit Range reload", () => {
+  it("keeps filtered address discovery all-history without an explicit UTC pair", () => {
+    const request = buildTransactionRequest(
+      "view-1",
+      applied("range_days=30"),
+      {
+        operation: "discover",
+        seed: SEED,
+        tokens: [TOKEN],
+        activityKinds: ["erc20"],
+        t0: "",
+        t1: "",
+      },
+    );
+
+    expect(request).toMatchObject({
+      operation: "discover",
+      seed_node_id: SEED,
+      tokens: [TOKEN],
+      activity_kinds: ["erc20"],
+      range_days: 0,
+      t0: "",
+      t1: "",
+    });
+  });
+
+  it("retains applied discovery filters for pagination and count-only reloads", () => {
+    const state = applied("execution_tables_plus_rpc_head");
+    Object.assign(state as unknown as Record<string, unknown>, {
+      query: {
+        kind: "address",
+        address: SEED,
+        counterparties: [TARGET],
+        tokens: [TOKEN],
+        activity_kinds: ["erc20"],
+        window: {
+          t0: "2026-07-01T00:00:00.000Z",
+          t1: "2026-07-19T12:30:00.000Z",
+          source: "custom_utc_window",
+        },
+      },
+    });
+
+    const request = buildTransactionRequest("view-1", state, {
+      operation: "discover",
+      cursor: "opaque-page",
+      pageSize: 25,
+    });
+
+    expect(request).toMatchObject({
+      seed_node_id: SEED,
+      counterparty_ids: [TARGET],
+      tokens: [TOKEN],
+      activity_kinds: ["erc20"],
+      t0: "2026-07-01T00:00:00.000Z",
+      t1: "2026-07-19T12:30:00.000Z",
+      cursor: "opaque-page",
+    });
+  });
+
+  it("preserves a newly supplied exact UTC pair", () => {
+    const request = buildTransactionRequest(
+      "view-1",
+      applied("range_days=30", { counterparties: [], tokens: [] }),
+      {
+        operation: "discover",
+        seed: SEED,
+        t0: "2026-07-18 00:00:00",
+        t1: "2026-07-19 00:00:00",
+      },
+    );
+
+    expect(request).toMatchObject({
+      range_days: 30,
+      t0: "2026-07-18 00:00:00",
+      t1: "2026-07-19 00:00:00",
+    });
+  });
+
+  it("never promotes discovered hashes or a legacy Range into a new address reload", () => {
     const request = buildTransactionRequest(
       "view-1",
       applied("range_days=30"),
@@ -72,14 +148,14 @@ describe("buildTransactionRequest", () => {
       seed_node_id: SEED,
       counterparty_ids: [TARGET],
       tokens: [TOKEN],
-      range_days: 90,
+      range_days: 0,
       max_txs: 25,
       t0: "",
       t1: "",
     });
   });
 
-  it("preserves an exact Money window for Txs edits but retires it for Range edits", () => {
+  it("preserves an exact Money window for count edits but retires it to all-history", () => {
     const exact = applied("money_trail_applied_window");
     expect(buildTransactionRequest("view-1", exact, { maxTxs: 50 })).toMatchObject({
       tx_hashes: [],
@@ -91,7 +167,7 @@ describe("buildTransactionRequest", () => {
     expect(buildTransactionRequest("view-1", exact, { rangeDays: 90 })).toMatchObject({
       tx_hashes: [],
       seed_node_id: SEED,
-      range_days: 90,
+      range_days: 0,
       t0: "",
       t1: "",
     });
@@ -126,18 +202,26 @@ describe("buildTransactionRequest", () => {
     });
   });
 
-  it("forces follow-expansion back onto address discovery", () => {
+  it("keeps follow-expansion on the legacy cursor-to-head contract", () => {
     const request = buildTransactionRequest(
       "view-1",
       applied("ignored_for_explicit_hash", { seed: "" }),
-      { expandNodeId: TARGET, afterBlock: 123, afterIndex: 7, merge: true },
+      {
+        operation: "legacy",
+        expandNodeId: TARGET,
+        afterBlock: 123,
+        afterIndex: 7,
+        merge: true,
+      },
     );
     expect(request).toMatchObject({
+      operation: "legacy",
       tx_hashes: [],
       expand_node_id: TARGET,
       after_block: 123,
       after_index: 7,
       merge: true,
+      range_days: 0,
     });
   });
 });

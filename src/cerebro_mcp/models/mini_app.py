@@ -14,7 +14,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-DatasetMode = Literal["exact_bounded", "random_sample", "preview_only"]
+DatasetMode = Literal[
+    "exact_bounded",
+    "exact_capped",
+    "random_sample",
+    "preview_only",
+]
 PayloadType = Literal["INITIAL_LOAD", "PATCH_VIEW_STATE", "SHOW_WARNING"]
 
 
@@ -25,6 +30,10 @@ class DatasetStats(BaseModel):
     rows_returned: int
     mode: DatasetMode
     sample_source_rows: int | None = None
+    source_rows: int | None = None
+    row_cap: int | None = None
+    truncated: bool | None = None
+    fetched_at: str | None = None
     elapsed_seconds: float | None = None
     warnings: list[str] = Field(default_factory=list)
 

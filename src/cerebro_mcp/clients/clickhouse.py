@@ -167,6 +167,56 @@ class ExecutedQuery:
     warnings: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class QueryBudget:
+    """Typed, internal-only ClickHouse query budget.
+
+    Callers cannot pass arbitrary ClickHouse settings through this contract.
+    The four supported guards are always clamped to the process-wide session
+    ceilings, and result overflow is always configured to fail closed.
+    """
+
+    max_execution_time: int | None = None
+    max_memory_usage: int | None = None
+    max_result_rows: int | None = None
+    max_threads: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_execution_time",
+            "max_memory_usage",
+            "max_result_rows",
+            "max_threads",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+
+
+# Deliberately conservative presets for Graph Explorer/internal callers.  The
+# manager clamps these again against stricter deployment-wide limits.
+CONTRACT_PROBE_QUERY_BUDGET = QueryBudget(
+    max_execution_time=5,
+    max_memory_usage=256 * 2**20,
+    max_result_rows=1_000,
+    max_threads=1,
+)
+DISCOVERY_QUERY_BUDGET = QueryBudget(
+    max_execution_time=10,
+    max_memory_usage=1536 * 2**20,
+    max_result_rows=10_000,
+    max_threads=2,
+)
+INTERACTIVE_QUERY_BUDGET = QueryBudget(
+    max_execution_time=20,
+    max_memory_usage=2 * 2**30,
+    max_result_rows=10_000,
+    max_threads=4,
+)
+
+
 class ClickHouseManager:
     """Manages per-database ClickHouse client connections and query execution."""
 
@@ -174,6 +224,7 @@ class ClickHouseManager:
     SCHEMA_CACHE_MAX_ENTRIES = 256
     TABLE_PAGE_CACHE_TTL = 60
     TABLE_PAGE_CACHE_MAX_ENTRIES = 64
+    MAX_INTERNAL_QUERY_THREADS = 4
 
     def __init__(self):
         # Per-thread clients: clickhouse_connect Client objects are NOT thread
@@ -227,6 +278,46 @@ class ClickHouseManager:
             )
         return out
 
+    @classmethod
+    def _query_budget_settings(
+        cls, query_budget: QueryBudget | None
+    ) -> dict[str, Any] | None:
+        """Translate a typed budget into safe per-query ClickHouse settings.
+
+        A budget may only make a query *stricter* than the connection's
+        session guards. Unknown ClickHouse settings are unrepresentable, so a
+        caller cannot disable readonly mode or change an overflow policy.
+        """
+        if query_budget is None:
+            return None
+
+        session = cls._session_settings()
+        out: dict[str, Any] = {}
+        if query_budget.max_execution_time is not None:
+            session_timeout = int(session.get("max_execution_time") or 0)
+            out["max_execution_time"] = (
+                min(query_budget.max_execution_time, session_timeout)
+                if session_timeout > 0
+                else query_budget.max_execution_time
+            )
+        if query_budget.max_memory_usage is not None:
+            session_memory = int(session.get("max_memory_usage") or 0)
+            out["max_memory_usage"] = (
+                min(query_budget.max_memory_usage, session_memory)
+                if session_memory > 0
+                else query_budget.max_memory_usage
+            )
+        if query_budget.max_result_rows is not None:
+            out["max_result_rows"] = min(
+                query_budget.max_result_rows, int(settings.MAX_ROWS)
+            )
+            out["result_overflow_mode"] = "throw"
+        if query_budget.max_threads is not None:
+            out["max_threads"] = min(
+                query_budget.max_threads, cls.MAX_INTERNAL_QUERY_THREADS
+            )
+        return out or None
+
     def _validate_database(self, database: str) -> None:
         valid, err = validate_identifier(database)
         if not valid:
@@ -256,6 +347,7 @@ class ClickHouseManager:
         output_path: Path,
         max_bytes: int,
         database: str = "dbt",
+        query_budget: QueryBudget | None = None,
     ) -> int:
         """Phase 2: stream a SELECT result to a parquet file.
 
@@ -286,7 +378,11 @@ class ClickHouseManager:
 
         # Step 1: introspect the inner-query schema. CH supports
         # `DESCRIBE (subquery)` natively; it returns rows of (name, type, ...).
-        describe_rows = client.query(f"DESCRIBE ({sql})").result_rows
+        query_settings = self._query_budget_settings(query_budget)
+        describe_kwargs = {"settings": query_settings} if query_settings else {}
+        describe_rows = client.query(
+            f"DESCRIBE ({sql})", **describe_kwargs
+        ).result_rows
         casts = [
             _sanitize_column_for_parquet(str(r[0]), str(r[1]))
             for r in describe_rows
@@ -302,7 +398,8 @@ class ClickHouseManager:
         bytes_written = 0
         writer: pq.ParquetWriter | None = None
         try:
-            with client.query_arrow_stream(safe_sql) as stream:
+            stream_kwargs = {"settings": query_settings} if query_settings else {}
+            with client.query_arrow_stream(safe_sql, **stream_kwargs) as stream:
                 for batch in stream:
                     if writer is None:
                         writer = pq.ParquetWriter(
@@ -328,12 +425,21 @@ class ClickHouseManager:
         return bytes_written
 
     def execute_raw(
-        self, sql: str, database: str = "dbt", parameters: dict | None = None
+        self,
+        sql: str,
+        database: str = "dbt",
+        parameters: dict | None = None,
+        *,
+        query_budget: QueryBudget | None = None,
     ) -> dict:
         """Execute a metadata query (DESCRIBE, SHOW, system tables)."""
         self._validate_database(database)
         client = self.get_client(database)
-        result = client.query(sql, parameters=parameters)
+        query_settings = self._query_budget_settings(query_budget)
+        kwargs: dict[str, Any] = {"parameters": parameters}
+        if query_settings:
+            kwargs["settings"] = query_settings
+        result = client.query(sql, **kwargs)
         return {
             "columns": list(result.column_names),
             "rows": [list(row) for row in result.result_rows],
@@ -364,28 +470,73 @@ class ClickHouseManager:
         ]
         return columns, rows
 
-    def _fetch_rows_arrow(self, client, sql: str) -> tuple[list[str], list[list[Any]]]:
-        table = client.query_arrow(sql)
+    def _fetch_rows_arrow(
+        self,
+        client,
+        sql: str,
+        query_budget: QueryBudget | None = None,
+    ) -> tuple[list[str], list[list[Any]]]:
+        query_settings = self._query_budget_settings(query_budget)
+        kwargs = {"settings": query_settings} if query_settings else {}
+        table = client.query_arrow(sql, **kwargs)
         return self._rows_from_arrow(table)
 
-    def _fetch_rows_native(self, client, sql: str, parameters: dict | None = None) -> tuple[list[str], list[list[Any]]]:
-        result = client.query(sql, parameters=parameters)
+    def _fetch_rows_native(
+        self,
+        client,
+        sql: str,
+        parameters: dict | None = None,
+        query_budget: QueryBudget | None = None,
+    ) -> tuple[list[str], list[list[Any]]]:
+        query_settings = self._query_budget_settings(query_budget)
+        kwargs: dict[str, Any] = {"parameters": parameters}
+        if query_settings:
+            kwargs["settings"] = query_settings
+        result = client.query(sql, **kwargs)
         return list(result.column_names), [list(row) for row in result.result_rows]
+
+    @staticmethod
+    def _is_server_query_error(exc: Exception) -> bool:
+        """True when retrying the same SQL through native rows is unsafe.
+
+        Arrow fallback is for client-side Arrow incompatibility. A ClickHouse
+        timeout/memory/query error would execute the same expensive query a
+        second time, which is both misleading and operationally dangerous.
+        """
+        text = str(exc).lower()
+        markers = (
+            "clickhouse error code",
+            "httpdriver for",
+            "memory_limit_exceeded",
+            "timeout_exceeded",
+            "query_was_cancelled",
+            "too_many_rows_or_bytes",
+            "code: 241",
+        )
+        return any(marker in text for marker in markers)
 
     def _fetch_rows(
         self, client, sql: str, fetch_mode: Literal["auto", "rows", "arrow"],
         parameters: dict | None = None,
+        query_budget: QueryBudget | None = None,
     ) -> tuple[list[str], list[list[Any]], Literal["rows", "arrow"], list[str]]:
         warnings: list[str] = []
         if fetch_mode in {"auto", "arrow"} and parameters is None:
             try:
-                columns, rows = self._fetch_rows_arrow(client, sql)
+                columns, rows = self._fetch_rows_arrow(
+                    client, sql, query_budget=query_budget
+                )
                 return columns, rows, "arrow", warnings
-            except Exception:
-                if fetch_mode == "arrow":
+            except Exception as exc:
+                if fetch_mode == "arrow" or self._is_server_query_error(exc):
                     raise
                 warnings.append("arrow_fallback_to_row_fetch")
-        columns, rows = self._fetch_rows_native(client, sql, parameters=parameters)
+        columns, rows = self._fetch_rows_native(
+            client,
+            sql,
+            parameters=parameters,
+            query_budget=query_budget,
+        )
         return columns, rows, "rows", warnings
 
     def run_query(
@@ -396,6 +547,7 @@ class ClickHouseManager:
         audience: Literal["tool", "internal"] = "tool",
         fetch_mode: Literal["auto", "rows", "arrow"] = "auto",
         parameters: dict | None = None,
+        query_budget: QueryBudget | None = None,
     ) -> ExecutedQuery:
         """Execute a validated read-only query through one shared pipeline."""
         self._validate_database(database)
@@ -431,7 +583,11 @@ class ClickHouseManager:
         start = time.time()
         try:
             columns, rows, actual_fetch_mode, fetch_warnings = self._fetch_rows(
-                client, executed_sql, fetch_mode, parameters=parameters
+                client,
+                executed_sql,
+                fetch_mode,
+                parameters=parameters,
+                query_budget=query_budget,
             )
         except Exception:
             elapsed = time.time() - start
@@ -562,12 +718,16 @@ class ClickHouseManager:
         parameters: dict | None = None,
         *,
         page_cache: bool = False,
+        query_budget: QueryBudget | None = None,
     ) -> dict:
         """Execute a metadata query with TTL caching."""
         cached = self._cache_get(cache_key, page_cache=page_cache)
         if cached is not None:
             return cached
-        result = self.execute_raw(sql, database, parameters=parameters)
+        kwargs: dict[str, Any] = {"parameters": parameters}
+        if query_budget is not None:
+            kwargs["query_budget"] = query_budget
+        result = self.execute_raw(sql, database, **kwargs)
         self._cache_set(cache_key, result, page_cache=page_cache)
         return result
 

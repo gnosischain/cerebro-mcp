@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from cerebro_mcp.models.mini_app import DatasetStats, MiniAppPayload
@@ -11,6 +12,60 @@ from cerebro_mcp.tools.visualization import mini_apps
 
 from . import constants
 from .forensics import canonical_row_hash
+
+
+_ROW_HASH_CACHE_MAX_ENTRIES = 512
+_row_hash_cache: dict[
+    tuple[str, str, int], tuple[CachedDataset, str]
+] = {}
+_row_hash_cache_lock = threading.Lock()
+
+
+def dataset_row_hash(
+    record: "mini_apps.ViewRecord",
+    key: str,
+    dataset: CachedDataset,
+    *,
+    revision: int | None = None,
+) -> str:
+    """Hash rows once for one concrete view/dataset revision.
+
+    The cache retains the dataset object and compares by identity, preventing
+    stale reuse if a removed key later restarts at revision 1. It is scoped to
+    a view rather than globally because equal revision integers have no meaning
+    across independently mutable views.
+    """
+    effective_revision = (
+        int(record.dataset_revisions.get(key, 0))
+        if revision is None
+        else int(revision)
+    )
+    cache_key = (record.view_id, key, effective_revision)
+    with _row_hash_cache_lock:
+        cached = _row_hash_cache.get(cache_key)
+        if cached is not None and cached[0] is dataset:
+            return cached[1]
+
+    row_hash = canonical_row_hash(dataset.rows)
+    with _row_hash_cache_lock:
+        # Retire old revisions/objects for this view key as soon as a new one
+        # is observed; normally this leaves exactly one entry per dataset.
+        stale = [
+            existing
+            for existing in _row_hash_cache
+            if existing[:2] == cache_key[:2] and existing != cache_key
+        ]
+        for existing in stale:
+            _row_hash_cache.pop(existing, None)
+        if len(_row_hash_cache) >= _ROW_HASH_CACHE_MAX_ENTRIES:
+            _row_hash_cache.pop(next(iter(_row_hash_cache)))
+        _row_hash_cache[cache_key] = (dataset, row_hash)
+    return row_hash
+
+
+def reset_row_hash_cache_for_tests() -> None:
+    with _row_hash_cache_lock:
+        _row_hash_cache.clear()
 
 
 def empty_dataset(label: str, columns: list[str], sql: str = "") -> CachedDataset:
@@ -298,6 +353,9 @@ def build_payload(
     record: "mini_apps.ViewRecord",
     app_id: str = constants.GRAPH_EXPLORER_APP_ID,
 ) -> MiniAppPayload:
+    # Callers often retain the live mutable record while queries run. Snapshot
+    # once so scopes, datasets, revisions, and hashes describe one atomic view.
+    record = mini_apps.snapshot_view(record.view_id) or record
     titles = constants.DATASET_TITLES
     dataset_scopes = dict(record.view_state.get("dataset_scopes") or {})
     possible_scopes = [
@@ -315,13 +373,21 @@ def build_payload(
         if isinstance(scope, dict) and scope.get("scope_id")
     }
     descriptors = {}
-    for key, dataset in record.datasets.items():
+    # Copy the already-coherent snapshot mappings for descriptor construction.
+    dataset_items = list(record.datasets.items())
+    dataset_revisions = dict(record.dataset_revisions)
+    for key, dataset in dataset_items:
         scope_id = str(dataset_scopes[key]) if dataset_scopes.get(key) else None
         provenance = dict(scope_by_id.get(str(scope_id or ""), {}))
         provenance.update(
             {
                 "dataset_key": key,
-                "result_row_hash": canonical_row_hash(dataset.rows),
+                "result_row_hash": dataset_row_hash(
+                    record,
+                    key,
+                    dataset,
+                    revision=dataset_revisions.get(key, 0),
+                ),
             }
         )
         descriptors[key] = mini_apps.build_dataset_descriptor(
@@ -341,7 +407,7 @@ def build_payload(
     # keys hydration and adoption on them, never on SQL text.
     view_state = {
         **record.view_state,
-        "dataset_revisions": dict(record.dataset_revisions),
+        "dataset_revisions": dataset_revisions,
     }
     return MiniAppPayload(
         type="INITIAL_LOAD",
@@ -357,4 +423,84 @@ def build_payload(
             "dataset_scopes": dataset_scopes,
         },
         warnings=seen,
+    )
+
+
+def build_dataset_append_patch(
+    record: "mini_apps.ViewRecord",
+    *,
+    dataset_key: str,
+    base_revision: int,
+    base_row_count: int,
+    append_rows: list[list[Any]],
+    view_state_patch: dict[str, Any],
+    scope: dict[str, Any] | None = None,
+    app_id: str = constants.GRAPH_EXPLORER_APP_ID,
+) -> MiniAppPayload:
+    """Build a revision-guarded append PATCH with a hydration fallback.
+
+    The append rows are cheap when the client still holds the exact base
+    dataset.  ``fallback`` intentionally carries no preview and starts at
+    offset zero: a client whose base revision/rows do not match can adopt it
+    and hydrate the complete committed dataset without mixing snapshots.
+
+    This helper is deliberately narrow.  Ordinary loads continue to use the
+    full ``INITIAL_LOAD`` snapshot; only keyset pagination should opt in.
+    """
+    record = mini_apps.snapshot_view(record.view_id) or record
+    dataset = record.datasets.get(dataset_key)
+    if dataset is None:
+        raise KeyError(f"Unknown dataset_key: {dataset_key}")
+    dataset_revision = int(record.dataset_revisions.get(dataset_key, 0))
+    if dataset_revision <= int(base_revision):
+        raise ValueError(
+            f"Append target revision for {dataset_key} must advance beyond "
+            f"base {base_revision}; received {dataset_revision}"
+        )
+    scope_id = str(
+        (record.view_state.get("dataset_scopes") or {}).get(dataset_key) or ""
+    ) or None
+    provenance = dict(scope or {})
+    provenance.update(
+        {
+            "dataset_key": dataset_key,
+            "result_row_hash": dataset_row_hash(
+                record,
+                dataset_key,
+                dataset,
+                revision=dataset_revision,
+            ),
+        }
+    )
+    fallback = mini_apps.build_dataset_descriptor(
+        key=dataset_key,
+        dataset=dataset,
+        title=constants.DATASET_TITLES.get(dataset_key, dataset_key),
+        # A mismatched client must fetch from the beginning of THIS revision.
+        preview_limit=0,
+        scope_id=scope_id,
+        provenance=provenance,
+    )
+    return MiniAppPayload(
+        type="PATCH_VIEW_STATE",
+        view_id=record.view_id,
+        app_id=app_id,
+        title=record.title,
+        status="ready",
+        patch={
+            "view_state": {
+                **view_state_patch,
+                "dataset_revisions": dict(record.dataset_revisions),
+            },
+            "dataset_deltas": {
+                dataset_key: {
+                    "operation": "append",
+                    "base_revision": int(base_revision),
+                    "dataset_revision": dataset_revision,
+                    "base_row_count": int(base_row_count),
+                    "rows": [list(row) for row in append_rows],
+                    "fallback": fallback.model_dump(mode="json"),
+                }
+            },
+        },
     )

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 
@@ -17,6 +17,13 @@ interface Props {
   sourceModel?: string;
   /** Hide the CHART_NN id badge (mini-app hosts have no chart numbering). */
   hideId?: boolean;
+  onEvents?: Record<string, (params: unknown) => void>;
+  /**
+   * ECharts renderer. Defaults to canvas (existing behavior for reports and
+   * other mini-apps). "svg" renders vector text/marks that stay crisp at any
+   * zoom or devicePixelRatio — prefer it for dense analytic charts.
+   */
+  renderer?: "canvas" | "svg";
 }
 
 /** Palette for the dataView popup + its injected table. ECharts renders the
@@ -105,7 +112,7 @@ function chartLabel(chartId: string): string {
   return chartId.replace(/^chart[_-]?/i, "CHART_").toUpperCase();
 }
 
-function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId }: Props) {
+function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEvents, renderer = "canvas" }: Props) {
   const { isDark } = useTheme();
   const [showSql, setShowSql] = useState(false);
 
@@ -183,18 +190,52 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId }: Prop
   const chartHeight =
     ((spec as Record<string, unknown>)?._cerebro_height as string) || "350px";
 
+  // Canvas backing stores go stale (→ stretched, fuzzy text) when the card's
+  // container resizes without a window resize event (grid reflows, section
+  // swaps). echarts-for-react only listens to window resize; observe the
+  // container and resize the instance directly (rAF-debounced).
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const echartsRef = useRef<ReactECharts | null>(null);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        echartsRef.current?.getEchartsInstance()?.resize();
+      });
+    });
+    observer.observe(el);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, []);
+  const rendererOpts = useMemo(
+    () => ({
+      renderer,
+      devicePixelRatio:
+        typeof window !== "undefined" ? window.devicePixelRatio : undefined,
+    }),
+    [renderer],
+  );
+
   return (
     <div id={`chart-${chartId}`} className="chart-card">
       <div className="chart-card-head">
         <div className="chart-card-title">{title || ""}</div>
         {!hideId && <div className="chart-card-id">{label}</div>}
       </div>
-      <div className="chart-card-body">
+      <div className="chart-card-body" ref={bodyRef}>
         <ReactECharts
+          ref={echartsRef}
           option={echartsOption}
           theme={isDark ? "cerebro-dark" : "cerebro-light"}
           style={{ width: "100%", height: chartHeight }}
           notMerge
+          onEvents={onEvents}
+          opts={rendererOpts}
         />
       </div>
       {showFoot && (

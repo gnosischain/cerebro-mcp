@@ -83,6 +83,76 @@ def _norm_ids(ids: list[str]) -> list[str]:
     return [str(s).strip().lower() for s in ids if s and str(s).strip()]
 
 
+def _enrichment_parts(
+    *, metadata_available: bool, prices_available: bool
+) -> dict[str, str]:
+    """SQL fragments that never reference an unavailable enrichment relation.
+
+    Transfer topology comes exclusively from ``FLOWS_RELATION``. Metadata and
+    prices may enrich that topology, but their absence must leave a query that
+    still returns every raw transfer group with nullable amount/USD fields.
+    """
+
+    use_metadata = bool(metadata_available)
+    use_prices = bool(prices_available and use_metadata)
+    joins = ""
+    if use_metadata:
+        joins += (
+            f"\n        LEFT JOIN {TOKENS_META_RELATION} AS m "
+            "ON m.token_address = d.token_address"
+        )
+    if use_prices:
+        joins += f"""
+        LEFT JOIN (
+            SELECT symbol, date, price, toUInt8(1) AS price_found
+            FROM {PRICES_RELATION}
+        ) AS p
+               ON p.symbol = m.token AND p.date = d.date"""
+
+    if use_metadata:
+        missing_metadata = "empty(coalesce(m.token_address, ''))"
+        normalized = (
+            "if(countIf(" + missing_metadata + ") > 0, "
+            "CAST(NULL AS Nullable(Float64)), "
+            f"sum({_AMOUNT_EXPR}))"
+        )
+        symbol = "any(m.token)"
+        unknown_decimals = f"countIf({missing_metadata})"
+    else:
+        normalized = "CAST(NULL AS Nullable(Float64))"
+        symbol = "CAST('' AS String)"
+        unknown_decimals = "count()"
+
+    if use_prices:
+        known_usd = _AGG_USD_EXPR
+        priced_rows = (
+            "countIf(p.price_found = 1 "
+            "AND notEmpty(coalesce(m.token_address, '')))"
+        )
+        unknown_price = (
+            "countIf(coalesce(p.price_found, 0) = 0 "
+            "AND notEmpty(coalesce(m.token_address, '')))"
+        )
+    else:
+        known_usd = "CAST(NULL AS Nullable(Float64))"
+        priced_rows = "toUInt64(0)"
+        # If metadata is present, every source row lacks price enrichment. If
+        # metadata itself is absent, unknown-decimal rows already express why
+        # quantitative enrichment is unavailable and must not be double-counted.
+        unknown_price = "count()" if use_metadata else "toUInt64(0)"
+
+    return {
+        "joins": joins,
+        "symbol": symbol,
+        "normalized": normalized,
+        "known_usd": known_usd,
+        "priced_rows": priced_rows,
+        "unknown_price_rows": unknown_price,
+        "unknown_decimals_rows": unknown_decimals,
+        "unknown_usd_rows": f"({unknown_price}) + ({unknown_decimals})",
+    }
+
+
 def build_flows_sql(
     *,
     frontier_ids: list[str],
@@ -92,6 +162,8 @@ def build_flows_sql(
     min_usd: float,
     tokens: list[str] | None,
     limit: int,
+    metadata_available: bool = True,
+    prices_available: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """Aggregated value-flow edges for one directional hop leg.
 
@@ -118,6 +190,10 @@ def build_flows_sql(
     if tokens:
         token_clause = " AND d.token_address IN {tokens:Array(String)}"
         params["tokens"] = _norm_ids(tokens)
+    enrich = _enrichment_parts(
+        metadata_available=metadata_available,
+        prices_available=prices_available,
+    )
     # Columns are qualified `d.` throughout: the SELECT aliases (`symbol`,
     # `amount_usd`, …) would otherwise shadow the joined columns of the same
     # name, which ClickHouse resolves to the ALIAS and then rejects or, worse,
@@ -127,20 +203,20 @@ def build_flows_sql(
             d.`from` AS source_id,
             d.`to` AS target_id,
             d.token_address AS token_address,
-            any(m.token) AS symbol,
-            sum({_AMOUNT_EXPR}) AS amount,
-            {_AGG_USD_EXPR} AS amount_usd,
+            {enrich["symbol"]} AS symbol,
+            {enrich["normalized"]} AS amount,
+            {enrich["known_usd"]} AS amount_usd,
             sum(d.transfer_count) AS transfer_count,
             min(d.date) AS first_seen,
             max(d.date) AS last_seen,
-            {_UNKNOWN_USD_ROWS_EXPR} AS unknown_usd_rows
-        FROM {FLOWS_RELATION} AS d{_ENRICH_JOINS}
+            {enrich["unknown_usd_rows"]} AS unknown_usd_rows
+        FROM {FLOWS_RELATION} AS d{enrich["joins"]}
         WHERE d.{where_col} IN {{ids:Array(String)}}
           AND d.date >= toDate({{t0:DateTime}}) AND d.date < toDate({{t1:DateTime}})
           AND d.`from` != d.`to`{token_clause}
         GROUP BY source_id, target_id, token_address
         HAVING {_USD_ELIGIBILITY}
-        ORDER BY isNull(amount_usd), amount_usd DESC,
+        ORDER BY isNull(amount_usd), amount_usd DESC, transfer_count DESC,
                  source_id, target_id, token_address
         LIMIT {{lim:UInt32}}
     """
@@ -155,6 +231,8 @@ def build_flows_coverage_sql(
     t1_exclusive: str,
     min_usd: float,
     tokens: list[str] | None,
+    metadata_available: bool = True,
+    prices_available: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """Exact pre-budget coverage for one directional hop query.
 
@@ -180,15 +258,39 @@ def build_flows_coverage_sql(
     if tokens:
         token_clause = " AND d.token_address IN {tokens:Array(String)}"
         params["tokens"] = _norm_ids(tokens)
+    enrich = _enrichment_parts(
+        metadata_available=metadata_available,
+        prices_available=prices_available,
+    )
+    total_counterparties = (
+        f"""uniqExactIf(
+                {counterparty},
+                NOT has({{structural_terminals:Array(String)}}, {counterparty})
+                AND {counterparty} NOT IN (
+                    SELECT token_address FROM {TOKENS_META_RELATION}
+                )
+            )"""
+        if metadata_available
+        else "CAST(NULL AS Nullable(UInt64))"
+    )
+    contract_endpoint_edges = (
+        f"""countIf(
+                {counterparty} IN (
+                    SELECT token_address FROM {TOKENS_META_RELATION}
+                )
+            )"""
+        if metadata_available
+        else "CAST(NULL AS Nullable(UInt64))"
+    )
     sql = f"""
         WITH candidate_edges AS (
             SELECT
                 d.`from` AS source_id,
                 d.`to` AS target_id,
                 d.token_address AS token_address,
-                {_AGG_USD_EXPR} AS amount_usd,
-                {_UNKNOWN_USD_ROWS_EXPR} AS unknown_usd_rows
-            FROM {FLOWS_RELATION} AS d{_ENRICH_JOINS}
+                {enrich["known_usd"]} AS amount_usd,
+                {enrich["unknown_usd_rows"]} AS unknown_usd_rows
+            FROM {FLOWS_RELATION} AS d{enrich["joins"]}
             WHERE d.{where_col} IN {{ids:Array(String)}}
               AND d.date >= toDate({{t0:DateTime}})
               AND d.date < toDate({{t1:DateTime}})
@@ -201,13 +303,7 @@ def build_flows_coverage_sql(
             WHERE {_USD_ELIGIBILITY}
         )
         SELECT
-            uniqExactIf(
-                {counterparty},
-                NOT has({{structural_terminals:Array(String)}}, {counterparty})
-                AND {counterparty} NOT IN (
-                    SELECT token_address FROM {TOKENS_META_RELATION}
-                )
-            ) AS total_counterparties,
+            {total_counterparties} AS total_counterparties,
             count() AS total_edges,
             sumIf(amount_usd, isNotNull(amount_usd)) AS known_usd,
             if(
@@ -226,11 +322,7 @@ def build_flows_coverage_sql(
             countIf(
                 has({{structural_terminals:Array(String)}}, {counterparty})
             ) AS supply_event_edges,
-            countIf(
-                {counterparty} IN (
-                    SELECT token_address FROM {TOKENS_META_RELATION}
-                )
-            ) AS contract_endpoint_edges
+            {contract_endpoint_edges} AS contract_endpoint_edges
         FROM eligible_edges
     """
     return sql, params
@@ -297,22 +389,30 @@ def _timeline_params(
 
 
 def _timeline_eligible_pairs_cte(
-    *, direction: str, tokens: list[str] | None
+    *,
+    direction: str,
+    tokens: list[str] | None,
+    metadata_available: bool = True,
+    prices_available: bool = True,
 ) -> str:
     """Full-range eligible token edges, matching Money Trail's HAVING rule."""
     direction_clause, token_clause = _timeline_filters(
         direction=direction, tokens=tokens
+    )
+    enrich = _enrichment_parts(
+        metadata_available=metadata_available,
+        prices_available=prices_available,
     )
     return f"""
         SELECT
             d.`from` AS source_id,
             d.`to` AS target_id,
             d.token_address AS token_address,
-            any(m.token) AS symbol,
-            {_AGG_USD_EXPR} AS amount_usd,
+            {enrich["symbol"]} AS symbol,
+            {enrich["known_usd"]} AS amount_usd,
             sum(d.transfer_count) AS transfer_count,
-            {_UNKNOWN_USD_ROWS_EXPR} AS unknown_usd_rows
-        FROM {FLOWS_RELATION} AS d{_ENRICH_JOINS}
+            {enrich["unknown_usd_rows"]} AS unknown_usd_rows
+        FROM {FLOWS_RELATION} AS d{enrich["joins"]}
         WHERE {direction_clause}
           AND d.date >= toDate({{t0:DateTime}})
           AND d.date < toDate({{t1:DateTime}})
@@ -323,7 +423,11 @@ def _timeline_eligible_pairs_cte(
 
 
 def _timeline_candidate_pairs_cte(
-    *, direction: str, tokens: list[str] | None
+    *,
+    direction: str,
+    tokens: list[str] | None,
+    metadata_available: bool = True,
+    prices_available: bool = True,
 ) -> str:
     """Full-range token edges before the USD eligibility decision.
 
@@ -333,16 +437,20 @@ def _timeline_candidate_pairs_cte(
     direction_clause, token_clause = _timeline_filters(
         direction=direction, tokens=tokens
     )
+    enrich = _enrichment_parts(
+        metadata_available=metadata_available,
+        prices_available=prices_available,
+    )
     return f"""
         SELECT
             d.`from` AS source_id,
             d.`to` AS target_id,
             d.token_address AS token_address,
-            any(m.token) AS symbol,
-            {_AGG_USD_EXPR} AS amount_usd,
+            {enrich["symbol"]} AS symbol,
+            {enrich["known_usd"]} AS amount_usd,
             sum(d.transfer_count) AS transfer_count,
-            {_UNKNOWN_USD_ROWS_EXPR} AS unknown_usd_rows
-        FROM {FLOWS_RELATION} AS d{_ENRICH_JOINS}
+            {enrich["unknown_usd_rows"]} AS unknown_usd_rows
+        FROM {FLOWS_RELATION} AS d{enrich["joins"]}
         WHERE {direction_clause}
           AND d.date >= toDate({{t0:DateTime}})
           AND d.date < toDate({{t1:DateTime}})
@@ -360,6 +468,8 @@ def build_timeline_universe_sql(
     min_usd: float,
     tokens: list[str] | None,
     limit: int,
+    metadata_available: bool = True,
+    prices_available: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """Rank counterparties once over the *entire* applied Money Trail range.
 
@@ -368,7 +478,10 @@ def build_timeline_universe_sql(
     ``LIMIT n+1`` is the exact policy-cap signal.
     """
     eligible = _timeline_eligible_pairs_cte(
-        direction=direction, tokens=tokens
+        direction=direction,
+        tokens=tokens,
+        metadata_available=metadata_available,
+        prices_available=prices_available,
     )
     # The direction predicate guarantees at least one endpoint is a seed.  In
     # the both-direction case choose the non-seed endpoint deterministically.
@@ -398,7 +511,8 @@ def build_timeline_universe_sql(
         WHERE NOT has({{seed_ids:Array(String)}}, {counterparty})
           AND NOT has({{structural_terminals:Array(String)}}, {counterparty})
         GROUP BY counterparty_id
-        ORDER BY isNull(amount_usd), amount_usd DESC, counterparty_id
+        ORDER BY isNull(amount_usd), amount_usd DESC, transfer_count DESC,
+                 counterparty_id
         LIMIT {{lim:UInt32}}
     """
     return sql, params
@@ -412,10 +526,15 @@ def build_timeline_global_coverage_sql(
     t1_exclusive: str,
     min_usd: float,
     tokens: list[str] | None,
+    metadata_available: bool = True,
+    prices_available: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """Exact pre-budget global totals for the full applied range."""
     candidates = _timeline_candidate_pairs_cte(
-        direction=direction, tokens=tokens
+        direction=direction,
+        tokens=tokens,
+        metadata_available=metadata_available,
+        prices_available=prices_available,
     )
     counterparty = (
         "if(has({seed_ids:Array(String)}, source_id), target_id, source_id)"
@@ -460,16 +579,28 @@ def build_timeline_global_coverage_sql(
 
 
 def _timeline_bucketed_cte(
-    *, direction: str, tokens: list[str] | None, grain: str
+    *,
+    direction: str,
+    tokens: list[str] | None,
+    grain: str,
+    metadata_available: bool = True,
+    prices_available: bool = True,
 ) -> str:
     """Eligible full-range pairs re-aggregated at the requested bucket grain."""
     eligible = _timeline_eligible_pairs_cte(
-        direction=direction, tokens=tokens
+        direction=direction,
+        tokens=tokens,
+        metadata_available=metadata_available,
+        prices_available=prices_available,
     )
     direction_clause, token_clause = _timeline_filters(
         direction=direction, tokens=tokens
     )
     bucket = _timeline_bucket_expr(grain)
+    enrich = _enrichment_parts(
+        metadata_available=metadata_available,
+        prices_available=prices_available,
+    )
     return f"""
         WITH eligible_pairs AS ({eligible}),
         bucketed AS (
@@ -477,36 +608,17 @@ def _timeline_bucketed_cte(
                 d.`from` AS source_id,
                 d.`to` AS target_id,
                 d.token_address AS token_address,
-                any(m.token) AS symbol,
+                {enrich["symbol"]} AS symbol,
                 {bucket} AS bucket_start,
                 toString(sum(d.amount_raw)) AS raw_amount,
-                if(
-                    countIf(empty(coalesce(m.token_address, ''))) > 0,
-                    CAST(NULL AS Nullable(Float64)),
-                    sum(
-                        toFloat64(d.amount_raw)
-                        / pow(10, toFloat64(coalesce(m.decimals, 0)))
-                    )
-                ) AS normalized_amount,
-                if(
-                    countIf(p.price_found = 1) = 0,
-                    CAST(NULL AS Nullable(Float64)),
-                    sumIf({_AMOUNT_EXPR} * p.price, p.price_found = 1)
-                ) AS known_usd,
+                {enrich["normalized"]} AS normalized_amount,
+                {enrich["known_usd"]} AS known_usd,
                 sum(d.transfer_count) AS transfer_count,
-                countIf(
-                    p.price_found = 1
-                    AND notEmpty(coalesce(m.token_address, ''))
-                ) AS priced_source_rows,
+                {enrich["priced_rows"]} AS priced_source_rows,
                 count() AS source_rows,
-                countIf(
-                    coalesce(p.price_found, 0) = 0
-                    AND notEmpty(coalesce(m.token_address, ''))
-                ) AS unknown_price_rows,
-                countIf(
-                    empty(coalesce(m.token_address, ''))
-                ) AS unknown_decimals_rows
-            FROM {FLOWS_RELATION} AS d{_ENRICH_JOINS}
+                {enrich["unknown_price_rows"]} AS unknown_price_rows,
+                {enrich["unknown_decimals_rows"]} AS unknown_decimals_rows
+            FROM {FLOWS_RELATION} AS d{enrich["joins"]}
             INNER JOIN eligible_pairs AS e
                     ON e.source_id = d.`from`
                    AND e.target_id = d.`to`
@@ -531,10 +643,16 @@ def build_timeline_bucket_edges_sql(
     min_usd: float,
     tokens: list[str] | None,
     limit: int,
+    metadata_available: bool = True,
+    prices_available: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """Bucket edges restricted to one fixed, full-range-ranked universe."""
     bucketed = _timeline_bucketed_cte(
-        direction=direction, tokens=tokens, grain=grain
+        direction=direction,
+        tokens=tokens,
+        grain=grain,
+        metadata_available=metadata_available,
+        prices_available=prices_available,
     )
     params = _timeline_params(
         seed_ids=seed_ids,
@@ -576,10 +694,16 @@ def build_timeline_bucket_coverage_sql(
     grain: str,
     min_usd: float,
     tokens: list[str] | None,
+    metadata_available: bool = True,
+    prices_available: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """Exact pre-universe totals for every bucket in the applied window."""
     bucketed = _timeline_bucketed_cte(
-        direction=direction, tokens=tokens, grain=grain
+        direction=direction,
+        tokens=tokens,
+        grain=grain,
+        metadata_available=metadata_available,
+        prices_available=prices_available,
     )
     counterparty = (
         "if(has({seed_ids:Array(String)}, source_id), target_id, source_id)"
@@ -669,9 +793,11 @@ def build_bridge_safety_gate_sql() -> tuple[str, dict[str, Any]]:
     The deployed bridge model is incremental, so validating only the requested
     time window can hide polluted historical partitions left behind by an old
     model definition.  This query therefore scans the *current full relation*
-    and returns exactly one aggregate row.  Runtime and memory settings bound
-    the probe: a timeout or resource-limit failure means cleanliness could not
-    be proven and callers must leave bridge enrichment disabled.
+    and returns exactly one aggregate row. The caller must execute it with the
+    internal contract-probe ``QueryBudget``: embedding a ``SETTINGS`` clause
+    here collides with the shared guarded-query wrapper. A timeout or resource
+    failure means cleanliness could not be proven and callers must leave
+    bridge enrichment disabled.
 
     The materialized schema cannot reconstruct both original transfer
     endpoints.  It can, however, conservatively identify endpoint ambiguity
@@ -710,11 +836,6 @@ def build_bridge_safety_gate_sql() -> tuple[str, dict[str, Any]]:
             max(date) AS last_date
         FROM {BRIDGES_RELATION}
         LIMIT 1
-        SETTINGS
-            max_execution_time = 5,
-            max_memory_usage = 67108864,
-            max_result_rows = 1,
-            result_overflow_mode = 'throw'
     """
     return sql, {}
 

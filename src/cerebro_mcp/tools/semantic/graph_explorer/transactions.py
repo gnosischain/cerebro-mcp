@@ -10,8 +10,7 @@ aggregation destroys.
 Three entry points, matching how an investigation actually arrives here:
   1. explicit ``tx_hashes`` — "what did this transaction do?"
   2. ``seed_node_id`` — "show me what this address has been doing" across the
-     complete address index plus its uncovered RPC head (stored execution logs
-     remain a rollout fallback while the additive index is absent)
+     existing execution transaction/log tables plus their uncovered RPC head
   3. ``seed_node_id`` + ``counterparty_ids`` — "show me the transactions behind
      this flow edge", i.e. the drill-down that the 25-row evidence panel could
      never honestly provide.
@@ -30,35 +29,40 @@ trailing transactions and says so.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from mcp.types import CallToolResult
 
-from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.clients.clickhouse import (
+    DISCOVERY_QUERY_BUDGET,
+    INTERACTIVE_QUERY_BUDGET,
+    ClickHouseManager,
+    QueryBudget,
+)
 from cerebro_mcp.clients.raw_rpc import RpcRouter
 from cerebro_mcp.semantic.tx_queries import (
     BURN_ADDRESSES,
     CHAIN_LOG_RELATIONS,
+    CHAIN_TRANSACTION_RELATIONS,
     PRICES_RELATION,
     TOKENS_META_RELATION,
-    TX_ADDRESS_INDEX_RELATION,
     build_all_history_tx_discovery_chunk_sql,
     build_data_horizon_sql,
-    build_indexed_tx_discovery_sql,
-    build_indexed_tx_membership_sql,
     build_leg_total_sql,
     build_legs_sql,
-    build_latest_indexed_activity_sql,
     build_token_contract_sql,
     build_tx_discovery_sql,
-    build_tx_index_horizon_sql,
 )
 from cerebro_mcp.tools.visualization import mini_apps
 
@@ -70,7 +74,12 @@ from .forensics import (
     source_record,
     validate_source_contract,
 )
-from .state import build_payload, dataset_from_rows, short_id
+from .state import (
+    build_dataset_append_patch,
+    build_payload,
+    dataset_from_rows,
+    short_id,
+)
 from .ui_tools import _normalize_node_id
 
 logger = logging.getLogger(__name__)
@@ -121,6 +130,323 @@ _address_rpc_cache_lock = threading.Lock()
 _address_rpc_cache: dict[str, tuple[int, list[list[Any]]]] = {}
 _GNOSIS_CHAIN_GENESIS_UTC = datetime(2018, 10, 8)
 _MAX_RPC_DIRECT_TAIL_BLOCKS = 10_000
+_DISCOVERY_MIN_SLICE = timedelta(hours=1)
+# Real-data timings for the audited address: a seven-day June tile took 7.58s
+# and a two-day tile 5.29s, while the one-day tile containing the known
+# activity completed in 2.32s.  Start with the largest measured-safe unit and
+# adapt down from there on timeout/memory pressure.
+_DISCOVERY_DEFAULT_TILE_SECONDS = 24 * 60 * 60
+_DISCOVERY_MIN_TILE_SECONDS = int(_DISCOVERY_MIN_SLICE.total_seconds())
+_DISCOVERY_WALL_BUDGET_SECONDS = 3.75
+_DISCOVERY_HORIZON_QUERY_BUDGET = QueryBudget(
+    # A one-second guard made the four-relation UNION horizon probe fail at
+    # ~1004ms on the live warehouse, which incorrectly made every discovery
+    # source look unavailable before candidate scanning even began.
+    max_execution_time=5,
+    max_memory_usage=256 * 2**20,
+    max_result_rows=100,
+    max_threads=1,
+)
+_ADDRESS_DISCOVERY_QUERY_BUDGET = QueryBudget(
+    max_execution_time=4,
+    max_memory_usage=1536 * 2**20,
+    max_result_rows=10_000,
+    max_threads=2,
+)
+_TX_CONTEXT_COLUMNS = [
+    "tx_hash",
+    "initiator",
+    "called_contract",
+    "method_selector",
+    "input",
+    "nonce",
+    "native_value_raw",
+    "gas_limit",
+    "gas_used",
+    "effective_gas_price",
+    "fee_wei",
+    "receipt_status",
+    "block_number",
+    "transaction_index",
+    "block_timestamp",
+    "matched_because",
+]
+
+
+def _encode_discovery_cursor(row: list[Any]) -> str:
+    """Opaque, deterministic keyset cursor for newest-first candidates."""
+    payload = json.dumps(
+        [int(row[1] or 0), int(row[2] or 0), _hex0x(str(row[0]))],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+@dataclass(frozen=True)
+class _CoverageDiscoveryCursor:
+    """Continue an execution-time coverage scan without skipping a gap.
+
+    ``before_time`` is always an exclusive upper bound.  When
+    ``retry_from_time`` is present the cursor targets that exact unresolved
+    slice first; after it succeeds, pagination continues below its lower
+    boundary.  Older version-one cursors omit the lower bound and retain the
+    original "continue before" behavior.
+    """
+
+    before_time: str
+    tile_seconds: int = _DISCOVERY_DEFAULT_TILE_SECONDS
+    retry_from_time: str | None = None
+
+
+DiscoveryCursor = tuple[int, int, str] | _CoverageDiscoveryCursor
+
+
+def _encode_coverage_discovery_cursor(
+    before_time: str,
+    *,
+    tile_seconds: int = _DISCOVERY_DEFAULT_TILE_SECONDS,
+    retry_from_time: str | None = None,
+) -> str:
+    boundary = datetime.fromisoformat(str(before_time).replace("Z", "+00:00"))
+    if boundary.tzinfo is None:
+        boundary = boundary.replace(tzinfo=timezone.utc)
+    else:
+        boundary = boundary.astimezone(timezone.utc)
+    retry_start: datetime | None = None
+    if retry_from_time is not None:
+        retry_start = datetime.fromisoformat(
+            str(retry_from_time).replace("Z", "+00:00")
+        )
+        if retry_start.tzinfo is None:
+            retry_start = retry_start.replace(tzinfo=timezone.utc)
+        else:
+            retry_start = retry_start.astimezone(timezone.utc)
+        if (
+            retry_start < _GNOSIS_CHAIN_GENESIS_UTC.replace(tzinfo=timezone.utc)
+            or retry_start >= boundary
+        ):
+            raise ValueError("coverage retry slice must be within chain history")
+    cursor_payload: dict[str, Any] = {
+        "v": 2 if retry_start is not None else 1,
+        "kind": "coverage",
+        "before_time": boundary.isoformat().replace("+00:00", "Z"),
+        "tile_seconds": max(
+            _DISCOVERY_MIN_TILE_SECONDS,
+            min(int(tile_seconds), _DISCOVERY_DEFAULT_TILE_SECONDS),
+        ),
+    }
+    if retry_start is not None:
+        cursor_payload["retry_from_time"] = retry_start.isoformat().replace(
+            "+00:00", "Z"
+        )
+    payload = json.dumps(
+        cursor_payload,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_discovery_cursor(value: str) -> DiscoveryCursor:
+    try:
+        encoded = str(value or "").strip()
+        raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        decoded = json.loads(raw.decode("utf-8"))
+        if isinstance(decoded, dict):
+            if decoded.get("v") not in {1, 2} or decoded.get("kind") != "coverage":
+                raise ValueError("unsupported discovery cursor")
+            boundary = datetime.fromisoformat(
+                str(decoded.get("before_time") or "").replace("Z", "+00:00")
+            )
+            if boundary.tzinfo is None:
+                boundary = boundary.replace(tzinfo=timezone.utc)
+            boundary = boundary.astimezone(timezone.utc)
+            if boundary <= _GNOSIS_CHAIN_GENESIS_UTC.replace(tzinfo=timezone.utc):
+                raise ValueError("coverage cursor is already at chain genesis")
+            tile_seconds = max(
+                _DISCOVERY_MIN_TILE_SECONDS,
+                min(
+                    int(
+                        decoded.get("tile_seconds")
+                        or _DISCOVERY_DEFAULT_TILE_SECONDS
+                    ),
+                    _DISCOVERY_DEFAULT_TILE_SECONDS,
+                ),
+            )
+            retry_from_time: str | None = None
+            if decoded.get("retry_from_time") is not None:
+                retry_start = datetime.fromisoformat(
+                    str(decoded["retry_from_time"]).replace("Z", "+00:00")
+                )
+                if retry_start.tzinfo is None:
+                    retry_start = retry_start.replace(tzinfo=timezone.utc)
+                else:
+                    retry_start = retry_start.astimezone(timezone.utc)
+                if (
+                    retry_start
+                    < _GNOSIS_CHAIN_GENESIS_UTC.replace(tzinfo=timezone.utc)
+                    or retry_start >= boundary
+                ):
+                    raise ValueError("invalid coverage retry slice")
+                retry_from_time = retry_start.isoformat().replace("+00:00", "Z")
+            return _CoverageDiscoveryCursor(
+                before_time=boundary.isoformat().replace("+00:00", "Z"),
+                tile_seconds=tile_seconds,
+                retry_from_time=retry_from_time,
+            )
+        block, index, transaction_hash = decoded
+        transaction_hash = _hex0x(str(transaction_hash))
+        if not re.fullmatch(r"0x[0-9a-f]{64}", transaction_hash):
+            raise ValueError("invalid transaction hash")
+        return int(block), int(index), transaction_hash
+    except (binascii.Error, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("cursor is not a valid Graph Explorer discovery cursor") from exc
+
+
+def _coverage_continuation_boundary(
+    scanned_ranges: list[dict[str, str]], *, through: str
+) -> str | None:
+    """Return the oldest boundary in the contiguous fully-scanned newest suffix.
+
+    We never jump across an uncovered tile.  The returned instant is exclusive
+    for the next page: everything at/after it was already searched.
+    """
+    try:
+        horizon = datetime.fromisoformat(str(through).replace("Z", "+00:00"))
+        if horizon.tzinfo is None:
+            horizon = horizon.replace(tzinfo=timezone.utc)
+        else:
+            horizon = horizon.astimezone(timezone.utc)
+        boundary = horizon + timedelta(seconds=1)
+        parsed: list[tuple[datetime, datetime]] = []
+        for item in scanned_ranges:
+            lo = datetime.fromisoformat(str(item["t0"]).replace("Z", "+00:00"))
+            hi = datetime.fromisoformat(str(item["t1"]).replace("Z", "+00:00"))
+            if lo.tzinfo is None:
+                lo = lo.replace(tzinfo=timezone.utc)
+            else:
+                lo = lo.astimezone(timezone.utc)
+            if hi.tzinfo is None:
+                hi = hi.replace(tzinfo=timezone.utc)
+            else:
+                hi = hi.astimezone(timezone.utc)
+            if lo < hi:
+                parsed.append((lo, hi))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    advanced = True
+    while advanced:
+        advanced = False
+        for lo, hi in parsed:
+            if hi == boundary and lo < boundary:
+                boundary = lo
+                advanced = True
+                break
+    newest_end = horizon + timedelta(seconds=1)
+    if (
+        boundary >= newest_end
+        or boundary <= _GNOSIS_CHAIN_GENESIS_UTC.replace(tzinfo=timezone.utc)
+    ):
+        return None
+    return boundary.isoformat().replace("+00:00", "Z")
+
+
+def _newest_uncovered_retry_slice(
+    uncovered_ranges: list[dict[str, str]],
+    *,
+    tile_seconds: int,
+) -> tuple[str, str] | None:
+    """Return a bounded slice of the newest unresolved execution range.
+
+    Coverage may contain both the tile that actually failed and a broad
+    synthetic range describing older work that was deliberately not attempted.
+    Selecting the range with the newest exclusive end retries the blocking gap
+    first.  Capping it to the next adaptive tile ensures a multi-year
+    "not-scanned" range never turns back into an unbounded query.
+    """
+    parsed: list[tuple[datetime, datetime]] = []
+    try:
+        for item in uncovered_ranges:
+            lo = datetime.fromisoformat(str(item["t0"]).replace("Z", "+00:00"))
+            hi = datetime.fromisoformat(str(item["t1"]).replace("Z", "+00:00"))
+            if lo.tzinfo is None:
+                lo = lo.replace(tzinfo=timezone.utc)
+            else:
+                lo = lo.astimezone(timezone.utc)
+            if hi.tzinfo is None:
+                hi = hi.replace(tzinfo=timezone.utc)
+            else:
+                hi = hi.astimezone(timezone.utc)
+            lo = max(lo, _GNOSIS_CHAIN_GENESIS_UTC.replace(tzinfo=timezone.utc))
+            if lo < hi:
+                parsed.append((lo, hi))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not parsed:
+        return None
+    lo, hi = max(parsed, key=lambda bounds: (bounds[1], bounds[0]))
+    bounded_seconds = max(
+        _DISCOVERY_MIN_TILE_SECONDS,
+        min(int(tile_seconds), _DISCOVERY_DEFAULT_TILE_SECONDS),
+    )
+    retry_start = max(lo, hi - timedelta(seconds=bounded_seconds))
+    return (
+        retry_start.isoformat().replace("+00:00", "Z"),
+        hi.isoformat().replace("+00:00", "Z"),
+    )
+
+
+def _uncovered_requires_smaller_tile(
+    uncovered_ranges: list[dict[str, str]],
+) -> bool:
+    """Return true only when ClickHouse rejected an attempted tile.
+
+    Reaching the loader's own wall budget means older work was not attempted;
+    it is pagination, not evidence that the current one-day tile is too large.
+    Shrinking on that signal made every subsequent click cover only half a day.
+    """
+    for item in uncovered_ranges:
+        reason = str(item.get("reason") or "")
+        if "interactive discovery wall-time budget reached" in reason.lower():
+            continue
+        if _is_subdividable_discovery_error(RuntimeError(reason)):
+            return True
+    return False
+
+
+def _is_subdividable_discovery_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "timeout",
+            "timed out",
+            "time limit",
+            "memory limit exceeded",
+            "memory_limit_exceeded",
+            "overcommittracker",
+            "overcommit tracker",
+            "code: 241",
+            "error code 241",
+        )
+    )
+
+
+def _coalesce_scanned_ranges(
+    ranges: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Compact adjacent internal tiles before publishing scope metadata."""
+    if not ranges:
+        return []
+    ordered = sorted(ranges, key=lambda item: (item["t0"], item["t1"]))
+    merged: list[dict[str, str]] = []
+    for item in ordered:
+        if merged and merged[-1]["t1"] == item["t0"]:
+            merged[-1]["t1"] = item["t1"]
+        else:
+            merged.append(dict(item))
+    return merged
 
 
 def _raw_preview(value: Any, limit: int = 130) -> str:
@@ -132,6 +458,9 @@ def _legs_from_receipts(
     hashes: list[str],
     *,
     raw_receipt_rows: list[list[Any]] | None = None,
+    transaction_context_rows: list[list[Any]] | None = None,
+    match_address: str = "",
+    filter_tokens: list[str] | None = None,
 ) -> tuple[
     list[list[Any]],
     list[str],
@@ -170,9 +499,49 @@ def _legs_from_receipts(
         logger.info("tx mode: RPC unavailable, falling back to SQL: %s", exc)
         return rows, list(hashes), statuses, blocks, decode_failures
     block_timestamps: dict[int, str] = {}
-    for h in hashes:
+    normalized_match = _normalize_node_id(match_address) if match_address else ""
+    normalized_tokens = {
+        _normalize_node_id(token) for token in (filter_tokens or []) if token
+    }
+
+    def quantity(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
         try:
-            rec = client.request("eth_getTransactionReceipt", [_hex0x(h)])
+            return int(str(value), 16)
+        except (TypeError, ValueError):
+            return None
+
+    for h in hashes:
+        tx: dict[str, Any] | None = None
+        try:
+            if transaction_context_rows is None:
+                rec = client.request("eth_getTransactionReceipt", [_hex0x(h)])
+            else:
+                # Receipt and envelope are independent RPC reads. Fetching them
+                # concurrently keeps selection latency close to one round trip
+                # without downloading a full block's transaction objects.
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    receipt_future = pool.submit(
+                        client.request, "eth_getTransactionReceipt", [_hex0x(h)]
+                    )
+                    tx_future = pool.submit(
+                        client.request, "eth_getTransactionByHash", [_hex0x(h)]
+                    )
+                    rec = receipt_future.result()
+                    try:
+                        tx_value = tx_future.result()
+                        tx = tx_value if isinstance(tx_value, dict) else None
+                    except Exception as exc:
+                        # The receipt remains authoritative for its log set.
+                        # Missing envelope context makes enrichment partial; it
+                        # must not erase a successfully read receipt.
+                        logger.info(
+                            "tx mode: transaction envelope failed for %s: %s", h, exc
+                        )
+                        tx = None
         except Exception as exc:
             logger.info("tx mode: receipt failed for %s: %s", h, exc)
             unresolved.append(h)
@@ -235,6 +604,65 @@ def _legs_from_receipts(
             except Exception as exc:  # timestamp is useful, not leg authority
                 logger.info("tx mode: block timestamp failed for %s: %s", block, exc)
                 block_timestamps[block] = ""
+
+        if transaction_context_rows is not None:
+            envelope = tx or {}
+            initiator = _normalize_node_id(str(envelope.get("from") or ""))
+            called_contract = _normalize_node_id(str(envelope.get("to") or ""))
+            input_data = str(envelope.get("input") or "")
+            method_selector = (
+                input_data[:10].lower()
+                if input_data.startswith("0x") and len(input_data) >= 10
+                else ""
+            )
+            matched_because: list[str] = []
+            if normalized_match:
+                if initiator == normalized_match:
+                    matched_because.append("direct_sender")
+                if called_contract == normalized_match:
+                    matched_because.append("direct_recipient")
+                for rpc_log in rec.get("logs") or []:
+                    topics = rpc_log.get("topics") or []
+                    if len(topics) != 3 or str(topics[0]).lower() != TRANSFER_TOPIC0:
+                        continue
+                    source = "0x" + str(topics[1])[-40:].lower()
+                    target = "0x" + str(topics[2])[-40:].lower()
+                    token = _normalize_node_id(str(rpc_log.get("address") or ""))
+                    if source == normalized_match:
+                        matched_because.append("erc20_sender")
+                    if target == normalized_match:
+                        matched_because.append("erc20_recipient")
+                    if normalized_tokens and token in normalized_tokens:
+                        matched_because.append("token_filter")
+            if not matched_because:
+                matched_because.append("explicit_hash")
+            gas_used = quantity(rec.get("gasUsed"))
+            gas_price = quantity(
+                rec.get("effectiveGasPrice") or envelope.get("gasPrice")
+            )
+            native_value = quantity(envelope.get("value"))
+            transaction_context_rows.append(
+                [
+                    _hex0x(h),
+                    initiator,
+                    called_contract,
+                    method_selector,
+                    input_data,
+                    quantity(envelope.get("nonce")),
+                    str(native_value) if native_value is not None else None,
+                    quantity(envelope.get("gas")),
+                    gas_used,
+                    gas_price,
+                    gas_used * gas_price
+                    if gas_used is not None and gas_price is not None
+                    else None,
+                    status,
+                    block,
+                    tx_index,
+                    block_timestamps.get(block, ""),
+                    sorted(set(matched_because)),
+                ]
+            )
         for log in rec.get("logs") or []:
             topics = log.get("topics") or []
             # 3 topics == ERC-20 Transfer; 4 means ERC-721 (tokenId indexed).
@@ -521,9 +949,9 @@ def _discover_address_direct_transactions_rpc(
     """Discover direct sender/recipient transactions in a small RPC head gap.
 
     Standard JSON-RPC has no address index. Scanning full blocks is therefore
-    permitted only for the bounded gap after the DBT index watermark; it is
-    never a full-history fallback. Transfer-log discovery runs separately and
-    the two result sets are merged by transaction hash.
+    permitted only for the bounded gap after the common stored execution-table
+    watermark; it is never a full-history fallback. Transfer-log discovery runs
+    separately and the two result sets are merged by transaction hash.
     """
     normalized = _normalize_node_id(address)
     if not normalized or not _RPC_ADDRESS_RE.fullmatch(normalized):
@@ -536,7 +964,7 @@ def _discover_address_direct_transactions_rpc(
     if width > max(1, int(max_blocks)):
         raise RuntimeError(
             f"RPC direct-transaction tail is {width} blocks; safety cap is "
-            f"{max_blocks}. Refresh the address index before retrying."
+            f"{max_blocks}. Refresh the execution ingestion before retrying."
         )
 
     client = (router or RpcRouter.from_settings()).standard
@@ -600,7 +1028,7 @@ def _discover_address_direct_transactions_rpc(
 
 
 def _merge_tx_discovery_rows(*groups: list[list[Any]]) -> list[list[Any]]:
-    """Merge direct/index/Transfer discoveries without inventing evidence."""
+    """Merge direct/Transfer discoveries without inventing evidence."""
     merged: dict[str, list[Any]] = {}
     for group in groups:
         for raw in group:
@@ -627,6 +1055,83 @@ def _merge_tx_discovery_rows(*groups: list[list[Any]]) -> list[list[Any]]:
     )
 
 
+def _append_only_discovery_delta(
+    previous_rows: list[list[Any]], merged_rows: list[list[Any]]
+) -> list[list[Any]] | None:
+    """Return the strict older-page suffix, or ``None`` when replacement is safer.
+
+    Keyset pagination guarantees that an older page extends the existing
+    newest-first list.  If any prior row changed position/value, the response
+    is not append-only and must use the ordinary full snapshot protocol.
+    """
+    previous = [list(row) for row in previous_rows]
+    merged = [list(row) for row in merged_rows]
+    if len(merged) < len(previous) or merged[: len(previous)] != previous:
+        return None
+    return merged[len(previous) :]
+
+
+def _hydrate_rpc_discovery_timestamps(
+    rows: list[list[Any]],
+    *,
+    router: RpcRouter | None = None,
+    max_workers: int = 8,
+) -> list[list[Any]]:
+    """Fill candidate timestamps with header-only RPC calls.
+
+    Transfer logs carry a block number but not its timestamp. Explicit UTC
+    discovery bounds therefore require the corresponding block headers; a
+    transaction-filled block is neither necessary nor requested.
+    """
+    pending_blocks = sorted(
+        {
+            int(row[1] or 0)
+            for row in rows
+            if int(row[1] or 0) and not str(row[3] or "")
+        }
+    )
+    if not pending_blocks:
+        return [list(row) for row in rows]
+    client = (router or RpcRouter.from_settings()).standard
+
+    def fetch(block_number: int) -> tuple[int, str]:
+        block = client.request("eth_getBlockByNumber", [hex(block_number), False])
+        if not isinstance(block, dict):
+            raise RuntimeError(f"missing block header {block_number}")
+        timestamp = int(str(block.get("timestamp") or "0x0"), 16)
+        return (
+            block_number,
+            datetime.fromtimestamp(timestamp, timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            if timestamp
+            else "",
+        )
+
+    timestamps: dict[int, str] = {}
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(max_workers, len(pending_blocks)))
+    ) as pool:
+        for block_number, timestamp in pool.map(fetch, pending_blocks):
+            timestamps[block_number] = timestamp
+    hydrated: list[list[Any]] = []
+    for raw in rows:
+        row = list(raw)
+        if not str(row[3] or ""):
+            row[3] = timestamps.get(int(row[1] or 0), "")
+        hydrated.append(row)
+    return hydrated
+
+
+def _candidate_precedes(
+    row: list[Any], cursor: tuple[int, int, str] | None
+) -> bool:
+    if cursor is None:
+        return True
+    row_key = (int(row[1] or 0), int(row[2] or 0), _hex0x(str(row[0])))
+    return row_key < cursor
+
+
 def _discover_address_transactions_execution(
     ch: ClickHouseManager,
     address: str,
@@ -634,8 +1139,16 @@ def _discover_address_transactions_execution(
     through: str,
     limit: int,
     max_workers: int = 4,
-) -> tuple[list[list[Any]], int | None, bool, int]:
-    """Use stored execution logs as a newest-first address index.
+    since: str | None = None,
+    before: tuple[int, int, str] | None = None,
+    activity_kinds: list[str] | None = None,
+    tokens: list[str] | None = None,
+    detailed: bool = False,
+    tile_seconds: int = _DISCOVERY_DEFAULT_TILE_SECONDS,
+) -> tuple[list[list[Any]], int | None, bool, int] | tuple[
+    list[list[Any]], int | None, bool, int, dict[str, Any]
+]:
+    """Page stored execution transactions and Transfer logs newest first.
 
     ClickHouse cannot complete one unbounded topic scan inside the service's
     30-second safety limit. Newest-first storage pages stop only after the
@@ -647,39 +1160,109 @@ def _discover_address_transactions_execution(
     if horizon.tzinfo is not None:
         horizon = horizon.astimezone(timezone.utc).replace(tzinfo=None)
     end = horizon + timedelta(seconds=1)
+    start = _GNOSIS_CHAIN_GENESIS_UTC
+    if since:
+        start = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+        if start.tzinfo is not None:
+            start = start.astimezone(timezone.utc).replace(tzinfo=None)
+        start = max(start, _GNOSIS_CHAIN_GENESIS_UTC)
+    if end <= start:
+        coverage = {
+            "scanned_ranges": [],
+            "uncovered_ranges": [],
+            "older_history_unscanned": False,
+        }
+        base: tuple[list[list[Any]], int | None, bool, int] = ([], 0, True, 0)
+        return (*base, coverage) if detailed else base
 
     effective_limit = max(1, int(limit))
+    effective_tile_seconds = max(
+        _DISCOVERY_MIN_TILE_SECONDS,
+        min(int(tile_seconds), _DISCOVERY_DEFAULT_TILE_SECONDS),
+    )
+    tile_span = timedelta(seconds=effective_tile_seconds)
+    deadline = time.monotonic() + _DISCOVERY_WALL_BUDGET_SECONDS
 
     chunks: list[tuple[datetime, datetime]] = []
-    cursor = _GNOSIS_CHAIN_GENESIS_UTC
+    cursor = start
     while cursor < end:
-        # The raw tables are ordered by time/block. Seven-day predicates are
-        # the measured fast path (~1.2s) and avoid paying a 30s timeout before
-        # adaptive splitting. These pages still tile genesis→horizon exactly.
-        chunk_end = min(cursor + timedelta(days=7), end)
+        # The raw tables are ordered by time/block. One day is the largest
+        # measured-safe interactive tile; a coverage cursor can reduce it only
+        # after an actual query timeout or memory rejection.
+        chunk_end = min(cursor + tile_span, end)
         chunks.append((cursor, chunk_end))
         cursor = chunk_end
 
-    def read_chunk(bounds: tuple[datetime, datetime]) -> tuple[list[list[Any]], int]:
+    def publish_bound(value: datetime) -> str:
+        return value.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def read_chunk(
+        bounds: tuple[datetime, datetime],
+    ) -> tuple[
+        list[list[Any]],
+        int,
+        list[dict[str, str]],
+        list[dict[str, str]],
+    ]:
         lo, hi = bounds
+        if time.monotonic() >= deadline:
+            return (
+                [],
+                0,
+                [],
+                [{
+                    "t0": publish_bound(lo),
+                    "t1": publish_bound(hi),
+                    "reason": "interactive discovery wall-time budget reached",
+                }],
+            )
         sql, params = build_all_history_tx_discovery_chunk_sql(
             address_ids=[address],
             t0=lo.strftime("%Y-%m-%d %H:%M:%S"),
             t1_exclusive=hi.strftime("%Y-%m-%d %H:%M:%S"),
             limit=effective_limit,
+            before_block=before[0] if before else None,
+            before_index=before[1] if before else None,
+            before_hash=before[2] if before else None,
+            activity_kinds=activity_kinds,
+            tokens=tokens,
         )
         try:
-            result = _run(ch, sql, params)
+            result = _run(
+                ch,
+                sql,
+                params,
+                query_budget=_ADDRESS_DISCOVERY_QUERY_BUDGET,
+            )
         except Exception as exc:
             duration = hi - lo
-            message = str(exc).lower()
-            if (
-                duration > timedelta(days=1)
-                and ("timeout" in message or "time limit" in message)
-            ):
+            if _is_subdividable_discovery_error(exc) and duration > _DISCOVERY_MIN_SLICE:
                 midpoint = lo + duration / 2
-                left_rows, left_total = read_chunk((lo, midpoint))
-                right_rows, right_total = read_chunk((midpoint, hi))
+                # Newest half first. This preserves one contiguous scanned
+                # suffix even when the wall clock expires during subdivision.
+                right_rows, right_total, right_scanned, right_uncovered = read_chunk(
+                    (midpoint, hi)
+                )
+                if right_uncovered:
+                    return (
+                        right_rows[: effective_limit + 1],
+                        right_total,
+                        right_scanned,
+                        [
+                            {
+                                "t0": publish_bound(lo),
+                                "t1": publish_bound(midpoint),
+                                "reason": (
+                                    "not scanned below an unresolved newer tile: "
+                                    f"{right_uncovered[0]['reason']}"
+                                ),
+                            },
+                            *right_uncovered,
+                        ],
+                    )
+                left_rows, left_total, left_scanned, left_uncovered = read_chunk(
+                    (lo, midpoint)
+                )
                 merged = [*left_rows, *right_rows]
                 merged.sort(
                     key=lambda row: (
@@ -689,39 +1272,139 @@ def _discover_address_transactions_execution(
                     ),
                     reverse=True,
                 )
-                return merged[: effective_limit + 1], left_total + right_total
+                return (
+                    merged[: effective_limit + 1],
+                    left_total + right_total,
+                    [*left_scanned, *right_scanned],
+                    [*left_uncovered, *right_uncovered],
+                )
+            if detailed and _is_subdividable_discovery_error(exc):
+                return (
+                    [],
+                    0,
+                    [],
+                    [
+                        {
+                            "t0": publish_bound(lo),
+                            "t1": publish_bound(hi),
+                            "reason": str(exc),
+                        }
+                    ],
+                )
             raise
         rows = [list(row) for row in result.rows]
         total = int(rows[0][6] or 0) if rows else 0
-        return [row[:6] for row in rows], total
+        return (
+            [row[:6] for row in rows],
+            total,
+            [{"t0": publish_bound(lo), "t1": publish_bound(hi)}],
+            [],
+        )
 
     chunks.reverse()  # newest first; result admission is count-based, not time-based
     candidates: list[list[Any]] = []
     scanned_total = 0
     complete = True
-    worker_count = max(1, min(max_workers, len(chunks))) if chunks else 1
-    with ThreadPoolExecutor(max_workers=worker_count) as pool:
-        for offset in range(0, len(chunks), worker_count):
-            batch = chunks[offset : offset + worker_count]
-            futures = [pool.submit(read_chunk, chunk) for chunk in batch]
-            for future in as_completed(futures):
-                rows, chunk_total = future.result()
-                candidates.extend(rows)
-                scanned_total += chunk_total
+    scanned_ranges: list[dict[str, str]] = []
+    uncovered_ranges: list[dict[str, str]] = []
+    older_history_unscanned = False
+    # Queries may execute in a small bounded batch, but their results are
+    # admitted strictly newest-first. If a newer tile is unresolved, any older
+    # result from the same batch is discarded and represented as uncovered;
+    # this keeps the published coverage monotonic without paying serial query
+    # latency for independent one-day tiles.
+    worker_count = max(1, min(int(max_workers), 4, len(chunks)))
+    offset = 0
+    while offset < len(chunks):
+        if time.monotonic() >= deadline:
+            remaining = chunks[offset:]
+            if remaining:
+                uncovered_ranges.append({
+                    "t0": publish_bound(min(bounds[0] for bounds in remaining)),
+                    "t1": publish_bound(max(bounds[1] for bounds in remaining)),
+                    "reason": "interactive discovery wall-time budget reached",
+                })
+            complete = False
+            older_history_unscanned = bool(remaining)
+            break
+        batch = chunks[offset : offset + worker_count]
+        if len(batch) == 1:
+            batch_results = [read_chunk(batch[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                futures = [pool.submit(read_chunk, chunk) for chunk in batch]
+                # Preserve chunk order rather than completion order.
+                batch_results = [future.result() for future in futures]
+
+        stop = False
+        for batch_index, (chunk, result) in enumerate(zip(batch, batch_results)):
+            rows, chunk_total, scanned, uncovered = result
+            candidates.extend(rows)
+            scanned_total += chunk_total
+            scanned_ranges.extend(scanned)
+            uncovered_ranges.extend(uncovered)
+            absolute_index = offset + batch_index
+            if uncovered:
+                # Never publish coverage below the newest unresolved tile.
+                remaining = chunks[absolute_index + 1 :]
+                if remaining:
+                    uncovered_ranges.append({
+                        "t0": publish_bound(min(bounds[0] for bounds in remaining)),
+                        "t1": publish_bound(max(bounds[1] for bounds in remaining)),
+                        "reason": (
+                            "not admitted below an unresolved newer tile: "
+                            f"{uncovered[0]['reason']}"
+                        ),
+                    })
+                complete = False
+                older_history_unscanned = True
+                stop = True
+                break
             if scanned_total > effective_limit:
                 complete = False
+                older_history_unscanned = absolute_index + 1 < len(chunks)
+                stop = True
                 break
+        if stop:
+            break
+        offset += len(batch)
+        if time.monotonic() >= deadline and offset < len(chunks):
+            remaining = chunks[offset:]
+            uncovered_ranges.append({
+                "t0": publish_bound(min(bounds[0] for bounds in remaining)),
+                "t1": publish_bound(max(bounds[1] for bounds in remaining)),
+                "reason": "interactive discovery wall-time budget reached",
+            })
+            complete = False
+            older_history_unscanned = True
+            break
+
+    if uncovered_ranges:
+        complete = False
 
     candidates = sorted(
         {str(row[0]): list(row) for row in candidates}.values(),
         key=lambda row: (int(row[1] or 0), int(row[2] or 0), str(row[0])),
         reverse=True,
     )[: effective_limit + 1]
-    return (
+    base_result: tuple[list[list[Any]], int | None, bool, int] = (
         candidates,
         scanned_total if complete else None,
         complete,
         scanned_total,
+    )
+    if not detailed:
+        return base_result
+    return (
+        *base_result,
+        {
+            "scanned_ranges": _coalesce_scanned_ranges(scanned_ranges),
+            "uncovered_ranges": sorted(
+                uncovered_ranges, key=lambda item: (item["t0"], item["t1"])
+            ),
+            "older_history_unscanned": older_history_unscanned,
+            "tile_seconds": effective_tile_seconds,
+        },
     )
 
 
@@ -745,10 +1428,22 @@ def _enrich_rpc_legs(
     raw amount while its normalized amount and USD value remain null. The leg is
     never dropped, because enrichment availability is not chain truth.
 
-    The current price relation is physically keyed by ``(symbol, date)`` and has
-    no token-address column. We may therefore display its price as an explicitly
-    partial enrichment, but must not pretend it is address-qualified: distinct
-    token contracts can share a symbol.
+    The price relation is physically keyed by ``(symbol, date)`` with no
+    token-address column, but that is not the ambiguity it appears to be. Every
+    symbol looked up here is sourced from ``stg_pools__tokens_meta`` (the
+    ``tokens_whitelist`` seed), which maps every token_address to a UNIQUE symbol
+    (verified: zero addresses carry >1 symbol; the only symbols shared across
+    addresses are the EURe/GBPe Monerium migrations -- same asset, same peg, with
+    adjacent validity windows meeting at the 2024-08-25 cutover, so both
+    contracts resolve to the identical peg price regardless). The address ->
+    symbol -> price chain is therefore a per-date bijection and is
+    address-accurate. A non-whitelisted contract is absent from the seed, never
+    receives a symbol, and so stays unpriced rather than borrowing another
+    token's price; any orphan symbol the price hub carries but no whitelisted
+    address maps to (e.g. XAUT0) is simply never consumed. The only honest caveat
+    is a genuine price GAP: a whitelisted, decimals-known token (whose USD would
+    otherwise be computable) with no price row for its trade date -- surfaced as
+    a partial enrichment naming the affected pairs.
     """
     tokens = sorted({str(r[7]) for r in rows if r[7]})
     meta: dict[str, tuple[str, int | None]] = {}
@@ -882,19 +1577,39 @@ def _enrich_rpc_legs(
                 for row in res.rows:
                     if row[2] is not None:
                         price[(str(row[0]), str(row[1])[:10])] = float(row[2])
-                # The physical source contract has only symbol/date/price. Do
-                # not silently promote a symbol match to address-qualified
-                # evidence: the live token metadata contains same-symbol
-                # contracts (and that can change independently of this load).
-                statuses["prices"] = "partial"
-                message = (
-                    "price enrichment is keyed by symbol and date because "
-                    "dbt.int_execution_token_prices_daily exposes no "
-                    "token_address; USD values cannot distinguish same-symbol "
-                    "token contracts"
-                )
-                source_details["prices"]["error"] = message
-                warnings.append(message)
+                # int_execution_token_prices_daily is keyed by (symbol, date),
+                # but that is NOT the same-symbol hazard it looks like: its whole
+                # universe is the tokens_whitelist seed, which maps every
+                # token_address to a unique symbol, and the metadata symbols used
+                # here come from that same seed (stg_pools__tokens_meta). So the
+                # address -> symbol -> price chain is a per-date bijection and is
+                # address-accurate; a non-whitelisted contract never receives a
+                # symbol and stays unpriced rather than borrowing a price. The
+                # only honest caveat is a genuine GAP -- a whitelisted (symbol,
+                # date) with no price row -- so surface exactly that, and only
+                # that. `needed` mirrors the leg loop's price_key = (sym, date),
+                # and gates on decimals too: USD is only computable when decimals
+                # are known, so a null-decimals leg is a metadata gap, not a
+                # price gap, and must not double-report here.
+                needed = {
+                    (meta[str(r[7])][0], str(r[4])[:10])
+                    for r in rows
+                    if str(r[7]) in meta
+                    and meta[str(r[7])][0]
+                    and meta[str(r[7])][1] is not None
+                    and r[4]
+                }
+                missing = sorted(needed - set(price))
+                if missing:
+                    statuses["prices"] = "partial"
+                    message = (
+                        f"no daily price for {len(missing)} whitelisted "
+                        "(token, date) pair(s); those legs' USD is left unknown"
+                    )
+                    source_details["prices"]["error"] = message
+                    warnings.append(message)
+                else:
+                    statuses["prices"] = "ok"
             except Exception as exc:  # pragma: no cover
                 logger.info("tx mode: price lookup failed: %s", exc)
                 statuses["prices"] = "error"
@@ -931,9 +1646,20 @@ def _authoritative_leg_total(
     return None if sql_count is None else int(sql_count)
 
 
-def _run(ch: ClickHouseManager, sql: str, params: dict[str, Any]):
+def _run(
+    ch: ClickHouseManager,
+    sql: str,
+    params: dict[str, Any],
+    *,
+    query_budget: QueryBudget | None = INTERACTIVE_QUERY_BUDGET,
+):
     return mini_apps.run_structured_query(
-        ch, sql, database="dbt", parameters=params, requested_max_rows=100_000
+        ch,
+        sql,
+        database="dbt",
+        parameters=params,
+        requested_max_rows=100_000,
+        query_budget=query_budget,
     )
 
 
@@ -961,6 +1687,7 @@ def _failed_transaction_result(
     scope: dict[str, Any],
     warnings: list[str],
     summary: str,
+    request_channel: str = "transactions.discovery",
 ) -> CallToolResult:
     """Record a failed *attempt* without destroying accepted evidence.
 
@@ -1015,12 +1742,17 @@ def _failed_transaction_result(
             "tx_legs": scope["scope_id"],
             "tx_list": scope["scope_id"],
         }
-    mini_apps.patch_view_state(
+    committed = mini_apps.commit_view_update(
         view_id,
-        patch,
+        request_channel=request_channel,
+        request_id=int(scope.get("request_id") or 0),
+        guard_channels=("transactions",),
+        state_patch=patch,
     )
-    updated = mini_apps.get_view(view_id)
+    updated = mini_apps.snapshot_view(view_id)
     assert updated is not None
+    if not committed:
+        summary = "Transaction request was superseded by a newer request."
     return mini_apps.payload_to_call_tool_result(
         build_payload(updated), summary_text=summary
     )
@@ -1044,8 +1776,17 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         after_index: int = -1,
         merge: bool = False,
         request_id: int = 0,
+        operation: str = "legacy",
+        cursor: str = "",
+        page_size: int = 0,
+        activity_kinds: list[str] | None = None,
     ) -> CallToolResult:
         """Open transactions and return every transfer leg (Transactions mode).
+
+        ``operation=discover`` returns only the newest candidate page for an
+        address. ``operation=receipt`` opens exactly one candidate while
+        preserving the accepted discovery list. The default ``legacy`` mode
+        retains the historical all-in-one contract for existing callers.
 
         ``expand_node_id`` + ``after_block``/``after_index`` follows ONE address
         forward in chain order — the next transactions it took part in after a
@@ -1053,19 +1794,86 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         the "what did it do next?" step: the chain of custody continues instead
         of the view restarting.
         """
-        record = mini_apps.get_view(view_id)
+        record = mini_apps.snapshot_view(view_id)
         if record is None:
             return mini_apps.error_call_tool_result(
                 f"Unknown or expired view_id: {view_id}"
             )
 
         state_tx = dict(record.view_state.get("transactions") or {})
+        operation = str(operation or "legacy").strip().lower()
+        if operation not in {"legacy", "discover", "receipt"}:
+            return mini_apps.error_call_tool_result(
+                "operation must be one of: legacy, discover, receipt"
+            )
+        candidate_only = operation == "discover"
+        receipt_only = operation == "receipt"
+        normalized_activity_kinds = sorted(
+            {
+                str(kind).strip().lower()
+                for kind in (activity_kinds or ["direct", "erc20"])
+                if str(kind).strip()
+            }
+        )
+        if not normalized_activity_kinds or any(
+            kind not in {"direct", "erc20"} for kind in normalized_activity_kinds
+        ):
+            return mini_apps.error_call_tool_result(
+                "activity_kinds must contain direct and/or erc20"
+            )
+        effective_activity_kinds = (
+            {"erc20"} if tokens else set(normalized_activity_kinds)
+        )
+        try:
+            discovery_before = _decode_discovery_cursor(cursor) if cursor else None
+        except ValueError as exc:
+            return mini_apps.error_call_tool_result(str(exc))
+        row_discovery_before = (
+            discovery_before
+            if isinstance(discovery_before, tuple)
+            else None
+        )
+        coverage_discovery_before = (
+            discovery_before
+            if isinstance(discovery_before, _CoverageDiscoveryCursor)
+            else None
+        )
+
+        preserved_tx_list = record.datasets.get("tx_list") if receipt_only else None
+        preserved_discovery = {
+            key: state_tx.get(key)
+            for key in (
+                "query_kind",
+                "query_hashes",
+                "result_hashes",
+                "query",
+                "seed",
+                "counterparties",
+                "range_days",
+                "t0",
+                "t1",
+                "max_txs",
+                "tokens",
+                "min_usd",
+                "discovery_scope",
+                "discovery_coverage",
+            )
+            if key in state_tx
+        }
         requested_t0 = str(t0 or "").strip()
         requested_t1 = str(t1 or "").strip()
         hashes = [_hex0x(h) for h in (tx_hashes or []) if str(h).strip()]
         explicit_hash_request = bool(hashes)
+        if receipt_only and len(hashes) != 1:
+            return mini_apps.error_call_tool_result(
+                "operation=receipt requires exactly one transaction hash"
+            )
+        if candidate_only and (hashes or not seed_node_id or expand_node_id):
+            return mini_apps.error_call_tool_result(
+                "operation=discover requires seed_node_id and does not accept "
+                "tx_hashes or expand_node_id"
+            )
         request_id = max(0, int(request_id or 0))
-        scope_id = new_scope_id("transactions", request_id)
         seed = _normalize_node_id(seed_node_id) if seed_node_id else ""
         expand = _normalize_node_id(expand_node_id) if expand_node_id else ""
         cps = [_normalize_node_id(c) for c in (counterparty_ids or []) if c]
@@ -1091,12 +1899,24 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         # address activity is deliberately history-wide hybrid discovery;
         # legacy txrange/t0/t1 URL fields do not narrow it.
         plain_address_request = bool(
-            not explicit_hash_request and seed and not expand and not cps and not tokens
+            not explicit_hash_request
+            and seed
+            and not expand
+            and not cps
+            and (candidate_only or not tokens)
         )
         rpc_address_request = bool(not explicit_hash_request and seed and expand)
-        all_history_address_request = bool(
-            plain_address_request or rpc_address_request
+        explicit_discovery_window = bool(
+            candidate_only and requested_t0 and requested_t1
         )
+        all_history_address_request = bool(
+            (plain_address_request and not explicit_discovery_window)
+            or rpc_address_request
+        )
+        if candidate_only and bool(requested_t0) != bool(requested_t1):
+            return mini_apps.error_call_tool_result(
+                "Address discovery requires both t0 and t1, or neither."
+            )
         if (
             not explicit_hash_request
             and not expand
@@ -1114,13 +1934,48 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 "(follow an address forward from a cursor)"
             )
 
-        days = 0 if all_history_address_request else (
+        days = 0 if all_history_address_request or candidate_only else (
             int(range_days) if range_days else constants.TX_DEFAULT_RANGE_DAYS
         )
         if not all_history_address_request:
             days = max(1, days)
-        limit_txs = int(max_txs) if max_txs else constants.TX_DEFAULT_MAX_TXS
+        if candidate_only:
+            requested_page_size = int(page_size or max_txs or constants.TX_DEFAULT_MAX_TXS)
+            limit_txs = max(1, min(requested_page_size, 100))
+        else:
+            limit_txs = int(max_txs) if max_txs else constants.TX_DEFAULT_MAX_TXS
         limit_txs = max(1, min(limit_txs, constants.TX_MAX_TXS))
+
+        transaction_channel = (
+            "transactions.receipt"
+            if receipt_only or explicit_hash_request
+            else "transactions.discovery"
+        )
+        effective_request_id = mini_apps.reserve_view_request(
+            view_id,
+            request_channel="transactions",
+            request_id=request_id,
+        )
+        if effective_request_id is None:
+            current = mini_apps.snapshot_view(view_id)
+            assert current is not None
+            return mini_apps.payload_to_call_tool_result(
+                build_payload(current),
+                summary_text="Transaction request was superseded by a newer request.",
+            )
+        if mini_apps.reserve_view_request(
+            view_id,
+            request_channel=transaction_channel,
+            request_id=effective_request_id,
+        ) is None:
+            current = mini_apps.snapshot_view(view_id)
+            assert current is not None
+            return mini_apps.payload_to_call_tool_result(
+                build_payload(current),
+                summary_text="Transaction request was superseded by a newer request.",
+            )
+        request_id = effective_request_id
+        scope_id = new_scope_id("transactions", request_id)
 
         warnings: list[str] = []
         sources: list[dict[str, Any]] = []
@@ -1135,7 +1990,16 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         if not explicit_hash_request and not rpc_address_request:
             try:
                 hsql, hparams = build_data_horizon_sql()
-                hres = _run(ch, hsql, hparams)
+                hres = _run(
+                    ch,
+                    hsql,
+                    hparams,
+                    query_budget=(
+                        _DISCOVERY_HORIZON_QUERY_BUDGET
+                        if candidate_only
+                        else INTERACTIVE_QUERY_BUDGET
+                    ),
+                )
                 for row in hres.rows:
                     if len(row) >= 2:
                         relation = str(row[0])
@@ -1149,11 +2013,36 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                         )
                     elif row and row[0]:  # compatibility with older fixtures
                         horizon = str(row[0])
-                observed_horizons = [
-                    value for value in chain_horizons.values() if value
+                log_horizons = [
+                    chain_horizons.get(relation)
+                    for relation in CHAIN_LOG_RELATIONS
+                    if chain_horizons.get(relation)
                 ]
-                if observed_horizons:
-                    horizon = max(observed_horizons)
+                transaction_horizons = [
+                    chain_horizons.get(relation)
+                    for relation in CHAIN_TRANSACTION_RELATIONS
+                    if chain_horizons.get(relation)
+                ]
+                if plain_address_request:
+                    # A complete address page includes both normal transaction
+                    # envelopes and Transfer-event participation. Stop stored
+                    # history at the slower source-family horizon, then cover
+                    # the common uncovered head through RPC.
+                    if candidate_only and effective_activity_kinds == {"erc20"}:
+                        horizon = max(log_horizons) if log_horizons else None
+                    elif candidate_only and effective_activity_kinds == {"direct"}:
+                        horizon = (
+                            max(transaction_horizons)
+                            if transaction_horizons
+                            else None
+                        )
+                    elif log_horizons and transaction_horizons:
+                        horizon = min(
+                            max(log_horizons),
+                            max(transaction_horizons),
+                        )
+                elif log_horizons:
+                    horizon = max(log_horizons)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.info("tx mode: horizon lookup failed: %s", exc)
                 warnings.append(f"chain data-horizon lookup failed: {exc}")
@@ -1163,7 +2052,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             and requested_t1
             and not explicit_hash_request
             and not expand
-            and (cps or tokens)
+            and (candidate_only or cps or tokens)
         )
 
         def parse_window(value: str) -> datetime:
@@ -1196,7 +2085,9 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             if explicit_hash_request
             else (
                 (
-                    "execution_logs_plus_rpc_head"
+                    "custom_utc_window"
+                    if explicit_discovery_window
+                    else "execution_tables_plus_rpc_head"
                     if plain_address_request
                     else "rpc_cursor_to_head"
                 )
@@ -1216,12 +2107,16 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             "explicit_hash"
             if explicit_hash_request
             else (
+                "address_discovery"
+                if candidate_only
+                else (
                 "follow"
                 if expand
                 else (
                     "money_edge"
                     if cps or tokens
                     else "address_discovery"
+                )
                 )
             )
         )
@@ -1239,6 +2134,9 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 "address": None if explicit_hash_request else (seed or None),
                 "counterparties": list(cps),
                 "tokens": list(tokens or []),
+                "activity_kinds": list(normalized_activity_kinds),
+                "cursor": str(cursor or "") or None,
+                "page_size": limit_txs,
                 "window": (
                     None
                     if explicit_hash_request or all_history_address_request
@@ -1249,6 +2147,30 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     }
                 ),
             }
+
+        def cursor_query_fingerprint(query: dict[str, Any]) -> tuple[Any, ...]:
+            window = query.get("window") or {}
+            return (
+                str(query.get("kind") or ""),
+                _normalize_node_id(str(query.get("address") or "")),
+                tuple(sorted(str(value) for value in query.get("counterparties") or [])),
+                tuple(sorted(str(value) for value in query.get("tokens") or [])),
+                tuple(sorted(str(value) for value in query.get("activity_kinds") or [])),
+                str(window.get("t0") or ""),
+                str(window.get("t1") or ""),
+                str(window.get("source") or ""),
+            )
+
+        cursor_matches_query = not bool(discovery_before)
+        if candidate_only and discovery_before:
+            previous_query = state_tx.get("query") or {}
+            cursor_matches_query = cursor_query_fingerprint(
+                previous_query
+            ) == cursor_query_fingerprint(query_contract())
+            if not cursor_matches_query:
+                return mini_apps.error_call_tool_result(
+                    "cursor does not belong to the current address discovery query"
+                )
 
         def failed_load(
             message: str, sources: list[dict[str, Any]]
@@ -1329,6 +2251,11 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 scope=scope,
                 warnings=failed_warnings,
                 summary=f"Transaction load failed safely: {message}",
+                request_channel=(
+                    "transactions.receipt"
+                    if receipt_only
+                    else "transactions.discovery"
+                ),
             )
 
         if horizon and not all_history_address_request:
@@ -1351,6 +2278,10 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         latest_before_t0: str | None = None
         discovery_path = "rpc_receipt" if explicit_hash_request else "unknown"
         discovery_coverage_complete = bool(explicit_hash_request)
+        discovery_scanned_ranges: list[dict[str, str]] = []
+        discovery_uncovered_ranges: list[dict[str, str]] = []
+        older_history_unscanned = False
+        next_discovery_cursor: str | None = None
         # hash -> block. Filled by discovery (free) or by RPC (pasted hashes).
         block_of: dict[str, int] = {}
 
@@ -1358,268 +2289,8 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         execution_discovery_attempted = False
         rpc_discovery_attempted = False
         if not hashes and plain_address_request:
-            index_contract = validate_source_contract(
-                ch,
-                TX_ADDRESS_INDEX_RELATION,
-                (
-                    "chain_id",
-                    "participant_address",
-                    "transaction_hash",
-                    "activity_source",
-                    "block_number",
-                    "transaction_index",
-                    "block_timestamp",
-                    "token_addresses",
-                    "token_counterparties",
-                    "indexed_transfer_leg_count",
-                    "source_horizon_block",
-                    "indexed_at",
-                ),
-            )
-            index_stage_rows: dict[str, list[Any]] = {}
-            index_history_complete = False
-            if index_contract["ok"]:
-                try:
-                    index_horizon_sql, index_horizon_params = (
-                        build_tx_index_horizon_sql()
-                    )
-                    index_horizon_result = _run(
-                        ch, index_horizon_sql, index_horizon_params
-                    )
-                    index_stage_rows = {
-                        str(row[0]): list(row)
-                        for row in index_horizon_result.rows
-                        if row and row[0]
-                    }
-                    required_stages = {"transactions", "transfers"}
-                    stage_names_complete = required_stages.issubset(index_stage_rows)
-                    # A relation created from a recent preflight must never be
-                    # mistaken for the complete historical index. Presence in
-                    # the launch month is a runtime guard; the deployment
-                    # reconciliation remains the stronger release gate.
-                    history_guard = _GNOSIS_CHAIN_GENESIS_UTC + timedelta(days=31)
-                    first_events: list[datetime] = []
-                    block_horizons: list[int] = []
-                    if stage_names_complete:
-                        for stage in sorted(required_stages):
-                            row = index_stage_rows[stage]
-                            first_events.append(parse_window(str(row[1])))
-                            block_horizons.append(int(row[3] or 0))
-                    index_history_complete = bool(
-                        stage_names_complete
-                        and block_horizons
-                        and min(block_horizons) > 0
-                        and all(first <= history_guard for first in first_events)
-                    )
-                except Exception as exc:
-                    warnings.append(
-                        f"Address-index horizon validation failed; using stored "
-                        f"execution logs instead: {exc}"
-                    )
-                    index_history_complete = False
-
-            if index_contract["ok"] and index_history_complete:
-                execution_discovery_attempted = True
-                applied_window_source = "address_index_plus_rpc_head"
-                stage_event_horizons = [
-                    str(index_stage_rows[stage][2])
-                    for stage in ("transactions", "transfers")
-                ]
-                stage_block_horizons = [
-                    int(index_stage_rows[stage][3] or 0)
-                    for stage in ("transactions", "transfers")
-                ]
-                indexed_event_horizon = min(stage_event_horizons)
-                indexed_head = min(stage_block_horizons)
-                sources.append(
-                    source_record(
-                        kind="dbt_aggregate",
-                        name=TX_ADDRESS_INDEX_RELATION,
-                        role="discovery",
-                        status="ok",
-                        horizon=indexed_event_horizon,
-                        horizon_basis=(
-                            "minimum per-stage max(block_timestamp); "
-                            + ", ".join(
-                                f"{stage}=block {index_stage_rows[stage][3]}"
-                                for stage in ("transactions", "transfers")
-                            )
-                        ),
-                        fetched_at=index_contract.get("freshness_checked_at"),
-                    )
-                )
-                try:
-                    index_sql, index_params = build_indexed_tx_discovery_sql(
-                        address_ids=[seed],
-                        t0=_GNOSIS_CHAIN_GENESIS_UTC.strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
-                        t1_exclusive=(
-                            datetime.now(timezone.utc).replace(tzinfo=None)
-                            + timedelta(seconds=1)
-                        ).strftime("%Y-%m-%d %H:%M:%S"),
-                        tokens=[],
-                        counterparty_ids=[],
-                        limit=limit_txs,
-                    )
-                    index_result = _run(ch, index_sql, index_params)
-                    raw_index_rows = [list(row) for row in index_result.rows]
-                    index_total = (
-                        int(raw_index_rows[0][6] or 0)
-                        if raw_index_rows and len(raw_index_rows[0]) >= 7
-                        else 0
-                    )
-                    index_rows = [row[:6] for row in raw_index_rows]
-                except Exception as exc:
-                    return failed_load(
-                        f"Address-index query failed: {exc}",
-                        [
-                            {
-                                **source,
-                                "status": "error",
-                                "error": str(exc),
-                            }
-                            if source.get("name") == TX_ADDRESS_INDEX_RELATION
-                            else source
-                            for source in sources
-                        ],
-                    )
-
-                try:
-                    transfer_tail_rows, rpc_head = (
-                        _discover_address_transactions_rpc(
-                            seed,
-                            after_block=indexed_head + 1,
-                        )
-                    )
-                    direct_tail_rows = _discover_address_direct_transactions_rpc(
-                        seed,
-                        after_block=indexed_head + 1,
-                        through_block=rpc_head,
-                    )
-                except Exception as exc:
-                    return failed_load(
-                        f"RPC address tail after index block {indexed_head} failed: {exc}",
-                        [
-                            *sources,
-                            source_record(
-                                kind="rpc",
-                                name="eth_getLogs + eth_getBlockByNumber",
-                                role="discovery_tail",
-                                status="error",
-                                horizon=indexed_head,
-                                horizon_basis=(
-                                    "address-index block horizon to eth_blockNumber"
-                                ),
-                                error=str(exc),
-                            ),
-                        ],
-                    )
-                sources.extend(
-                    [
-                        source_record(
-                            kind="rpc",
-                            name="eth_getLogs",
-                            role="discovery_tail",
-                            status="ok",
-                            horizon=rpc_head,
-                            horizon_basis=(
-                                f"standard ERC-20 Transfer logs in blocks "
-                                f"{indexed_head + 1} through eth_blockNumber"
-                            ),
-                        ),
-                        source_record(
-                            kind="rpc",
-                            name="eth_getBlockByNumber",
-                            role="discovery_tail",
-                            status="ok",
-                            horizon=rpc_head,
-                            horizon_basis=(
-                                f"direct sender/recipient transactions in blocks "
-                                f"{indexed_head + 1} through eth_blockNumber"
-                            ),
-                        ),
-                    ]
-                )
-                tail_rows = _merge_tx_discovery_rows(
-                    direct_tail_rows, transfer_tail_rows
-                )
-                indexed_tail_hashes: set[str] = set()
-                membership_verified = True
-                if tail_rows:
-                    try:
-                        membership_sql, membership_params = (
-                            build_indexed_tx_membership_sql(
-                                address_id=seed,
-                                tx_hashes=[str(row[0]) for row in tail_rows],
-                            )
-                        )
-                        membership_result = _run(
-                            ch, membership_sql, membership_params
-                        )
-                        indexed_tail_hashes = {
-                            _hex0x(str(row[0]))
-                            for row in membership_result.rows
-                            if row and row[0]
-                        }
-                    except Exception as exc:
-                        membership_verified = False
-                        warnings.append(
-                            "RPC-tail overlap with the address index could not "
-                            f"be counted exactly: {exc}"
-                        )
-                tail_new = [
-                    row
-                    for row in tail_rows
-                    if _hex0x(str(row[0])) not in indexed_tail_hashes
-                ]
-                all_rows = _merge_tx_discovery_rows(index_rows, tail_new)
-                discovered_total_matching = (
-                    index_total + len(tail_new)
-                    if membership_verified
-                    else None
-                )
-                discovered_total_lower_bound = max(index_total, len(all_rows))
-                txs_truncated = bool(
-                    len(all_rows) > limit_txs
-                    or (
-                        discovered_total_matching is not None
-                        and discovered_total_matching > limit_txs
-                    )
-                )
-                rows = all_rows[:limit_txs]
-                hashes = [_hex0x(str(row[0])) for row in rows]
-                block_of.update(
-                    {
-                        _hex0x(str(row[0])): int(row[1] or 0)
-                        for row in rows
-                        if int(row[1] or 0)
-                    }
-                )
-                tx_list_rows = [list(row) for row in rows]
-                horizon = rpc_head
-                discovery_path = "address_index_rpc_tail"
-                discovery_coverage_complete = True
-            elif index_contract["ok"]:
-                warnings.append(
-                    "Address-index relation exists but does not contain both "
-                    "full-history source stages; using stored execution logs."
-                )
-                sources.append(
-                    source_record(
-                        kind="dbt_aggregate",
-                        name=TX_ADDRESS_INDEX_RELATION,
-                        role="discovery_candidate",
-                        status="partial",
-                        horizon=None,
-                        horizon_basis="per-stage history contract",
-                        error="full-history transactions/transfers stages not verified",
-                    )
-                )
-
-        if not hashes and plain_address_request and not execution_discovery_attempted:
             execution_discovery_attempted = True
-            source_checks = [
+            log_source_checks = [
                 validate_source_contract(
                     ch,
                     relation,
@@ -1639,8 +2310,49 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 )
                 for relation in CHAIN_LOG_RELATIONS
             ]
+            transaction_source_checks = [
+                validate_source_contract(
+                    ch,
+                    relation,
+                    (
+                        "block_number",
+                        "transaction_index",
+                        "transaction_hash",
+                        "block_timestamp",
+                        "from_address",
+                        "to_address",
+                    ),
+                )
+                for relation in CHAIN_TRANSACTION_RELATIONS
+            ]
+            source_checks = [
+                *(
+                    log_source_checks
+                    if "erc20" in effective_activity_kinds or not candidate_only
+                    else []
+                ),
+                *(
+                    transaction_source_checks
+                    if "direct" in effective_activity_kinds or not candidate_only
+                    else []
+                ),
+            ]
             invalid = [check for check in source_checks if not check["ok"]]
-            if invalid or not horizon:
+            log_heads = [
+                int(chain_block_horizons[relation])
+                for relation in CHAIN_LOG_RELATIONS
+                if chain_block_horizons.get(relation) is not None
+            ]
+            transaction_heads = [
+                int(chain_block_horizons[relation])
+                for relation in CHAIN_TRANSACTION_RELATIONS
+                if chain_block_horizons.get(relation) is not None
+            ]
+            required_heads_available = bool(
+                ("erc20" not in effective_activity_kinds or log_heads)
+                and ("direct" not in effective_activity_kinds or transaction_heads)
+            )
+            if invalid or not horizon or not required_heads_available:
                 failed_sources = [
                     source_record(
                         kind="chain",
@@ -1652,32 +2364,111 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                         error=(
                             check.get("error")
                             if not check["ok"]
-                            else "execution-log horizon unavailable"
+                            else "common execution-table horizon unavailable"
                         ),
                     )
                     for check in source_checks
                 ]
                 return failed_load(
-                    "Execution-log address discovery source is unavailable",
+                    "Execution transaction/log address discovery source is unavailable",
                     failed_sources,
                 )
+            execution_through = horizon
+            execution_since: str | None = None
+            execution_query_floor = (
+                t0 if explicit_discovery_window else _GNOSIS_CHAIN_GENESIS_UTC
+            )
+            discovery_tile_seconds = (
+                coverage_discovery_before.tile_seconds
+                if coverage_discovery_before is not None
+                else _DISCOVERY_DEFAULT_TILE_SECONDS
+            )
+            coverage_boundary: datetime | None = None
+            coverage_retry_start: datetime | None = None
+            if coverage_discovery_before is not None:
+                # ``before_time`` is exclusive. Version-two cursors may also
+                # carry the exact lower bound of an unresolved slice; those
+                # retry that slice before moving into older history.
+                coverage_boundary = datetime.fromisoformat(
+                    coverage_discovery_before.before_time.replace("Z", "+00:00")
+                ).astimezone(timezone.utc).replace(tzinfo=None)
+                execution_through = (
+                    coverage_boundary - timedelta(seconds=1)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                if coverage_discovery_before.retry_from_time:
+                    coverage_retry_start = datetime.fromisoformat(
+                        coverage_discovery_before.retry_from_time.replace(
+                            "Z", "+00:00"
+                        )
+                    ).astimezone(timezone.utc).replace(tzinfo=None)
+            if explicit_discovery_window:
+                stored_horizon_dt = parse_window(horizon)
+                execution_end = min(t1, stored_horizon_dt + timedelta(seconds=1))
+                if coverage_boundary is not None:
+                    execution_end = min(execution_end, coverage_boundary)
+                execution_through = (
+                    execution_end - timedelta(seconds=1)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                execution_since = t0.strftime("%Y-%m-%d %H:%M:%S")
+            if coverage_retry_start is not None:
+                execution_since = max(
+                    execution_query_floor, coverage_retry_start
+                ).strftime("%Y-%m-%d %H:%M:%S")
+            resolved_retry_boundary: str | None = None
             try:
+                execution_result = _discover_address_transactions_execution(
+                    ch,
+                    seed,
+                    through=execution_through,
+                    since=execution_since,
+                    limit=limit_txs,
+                    before=row_discovery_before,
+                    activity_kinds=normalized_activity_kinds,
+                    tokens=tokens or [],
+                    detailed=candidate_only,
+                    tile_seconds=discovery_tile_seconds,
+                ) if candidate_only else _discover_address_transactions_execution(
+                        ch,
+                        seed,
+                        through=horizon,
+                        limit=limit_txs,
+                )
                 (
                     execution_rows,
                     execution_total,
                     execution_complete,
                     execution_scanned_total,
-                ) = (
-                    _discover_address_transactions_execution(
-                        ch,
-                        seed,
-                        through=horizon,
-                        limit=limit_txs,
+                ) = execution_result[:4]
+                if candidate_only:
+                    execution_coverage = execution_result[4]
+                    if (
+                        coverage_retry_start is not None
+                        and execution_complete
+                        and coverage_retry_start > execution_query_floor
+                    ):
+                        # The exact failed slice is now resolved, but history
+                        # below it is intentionally still pending.  Converting
+                        # this bounded success into an overall exact zero would
+                        # be forensically wrong; emit a generic continuation at
+                        # the slice's lower edge instead.
+                        resolved_retry_boundary = coverage_retry_start.replace(
+                            tzinfo=timezone.utc
+                        ).isoformat().replace("+00:00", "Z")
+                        execution_complete = False
+                        execution_total = None
+                        execution_coverage["older_history_unscanned"] = True
+                    discovery_scanned_ranges.extend(
+                        execution_coverage["scanned_ranges"]
                     )
-                )
+                    discovery_uncovered_ranges.extend(
+                        execution_coverage["uncovered_ranges"]
+                    )
+                    older_history_unscanned = bool(
+                        execution_coverage["older_history_unscanned"]
+                    )
             except Exception as exc:
                 return failed_load(
-                    f"All-history execution-log address discovery failed: {exc}",
+                    f"Execution transaction/log address discovery failed: {exc}",
                     [
                         source_record(
                             kind="chain",
@@ -1712,45 +2503,185 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 for check in source_checks
             )
 
-            indexed_head = max(
-                (
-                    block
-                    for block in chain_block_horizons.values()
-                    if block is not None
+            relevant_heads = [
+                *([max(log_heads)] if "erc20" in effective_activity_kinds else []),
+                *(
+                    [max(transaction_heads)]
+                    if "direct" in effective_activity_kinds
+                    else []
                 ),
-                default=0,
-            )
+            ]
+            stored_head = min(relevant_heads)
+            rpc_tail_failed = False
             try:
-                rpc_tail_rows, rpc_head = _discover_address_transactions_rpc(
-                    seed,
-                    after_block=indexed_head + 1,
+                bounded_before_stored_head = bool(
+                    coverage_discovery_before is not None
+                    or (
+                        candidate_only
+                        and explicit_discovery_window
+                        and t1 <= parse_window(str(horizon)) + timedelta(seconds=1)
+                    )
                 )
+                if bounded_before_stored_head:
+                    rpc_head = stored_head
+                    transfer_tail_rows = []
+                    direct_tail_rows = []
+                elif candidate_only:
+                    if "erc20" in effective_activity_kinds:
+                        transfer_tail_rows, rpc_head = (
+                            _discover_address_transactions_rpc(
+                                seed,
+                                after_block=stored_head + 1,
+                                tokens=tokens or [],
+                            )
+                        )
+                    else:
+                        rpc_client = RpcRouter.from_settings().standard
+                        rpc_head = int(rpc_client.request("eth_blockNumber", []), 16)
+                        transfer_tail_rows = []
+                    direct_tail_rows = (
+                        _discover_address_direct_transactions_rpc(
+                            seed,
+                            after_block=stored_head + 1,
+                            through_block=rpc_head,
+                        )
+                        if "direct" in effective_activity_kinds
+                        else []
+                    )
+                else:
+                    transfer_tail_rows, rpc_head = _discover_address_transactions_rpc(
+                        seed,
+                        after_block=stored_head + 1,
+                    )
+                    direct_tail_rows = _discover_address_direct_transactions_rpc(
+                        seed,
+                        after_block=stored_head + 1,
+                        through_block=rpc_head,
+                    )
             except Exception as exc:
-                return failed_load(
-                    f"RPC tail discovery after execution block {indexed_head} failed: {exc}",
-                    [
-                        *sources,
-                        source_record(
-                            kind="rpc",
-                            name="eth_getLogs",
-                            role="discovery_tail",
-                            status="error",
-                            horizon=indexed_head,
-                            horizon_basis="execution-log block horizon to RPC head",
-                            error=str(exc),
+                if not candidate_only:
+                    return failed_load(
+                        f"RPC tail discovery after execution block {stored_head} failed: {exc}",
+                        [
+                            *sources,
+                            source_record(
+                                kind="rpc",
+                                name="eth_getLogs + eth_getBlockByNumber",
+                                role="discovery_tail",
+                                status="error",
+                                horizon=stored_head,
+                                horizon_basis="common execution-table horizon to RPC head",
+                                error=str(exc),
+                            ),
+                        ],
+                    )
+                rpc_tail_failed = True
+                transfer_tail_rows = []
+                direct_tail_rows = []
+                rpc_head = stored_head
+                discovery_coverage_complete = False
+                tail_start = parse_window(str(horizon)).replace(tzinfo=timezone.utc)
+                tail_end = (
+                    t1.replace(tzinfo=timezone.utc)
+                    if explicit_discovery_window
+                    else datetime.now(timezone.utc)
+                )
+                discovery_uncovered_ranges.append(
+                    {
+                        "t0": tail_start.isoformat().replace("+00:00", "Z"),
+                        "t1": tail_end.isoformat().replace("+00:00", "Z"),
+                        "reason": str(exc),
+                    }
+                )
+                warnings.append(
+                    "RPC-head discovery failed; stored execution candidates remain "
+                    "inspectable and the uncovered head is disclosed."
+                )
+                sources.append(
+                    source_record(
+                        kind="rpc",
+                        name="eth_getLogs + eth_getBlockByNumber",
+                        role="discovery_tail",
+                        status="error",
+                        horizon=stored_head,
+                        horizon_basis="common execution-table horizon to RPC head",
+                        error=str(exc),
+                    )
+                )
+            rpc_tail_sources: list[dict[str, Any]] = []
+            if (
+                not rpc_tail_failed
+                and (not candidate_only or "erc20" in effective_activity_kinds)
+                and not bounded_before_stored_head
+            ):
+                rpc_tail_sources.append(
+                    source_record(
+                        kind="rpc",
+                        name="eth_getLogs",
+                        role="discovery_tail",
+                        status="ok",
+                        horizon=rpc_head,
+                        horizon_basis=(
+                            f"Transfer logs in blocks {stored_head + 1} "
+                            "through eth_blockNumber"
                         ),
-                    ],
+                    )
                 )
-            sources.append(
-                source_record(
-                    kind="rpc",
-                    name="eth_getLogs",
-                    role="discovery_tail",
-                    status="ok",
-                    horizon=rpc_head,
-                    horizon_basis=f"blocks {indexed_head + 1} through eth_blockNumber",
+            if (
+                not rpc_tail_failed
+                and (not candidate_only or "direct" in effective_activity_kinds)
+                and not bounded_before_stored_head
+            ):
+                rpc_tail_sources.append(
+                    source_record(
+                        kind="rpc",
+                        name="eth_getBlockByNumber",
+                        role="discovery_tail",
+                        status="ok",
+                        horizon=rpc_head,
+                        horizon_basis=(
+                            f"direct transactions in blocks {stored_head + 1} "
+                            "through eth_blockNumber"
+                        ),
+                    )
                 )
+            sources.extend(rpc_tail_sources)
+            rpc_tail_rows = _merge_tx_discovery_rows(
+                direct_tail_rows, transfer_tail_rows
             )
+            if candidate_only:
+                rpc_tail_rows = [
+                    row
+                    for row in rpc_tail_rows
+                    if _candidate_precedes(row, row_discovery_before)
+                ]
+                if explicit_discovery_window and rpc_tail_rows:
+                    rpc_tail_rows = _hydrate_rpc_discovery_timestamps(rpc_tail_rows)
+                    rpc_tail_rows = [
+                        row
+                        for row in rpc_tail_rows
+                        if str(row[3] or "")
+                        and t0 <= parse_window(str(row[3])) < t1
+                    ]
+                stored_horizon_bound = parse_window(str(horizon))
+                tail_end = t1 if explicit_discovery_window else datetime.now(
+                    timezone.utc
+                ).replace(tzinfo=None)
+                if (
+                    not rpc_tail_failed
+                    and not bounded_before_stored_head
+                    and tail_end > stored_horizon_bound
+                ):
+                    discovery_scanned_ranges.append(
+                        {
+                            "t0": stored_horizon_bound.replace(
+                                tzinfo=timezone.utc
+                            ).isoformat().replace("+00:00", "Z"),
+                            "t1": tail_end.replace(tzinfo=timezone.utc)
+                            .isoformat()
+                            .replace("+00:00", "Z"),
+                        }
+                    )
             execution_hashes = {_hex0x(str(row[0])) for row in execution_rows}
             tail_new = [
                 row
@@ -1784,6 +2715,102 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 )
             )
             rows = all_rows[:limit_txs]
+            if candidate_only and len(all_rows) > limit_txs:
+                older_history_unscanned = True
+            # A row cursor is only useful when the scanned portion itself
+            # contains another admitted page.  When a partial scan found fewer
+            # than ``limit_txs`` matches, a row cursor would restart at the
+            # source horizon and rescan the same recent tiles before reaching
+            # older history.  Continue from the measured coverage boundary
+            # instead; this is both faster and preserves monotonic coverage.
+            if candidate_only and len(all_rows) > limit_txs:
+                next_discovery_cursor = _encode_discovery_cursor(rows[-1])
+            elif (
+                candidate_only
+                and not execution_complete
+                and (
+                    older_history_unscanned
+                    or bool(execution_coverage["uncovered_ranges"])
+                )
+            ):
+                attempted_tile_seconds = int(
+                    execution_coverage.get(
+                        "tile_seconds", discovery_tile_seconds
+                    )
+                )
+                resource_failure = _uncovered_requires_smaller_tile(
+                    execution_coverage["uncovered_ranges"]
+                )
+                retry_tile_seconds = (
+                    max(
+                        _DISCOVERY_MIN_TILE_SECONDS,
+                        attempted_tile_seconds // 2,
+                    )
+                    if resource_failure
+                    else attempted_tile_seconds
+                )
+                unresolved_slice = _newest_uncovered_retry_slice(
+                    execution_coverage["uncovered_ranges"],
+                    tile_seconds=retry_tile_seconds,
+                )
+                continuation_boundary = _coverage_continuation_boundary(
+                    execution_coverage["scanned_ranges"],
+                    through=execution_through,
+                )
+                if not resource_failure and continuation_boundary:
+                    # Ordinary pagination stopped at the loader wall budget.
+                    # Continue below the fully scanned suffix and retain the
+                    # measured-safe one-day tile so each click still advances
+                    # a bounded batch rather than half a day.
+                    next_discovery_cursor = _encode_coverage_discovery_cursor(
+                        continuation_boundary,
+                        tile_seconds=attempted_tile_seconds,
+                    )
+                elif unresolved_slice is not None:
+                    retry_from, retry_before = unresolved_slice
+                    next_discovery_cursor = _encode_coverage_discovery_cursor(
+                        retry_before,
+                        retry_from_time=retry_from,
+                        tile_seconds=retry_tile_seconds,
+                    )
+                elif resolved_retry_boundary is not None:
+                    next_discovery_cursor = _encode_coverage_discovery_cursor(
+                        resolved_retry_boundary,
+                        tile_seconds=attempted_tile_seconds,
+                    )
+                elif continuation_boundary:
+                    next_discovery_cursor = _encode_coverage_discovery_cursor(
+                        continuation_boundary,
+                        tile_seconds=attempted_tile_seconds,
+                    )
+                else:
+                    # Defensive fallback for older/mocked coverage without an
+                    # explicit uncovered interval. Retry one bounded newest
+                    # slice; never drop the only action that can advance a
+                    # partial all-history search.
+                    retry_boundary = (
+                        parse_window(execution_through)
+                        + timedelta(seconds=1)
+                    )
+                    retry_from = max(
+                        execution_query_floor,
+                        retry_boundary - timedelta(seconds=retry_tile_seconds),
+                    )
+                    if (
+                        retry_boundary > execution_query_floor
+                        and retry_from < retry_boundary
+                    ):
+                        next_discovery_cursor = (
+                            _encode_coverage_discovery_cursor(
+                                retry_boundary.replace(
+                                    tzinfo=timezone.utc
+                                ).isoformat().replace("+00:00", "Z"),
+                                retry_from_time=retry_from.replace(
+                                    tzinfo=timezone.utc
+                                ).isoformat().replace("+00:00", "Z"),
+                                tile_seconds=retry_tile_seconds,
+                            )
+                        )
             hashes = [_hex0x(str(row[0])) for row in rows]
             block_of.update(
                 {
@@ -1794,15 +2821,21 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             )
             tx_list_rows = [list(row) for row in rows]
             horizon = rpc_head
-            discovery_path = "execution_logs_rpc_tail"
-            discovery_coverage_complete = execution_complete
+            discovery_path = "execution_tables_rpc_tail"
+            discovery_coverage_complete = execution_complete and not rpc_tail_failed
             if not execution_complete:
-                warnings.append(
-                    f"Newest-first result admission stopped after establishing at "
-                    f"least {discovered_total_lower_bound} matching transaction(s). "
-                    "Older execution history was not needed to fill this result page; "
-                    "increase Results to continue farther back."
-                )
+                if rows:
+                    warnings.append(
+                        f"Newest-first admission returned at least "
+                        f"{discovered_total_lower_bound} matching transaction(s); "
+                        "older stored history remains available through the continuation cursor."
+                    )
+                else:
+                    warnings.append(
+                        "The newest stored-data slices contained no matching transaction. "
+                        "Older stored history remains unscanned and is available through "
+                        "the continuation cursor; this is not verified absence."
+                    )
 
         if not hashes and rpc_address_request:
             rpc_discovery_attempted = True
@@ -1874,148 +2907,79 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             and not rpc_discovery_attempted
             and not execution_discovery_attempted
         ):
-            index_contract = validate_source_contract(
-                ch,
-                TX_ADDRESS_INDEX_RELATION,
-                (
-                    "chain_id",
-                    "participant_address",
-                    "transaction_hash",
-                    "activity_source",
-                    "block_number",
-                    "transaction_index",
-                    "block_timestamp",
-                    "token_addresses",
-                    "token_counterparties",
-                    "indexed_transfer_leg_count",
-                    "source_horizon_block",
-                    "indexed_at",
-                ),
-                probe_horizon=True,
-                horizon_column="block_timestamp",
-            )
-            if index_contract["ok"]:
-                try:
-                    index_horizon_sql, index_horizon_params = (
-                        build_tx_index_horizon_sql()
-                    )
-                    index_horizon_result = _run(
-                        ch, index_horizon_sql, index_horizon_params
-                    )
-                    transfer_horizon_row = next(
-                        (
-                            list(row)
-                            for row in index_horizon_result.rows
-                            if row and str(row[0]) == "transfers"
-                        ),
-                        None,
-                    )
-                    if transfer_horizon_row is None:
-                        raise RuntimeError("transfers stage is not populated")
-                    horizon = str(transfer_horizon_row[2])
-                except Exception as exc:
-                    index_contract = {
-                        **index_contract,
-                        "ok": False,
-                        "error": f"address-index stage horizon failed: {exc}",
-                    }
-
-            if index_contract["ok"]:
-                discovery_path = "address_index"
-                sources.append(
-                    source_record(
-                        kind="dbt_aggregate",
-                        name=TX_ADDRESS_INDEX_RELATION,
-                        role="discovery",
-                        status="ok",
-                        horizon=horizon,
-                        horizon_basis="transfers stage max(block_timestamp)",
-                        fetched_at=index_contract.get("freshness_checked_at"),
-                    )
+            # Money Trail edge drill-down is already bounded by the exact
+            # applied UTC window and token/counterparty predicates. Query the
+            # existing Transfer-log union directly; no participant index is
+            # required or preferred.
+            discovery_path = "execution_logs_window"
+            source_checks = [
+                validate_source_contract(
+                    ch,
+                    relation,
+                    (
+                        "block_number",
+                        "transaction_index",
+                        "log_index",
+                        "transaction_hash",
+                        "block_timestamp",
+                        "address",
+                        "topic0",
+                        "topic1",
+                        "topic2",
+                        "topic3",
+                        "data",
+                    ),
                 )
-                dsql, dparams = build_indexed_tx_discovery_sql(
-                    address_ids=[seed],
-                    t0=t0.strftime("%Y-%m-%d %H:%M:%S"),
-                    t1_exclusive=t1.strftime("%Y-%m-%d %H:%M:%S"),
-                    tokens=tokens or [],
-                    counterparty_ids=cps,
-                    limit=limit_txs,
-                    after_block=int(after_block or 0),
-                    after_index=int(after_index if after_index is not None else -1),
-                )
-            else:
-                # Compatibility while the index rolls out. This bounded raw
-                # scan is explicitly disclosed and may fail at large windows;
-                # its failure is never converted into verified absence.
-                discovery_path = "raw_chain_fallback"
-                warnings.append(
-                    "Address-index relation is unavailable; discovery used a "
-                    "bounded raw execution.logs union and may time out: "
-                    + str(index_contract.get("error") or "source unavailable")
-                )
-                source_checks = [
-                    validate_source_contract(
-                        ch,
-                        relation,
-                        (
-                            "block_number",
-                            "transaction_index",
-                            "log_index",
-                            "transaction_hash",
-                            "block_timestamp",
-                            "address",
-                            "topic0",
-                            "topic1",
-                            "topic2",
-                            "topic3",
-                            "data",
-                        ),
-                    )
-                    for relation in CHAIN_LOG_RELATIONS
-                ]
-                invalid = [check for check in source_checks if not check["ok"]]
-                if invalid:
-                    sources = [
-                        source_record(
-                            kind="chain",
-                            name=check["relation"],
-                            role="discovery",
-                            status="error" if not check["ok"] else "ok",
-                            horizon=chain_horizons.get(check["relation"]),
-                            horizon_basis="max(block_timestamp)",
-                            error=check.get("error"),
-                        )
-                        for check in source_checks
-                    ]
-                    return failed_load(
-                        "Transaction discovery source contract failed: "
-                        + "; ".join(str(check.get("error")) for check in invalid),
-                        sources,
-                    )
-                sources.extend(
+                for relation in CHAIN_LOG_RELATIONS
+            ]
+            invalid = [check for check in source_checks if not check["ok"]]
+            if invalid:
+                failed_sources = [
                     source_record(
                         kind="chain",
                         name=check["relation"],
                         role="discovery",
-                        status="ok",
+                        status="error" if not check["ok"] else "ok",
                         horizon=chain_horizons.get(check["relation"]),
-                        horizon_basis="max(block_timestamp)",
+                        horizon_basis="max(block_timestamp), max(block_number)",
+                        error=check.get("error"),
                     )
                     for check in source_checks
+                ]
+                return failed_load(
+                    "Transaction discovery source contract failed: "
+                    + "; ".join(str(check.get("error")) for check in invalid),
+                    failed_sources,
                 )
-                dsql, dparams = build_tx_discovery_sql(
-                    address_ids=[seed],
-                    t0=t0.strftime("%Y-%m-%d %H:%M:%S"),
-                    t1_exclusive=t1.strftime("%Y-%m-%d %H:%M:%S"),
-                    min_usd=float(min_usd or 0),
-                    tokens=tokens or [],
-                    counterparty_ids=cps,
-                    limit=limit_txs,
-                    after_block=int(after_block or 0),
-                    after_index=int(after_index if after_index is not None else -1),
+            sources.extend(
+                source_record(
+                    kind="chain",
+                    name=check["relation"],
+                    role="discovery",
+                    status="ok",
+                    horizon=chain_horizons.get(check["relation"]),
+                    horizon_basis="bounded UTC window over Transfer logs",
                 )
+                for check in source_checks
+            )
+            dsql, dparams = build_tx_discovery_sql(
+                address_ids=[seed],
+                t0=t0.strftime("%Y-%m-%d %H:%M:%S"),
+                t1_exclusive=t1.strftime("%Y-%m-%d %H:%M:%S"),
+                min_usd=float(min_usd or 0),
+                tokens=tokens or [],
+                counterparty_ids=cps,
+                limit=limit_txs,
+                after_block=int(after_block or 0),
+                after_index=int(after_index if after_index is not None else -1),
+            )
             try:
-                dres = _run(ch, dsql, dparams)
+                dres = _run(
+                    ch,
+                    dsql,
+                    dparams,
+                    query_budget=DISCOVERY_QUERY_BUDGET,
+                )
             except Exception as exc:
                 failed_sources = [dict(source) for source in sources]
                 for source in failed_sources:
@@ -2026,70 +2990,17 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     f"Transaction discovery query failed: {exc}",
                     failed_sources,
                 )
-            raw_rows = [list(r) for r in dres.rows]
-            if discovery_path == "address_index" and raw_rows:
-                discovered_total_matching = (
-                    int(raw_rows[0][6] or 0)
-                    if len(raw_rows[0]) >= 7
-                    else None
-                )
-            rows = [row[:6] for row in raw_rows]
-            if len(rows) > limit_txs:
-                txs_truncated = True
-                rows = rows[:limit_txs]
-            if (
-                discovered_total_matching is not None
-                and discovered_total_matching > limit_txs
-            ):
-                txs_truncated = True
-            hashes = [_hex0x(str(r[0])) for r in rows]
-            for r in rows:
-                blk = int(r[1] or 0)
-                if blk:
-                    block_of[_hex0x(str(r[0]))] = blk
-            if expand and not hashes:
-                warnings.append(
-                    f"{short_id(expand)} has no further transactions after block "
-                    f"{after_block} inside the {days}d window — the trail ends "
-                    "here for this address, OR the window/data horizon cuts it "
-                    "off. Widen the range before concluding the former."
-                )
-            if merge:
-                # Union with what is already on screen, preserving chain order
-                # and never dropping a previously loaded transaction.
-                prior = [_hex0x(str(h)) for h in (state_tx.get("tx_hashes") or [])]
-                hashes = prior + [h for h in hashes if h not in prior]
-                if len(hashes) > constants.TX_MAX_TXS:
-                    hashes = hashes[-constants.TX_MAX_TXS :]
-                    warnings.append(
-                        f"Transaction set capped at {constants.TX_MAX_TXS}; the "
-                        "oldest were dropped to make room for the newly followed "
-                        "ones."
-                    )
-            tx_list_rows = [
-                [_hex0x(str(r[0])), int(r[1] or 0), int(r[2] or 0), str(r[3] or ""),
-                 int(r[4] or 0), int(r[5] or 0)]
-                for r in rows
-            ]
-            if discovery_path == "address_index" and not rows and seed:
-                try:
-                    previous_sql, previous_params = build_latest_indexed_activity_sql(
-                        address_id=seed,
-                        before=t0.strftime("%Y-%m-%d %H:%M:%S"),
-                    )
-                    previous_result = _run(ch, previous_sql, previous_params)
-                    if previous_result.rows and previous_result.rows[0][0]:
-                        latest_before_t0 = str(previous_result.rows[0][0])
-                except Exception as exc:  # guidance only; not result authority
-                    warnings.append(
-                        f"Latest activity before the applied window could not be read: {exc}"
-                    )
+            raw_rows = [list(row[:6]) for row in dres.rows]
+            discovered_total_lower_bound = len(raw_rows)
+            txs_truncated = len(raw_rows) > limit_txs
+            rows = raw_rows[:limit_txs]
+            hashes = [_hex0x(str(row[0])) for row in rows]
+            for row in rows:
+                block_number = int(row[1] or 0)
+                if block_number:
+                    block_of[_hex0x(str(row[0]))] = block_number
+            tx_list_rows = [list(row) for row in rows]
 
-            # A query can complete successfully against a source whose ingest
-            # horizon ends before the requested t1. That proves only "nothing
-            # observed through the horizon", not absence over the requested
-            # window. Exact address-discovery emptiness requires full temporal
-            # coverage; receipt verification remains independent below.
             try:
                 horizon_dt = (
                     datetime.fromisoformat(str(horizon).replace("Z", "+00:00"))
@@ -2100,44 +3011,24 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     horizon_dt = horizon_dt.astimezone(timezone.utc).replace(
                         tzinfo=None
                     )
-                horizon_covers_window = bool(
-                    horizon_dt is not None and horizon_dt >= t1
-                )
-                # A bounded raw scan is a compatibility fallback, not an
-                # independently maintained address index. Even when its two
-                # source horizons cover t1, it may time out or omit an
-                # unindexed physical shard; it must never certify absence.
                 discovery_coverage_complete = bool(
-                    discovery_path == "address_index" and horizon_covers_window
+                    horizon_dt is not None and horizon_dt >= t1
                 )
             except ValueError:
                 discovery_coverage_complete = False
             if not discovery_coverage_complete:
-                if discovery_path == "raw_chain_fallback":
-                    warnings.append(
-                        "The bounded raw-log compatibility fallback cannot verify "
-                        "address absence independently. An empty result is not "
-                        "verified absence."
-                    )
-                else:
-                    warnings.append(
-                        "Address discovery does not cover the complete requested "
-                        f"window through {t1:%Y-%m-%d %H:%M:%S}; source horizon is "
-                        f"{horizon or 'unknown'}. An empty result is not verified absence."
-                    )
+                warnings.append(
+                    "Execution-log discovery does not cover the complete requested "
+                    f"window through {t1:%Y-%m-%d %H:%M:%S}; source horizon is "
+                    f"{horizon or 'unknown'}. An empty result is not verified absence."
+                )
                 for source in sources:
-                    if source.get("role") == "discovery" and source.get("status") == "ok":
-                        if discovery_path == "raw_chain_fallback":
-                            source["status"] = "partial"
-                            source["error"] = (
-                                "bounded raw-log fallback is not independent "
-                                "address-absence proof"
-                            )
-                        else:
-                            source["status"] = "stale"
-                            source["error"] = (
-                                "source horizon does not cover requested t1"
-                            )
+                    if (
+                        source.get("role") == "discovery"
+                        and source.get("status") == "ok"
+                    ):
+                        source["status"] = "stale"
+                        source["error"] = "source union does not cover requested t1"
 
         if not hashes:
             if all_history_address_request and discovery_coverage_complete:
@@ -2147,11 +3038,259 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     f"and uncovered RPC tail through block {horizon}."
                 )
             else:
-                warnings.append(
-                    f"No transactions found for {short_id(seed)} in the applied scope"
-                    + (f" with counterparty {short_id(cps[0])}" if cps else "")
-                    + " — lower min USD or clear the token filter."
+                qualifier = (
+                    f" with counterparty {short_id(cps[0])}" if cps else ""
                 )
+                if candidate_only and not discovery_coverage_complete:
+                    warnings.append(
+                        f"No matching transaction has been admitted yet for "
+                        f"{short_id(seed)}{qualifier}; older stored history remains "
+                        "unscanned, so absence is not verified."
+                    )
+                else:
+                    warnings.append(
+                        f"No transactions found for {short_id(seed)} in the applied scope"
+                        + qualifier
+                        + (" with the applied token filter." if tokens else ".")
+                    )
+
+        if candidate_only:
+            previous_dataset = record.datasets.get("tx_list")
+            same_query = bool(
+                cursor
+                and cursor_matches_query
+                and previous_dataset is not None
+            )
+            base_tx_list_revision = int(
+                record.dataset_revisions.get("tx_list", 0)
+            )
+            base_tx_list_row_count = (
+                len(previous_dataset.rows) if previous_dataset is not None else 0
+            )
+            append_delta_rows: list[list[Any]] | None = None
+            if same_query:
+                previous_rows = [list(row) for row in previous_dataset.rows]
+                merged_rows = _merge_tx_discovery_rows(
+                    previous_rows, tx_list_rows
+                )
+                append_delta_rows = _append_only_discovery_delta(
+                    previous_rows, merged_rows
+                )
+                tx_list_rows = merged_rows
+                prior_coverage = state_tx.get("discovery_coverage") or {}
+                discovery_scanned_ranges = [
+                    *list(prior_coverage.get("scanned_ranges") or []),
+                    *discovery_scanned_ranges,
+                ]
+                discovery_uncovered_ranges = [
+                    *list(prior_coverage.get("uncovered_ranges") or []),
+                    *discovery_uncovered_ranges,
+                ]
+                if discovery_uncovered_ranges:
+                    discovery_coverage_complete = False
+
+            total_exact = (
+                (
+                    len(tx_list_rows)
+                    if same_query
+                    else discovered_total_matching
+                )
+                if discovery_coverage_complete
+                else None
+            )
+            total_lower_bound = max(
+                int(discovered_total_lower_bound or 0), len(tx_list_rows)
+            )
+            coverage = {
+                "complete": discovery_coverage_complete,
+                "total_exact": total_exact,
+                "total_lower_bound": total_lower_bound,
+                "next_cursor": next_discovery_cursor,
+                "scanned_ranges": _coalesce_scanned_ranges(
+                    discovery_scanned_ranges
+                ),
+                "uncovered_ranges": discovery_uncovered_ranges,
+                "older_history_unscanned": bool(
+                    older_history_unscanned or txs_truncated
+                ),
+            }
+            verified_empty = bool(
+                not tx_list_rows
+                and coverage["complete"]
+                and coverage["total_exact"] == 0
+                and not coverage["uncovered_ranges"]
+            )
+            scope_status = (
+                "ready"
+                if coverage["complete"] and not coverage["uncovered_ranges"]
+                else "partial"
+            )
+            scope = forensic_scope(
+                scope_id=scope_id,
+                request_id=request_id,
+                status=scope_status,
+                t0=(t0.strftime("%Y-%m-%d %H:%M:%S") if exact_window_request else None),
+                t1=(t1.strftime("%Y-%m-%d %H:%M:%S") if exact_window_request else None),
+                window_source=applied_window_source,
+                data_horizon=horizon,
+                sources=sources,
+                rows_returned=len(tx_list_rows),
+                rows_total=total_exact,
+                nodes_returned=0,
+                nodes_total=0 if verified_empty else None,
+                edges_returned=0,
+                edges_total=0 if verified_empty else None,
+                truncated=bool(txs_truncated),
+                truncation_rule=(
+                    f"newest-first keyset page of {limit_txs} candidates"
+                    if txs_truncated
+                    else None
+                ),
+                residuals=(
+                    "candidate discovery is not receipt verification",
+                    "native/internal value semantics require receipt and trace evidence",
+                ),
+                warnings=warnings,
+                verification_status="verified" if verified_empty else "unverified",
+                verification_method=(
+                    "complete execution/live history plus bounded RPC head"
+                    if coverage["complete"]
+                    else "newest-first admitted candidates with disclosed remaining coverage"
+                ),
+                query_kind="address_discovery",
+                evidence_class="address_discovery",
+                subjects=[seed],
+                result_row_hash=canonical_row_hash(tx_list_rows),
+            )
+            scope.update(
+                {
+                    "query_kind": "address_discovery",
+                    "evidence_class": "address_discovery",
+                    "discovery_path": discovery_path,
+                    "discovery_coverage": coverage,
+                    "receipt_verification_status": "not_loaded",
+                    "txs_total_matching": total_exact,
+                    "txs_total_lower_bound": total_lower_bound,
+                    "more_transactions_available": bool(next_discovery_cursor),
+                    "exact": verified_empty,
+                    "ordered": True,
+                    "legs_returned": 0,
+                    "legs_total": 0 if verified_empty else None,
+                }
+            )
+            query = query_contract()
+            append_patch_safe = bool(
+                same_query
+                and append_delta_rows is not None
+                and base_tx_list_revision > 0
+            )
+            candidate_datasets = {
+                "tx_list": dataset_from_rows(
+                    constants.TX_LIST_COLUMNS, tx_list_rows, "tx_list"
+                ),
+            }
+            if not append_patch_safe:
+                candidate_datasets.update(
+                    {
+                        "tx_nodes": dataset_from_rows(
+                            constants.TX_LEG_NODES_COLUMNS, [], "tx_nodes"
+                        ),
+                        "tx_legs": dataset_from_rows(
+                            constants.TX_LEG_EDGES_COLUMNS, [], "tx_legs"
+                        ),
+                        "tx_raw_receipts": dataset_from_rows(
+                            constants.TX_RAW_RECEIPTS_COLUMNS,
+                            [],
+                            "tx_raw_receipts",
+                        ),
+                        "tx_context": dataset_from_rows(
+                            _TX_CONTEXT_COLUMNS, [], "tx_context"
+                        ),
+                    }
+                )
+            candidate_dataset_scopes = {"tx_list": scope_id}
+            if not append_patch_safe:
+                candidate_dataset_scopes.update(
+                    {
+                        "tx_nodes": scope_id,
+                        "tx_legs": scope_id,
+                        "tx_raw_receipts": scope_id,
+                        "tx_context": scope_id,
+                    }
+                )
+            candidate_state_patch = {
+                "transactions": {
+                    "operation": "discover",
+                    "tx_hashes": [],
+                    "query_kind": "address_discovery",
+                    "query_hashes": [],
+                    "result_hashes": [str(row[0]) for row in tx_list_rows],
+                    "query": query,
+                    "results": {
+                        "hashes": [str(row[0]) for row in tx_list_rows],
+                        "selected_hash": None,
+                    },
+                    "seed": seed,
+                    "counterparties": [],
+                    "range_days": 0,
+                    "t0": query.get("window", {}).get("t0", "")
+                    if query.get("window")
+                    else "",
+                    "t1": query.get("window", {}).get("t1", "")
+                    if query.get("window")
+                    else "",
+                    "max_txs": limit_txs,
+                    "page_size": limit_txs,
+                    "tokens": tokens or [],
+                    "activity_kinds": normalized_activity_kinds,
+                    "tx_count": len(tx_list_rows),
+                    "leg_count": 0,
+                    "scope": scope,
+                    "discovery_scope": scope,
+                    "receipt_scope": None,
+                    "discovery_coverage": coverage,
+                    "last_attempt": None,
+                },
+                "dataset_scopes": candidate_dataset_scopes,
+                "warnings": warnings,
+            }
+            committed = mini_apps.commit_view_update(
+                view_id,
+                request_channel="transactions.discovery",
+                request_id=request_id,
+                guard_channels=("transactions",),
+                datasets=candidate_datasets,
+                state_patch=candidate_state_patch,
+            )
+            updated = mini_apps.snapshot_view(view_id)
+            assert updated is not None
+            if not committed:
+                return mini_apps.payload_to_call_tool_result(
+                    build_payload(updated),
+                    summary_text="Transaction discovery was superseded by a newer request.",
+                )
+            summary = (
+                f"No matching address activity for {short_id(seed)} (verified)."
+                if verified_empty
+                else f"Discovered {len(tx_list_rows)} candidate transaction(s) for "
+                f"{short_id(seed)}; select one to verify its receipt."
+            )
+            response_payload = (
+                build_dataset_append_patch(
+                    updated,
+                    dataset_key="tx_list",
+                    base_revision=base_tx_list_revision,
+                    base_row_count=base_tx_list_row_count,
+                    append_rows=append_delta_rows or [],
+                    view_state_patch=candidate_state_patch,
+                    scope=scope,
+                )
+                if append_patch_safe
+                else build_payload(updated)
+            )
+            return mini_apps.payload_to_call_tool_result(
+                response_payload, summary_text=summary
+            )
 
         requested_hashes = list(hashes)
 
@@ -2161,16 +3300,29 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         # user-pasted hashes are resolved over RPC.
         # Legs for KNOWN transactions come from RPC receipts: ~155ms vs ~7s for
         # the equivalent SQL scan, and the receipt is authoritative (no
-        # whitelist, no indexer lag). Plain-address hashes come from the address
-        # index plus a bounded RPC head scan, or the disclosed raw-log rollout
-        # fallback. SQL leg reads remain only a receipt fallback.
+        # whitelist, no indexer lag). Plain-address hashes come from bounded,
+        # newest-first execution transaction/log pages plus the uncovered RPC
+        # head. SQL leg reads remain only a receipt fallback.
         rpc_rows: list[list[Any]] = []
         rpc_unresolved = list(hashes)
         receipt_statuses: dict[str, str] = {}
         receipt_blocks: dict[str, int] = {}
         receipt_decode_failures: list[dict[str, Any]] = []
         raw_receipt_rows: list[list[Any]] = []
+        transaction_context_rows: list[list[Any]] = []
         if hashes:
+            receipt_kwargs: dict[str, Any] = {
+                "raw_receipt_rows": raw_receipt_rows,
+            }
+            if receipt_only:
+                previous_query = state_tx.get("query") or {}
+                receipt_kwargs.update(
+                    {
+                        "transaction_context_rows": transaction_context_rows,
+                        "match_address": str(previous_query.get("address") or ""),
+                        "filter_tokens": list(previous_query.get("tokens") or []),
+                    }
+                )
             (
                 rpc_rows,
                 rpc_unresolved,
@@ -2179,7 +3331,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 receipt_decode_failures,
             ) = _legs_from_receipts(
                 hashes,
-                raw_receipt_rows=raw_receipt_rows,
+                **receipt_kwargs,
             )
             block_of.update(receipt_blocks)
             for r in rpc_rows:
@@ -2291,6 +3443,26 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     ),
                 )
             )
+            if receipt_only:
+                context_complete = bool(
+                    transaction_context_rows
+                    and all(row[1] for row in transaction_context_rows)
+                )
+                sources.append(
+                    source_record(
+                        kind="rpc",
+                        name="eth_getTransactionByHash",
+                        role="primary",
+                        status="ok" if context_complete else "partial",
+                        horizon=max(known) if known else None,
+                        horizon_basis="transaction block_number",
+                        error=(
+                            None
+                            if context_complete
+                            else "transaction envelope unavailable or incomplete"
+                        ),
+                    )
+                )
 
             fallback_hashes = [
                 h for h in hashes if _hex0x(h) not in receipt_statuses
@@ -2477,12 +3649,19 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 kept_hashes = [h for h in seen_order if h != drop]
             else:
                 kept_hashes = seen_order
-            warnings.append(
-                f"Leg cap reached ({constants.TX_MAX_LEGS}): showing "
-                f"{len(kept_hashes)} of {len(hashes)} transactions in full. "
-                "Whole transactions are dropped rather than split — a partial "
-                "transaction misreads as a different operation."
-            )
+            if len(seen_order) == 1:
+                warnings.append(
+                    f"Leg cap reached ({constants.TX_MAX_LEGS}): the selected "
+                    f"transaction contains {legs_total or len(leg_rows_raw)} "
+                    "standard ERC-20 Transfer logs, so only the first capped "
+                    "legs are displayed. This receipt is PARTIAL in the UI."
+                )
+            else:
+                warnings.append(
+                    f"Leg cap reached ({constants.TX_MAX_LEGS}): showing "
+                    f"{len(kept_hashes)} of {len(hashes)} transactions in full. "
+                    "Whole trailing transactions are dropped rather than split."
+                )
             hashes = kept_hashes
             kept_receipt_hashes = set(kept_hashes)
             raw_receipt_rows = [
@@ -2653,12 +3832,11 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             else t1.strftime("%Y-%m-%d %H:%M:%S")
         )
         plain_discovery_method = (
-            "complete address index plus bounded RPC-head discovery"
-            if discovery_path == "address_index_rpc_tail"
+            "complete execution transaction/log history plus RPC-head discovery"
+            if discovery_coverage_complete
             else (
-                "complete execution-log history plus RPC-head discovery"
-                if discovery_coverage_complete
-                else "newest-first execution-log result admission plus RPC-head discovery"
+                "newest-first execution transaction/log result admission plus "
+                "RPC-head discovery"
             )
         )
         scope = forensic_scope(
@@ -2841,90 +4019,154 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             }
         )
 
-        mini_apps.attach_dataset(
-            view_id, "tx_nodes",
-            dataset_from_rows(constants.TX_LEG_NODES_COLUMNS, node_rows, "tx_nodes"),
-        )
-        mini_apps.attach_dataset(
-            view_id, "tx_legs",
-            dataset_from_rows(constants.TX_LEG_EDGES_COLUMNS, leg_edge_rows, "tx_legs"),
-        )
-        mini_apps.attach_dataset(
-            view_id, "tx_list",
-            dataset_from_rows(constants.TX_LIST_COLUMNS, tx_list_rows, "tx_list"),
-        )
-        mini_apps.attach_dataset(
-            view_id,
-            "tx_raw_receipts",
-            dataset_from_rows(
+        if receipt_only and no_answer_for_requested:
+            return _failed_transaction_result(
+                view_id=view_id,
+                record=record,
+                tx_state={
+                    **state_tx,
+                    "operation": "receipt",
+                    "requested_hash": requested_hashes[0]
+                    if requested_hashes
+                    else None,
+                },
+                scope=scope,
+                warnings=warnings,
+                summary="Selected transaction receipt could not be verified; "
+                "the accepted discovery list and receipt evidence were preserved.",
+                request_channel="transactions.receipt",
+            )
+
+        transaction_datasets = {
+            "tx_nodes": dataset_from_rows(
+                constants.TX_LEG_NODES_COLUMNS, node_rows, "tx_nodes"
+            ),
+            "tx_legs": dataset_from_rows(
+                constants.TX_LEG_EDGES_COLUMNS, leg_edge_rows, "tx_legs"
+            ),
+            "tx_raw_receipts": dataset_from_rows(
                 constants.TX_RAW_RECEIPTS_COLUMNS,
                 raw_receipt_rows,
                 "tx_raw_receipts",
             ),
+            "tx_context": dataset_from_rows(
+                _TX_CONTEXT_COLUMNS, transaction_context_rows, "tx_context"
+            ),
+        }
+        if not receipt_only or preserved_tx_list is None:
+            transaction_datasets["tx_list"] = dataset_from_rows(
+                constants.TX_LIST_COLUMNS, tx_list_rows, "tx_list"
+            )
+
+        generated_transaction_state = {
+            "operation": operation,
+            "tx_hashes": hashes,
+            "query_kind": query_kind,
+            "query_hashes": list(query_hashes),
+            "result_hashes": list(hashes),
+            "query": query_contract(),
+            "results": {
+                "hashes": list(hashes),
+                "selected_hash": hashes[0] if hashes else None,
+            },
+            "seed": seed,
+            "expanded": (
+                sorted({*(state_tx.get("expanded") or []), expand})
+                if expand
+                else list(state_tx.get("expanded") or [])
+            ),
+            "counterparties": cps,
+            "range_days": (
+                0 if explicit_hash_request or all_history_address_request else days
+            ),
+            "t0": (
+                ""
+                if explicit_hash_request or all_history_address_request
+                else t0.strftime("%Y-%m-%d %H:%M:%S")
+            ),
+            "t1": (
+                ""
+                if explicit_hash_request or all_history_address_request
+                else t1.strftime("%Y-%m-%d %H:%M:%S")
+            ),
+            "max_txs": limit_txs,
+            "tokens": tokens or [],
+            "min_usd": float(min_usd or 0),
+            "tx_count": len(tx_rank),
+            "leg_count": legs_returned,
+            "scope": scope,
+            "receipt_scope": scope if receipt_only else None,
+            "last_attempt": None,
+        }
+        preserved_address_query = bool(
+            receipt_only
+            and preserved_tx_list is not None
+            and isinstance(preserved_discovery.get("query"), dict)
+            and preserved_discovery["query"].get("kind") == "address"
         )
+        if preserved_address_query:
+            discovery_scope = preserved_discovery.get("discovery_scope") or state_tx.get(
+                "scope"
+            )
+            prior_hashes = list(preserved_discovery.get("result_hashes") or [])
+            generated_transaction_state.update(preserved_discovery)
+            generated_transaction_state.update(
+                {
+                    "operation": "receipt",
+                    "tx_hashes": [],
+                    "query_kind": "address_discovery",
+                    "result_hashes": prior_hashes,
+                    "results": {
+                        "hashes": prior_hashes,
+                        "selected_hash": hashes[0] if hashes else None,
+                    },
+                    "tx_count": len(prior_hashes),
+                    "leg_count": legs_returned,
+                    "scope": discovery_scope,
+                    "discovery_scope": discovery_scope,
+                    "receipt_scope": scope,
+                    "last_attempt": None,
+                }
+            )
+
+        dataset_scopes = {
+            "tx_nodes": scope_id,
+            "tx_legs": scope_id,
+            "tx_raw_receipts": scope_id,
+            "tx_context": scope_id,
+        }
+        if not receipt_only or preserved_tx_list is None:
+            dataset_scopes["tx_list"] = scope_id
 
         # Data loader: writes ONLY its own namespace + datasets. `mode` and
         # `selection` belong to explicit mode commands (which bump
         # mode_revision), so a slow load can never yank the user's tab.
-        mini_apps.patch_view_state(
+        committed = mini_apps.commit_view_update(
             view_id,
-            {
+            request_channel=(
+                "transactions.receipt"
+                if explicit_hash_request
+                else "transactions.discovery"
+            ),
+            request_id=request_id,
+            guard_channels=("transactions",),
+            datasets=transaction_datasets,
+            state_patch={
                 "transactions": {
-                    "tx_hashes": hashes,
-                    # Separate query authority from result hashes. The legacy
-                    # tx_hashes field remains for old URLs/clients, but a
-                    # discovery result must never turn into an explicit-hash
-                    # query when the page reloads.
-                    "query_kind": query_kind,
-                    "query_hashes": list(query_hashes),
-                    "result_hashes": list(hashes),
-                    "query": query_contract(),
-                    "results": {
-                        "hashes": list(hashes),
-                        "selected_hash": hashes[0] if hashes else None,
-                    },
-                    "seed": seed,
-                    # Addresses already followed forward, so the UI can mark a
-                    # node as walked and the analyst can see the trail taken.
-                    "expanded": (
-                        sorted({*(state_tx.get("expanded") or []), expand})
-                        if expand
-                        else list(state_tx.get("expanded") or [])
-                    ),
-                    "counterparties": cps,
-                    "range_days": (
-                        0 if explicit_hash_request or all_history_address_request else days
-                    ),
-                    "t0": (
-                        ""
-                        if explicit_hash_request or all_history_address_request
-                        else t0.strftime("%Y-%m-%d %H:%M:%S")
-                    ),
-                    "t1": (
-                        ""
-                        if explicit_hash_request or all_history_address_request
-                        else t1.strftime("%Y-%m-%d %H:%M:%S")
-                    ),
-                    "max_txs": limit_txs,
-                    "tokens": tokens or [],
-                    "min_usd": float(min_usd or 0),
-                    "tx_count": len(tx_rank),
-                    "leg_count": legs_returned,
-                    "scope": scope,
-                    "last_attempt": None,
+                    **generated_transaction_state,
                 },
-                "dataset_scopes": {
-                    "tx_nodes": scope_id,
-                    "tx_legs": scope_id,
-                    "tx_list": scope_id,
-                    "tx_raw_receipts": scope_id,
-                },
+                "dataset_scopes": dataset_scopes,
                 "warnings": warnings,
             },
         )
 
-        updated = mini_apps.get_view(view_id)
+        updated = mini_apps.snapshot_view(view_id)
         assert updated is not None
+        if not committed:
+            return mini_apps.payload_to_call_tool_result(
+                build_payload(updated),
+                summary_text="Transaction request was superseded by a newer request.",
+            )
         return mini_apps.payload_to_call_tool_result(
             build_payload(updated),
             summary_text=(

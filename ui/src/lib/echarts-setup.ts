@@ -10,6 +10,7 @@ import {
   SankeyChart,
   GraphChart,
   FunnelChart,
+  CandlestickChart,
 } from "echarts/charts";
 import {
   TitleComponent,
@@ -22,7 +23,7 @@ import {
   CalendarComponent,
   VisualMapComponent,
 } from "echarts/components";
-import { CanvasRenderer } from "echarts/renderers";
+import { CanvasRenderer, SVGRenderer } from "echarts/renderers";
 
 import { ECHARTS_LIGHT } from "../themes/echarts-light";
 import { ECHARTS_DARK } from "../themes/echarts-dark";
@@ -38,6 +39,7 @@ echarts.use([
   SankeyChart,
   GraphChart,
   FunnelChart,
+  CandlestickChart,
   TitleComponent,
   TooltipComponent,
   LegendComponent,
@@ -48,6 +50,7 @@ echarts.use([
   CalendarComponent,
   VisualMapComponent,
   CanvasRenderer,
+  SVGRenderer,
 ]);
 
 echarts.registerTheme("cerebro-light", ECHARTS_LIGHT);

@@ -41,4 +41,8 @@ packages = ["src/cerebro_mcp"]
 # VCS-based file selection skips it; `artifacts` un-ignores just that file.
 # A directory-level force-include of static/ would re-add every tracked file
 # `packages` already ships, which newer hatchling rejects as a duplicate path.
-artifacts = ["src/cerebro_mcp/static/report.html"]
+artifacts = [
+    "src/cerebro_mcp/static/report.html",
+    "src/cerebro_mcp/static/graph_explorer_web.html",
+    "src/cerebro_mcp/static/assets/graph_explorer/**",
+]

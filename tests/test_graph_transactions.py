@@ -14,11 +14,8 @@ from mcp.server.fastmcp import FastMCP
 from cerebro_mcp.clients.clickhouse import ExecutedQuery
 from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
 from cerebro_mcp.semantic.tx_queries import (
-    TX_ADDRESS_INDEX_RELATION,
-    build_indexed_tx_discovery_sql,
-    build_indexed_tx_membership_sql,
+    build_all_history_tx_discovery_chunk_sql,
     build_legs_sql,
-    build_tx_index_horizon_sql,
 )
 from cerebro_mcp.tools.semantic.graph_explorer import constants
 from cerebro_mcp.tools.semantic.graph_explorer.forensics import (
@@ -31,10 +28,19 @@ from cerebro_mcp.tools.semantic.graph_explorer.state import (
 )
 from cerebro_mcp.tools.semantic.graph_explorer.transactions import (
     TRANSFER_TOPIC0,
+    _DISCOVERY_HORIZON_QUERY_BUDGET,
     _authoritative_leg_total,
+    _append_only_discovery_delta,
+    _coverage_continuation_boundary,
+    _decode_discovery_cursor,
     _discover_address_direct_transactions_rpc,
+    _discover_address_transactions_execution,
     _discover_address_transactions_rpc,
+    _encode_discovery_cursor,
+    _encode_coverage_discovery_cursor,
     _legs_from_receipts,
+    _newest_uncovered_retry_slice,
+    _uncovered_requires_smaller_tile,
     register_transaction_tools,
 )
 from cerebro_mcp.tools.visualization import mini_apps
@@ -63,16 +69,12 @@ class TxStubCH:
         *,
         price: float | None = 2.0,
         validate_sources: bool = True,
-        address_index: bool = False,
-        index_rows: list[list[Any]] | None = None,
         missing_relations: set[str] | None = None,
         sql_fallback_rows: list[list[Any]] | None = None,
         sql_leg_total: int = 7,
     ):
         self.price = price
         self.validate_sources = validate_sources
-        self.address_index = address_index
-        self.index_rows = index_rows or []
         self.missing_relations = missing_relations or set()
         self.sql_fallback_rows = sql_fallback_rows or []
         self.sql_leg_total = sql_leg_total
@@ -101,11 +103,7 @@ class TxStubCH:
             relation = ".".join(
                 part for part in (params.get("database"), params.get("table")) if part
             )
-            relation_available = self.validate_sources and (
-                relation
-                != "dbt.int_execution_address_activity"
-                or self.address_index
-            )
+            relation_available = self.validate_sources
             rows = (
                 [[name, "String"] for name in required]
                 if relation_available and relation not in self.missing_relations
@@ -113,39 +111,13 @@ class TxStubCH:
             )
             return result(["name", "type"], rows)
         if (
-            "int_execution_address_activity" in sql
-            and "GROUP BY activity_source" in sql
+            "max(toString(`block_timestamp`))" in sql
+            or "toString(max(`block_timestamp`))" in sql
         ):
-            return result(
-                [
-                    "activity_source",
-                    "first_event_at",
-                    "event_horizon",
-                    "block_horizon",
-                    "indexed_at",
-                ],
-                [
-                    [
-                        "transactions",
-                        "2018-10-08 00:00:00",
-                        "2026-07-19 01:30:00",
-                        47_000_000,
-                        "2026-07-19 01:35:00",
-                    ],
-                    [
-                        "transfers",
-                        "2018-10-09 00:00:00",
-                        "2026-07-19 01:25:00",
-                        46_999_999,
-                        "2026-07-19 01:35:00",
-                    ],
-                ],
-            )
-        if "max(toString(`block_timestamp`))" in sql:
             return result(["source_horizon"], [["2026-07-19 01:25:00"]])
         if "metadata_modification_time" in sql:
             return result(["source_horizon"], [["2026-07-19 08:13:13"]])
-        if "max(toString(`date`))" in sql:
+        if "max(toString(`date`))" in sql or "toString(max(`date`))" in sql:
             return result(["source_horizon"], [["2026-07-18"]])
         if "'execution.logs' AS relation" in sql:
             return result(
@@ -153,26 +125,9 @@ class TxStubCH:
                 [
                     ["execution.logs", "2026-07-19 00:00:00", 46_999_000],
                     ["execution_live.logs", "2026-07-19 01:00:00", 47_000_000],
+                    ["execution.transactions", "2026-07-19 00:00:00", 46_999_000],
+                    ["execution_live.transactions", "2026-07-19 01:00:00", 47_000_000],
                 ],
-            )
-        if "int_execution_address_activity" in sql and "latest_before_t0" in sql:
-            return result(["latest_before_t0"], [[None]])
-        if (
-            "int_execution_address_activity" in sql
-            and "SELECT DISTINCT transaction_hash" in sql
-        ):
-            return result(["transaction_hash"], [])
-        if "int_execution_address_activity" in sql:
-            return result(
-                [
-                    "transaction_hash",
-                    "block_number",
-                    "transaction_index",
-                    "block_timestamp",
-                    "leg_count",
-                    "token_count",
-                ],
-                self.index_rows,
             )
         if "stg_pools__tokens_meta" in sql:
             return result(
@@ -295,33 +250,25 @@ def test_sql_fallback_query_is_raw_chain_only():
     assert "amount_usd" not in sql
 
 
-def test_address_index_queries_match_the_additive_dbt_contract():
-    sql, params = build_indexed_tx_discovery_sql(
+def test_address_discovery_page_merges_existing_transactions_and_transfer_logs():
+    sql, params = build_all_history_tx_discovery_chunk_sql(
         address_ids=[SOURCE],
         t0="2018-10-08 00:00:00",
         t1_exclusive="2026-07-20 00:00:00",
-        tokens=[TOKEN],
-        counterparty_ids=[TARGET],
         limit=25,
     )
-    assert TX_ADDRESS_INDEX_RELATION == "dbt.int_execution_address_activity"
-    assert f"FROM {TX_ADDRESS_INDEX_RELATION} FINAL" in sql
-    assert "indexed_transfer_leg_count" in sql
-    assert "token_counterparties" in sql
-    assert "count() OVER () AS transaction_total" in sql
-    assert "standard_erc20_leg_count" not in sql
-    assert params["chain_id"] == 100
-
-    horizon_sql, _ = build_tx_index_horizon_sql()
-    assert "GROUP BY activity_source" in horizon_sql
-    assert "max(source_horizon_block) AS block_horizon" in horizon_sql
-
-    membership_sql, membership_params = build_indexed_tx_membership_sql(
-        address_id=SOURCE,
-        tx_hashes=[TX_HASH],
-    )
-    assert f"FROM {TX_ADDRESS_INDEX_RELATION} FINAL" in membership_sql
-    assert membership_params["hashes"] == [TX_HASH]
+    assert "FROM execution.logs" in sql
+    assert "FROM execution_live.logs" in sql
+    assert "FROM execution.transactions" in sql
+    assert "FROM execution_live.transactions" in sql
+    assert "topic1 IN {topics:Array(String)}" in sql
+    assert "from_address IN {addresses:Array(String)}" in sql
+    assert "to_address IN {addresses:Array(String)}" in sql
+    assert "transfer_candidates" in sql
+    assert "direct_candidates" in sql
+    assert "GROUP BY transaction_hash" in sql
+    assert "count() OVER () AS chunk_transaction_total" in sql
+    assert params["addresses"] == [SOURCE[2:]]
 
 
 def test_rpc_address_discovery_scans_genesis_to_head_and_deduplicates_self_transfers():
@@ -539,7 +486,13 @@ def test_null_token_decimals_preserve_raw_amount_without_inventing_normalized_va
     assert any("normalized amounts" in warning for warning in scope["warnings"])
 
 
-def test_symbol_only_price_source_is_explicitly_partial_not_address_qualified():
+def test_whitelist_symbol_price_is_address_accurate_when_fully_priced():
+    # int_execution_token_prices_daily is keyed by (symbol, date), but the
+    # tokens_whitelist seed maps every token_address to a UNIQUE symbol, and the
+    # metadata symbols come from that same seed, so a resolved price is
+    # address-accurate -- NOT a blanket "symbol-only, cannot distinguish
+    # same-symbol contracts" caveat. A fully-priced load must read "ok" with no
+    # false same-symbol alarm.
     ch = TxStubCH(price=2.0)
     view_id, load = _view_and_tool(ch)
     with patch(
@@ -556,11 +509,15 @@ def test_symbol_only_price_source_is_explicitly_partial_not_address_qualified():
         for source in scope["sources"]
         if source["name"] == "dbt.int_execution_token_prices_daily"
     )
-    assert price_source["status"] == "partial"
-    assert "exposes no token_address" in price_source["error"]
-    assert scope["status"] == "partial"
+    assert price_source["status"] == "ok"
+    assert "token_address" not in (price_source.get("error") or "")
+    assert not any(
+        "same-symbol" in warning or "exposes no token_address" in warning
+        for warning in scope["warnings"]
+    )
     assert scope["verification"]["status"] == "verified"
-    # The value remains inspectable, but its source limitation is not hidden.
+    assert scope["unpriced_leg_count"] == 0
+    # The value is present and, per the bijection above, address-accurate.
     assert result.structuredContent["datasets"]["tx_legs"]["preview_rows"][0][11] == 2.0
 
 
@@ -738,6 +695,18 @@ def test_missing_price_is_null_not_zero_and_scope_discloses_coverage():
     assert scope["known_usd_total"] == 0.0
     assert scope["unpriced_leg_count"] == 2
     assert scope["coverage"]["usd"]["total"] is None
+    # Genuine price GAP (whitelisted token, no price row for its date) is the
+    # only honest "partial" for the price source -- and it names the gap, not a
+    # blanket same-symbol caveat.
+    price_source = next(
+        source
+        for source in scope["sources"]
+        if source["name"] == "dbt.int_execution_token_prices_daily"
+    )
+    assert price_source["status"] == "partial"
+    assert "no daily price" in (price_source["error"] or "")
+    assert "left unknown" in (price_source["error"] or "")
+    assert "token_address" not in (price_source["error"] or "")
     nodes = {
         row[0]: row
         for row in result.structuredContent["datasets"]["tx_nodes"]["preview_rows"]
@@ -821,6 +790,10 @@ def test_complete_full_history_rpc_empty_discovery_is_verified_zero():
             "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
             return_value=([], 47_000_000),
         ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ),
     ):
         result = load(
             view_id=view_id,
@@ -839,16 +812,19 @@ def test_complete_full_history_rpc_empty_discovery_is_verified_zero():
     assert scope["result_observed_through"] is None
     assert scope["query_kind"] == "address_discovery"
     assert scope["evidence_class"] == "address_discovery"
-    assert scope["discovery_path"] == "execution_logs_rpc_tail"
+    assert scope["discovery_path"] == "execution_tables_rpc_tail"
     assert scope["window"] == {
         "t0": None,
         "t1": None,
-        "source": "execution_logs_plus_rpc_head",
+        "source": "execution_tables_plus_rpc_head",
     }
     assert {source["name"] for source in scope["sources"]} >= {
         "execution.logs",
         "execution_live.logs",
+        "execution.transactions",
+        "execution_live.transactions",
         "eth_getLogs",
+        "eth_getBlockByNumber",
     }
 
 
@@ -864,6 +840,10 @@ def test_plain_address_ignores_legacy_date_ranges_instead_of_hiding_activity():
             "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
             return_value=([], 47_000_001),
         ) as rpc_discover,
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ) as direct_discover,
     ):
         result = load(
             view_id=view_id,
@@ -881,6 +861,11 @@ def test_plain_address_ignores_legacy_date_ranges_instead_of_hiding_activity():
         limit=25,
     )
     rpc_discover.assert_called_once_with(SOURCE, after_block=47_000_001)
+    direct_discover.assert_called_once_with(
+        SOURCE,
+        after_block=47_000_001,
+        through_block=47_000_001,
+    )
     assert scope["verification"]["status"] == "verified"
     assert result.structuredContent["view_state"]["transactions"]["range_days"] == 0
     assert scope["discovery_coverage"] == {
@@ -890,18 +875,22 @@ def test_plain_address_ignores_legacy_date_ranges_instead_of_hiding_activity():
     }
 
 
-def test_plain_address_uses_dbt_index_rpc_tail_then_authoritative_receipts():
-    index_hash = "0x" + "cd" * 32
-    ch = TxStubCH(
-        address_index=True,
-        index_rows=[
-            [index_hash, 12_500, 3, "2026-07-19 02:00:00", 2, 1, 1],
-        ],
-    )
+def test_plain_address_uses_execution_tables_then_authoritative_receipts():
+    discovered_hash = "0x" + "cd" * 32
+    discovered_row = [
+        discovered_hash,
+        12_500,
+        3,
+        "2026-07-19 00:30:00",
+        2,
+        1,
+    ]
+    ch = TxStubCH()
     view_id, load = _view_and_tool(ch)
     with (
         patch(
             "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_execution",
+            return_value=([discovered_row], 1, True, 1),
         ) as execution_discover,
         patch(
             "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
@@ -914,10 +903,10 @@ def test_plain_address_uses_dbt_index_rpc_tail_then_authoritative_receipts():
         patch(
             "cerebro_mcp.tools.semantic.graph_explorer.transactions._legs_from_receipts",
             return_value=(
-                [[index_hash, *row[1:]] for row in _receipt_rows(2)],
+                [[discovered_hash, *row[1:]] for row in _receipt_rows(2)],
                 [],
-                {index_hash: "success"},
-                {index_hash: 12_500},
+                {discovered_hash: "success"},
+                {discovered_hash: 12_500},
                 [],
             ),
         ),
@@ -926,21 +915,33 @@ def test_plain_address_uses_dbt_index_rpc_tail_then_authoritative_receipts():
 
     tx = result.structuredContent["view_state"]["transactions"]
     scope = tx["scope"]
-    execution_discover.assert_not_called()
-    assert scope["discovery_path"] == "address_index_rpc_tail"
-    assert scope["data_horizon"] == 47_000_002
-    discovery_source = next(
-        source for source in scope["sources"] if source["role"] == "discovery"
+    execution_discover.assert_called_once_with(
+        ch, SOURCE, through="2026-07-19 01:00:00", limit=25
     )
-    assert discovery_source["name"] == "dbt.int_execution_address_activity"
-    assert any("participant_address IN" in call["sql"] for call in ch.calls)
+    assert scope["discovery_path"] == "execution_tables_rpc_tail"
+    assert scope["data_horizon"] == 47_000_002
+    discovery_sources = {
+        source["name"]
+        for source in scope["sources"]
+        if source["role"] == "discovery"
+    }
+    assert discovery_sources == {
+        "execution.logs",
+        "execution_live.logs",
+        "execution.transactions",
+        "execution_live.transactions",
+    }
+    assert all(
+        source["kind"] != "dbt_aggregate"
+        for source in scope["sources"]
+        if source["role"] == "discovery"
+    )
     assert tx["query_kind"] == "address_discovery"
     assert tx["query_hashes"] == []
-    assert tx["result_hashes"] == [index_hash]
+    assert tx["result_hashes"] == [discovered_hash]
     assert result.structuredContent["datasets"]["tx_list"]["preview_rows"] == [
-        [index_hash, 12_345, 7, "2026-07-18 12:00:00", 2, 1]
+        [discovered_hash, 12_345, 7, "2026-07-18 12:00:00", 2, 1]
     ]
-
 
 def test_result_count_paging_discloses_lower_bound_without_a_date_range():
     hashes = [f"0x{index:064x}" for index in range(1, 27)]
@@ -961,6 +962,10 @@ def test_result_count_paging_discloses_lower_bound_without_a_date_range():
             return_value=([], 47_000_100),
         ),
         patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ),
+        patch(
             "cerebro_mcp.tools.semantic.graph_explorer.transactions._legs_from_receipts",
             return_value=(
                 [],
@@ -977,7 +982,7 @@ def test_result_count_paging_discloses_lower_bound_without_a_date_range():
     assert scope["window"] == {
         "t0": None,
         "t1": None,
-        "source": "execution_logs_plus_rpc_head",
+        "source": "execution_tables_plus_rpc_head",
     }
     assert scope["more_transactions_available"] is True
     assert scope["txs_total_matching"] is None
@@ -1053,3 +1058,755 @@ def test_money_edge_discovery_preserves_applied_endpoints_token_and_window():
     assert discovery["parameters"]["ts1"] == "2026-07-01 00:00:00"
     assert discovery["parameters"]["cps"]
     assert discovery["parameters"]["tokens"] == [TOKEN[2:]]
+
+
+def test_candidate_sql_uses_keyset_activity_and_token_authority():
+    cursor_hash = "0x" + "fe" * 32
+    sql, params = build_all_history_tx_discovery_chunk_sql(
+        address_ids=[SOURCE],
+        t0="2026-01-01 00:00:00",
+        t1_exclusive="2026-02-01 00:00:00",
+        limit=25,
+        before_block=123,
+        before_index=4,
+        before_hash=cursor_hash,
+        activity_kinds=["direct", "erc20"],
+        tokens=[TOKEN],
+    )
+
+    assert "transaction_hash < {before_hash:String}" in sql
+    assert "address IN {tokens:Array(String)}" in sql
+    candidates = sql.split("\n    candidates AS (", 1)[1].split(
+        "),\n    grouped", 1
+    )[0]
+    assert "transfer_candidates" in candidates
+    assert "direct_candidates" not in candidates
+    assert params["before_block"] == 123
+    assert params["before_index"] == 4
+    assert params["before_hash"] == cursor_hash[2:]
+    assert params["tokens"] == [TOKEN[2:]]
+
+
+def test_discovery_cursor_round_trips_and_rejects_invalid_values():
+    row = [TX_HASH, 12345, 7, "", 1, 1]
+    cursor = _encode_discovery_cursor(row)
+    assert _decode_discovery_cursor(cursor) == (12345, 7, TX_HASH)
+    with pytest.raises(ValueError, match="valid Graph Explorer discovery cursor"):
+        _decode_discovery_cursor("not-a-cursor")
+
+
+def test_discovery_horizon_probe_has_five_second_budget():
+    assert _DISCOVERY_HORIZON_QUERY_BUDGET.max_execution_time == 5
+    assert _DISCOVERY_HORIZON_QUERY_BUDGET.max_memory_usage == 256 * 2**20
+    assert _DISCOVERY_HORIZON_QUERY_BUDGET.max_threads == 1
+
+
+def test_append_only_discovery_delta_rejects_changed_or_reordered_base():
+    older_hash = "0x" + "cd" * 32
+    first = [TX_HASH, 200, 2, "2026-01-02 00:00:00", 1, 1]
+    older = [older_hash, 100, 1, "2026-01-01 00:00:00", 1, 0]
+
+    assert _append_only_discovery_delta([first], [first, older]) == [older]
+    assert _append_only_discovery_delta([first], [older, first]) is None
+    changed = [*first[:4], 2, 1]
+    assert _append_only_discovery_delta([first], [changed, older]) is None
+
+
+def test_coverage_cursor_uses_only_contiguous_newest_scanned_suffix():
+    boundary = _coverage_continuation_boundary(
+        [
+            {"t0": "2026-07-12T00:00:00Z", "t1": "2026-07-19T01:00:01Z"},
+            # This older range is separated by a gap and must not be skipped.
+            {"t0": "2026-07-01T00:00:00Z", "t1": "2026-07-05T00:00:00Z"},
+        ],
+        through="2026-07-19 01:00:00",
+    )
+    assert boundary == "2026-07-12T00:00:00Z"
+    decoded = _decode_discovery_cursor(
+        _encode_coverage_discovery_cursor(boundary)
+    )
+    assert getattr(decoded, "before_time", None) == boundary
+
+
+def test_uncovered_retry_cursor_targets_newest_bounded_gap():
+    retry_from, retry_before = _newest_uncovered_retry_slice(
+        [
+            {
+                "t0": "2018-10-08T00:00:00Z",
+                "t1": "2026-07-05T00:00:00Z",
+                "reason": "older work not attempted",
+            },
+            {
+                "t0": "2026-07-05T00:00:00Z",
+                "t1": "2026-07-12T00:00:00Z",
+                "reason": "query timed out",
+            },
+        ],
+        tile_seconds=12 * 60 * 60,
+    ) or (None, None)
+    assert retry_from == "2026-07-11T12:00:00Z"
+    assert retry_before == "2026-07-12T00:00:00Z"
+
+    decoded = _decode_discovery_cursor(
+        _encode_coverage_discovery_cursor(
+            retry_before,
+            retry_from_time=retry_from,
+            tile_seconds=12 * 60 * 60,
+        )
+    )
+    assert getattr(decoded, "before_time", None) == retry_before
+    assert getattr(decoded, "retry_from_time", None) == retry_from
+
+
+def test_wall_budget_pagination_keeps_one_day_tile():
+    assert _uncovered_requires_smaller_tile(
+        [
+            {
+                "t0": "2018-10-08T00:00:00Z",
+                "t1": "2026-07-12T00:00:00Z",
+                "reason": "interactive discovery wall-time budget reached",
+            }
+        ]
+    ) is False
+    assert _uncovered_requires_smaller_tile(
+        [
+            {
+                "t0": "2026-07-11T00:00:00Z",
+                "t1": "2026-07-12T00:00:00Z",
+                "reason": "ClickHouse query timeout exceeded",
+            }
+        ]
+    ) is True
+
+
+def test_execution_discovery_subdivides_memory_errors_and_discloses_leaf_gaps():
+    class MemoryCH:
+        def run_query(self, *args, **kwargs):
+            raise RuntimeError(
+                "ClickHouse error code 241: MEMORY_LIMIT_EXCEEDED"
+            )
+
+    result = _discover_address_transactions_execution(
+        MemoryCH(),
+        SOURCE,
+        since="2026-01-01 00:00:00",
+        through="2026-01-01 01:59:59",
+        limit=25,
+        max_workers=1,
+        detailed=True,
+    )
+
+    rows, total, complete, lower_bound, coverage = result
+    assert rows == []
+    assert total is None
+    assert complete is False
+    assert lower_bound == 0
+    assert coverage["scanned_ranges"] == []
+    assert coverage["uncovered_ranges"]
+    assert all(
+        "MEMORY_LIMIT_EXCEEDED" in gap["reason"]
+        for gap in coverage["uncovered_ranges"]
+    )
+
+
+def test_discover_operation_returns_candidates_without_fetching_receipts():
+    candidate_hash = "0x" + "cd" * 32
+    candidate = [
+        candidate_hash,
+        12_500,
+        3,
+        "2026-07-19 00:30:00",
+        2,
+        1,
+    ]
+    ch = TxStubCH()
+    view_id, load = _view_and_tool(ch)
+    coverage = {
+        "scanned_ranges": [
+            {"t0": "2018-10-08T00:00:00Z", "t1": "2026-07-19T01:00:01Z"}
+        ],
+        "uncovered_ranges": [],
+        "older_history_unscanned": True,
+    }
+    with (
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_execution",
+            return_value=([candidate], None, False, 2, coverage),
+        ) as execution_discover,
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
+            return_value=([], 47_000_001),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._legs_from_receipts",
+            side_effect=AssertionError("candidate discovery must not fetch receipts"),
+        ),
+    ):
+        result = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            page_size=25,
+            activity_kinds=["direct", "erc20"],
+            request_id=11,
+        )
+
+    execution_discover.assert_called_once_with(
+        ch,
+        SOURCE,
+        through="2026-07-19 01:00:00",
+        since=None,
+        limit=25,
+        before=None,
+        activity_kinds=["direct", "erc20"],
+        tokens=[],
+        detailed=True,
+        tile_seconds=86_400,
+    )
+    tx = result.structuredContent["view_state"]["transactions"]
+    assert tx["query"]["kind"] == "address"
+    assert tx["query"]["window"] is None
+    assert tx["result_hashes"] == [candidate_hash]
+    assert tx["results"]["selected_hash"] is None
+    assert tx["receipt_scope"] is None
+    assert tx["discovery_coverage"]["complete"] is False
+    assert tx["discovery_coverage"]["total_exact"] is None
+    assert tx["discovery_coverage"]["total_lower_bound"] == 2
+    continuation = tx["discovery_coverage"]["next_cursor"]
+    assert continuation
+    assert not isinstance(_decode_discovery_cursor(continuation), tuple)
+    assert result.structuredContent["datasets"]["tx_legs"]["preview_rows"] == []
+
+
+def test_discovery_pagination_returns_revision_safe_append_patch():
+    newest_hash = "0x" + "cd" * 32
+    older_hash = "0x" + "ce" * 32
+    newest = [newest_hash, 12_500, 3, "2026-07-19 00:30:00", 2, 1]
+    older = [older_hash, 12_400, 2, "2026-07-18 23:30:00", 1, 1]
+    partial_coverage = {
+        "scanned_ranges": [],
+        "uncovered_ranges": [],
+        "older_history_unscanned": True,
+    }
+    ch = TxStubCH()
+    view_id, load = _view_and_tool(ch)
+    with (
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_execution",
+            side_effect=[
+                ([newest], None, False, 2, partial_coverage),
+                ([older], None, False, 1, partial_coverage),
+            ],
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
+            return_value=([], 47_000_001),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ),
+    ):
+        first = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            page_size=1,
+            request_id=31,
+        )
+        cursor = first.structuredContent["view_state"]["transactions"][
+            "discovery_coverage"
+        ]["next_cursor"]
+        base_revision = first.structuredContent["view_state"][
+            "dataset_revisions"
+        ]["tx_list"]
+        second = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            cursor=cursor,
+            page_size=1,
+            request_id=32,
+        )
+
+    content = second.structuredContent
+    assert content["type"] == "PATCH_VIEW_STATE"
+    assert content.get("datasets") == {}
+    delta = content["patch"]["dataset_deltas"]["tx_list"]
+    assert delta["operation"] == "append"
+    assert delta["base_revision"] == base_revision
+    assert delta["dataset_revision"] == base_revision + 1
+    assert delta["base_row_count"] == 1
+    assert delta["rows"] == [older]
+    # The fallback is deliberately cheap and hydration-safe from offset zero.
+    assert delta["fallback"]["preview_rows"] == []
+    assert delta["fallback"]["page_token"] == "offset:0"
+    assert delta["fallback"]["stats"]["row_count"] == 2
+    assert content["patch"]["view_state"]["transactions"][
+        "result_hashes"
+    ] == [newest_hash, older_hash]
+    stored = mini_apps.snapshot_view(view_id)
+    assert stored is not None
+    assert stored.datasets["tx_list"].rows == [newest, older]
+
+
+def test_zero_row_partial_discovery_cursor_remains_actionable_until_older_result():
+    june_hash = "0x" + "cf" * 32
+    june_activity = [june_hash, 12_000, 1, "2026-06-12 08:00:00", 1, 1]
+    first_coverage = {
+        "scanned_ranges": [
+            {
+                "t0": "2026-07-12T00:00:00Z",
+                "t1": "2026-07-19T01:00:01Z",
+            }
+        ],
+        "uncovered_ranges": [
+            {
+                "t0": "2018-10-08T00:00:00Z",
+                "t1": "2026-07-12T00:00:00Z",
+                "reason": "ClickHouse query timeout exceeded",
+            }
+        ],
+        "older_history_unscanned": True,
+    }
+    second_coverage = {
+        "scanned_ranges": [],
+        "uncovered_ranges": [
+            {
+                "t0": "2026-07-11T12:00:00Z",
+                "t1": "2026-07-12T00:00:00Z",
+                "reason": "interactive discovery wall-time budget reached",
+            }
+        ],
+        "older_history_unscanned": True,
+        "tile_seconds": 43_200,
+    }
+    third_coverage = {
+        "scanned_ranges": [
+            {
+                "t0": "2026-07-11T12:00:00Z",
+                "t1": "2026-07-12T00:00:00Z",
+            }
+        ],
+        "uncovered_ranges": [],
+        "older_history_unscanned": False,
+        "tile_seconds": 43_200,
+    }
+    fourth_coverage = {
+        "scanned_ranges": [
+            {
+                "t0": "2026-06-05T00:00:00Z",
+                "t1": "2026-07-11T12:00:00Z",
+            }
+        ],
+        "uncovered_ranges": [],
+        "older_history_unscanned": True,
+        "tile_seconds": 43_200,
+    }
+    ch = TxStubCH()
+    view_id, load = _view_and_tool(ch)
+    with (
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_execution",
+            side_effect=[
+                ([], None, False, 0, first_coverage),
+                ([], None, False, 0, second_coverage),
+                ([], 0, True, 0, third_coverage),
+                ([june_activity], None, False, 1, fourth_coverage),
+            ],
+        ) as execution_discover,
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
+            return_value=([], 47_000_001),
+        ) as rpc_transfer_discover,
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ) as rpc_direct_discover,
+    ):
+        first = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            page_size=25,
+            request_id=51,
+        )
+        first_tx = first.structuredContent["view_state"]["transactions"]
+        coverage_cursor = first_tx["discovery_coverage"]["next_cursor"]
+        assert coverage_cursor
+        assert first_tx["result_hashes"] == []
+        decoded_first = _decode_discovery_cursor(coverage_cursor)
+        assert getattr(decoded_first, "before_time", None) == (
+            "2026-07-12T00:00:00Z"
+        )
+        assert getattr(decoded_first, "retry_from_time", None) == (
+            "2026-07-11T12:00:00Z"
+        )
+        assert getattr(decoded_first, "tile_seconds", None) == 43_200
+
+        second = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            cursor=coverage_cursor,
+            page_size=25,
+            request_id=52,
+        )
+        second_tx = second.structuredContent["patch"]["view_state"][
+            "transactions"
+        ]
+        retry_cursor = second_tx["discovery_coverage"]["next_cursor"]
+        assert retry_cursor
+        decoded_retry = _decode_discovery_cursor(retry_cursor)
+        assert getattr(decoded_retry, "before_time", None) == (
+            "2026-07-12T00:00:00Z"
+        )
+        assert getattr(decoded_retry, "retry_from_time", None) == (
+            "2026-07-11T12:00:00Z"
+        )
+        assert getattr(decoded_retry, "tile_seconds", None) == 43_200
+
+        third = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            cursor=retry_cursor,
+            page_size=25,
+            request_id=53,
+        )
+        third_tx = third.structuredContent["patch"]["view_state"][
+            "transactions"
+        ]
+        older_cursor = third_tx["discovery_coverage"]["next_cursor"]
+        assert older_cursor
+        decoded_older = _decode_discovery_cursor(older_cursor)
+        assert getattr(decoded_older, "before_time", None) == (
+            "2026-07-11T12:00:00Z"
+        )
+        assert getattr(decoded_older, "retry_from_time", None) is None
+
+        fourth = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            cursor=older_cursor,
+            page_size=25,
+            request_id=54,
+        )
+
+    assert execution_discover.call_count == 4
+    first_call, second_call, third_call, fourth_call = (
+        execution_discover.call_args_list
+    )
+    assert first_call.kwargs["through"] == "2026-07-19 01:00:00"
+    assert second_call.kwargs["through"] == "2026-07-11 23:59:59"
+    assert third_call.kwargs["through"] == "2026-07-11 23:59:59"
+    assert fourth_call.kwargs["through"] == "2026-07-11 11:59:59"
+    assert first_call.kwargs["since"] is None
+    assert second_call.kwargs["since"] == "2026-07-11 12:00:00"
+    assert third_call.kwargs["since"] == "2026-07-11 12:00:00"
+    assert fourth_call.kwargs["since"] is None
+    assert first_call.kwargs["tile_seconds"] == 86_400
+    assert second_call.kwargs["tile_seconds"] == 43_200
+    assert third_call.kwargs["tile_seconds"] == 43_200
+    assert fourth_call.kwargs["tile_seconds"] == 43_200
+    assert first_call.kwargs["before"] is None
+    assert second_call.kwargs["before"] is None
+    assert third_call.kwargs["before"] is None
+    assert fourth_call.kwargs["before"] is None
+    # The RPC head is already newer than the coverage boundary and is not
+    # rescanned on the older continuation.
+    assert rpc_transfer_discover.call_count == 1
+    assert rpc_direct_discover.call_count == 1
+    assert second.structuredContent["type"] == "PATCH_VIEW_STATE"
+    assert third.structuredContent["type"] == "PATCH_VIEW_STATE"
+    assert fourth.structuredContent["type"] == "PATCH_VIEW_STATE"
+    delta = fourth.structuredContent["patch"]["dataset_deltas"]["tx_list"]
+    assert delta["base_row_count"] == 0
+    assert delta["rows"] == [june_activity]
+    assert fourth.structuredContent["patch"]["view_state"]["transactions"][
+        "result_hashes"
+    ] == [june_hash]
+
+
+def test_non_cursor_discovery_still_returns_full_initial_load():
+    candidate = [TX_HASH, 12_500, 3, "2026-07-19 00:30:00", 1, 1]
+    ch = TxStubCH()
+    view_id, load = _view_and_tool(ch)
+    with (
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_execution",
+            return_value=(
+                [candidate],
+                1,
+                True,
+                1,
+                {
+                    "scanned_ranges": [],
+                    "uncovered_ranges": [],
+                    "older_history_unscanned": False,
+                },
+            ),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
+            return_value=([], 47_000_001),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ),
+    ):
+        result = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            page_size=25,
+            request_id=41,
+        )
+
+    assert result.structuredContent["type"] == "INITIAL_LOAD"
+    assert result.structuredContent["datasets"]["tx_list"]["preview_rows"] == [
+        candidate
+    ]
+
+
+def test_discovery_cursor_is_bound_to_exact_utc_window():
+    candidate_hash = "0x" + "cd" * 32
+    candidate = [candidate_hash, 12_500, 3, "2026-07-19 00:30:00", 2, 1]
+    ch = TxStubCH()
+    view_id, load = _view_and_tool(ch)
+    coverage = {
+        "scanned_ranges": [
+            {"t0": "2026-07-01T00:00:00Z", "t1": "2026-07-20T00:00:00Z"}
+        ],
+        "uncovered_ranges": [],
+        "older_history_unscanned": True,
+    }
+    with (
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_execution",
+            return_value=([candidate], None, False, 2, coverage),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
+            return_value=([], 47_000_001),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ),
+    ):
+        first = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            t0="2026-07-01T00:00:00Z",
+            t1="2026-07-20T00:00:00Z",
+            page_size=1,
+            request_id=21,
+        )
+        cursor = first.structuredContent["view_state"]["transactions"][
+            "discovery_coverage"
+        ]["next_cursor"]
+        replay = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            t0="2026-06-01T00:00:00Z",
+            t1="2026-07-20T00:00:00Z",
+            cursor=cursor,
+            page_size=1,
+            request_id=22,
+        )
+
+    assert replay.isError is True
+    assert "cursor does not belong" in replay.content[0].text
+
+
+def test_omitted_transaction_request_id_gets_positive_server_revision():
+    ch = TxStubCH()
+    view_id, load = _view_and_tool(ch)
+    with (
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_execution",
+            return_value=([], 0, True, 0, {
+                "scanned_ranges": [],
+                "uncovered_ranges": [],
+                "older_history_unscanned": False,
+            }),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
+            return_value=([], 47_000_001),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ),
+    ):
+        result = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+        )
+
+    scope = result.structuredContent["view_state"]["transactions"]["scope"]
+    assert scope["request_id"] > 0
+
+
+def test_receipt_operation_preserves_address_list_and_adds_rpc_context():
+    candidate_hash = "0x" + "cd" * 32
+    candidate = [candidate_hash, 12_500, 3, "2026-07-19 00:30:00", 1, 1]
+    ch = TxStubCH()
+    view_id, load = _view_and_tool(ch)
+    complete_coverage = {
+        "scanned_ranges": [
+            {"t0": "2018-10-08T00:00:00Z", "t1": "2026-07-19T01:00:01Z"}
+        ],
+        "uncovered_ranges": [],
+        "older_history_unscanned": False,
+    }
+    with (
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_execution",
+            return_value=([candidate], 1, True, 1, complete_coverage),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
+            return_value=([], 47_000_001),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_direct_transactions_rpc",
+            return_value=[],
+        ),
+    ):
+        discovered = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            request_id=12,
+        )
+    original_list = discovered.structuredContent["datasets"]["tx_list"][
+        "preview_rows"
+    ]
+
+    structural = "0x" + "00" * 20
+    topic = lambda address: "0x" + "0" * 24 + address[2:]
+
+    class ReceiptRpc:
+        def request(self, method, params):
+            if method == "eth_getTransactionByHash":
+                return {
+                    "hash": candidate_hash,
+                    "from": SOURCE,
+                    "to": TARGET,
+                    "input": "0xa9059cbb" + "00" * 32,
+                    "nonce": "0x2",
+                    "value": "0x0",
+                    "gas": "0x5208",
+                    "gasPrice": "0x3b9aca00",
+                }
+            if method == "eth_getTransactionReceipt":
+                return {
+                    "blockNumber": hex(12_500),
+                    "transactionIndex": "0x3",
+                    "status": "0x1",
+                    "gasUsed": "0x5208",
+                    "effectiveGasPrice": "0x3b9aca00",
+                    "logs": [
+                        {
+                            "logIndex": "0x1",
+                            "address": TOKEN,
+                            "topics": [TRANSFER_TOPIC0, topic(structural), topic(SOURCE)],
+                            "data": "0x" + f"{10**18:064x}",
+                        }
+                    ],
+                }
+            if method == "eth_getBlockByNumber":
+                assert params[1] is False
+                return {"timestamp": hex(1_752_837_600)}
+            raise AssertionError(method)
+
+    with patch(
+        "cerebro_mcp.tools.semantic.graph_explorer.transactions.RpcRouter.from_settings",
+        return_value=SimpleNamespace(standard=ReceiptRpc()),
+    ):
+        receipt = load(
+            view_id=view_id,
+            operation="receipt",
+            tx_hashes=[candidate_hash],
+            request_id=13,
+        )
+
+    tx = receipt.structuredContent["view_state"]["transactions"]
+    assert receipt.structuredContent["datasets"]["tx_list"]["preview_rows"] == (
+        original_list
+    )
+    assert tx["query"]["kind"] == "address"
+    assert tx["query"]["address"] == SOURCE
+    assert tx["results"]["selected_hash"] == candidate_hash
+    assert tx["scope"]["evidence_class"] == "address_discovery"
+    assert tx["receipt_scope"]["evidence_class"] == "rpc_receipt"
+    context = receipt.structuredContent["datasets"]["tx_context"]["preview_rows"]
+    assert len(context) == 1
+    assert context[0][0:4] == [candidate_hash, SOURCE, TARGET, "0xa9059cbb"]
+    assert context[0][10] == 21_000 * 1_000_000_000
+    assert context[0][15] == ["direct_sender", "erc20_recipient"]
+    leg = receipt.structuredContent["datasets"]["tx_legs"]["preview_rows"][0]
+    assert leg[1] == structural
+    nodes = {
+        row[0]: row
+        for row in receipt.structuredContent["datasets"]["tx_nodes"]["preview_rows"]
+    }
+    assert nodes[structural][2] == "burn"
+
+
+def test_discover_operation_keeps_stored_candidates_when_rpc_head_fails():
+    candidate_hash = "0x" + "ce" * 32
+    candidate = [candidate_hash, 12_400, 2, "2026-07-18 23:00:00", 0, 0]
+    ch = TxStubCH()
+    view_id, load = _view_and_tool(ch)
+    execution_coverage = {
+        "scanned_ranges": [
+            {"t0": "2018-10-08T00:00:00Z", "t1": "2026-07-19T01:00:01Z"}
+        ],
+        "uncovered_ranges": [],
+        "older_history_unscanned": False,
+    }
+    with (
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_execution",
+            return_value=([candidate], 1, True, 1, execution_coverage),
+        ),
+        patch(
+            "cerebro_mcp.tools.semantic.graph_explorer.transactions._discover_address_transactions_rpc",
+            side_effect=RuntimeError("RPC temporarily unavailable"),
+        ),
+    ):
+        result = load(
+            view_id=view_id,
+            operation="discover",
+            seed_node_id=SOURCE,
+            activity_kinds=["erc20"],
+            request_id=14,
+        )
+
+    assert result.isError is not True
+    tx = result.structuredContent["view_state"]["transactions"]
+    assert tx["result_hashes"] == [candidate_hash]
+    assert tx["discovery_scope"]["status"] == "partial"
+    coverage = tx["discovery_coverage"]
+    assert coverage["complete"] is False
+    assert coverage["uncovered_ranges"]
+    assert "RPC temporarily unavailable" in coverage["uncovered_ranges"][0][
+        "reason"
+    ]
+    assert any(
+        source["role"] == "discovery_tail" and source["status"] == "error"
+        for source in tx["discovery_scope"]["sources"]
+    )

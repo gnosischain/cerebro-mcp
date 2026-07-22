@@ -77,6 +77,27 @@ async def test_app_health_exposes_process_identity(registered):
 
 
 @pytest.mark.asyncio
+async def test_app_health_includes_artifact_diagnostics(registered):
+    import dataclasses
+
+    cfg = web_apps.WEB_APP_CONFIGS["model_lineage"]
+    web_apps.WEB_APP_CONFIGS["model_lineage"] = dataclasses.replace(
+        cfg,
+        diagnostics_loader=lambda: {
+            "bundle_kind": "split_web",
+            "bundle_sha256": "abc123",
+        },
+    )
+    req = FakeRequest(path_params={"app_id": "model_lineage"})
+    resp = await web_apps.serve_app_health(req)
+    data = json.loads(resp.body.decode())
+
+    assert data["status"] == "ok"
+    assert data["bundle_kind"] == "split_web"
+    assert data["bundle_sha256"] == "abc123"
+
+
+@pytest.mark.asyncio
 async def test_serve_app_returns_html_with_payload(registered):
     req = FakeRequest(path_params={"app_id": "model_lineage"})
     resp = await web_apps.serve_app(req)
@@ -223,3 +244,33 @@ async def test_dispatch_cross_app_tool_404(registered):
     resp = await web_apps.dispatch_app_tool(req)
     assert resp.status_code == 404
     assert "not available" in json.loads(resp.body.decode())["error"]
+
+
+@pytest.mark.asyncio
+async def test_split_asset_is_scoped_and_immutable(registered, monkeypatch, tmp_path):
+    package_root = tmp_path / "cerebro_mcp"
+    asset_dir = package_root / "static" / "assets" / "model_lineage"
+    asset_dir.mkdir(parents=True)
+    (asset_dir / "app-deadbeef.js").write_text("export const ok = true")
+    monkeypatch.setattr("importlib.resources.files", lambda _package: package_root)
+
+    req = FakeRequest(
+        path_params={
+            "app_id": "model_lineage",
+            "path": "app-deadbeef.js",
+        },
+    )
+    resp = await web_apps.serve_app_asset(req)
+
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert resp.media_type == "text/javascript"
+
+
+@pytest.mark.asyncio
+async def test_split_asset_rejects_traversal(registered):
+    req = FakeRequest(
+        path_params={"app_id": "model_lineage", "path": "../secret"},
+    )
+    resp = await web_apps.serve_app_asset(req)
+    assert resp.status_code == 400

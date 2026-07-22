@@ -386,7 +386,7 @@ class TimelineStubCH(StubCH):
             )
         if FLOWS_RELATION in sql:
             params = parameters or {}
-            if "ORDER BY isNull(amount_usd), amount_usd DESC, counterparty_id" in sql:
+            if "GROUP BY counterparty_id" in sql:
                 kind = "universe"
                 columns = [
                     "counterparty_id", "amount_usd", "transfer_count",

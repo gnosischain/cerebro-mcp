@@ -73,6 +73,16 @@ _SHARED_INFRA_TOOLS = frozenset({"get_mini_app_rows", "get_mini_app_state"})
 # Query-param aliases → candidate open-tool parameter names. The first param
 # that actually exists on the open tool's signature wins.
 _SEED_ALIASES = ("seed", "seed_model", "seed_node_id", "address")
+_QUERY_PARAM_ALIASES = {
+    "scope": "environment_scope",
+    "chain": "chain_id",
+    "base": "base_token",
+    "quote": "quote_token",
+    "start": "start_at",
+    "end": "end_at",
+    "entity": "entity_type",
+    "id": "identifier",
+}
 
 
 def register_web_app(
@@ -158,6 +168,9 @@ def _open_kwargs_from_query(
     except (TypeError, ValueError):
         params = {}
     raw = dict(query)
+    for public_name, tool_name in _QUERY_PARAM_ALIASES.items():
+        if public_name in raw and tool_name in params and tool_name not in raw:
+            raw[tool_name] = raw.pop(public_name)
     if "seed" in raw and "seed" not in params:
         seed_value = raw.pop("seed")
         for candidate in _SEED_ALIASES[1:]:
@@ -210,6 +223,17 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
         "isError": bool(result.isError),
         "content": content,
     }
+
+
+def _encode_tool_result(result: Any) -> bytes:
+    """CPU-bound JSON conversion kept out of the async request loop."""
+    return json.dumps(_result_to_dict(result), default=str).encode("utf-8")
+
+
+def _gzip_bytes(body: bytes) -> bytes:
+    import gzip
+
+    return gzip.compress(body, compresslevel=6)
 
 
 def _inject_payload(
@@ -295,12 +319,14 @@ async def serve_app(request: Request) -> Response:
     query = {k: v for k, v in request.query_params.items() if k != "token"}
     kwargs = _open_kwargs_from_query(open_fn, query)
     try:
-        result = open_fn(**kwargs)
+        result = await asyncio.to_thread(open_fn, **kwargs)
     except Exception as exc:  # noqa: BLE001 — surface as a 500 page, don't crash
         logger.exception("web app %s open failed", app_id)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
-    payload_json = json.dumps(_json_safe_structured(result) or {})
+    payload_json = await asyncio.to_thread(
+        lambda: json.dumps(_json_safe_structured(result) or {})
+    )
     # Forward whatever token the client already presented so the frontend can
     # authenticate its HTTP tool calls and cross-app nav links. We echo the
     # client's own credential — never more than it already had.
@@ -312,12 +338,13 @@ async def serve_app(request: Request) -> Response:
     diagnostics: dict[str, Any] = {}
     if config.diagnostics_loader is not None:
         try:
-            diagnostics = config.diagnostics_loader()
+            diagnostics = await asyncio.to_thread(config.diagnostics_loader)
         except Exception as exc:  # diagnostics must never take down the app
             logger.warning("web app %s diagnostics failed: %s", app_id, exc)
             diagnostics = {"status": "error", "error": str(exc)}
-    html = _inject_payload(
-        config.html_loader(), payload_json, app_id, token, diagnostics
+    shell = await asyncio.to_thread(config.html_loader)
+    html = await asyncio.to_thread(
+        _inject_payload, shell, payload_json, app_id, token, diagnostics
     )
     # gzip the (large, ~2.9MB single-file) bundle when the client accepts it —
     # ~40% wire cut. Scoped to this HTML route only; never touches the SSE
@@ -327,9 +354,7 @@ async def serve_app(request: Request) -> Response:
     # for single-file apps this preserves prior behavior (just adds no-store).
     accept = request.headers.get("accept-encoding", "").lower()
     if "gzip" in accept:
-        import gzip as _gzip
-
-        body = _gzip.compress(html.encode("utf-8"), compresslevel=6)
+        body = await asyncio.to_thread(_gzip_bytes, html.encode("utf-8"))
         return Response(
             content=body,
             media_type="text/html; charset=utf-8",
@@ -354,7 +379,7 @@ async def serve_app_health(request: Request) -> JSONResponse:
     diagnostics: dict[str, Any] = {}
     if config.diagnostics_loader is not None:
         try:
-            diagnostics = config.diagnostics_loader()
+            diagnostics = await asyncio.to_thread(config.diagnostics_loader)
         except Exception as exc:
             logger.exception("web app %s health diagnostics failed", app_id)
             return JSONResponse(
@@ -416,7 +441,7 @@ async def dispatch_app_tool(request: Request) -> JSONResponse:
         # ClickHouse call can't block the event loop and freeze the whole server.
         # CH-free tools (search / entity / lineage / governance) then keep
         # responding even while a CH-touching tool (sample / stats) is stalled.
-        result = await asyncio.get_event_loop().run_in_executor(None, lambda: fn(**kwargs))
+        result = await asyncio.to_thread(fn, **kwargs)
     except Exception as exc:  # noqa: BLE001
         logger.exception("web app %s tool %s failed", app_id, tool_name)
         return JSONResponse(
@@ -428,13 +453,11 @@ async def dispatch_app_tool(request: Request) -> JSONResponse:
 
     # gzip large tool payloads (e.g. lineage subgraphs run to hundreds of KB)
     # when the client accepts it — same treatment the /assets route gets.
-    body = json.dumps(_result_to_dict(result), default=str).encode("utf-8")
+    body = await asyncio.to_thread(_encode_tool_result, result)
     accept = request.headers.get("accept-encoding", "").lower()
     if "gzip" in accept and len(body) > 1024:
-        import gzip as _gzip
-
         return Response(
-            content=_gzip.compress(body, compresslevel=6),
+            content=await asyncio.to_thread(_gzip_bytes, body),
             media_type="application/json",
             headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
         )
@@ -462,18 +485,20 @@ async def serve_app_asset(request: Request) -> Response:
     asset_path = request.path_params["path"]
     if app_id not in WEB_APP_CONFIGS:
         return Response("unknown app", status_code=404, media_type="text/plain")
-    # Hashed assets are flat filenames under static/assets/ — reject any traversal.
+    # Hashed assets are flat filenames inside an app-specific namespace under
+    # static/assets/<app_id>/ — reject any traversal.
     if "/" in asset_path or "\\" in asset_path or ".." in asset_path or not asset_path:
         return Response("bad path", status_code=400, media_type="text/plain")
     try:
         import importlib.resources as _res
 
-        data = (
+        asset = (
             _res.files("cerebro_mcp")
             .joinpath("static/assets")
+            .joinpath(app_id)
             .joinpath(asset_path)
-            .read_bytes()
         )
+        data = await asyncio.to_thread(asset.read_bytes)
     except (FileNotFoundError, ModuleNotFoundError, OSError, NotADirectoryError):
         return Response("not found", status_code=404, media_type="text/plain")
 
@@ -482,9 +507,7 @@ async def serve_app_asset(request: Request) -> Response:
     headers = {"Cache-Control": "public, max-age=31536000, immutable"}
     accept = request.headers.get("accept-encoding", "").lower()
     if ext in _GZIP_ASSET_EXT and "gzip" in accept:
-        import gzip as _gzip
-
-        data = _gzip.compress(data, compresslevel=6)
+        data = await asyncio.to_thread(_gzip_bytes, data)
         headers["Content-Encoding"] = "gzip"
         headers["Vary"] = "Accept-Encoding"
     return Response(content=data, media_type=media, headers=headers)

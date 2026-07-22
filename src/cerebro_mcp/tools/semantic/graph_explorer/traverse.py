@@ -17,6 +17,7 @@ profiles on that hop; kinds are learned from returned nodes for later hops.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -24,6 +25,80 @@ from cerebro_mcp.clients.clickhouse import ClickHouseManager
 from cerebro_mcp.semantic.graph_profiles import GraphProfile
 
 from .fetch import fetch_profile_edges, pick_direction
+
+
+_MAX_PROFILE_FETCH_WORKERS = 4
+
+
+@dataclass(frozen=True)
+class _ProfileFetchResult:
+    """One profile fetch, retained in caller/profile order for deterministic merge."""
+
+    profile: GraphProfile
+    nodes: list[dict[str, Any]] = field(default_factory=list)
+    edges: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    error: Exception | None = None
+
+
+def _fetch_profile_group(
+    ch: ClickHouseManager,
+    *,
+    profiles: list[GraphProfile],
+    group_kind: str,
+    group_ids: list[str],
+    direction: str,
+    auto_direction: bool,
+    window_days: int,
+    per_query_limit: int,
+    fetch: Callable[..., tuple[list[dict], list[dict], list[str]]],
+) -> list[_ProfileFetchResult]:
+    """Fetch one BFS kind group concurrently, returning profile-ordered results.
+
+    Fetches inside a kind group are independent.  Admission is deliberately
+    kept out of the worker threads: the caller replays these results in the
+    original ``profiles`` order so node-budget decisions, edge ordering, and
+    warnings remain deterministic.
+    """
+
+    def run(profile: GraphProfile) -> _ProfileFetchResult:
+        eff_dir = (
+            pick_direction(profile, group_kind)
+            if auto_direction and direction == "both"
+            else direction
+        )
+        try:
+            new_nodes, new_edges, warnings = fetch(
+                ch,
+                profile,
+                seed_ids=group_ids,
+                direction=eff_dir,
+                window_days=window_days,
+                limit=per_query_limit,
+            )
+        except Exception as exc:  # isolate one broken profile from the group
+            return _ProfileFetchResult(profile=profile, error=exc)
+        return _ProfileFetchResult(
+            profile=profile,
+            nodes=new_nodes,
+            edges=new_edges,
+            warnings=warnings,
+        )
+
+    if not profiles:
+        return []
+    if len(profiles) == 1:
+        return [run(profiles[0])]
+
+    with ThreadPoolExecutor(
+        max_workers=min(_MAX_PROFILE_FETCH_WORKERS, len(profiles)),
+        thread_name_prefix="graph-profile",
+    ) as pool:
+        futures = [pool.submit(run, profile) for profile in profiles]
+        # Calling result() in submission order does not serialize execution;
+        # every future above is already scheduled.  It only fixes the order in
+        # which the completed payloads are handed to deterministic admission.
+        return [future.result() for future in futures]
 
 
 @dataclass
@@ -167,25 +242,25 @@ def bfs_expand(
                 ]
             else:
                 group_profiles = chosen_profiles
-            for profile in group_profiles:
-                eff_dir = (
-                    pick_direction(profile, group_kind)
-                    if auto_direction and direction == "both"
-                    else direction
-                )
-                try:
-                    new_nodes, new_edges, warn = fetch(
-                        ch,
-                        profile,
-                        seed_ids=group_ids,
-                        direction=eff_dir,
-                        window_days=window_days,
-                        limit=per_query_limit,
-                    )
-                except Exception as exc:  # never let one profile abort the walk
-                    result.warnings.append(f"{profile.profile}: {exc}")
+            fetched_profiles = _fetch_profile_group(
+                ch,
+                profiles=group_profiles,
+                group_kind=group_kind,
+                group_ids=group_ids,
+                direction=direction,
+                auto_direction=auto_direction,
+                window_days=window_days,
+                per_query_limit=per_query_limit,
+                fetch=fetch,
+            )
+            for fetched in fetched_profiles:
+                profile = fetched.profile
+                if fetched.error is not None:
+                    result.warnings.append(f"{profile.profile}: {fetched.error}")
                     continue
-                result.warnings.extend(warn)
+                new_nodes = fetched.nodes
+                new_edges = fetched.edges
+                result.warnings.extend(fetched.warnings)
                 if new_edges:
                     result.profiles_used.add(profile.profile)
                 for node in new_nodes:

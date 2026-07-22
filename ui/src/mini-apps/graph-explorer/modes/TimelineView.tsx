@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } 
 import { shortAddr } from "../../../utils/format";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
 import { DetailsPanel } from "../DetailsPanel";
+import { FilterDrawer } from "../FilterDrawer";
 import { EvidencePanel, EvidenceTrigger } from "../ForensicScopeDisclosure";
 import { GraphCanvas } from "../canvas/GraphCanvas";
 import {
@@ -64,6 +65,7 @@ interface Props {
 }
 
 const WINDOW_OPTIONS = [1, 2, 4, 8, 12];
+const NARRATIVE_PAGE_SIZE = 100;
 const NARRATIVE_CHANGES = new Set([
   "first_observed",
   "increased",
@@ -323,17 +325,32 @@ export function TimelineNarrativeTable({
   dataset,
   loading,
   onSelectCounterparty,
+  parsedRows,
 }: {
   dataset: HydratedDataset | undefined;
   loading: boolean;
   onSelectCounterparty: (id: string) => void;
+  parsedRows?: TimelineNarrativeRow[];
 }) {
-  const rows = useMemo(
+  const datasetRows = useMemo(
     () => parseTimelineNarrativeRows(dataset?.rows, dataset?.columns),
     [dataset?.rows, dataset?.columns],
   );
+  const rows = parsedRows ?? datasetRows;
+  const [page, setPage] = useState(0);
+  const pageCount = Math.max(1, Math.ceil(rows.length / NARRATIVE_PAGE_SIZE));
+  const visiblePage = Math.min(page, pageCount - 1);
+  const visibleRows = rows.slice(
+    visiblePage * NARRATIVE_PAGE_SIZE,
+    (visiblePage + 1) * NARRATIVE_PAGE_SIZE,
+  );
+  useEffect(() => setPage(0), [rows[0]?.id, rows.length]);
   const phase = dataset?.phase ?? (loading ? "loading" : "idle");
   const error = dataset?.error;
+  const expected = dataset?.rowsExpected;
+  const hydrationCount = expected == null
+    ? `${dataset?.rowsLoaded ?? rows.length} loaded`
+    : `${dataset?.rowsLoaded ?? rows.length}/${expected} loaded`;
 
   return (
     <section className="ge-timeline-narrative" aria-labelledby="ge-over-time-title">
@@ -347,7 +364,11 @@ export function TimelineNarrativeTable({
           </p>
         </div>
         <span className="ge-timeline-narrative__count" aria-live="polite">
-          {phase === "loading" ? "Loading…" : `${rows.length.toLocaleString()} activity changes`}
+          {phase === "loading"
+            ? `Loading · ${hydrationCount}`
+            : `${rows.length.toLocaleString()} activity changes · page ${visiblePage + 1}/${pageCount}${
+                dataset?.truncated ? " · capped" : ""
+              }`}
         </span>
       </header>
 
@@ -378,7 +399,7 @@ export function TimelineNarrativeTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
+            {visibleRows.map((row) => (
               <tr key={row.id} data-change={row.change}>
                 <td>{row.bucket}</td>
                 <td>
@@ -455,6 +476,27 @@ export function TimelineNarrativeTable({
           </tbody>
         </table>
       </div>
+      {rows.length > NARRATIVE_PAGE_SIZE ? (
+        <footer className="ge-timeline-narrative__pagination">
+          <button
+            type="button"
+            className="ge-btn"
+            disabled={visiblePage === 0}
+            onClick={() => setPage(Math.max(0, visiblePage - 1))}
+          >
+            Previous
+          </button>
+          <span>{visiblePage + 1} / {pageCount}</span>
+          <button
+            type="button"
+            className="ge-btn"
+            disabled={visiblePage >= pageCount - 1}
+            onClick={() => setPage(Math.min(pageCount - 1, visiblePage + 1))}
+          >
+            Next
+          </button>
+        </footer>
+      ) : null}
     </section>
   );
 }
@@ -721,9 +763,7 @@ export function TimelineView({
             {anchorId ? displayAddress(anchorId) : "no anchor"}
           </span>
         </div>
-        <details className="ge-filter-drawer">
-          <summary>Filters</summary>
-          <div className="ge-topbar-filters">
+        <FilterDrawer>
           <div className="ge-segment" role="group" aria-label="Time grain">
             {(["day", "week", "month"] as const).map((grain) => (
               <button
@@ -766,8 +806,7 @@ export function TimelineView({
               ))}
             </select>
           </label>
-          </div>
-        </details>
+        </FilterDrawer>
         <div className="ge-topbar-right">
           <button
             type="button"
@@ -845,6 +884,7 @@ export function TimelineView({
       <TimelineNarrativeTable
         dataset={moneyScopeInvalidated ? undefined : timelineNarrative}
         loading={loading}
+        parsedRows={narrativeRows}
         onSelectCounterparty={inspectNarrativeCounterparty}
       />
 
@@ -883,7 +923,6 @@ export function TimelineView({
             <main
               className={`ge-canvas ge-timeline-canvas ${canvasStale ? "is-stale" : ""}`}
               aria-busy={canvasStale}
-              style={canvasStale ? { opacity: 0.55 } : undefined}
             >
               <GraphCanvas
                 stateKey="money:over-time"

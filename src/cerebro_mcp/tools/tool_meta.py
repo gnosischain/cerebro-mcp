@@ -117,6 +117,11 @@ TOOL_META: dict[str, Meta] = {
     "load_tools": {"domain": "meta", "tier": "core", "tags": ["load", "unhide", "advanced", "tools"]},
     # ── catalog (advanced) ───────────────────────────────────────────
     "catalog_search": {"domain": "discovery", "tier": "advanced", "tags": ["catalog", "search", "browse"]},
+    "open_cow_explorer": {
+        "domain": "visualization",
+        "tier": "advanced",
+        "tags": ["cow", "orders", "trades", "prices", "auctions", "solvers", "orderbook"],
+    },
     # ── web3 / rpc (advanced) ────────────────────────────────────────
     "contract_explore": {"domain": "web3", "tier": "advanced", "tags": ["contract", "abi", "address"]},
     "contract_call_function": {"domain": "web3", "tier": "advanced", "tags": ["contract", "call", "read"]},

@@ -162,7 +162,7 @@ def test_bridge_sql_out_only_never_reversed_no_usd():
     assert params["lim"] == 51
 
 
-def test_bridge_safety_gate_scans_full_relation_with_bounded_resources():
+def test_bridge_safety_gate_scans_full_relation_without_guard_collision():
     sql, params = build_bridge_safety_gate_sql()
 
     assert params == {}
@@ -176,9 +176,9 @@ def test_bridge_safety_gate_scans_full_relation_with_bounded_resources():
     assert "SELECT bridge_contract FROM bridge_addresses" in sql
     # No scoped date predicate: stale polluted partitions must fail the gate.
     assert "{t0:" not in sql and "{t1:" not in sql
-    assert "max_execution_time = 5" in sql
-    assert "max_memory_usage = 67108864" in sql
-    assert "max_result_rows = 1" in sql
+    # Resource guards are supplied through the typed QueryBudget. Embedding a
+    # SETTINGS clause here collides with the shared guarded query wrapper.
+    assert "SETTINGS" not in sql.upper()
 
 
 def test_flow_evidence_sql_transfer_is_transaction_level():
@@ -1310,7 +1310,9 @@ def test_missing_flow_enrichment_relation_is_not_reported_ok(flows_snapshot):
         for source in scope["sources"]
         if source["name"].endswith("int_execution_token_prices_daily")
     )
-    assert scope["status"] == "failed"
+    # Prices are optional enrichment. Their absence must downgrade the scope
+    # without erasing primary transfer evidence or claiming a ready result.
+    assert scope["status"] == "partial"
     assert price_source["status"] == "error"
 
 
@@ -1340,7 +1342,9 @@ def test_flow_evidence_uses_view_range(flows_snapshot):
     patch_block = result.structuredContent["patch"]
     rows = patch_block["datasets"]["edge_evidence"]["preview_rows"]
     assert any(r[1] == "transaction_hash" and r[2] == "0xhash1" for r in rows)
-    assert all(r[3] == "edge" and r[4] == 0 for r in rows)
+    focus_request_id = patch_block["view_state"]["selection"]["request_id"]
+    assert focus_request_id > 0
+    assert all(r[3] == "edge" and r[4] == focus_request_id for r in rows)
     ts = [r for r in rows if r[1] == "block_timestamp"]
     assert ts and ts[0][2] == "2026-06-05 12:00:00"  # tx-level, not daily
 

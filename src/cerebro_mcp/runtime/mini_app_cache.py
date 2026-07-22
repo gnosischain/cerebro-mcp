@@ -89,9 +89,15 @@ class MiniAppCache:
             observe_cache_hit("mini_app_dataset")
             return entry
 
-    def put(self, key: str, dataset: CachedDataset) -> None:
+    def put(
+        self,
+        key: str,
+        dataset: CachedDataset,
+        *,
+        ttl: timedelta | None = None,
+    ) -> None:
         with self._lock:
-            dataset.expires = datetime.now(timezone.utc) + self._ttl
+            dataset.expires = datetime.now(timezone.utc) + (ttl or self._ttl)
             self._store[key] = dataset
             self._prune_locked()
 

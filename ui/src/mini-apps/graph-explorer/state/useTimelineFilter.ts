@@ -135,7 +135,12 @@ export function useTimelineFilter(
     showStatic,
     windowLabel,
     setCursor,
-    togglePlay: () => setPlaying((v) => !v),
+    togglePlay: () => setPlaying((wasPlaying) => {
+      if (!wasPlaying && cursor >= maxCursor && maxCursor > 0) {
+        setCursorRaw(0);
+      }
+      return !wasPlaying;
+    }),
     setSpeed,
     setShowStatic,
   };

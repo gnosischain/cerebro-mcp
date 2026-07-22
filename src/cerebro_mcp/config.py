@@ -344,6 +344,7 @@ class Settings(BaseSettings):
         "nebula",
         "nebula_discv4",
         "dbt",
+        "cow_db",
     ]
 
     @model_validator(mode="after")

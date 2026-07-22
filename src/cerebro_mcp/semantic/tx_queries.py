@@ -1,12 +1,12 @@
 """Transaction-grain SQL builders (Transactions mode).
 
-EVIDENCE PLANE: selected transaction legs come from RPC receipts. The additive
-``dbt.int_execution_address_activity`` model is only an address-to-hash
-discovery index; ``execution.logs`` UNION ``execution_live.logs`` remains a
-feature-detected rollout/failure fallback. Token metadata and USD prices are
-optional enrichment and can never remove a receipt leg.
+EVIDENCE PLANE: selected transaction legs come from RPC receipts. Address
+candidate discovery reads the existing historical/live execution transaction
+and log relations in bounded pages; it does not require a separate dbt index.
+Token metadata and USD prices are optional enrichment and can never remove a
+receipt leg.
 
-Why the index is not receipt authority: ``int_execution_transfers_whitelisted_raw``
+Why SQL is not receipt authority: ``int_execution_transfers_whitelisted_raw``
 was the earlier leg candidate and is RETIRED — the file is ``.sqlx`` (dbt compiles only
 ``.sql``) and it is absent from the manifest, so it stopped being rebuilt and
 froze ~12 days behind the chain. It also applied the token whitelist, which
@@ -18,9 +18,10 @@ pass after these queries return, so a missing enrichment relation cannot erase
 a chain leg.
 
 ``execution_live`` runs ~800 blocks (~70 min) ahead of ``execution``, so both
-are unioned and de-duplicated on the natural key
-``(block_number, transaction_index, log_index, transaction_hash)``. Verified:
-the union returns 9 legs for the test transaction, not 18.
+log and transaction relations are unioned and de-duplicated on their natural
+chain-position keys. Address discovery reads these existing relations in
+newest-first bounded chunks and stops when the requested page is full; it does
+not require a chain-wide DBT participant index.
 
 STORAGE FORMAT — both cost hours to rediscover, so they are pinned here:
   * hex columns carry NO ``0x`` prefix and are lowercase, so an address sits in
@@ -42,6 +43,10 @@ from typing import Any
 
 # Chain truth. `execution_live` is the hot tail; both are unioned + deduped.
 CHAIN_LOG_RELATIONS = ("execution.logs", "execution_live.logs")
+CHAIN_TRANSACTION_RELATIONS = (
+    "execution.transactions",
+    "execution_live.transactions",
+)
 # keccak("Transfer(address,address,uint256)"), stored without the 0x prefix.
 TRANSFER_TOPIC0 = (
     "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -49,13 +54,6 @@ TRANSFER_TOPIC0 = (
 # dbt, ENRICHMENT ONLY — never the source of truth for whether a leg exists.
 TOKENS_META_RELATION = "dbt.stg_pools__tokens_meta"
 PRICES_RELATION = "dbt.int_execution_token_prices_daily"
-# Optional address-keyed discovery index. The application feature-detects this
-# relation and its exact contract before using it; deployments can roll the
-# model out independently without breaking receipt-by-hash inspection. It is a
-# candidate-hash index only. RPC receipts remain the authority for every
-# selected transaction and every rendered ERC-20 leg.
-TX_ADDRESS_INDEX_RELATION = "dbt.int_execution_address_activity"
-
 CHAIN_ORDER = "block_number, transaction_index, log_index"
 
 BURN_ADDRESSES = (
@@ -107,6 +105,32 @@ def _union_legs_cte(where: str) -> str:
                any(data)            AS data
         FROM raw
         GROUP BY block_number, transaction_index, log_index, transaction_hash
+    )"""
+
+
+def _union_transactions_cte(where: str) -> str:
+    """Historical + live transaction envelopes under one bounded predicate."""
+    parts = []
+    for rel in CHAIN_TRANSACTION_RELATIONS:
+        parts.append(
+            f"""
+        SELECT block_number, transaction_index, transaction_hash,
+               block_timestamp, from_address, to_address, insert_version
+        FROM {rel}
+        WHERE {where}"""
+        )
+    union = "\n        UNION ALL".join(parts)
+    return f"""
+    raw_transactions AS ({union}
+    ),
+    direct_transactions AS (
+        SELECT
+            block_number,
+            transaction_index,
+            transaction_hash,
+            argMax(block_timestamp, insert_version) AS block_timestamp
+        FROM raw_transactions
+        GROUP BY block_number, transaction_index, transaction_hash
     )"""
 
 
@@ -269,31 +293,90 @@ def build_all_history_tx_discovery_chunk_sql(
     t0: str,
     t1_exclusive: str,
     limit: int,
+    before_block: int | None = None,
+    before_index: int | None = None,
+    before_hash: str | None = None,
+    activity_kinds: list[str] | None = None,
+    tokens: list[str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Discover address transactions in one internal storage partition.
 
     The caller tiles these half-open UTC chunks from chain genesis through the
-    execution-log horizon. Chunks are a ClickHouse transport/performance detail,
-    not an analyst time filter: completeness requires every chunk plus the RPC
-    tail to succeed. Each non-empty chunk returns its exact transaction total
-    alongside its newest rows so the global result cap remains disclosed.
+    common execution-table horizon. Token candidates come from indexed Transfer
+    topics; normal/native candidates come from transaction envelopes. Chunks
+    are a storage transport detail, not an analyst time filter: completeness
+    requires every chunk plus the RPC tail to succeed.
     """
+    normalized_kinds = {
+        str(kind).strip().lower() for kind in (activity_kinds or ["direct", "erc20"])
+    }
+    invalid_kinds = normalized_kinds - {"direct", "erc20"}
+    if invalid_kinds:
+        raise ValueError(
+            "activity_kinds must contain only 'direct' and/or 'erc20'"
+        )
+    if not normalized_kinds:
+        raise ValueError("activity_kinds cannot be empty")
+
+    # A token predicate describes Transfer-log participation. It must never
+    # accidentally retain normal/native transaction candidates merely because
+    # the same address also submitted a transaction in the selected period.
+    if tokens:
+        normalized_kinds.discard("direct")
+        normalized_kinds.add("erc20")
+
     params: dict[str, Any] = {
         "topics": [_addr_topic(address) for address in address_ids or []],
+        "addresses": _bare_list(address_ids),
         "ts0": t0,
         "ts1": t1_exclusive,
         "t0": TRANSFER_TOPIC0,
         "lim": int(limit) + 1,
     }
-    where = (
+    log_where = (
         "block_timestamp >= {ts0:DateTime} AND block_timestamp < {ts1:DateTime}"
         " AND topic0 = {t0:String}"
         " AND topic3 IS NULL"
         " AND (topic1 IN {topics:Array(String)} OR topic2 IN {topics:Array(String)})"
     )
+    transaction_where = (
+        "block_timestamp >= {ts0:DateTime} AND block_timestamp < {ts1:DateTime}"
+        " AND transaction_hash IS NOT NULL"
+        " AND (from_address IN {addresses:Array(String)}"
+        " OR to_address IN {addresses:Array(String)})"
+    )
+    if tokens:
+        params["tokens"] = _bare_list(tokens)
+        log_where += " AND address IN {tokens:Array(String)}"
+
+    if before_block is not None:
+        params.update(
+            {
+                "before_block": int(before_block),
+                "before_index": int(before_index if before_index is not None else -1),
+                "before_hash": _bare(str(before_hash or "f" * 64)),
+            }
+        )
+        before_predicate = (
+            " AND (block_number < {before_block:UInt64}"
+            " OR (block_number = {before_block:UInt64}"
+            " AND (transaction_index < {before_index:Int64}"
+            " OR (transaction_index = {before_index:Int64}"
+            " AND transaction_hash < {before_hash:String}))))"
+        )
+        log_where += before_predicate
+        transaction_where += before_predicate
+
+    candidate_parts: list[str] = []
+    if "erc20" in normalized_kinds:
+        candidate_parts.append("SELECT * FROM transfer_candidates")
+    if "direct" in normalized_kinds:
+        candidate_parts.append("SELECT * FROM direct_candidates")
+    candidate_union = "\n        UNION ALL\n        ".join(candidate_parts)
     sql = f"""
-    WITH{_union_legs_cte(where)},
-    grouped AS (
+    WITH{_union_legs_cte(log_where)},
+    {_union_transactions_cte(transaction_where)},
+    transfer_candidates AS (
         SELECT
             transaction_hash,
             min(block_number) AS discovered_block_number,
@@ -302,6 +385,31 @@ def build_all_history_tx_discovery_chunk_sql(
             count() AS discovered_leg_count,
             uniqExact(token_bare) AS discovered_token_count
         FROM legs
+        GROUP BY transaction_hash
+    ),
+    direct_candidates AS (
+        SELECT
+            transaction_hash,
+            min(block_number) AS discovered_block_number,
+            min(transaction_index) AS discovered_transaction_index,
+            min(block_timestamp) AS discovered_block_timestamp,
+            toUInt64(0) AS discovered_leg_count,
+            toUInt64(0) AS discovered_token_count
+        FROM direct_transactions
+        GROUP BY transaction_hash
+    ),
+    candidates AS (
+        {candidate_union}
+    ),
+    grouped AS (
+        SELECT
+            transaction_hash,
+            min(discovered_block_number) AS discovered_block_number,
+            min(discovered_transaction_index) AS discovered_transaction_index,
+            min(discovered_block_timestamp) AS discovered_block_timestamp,
+            max(discovered_leg_count) AS discovered_leg_count,
+            max(discovered_token_count) AS discovered_token_count
+        FROM candidates
         GROUP BY transaction_hash
     )
     SELECT
@@ -315,170 +423,10 @@ def build_all_history_tx_discovery_chunk_sql(
     FROM grouped
     ORDER BY discovered_block_number DESC,
              discovered_transaction_index DESC,
-             transaction_hash
+             transaction_hash DESC
     LIMIT {{lim:UInt32}}
     """
     return sql, params
-
-
-def build_indexed_tx_discovery_sql(
-    *,
-    address_ids: list[str],
-    t0: str,
-    t1_exclusive: str,
-    tokens: list[str] | None,
-    counterparty_ids: list[str] | None,
-    limit: int,
-    after_block: int = 0,
-    after_index: int = -1,
-) -> tuple[str, dict[str, Any]]:
-    """Discover transaction hashes through the address-keyed dbt index.
-
-    Public index values are normalized lowercase ``0x`` strings (unlike raw
-    ``execution.logs``). Direct transaction participation and Transfer-log
-    participation are stored as separate evidence rows, so this query merges
-    them at transaction grain without double-counting a transaction that
-    appears in both evidence classes. The caller still enumerates every
-    selected transaction from its RPC receipt.
-    """
-    params: dict[str, Any] = {
-        "chain_id": 100,
-        "addresses": [str(value).lower() for value in address_ids if value],
-        "ts0": t0,
-        "ts1": t1_exclusive,
-        "lim": int(limit) + 1,
-    }
-    where = [
-        "chain_id = {chain_id:UInt64}",
-        "activity_source IN ('transactions', 'transfers')",
-        "participant_address IN {addresses:Array(String)}",
-        "block_timestamp >= {ts0:DateTime}",
-        "block_timestamp < {ts1:DateTime}",
-    ]
-    if tokens:
-        params["tokens"] = [str(value).lower() for value in tokens if value]
-        where.append("hasAny(token_addresses, {tokens:Array(String)})")
-    if counterparty_ids:
-        params["counterparties"] = [
-            str(value).lower() for value in counterparty_ids if value
-        ]
-        where.append(
-            "hasAny(token_counterparties, {counterparties:Array(String)})"
-        )
-    forward = after_block > 0
-    if forward:
-        params["after_block"] = int(after_block)
-        params["after_index"] = int(after_index)
-        where.append(
-            "(block_number > {after_block:UInt64} OR "
-            "(block_number = {after_block:UInt64} AND "
-            "transaction_index > {after_index:Int64}))"
-        )
-    order = (
-        "block_number ASC, transaction_index ASC, transaction_hash ASC"
-        if forward
-        else "block_number DESC, transaction_index DESC, transaction_hash ASC"
-    )
-    sql = f"""
-    WITH matching_evidence AS (
-        SELECT
-            transaction_hash,
-            block_number,
-            transaction_index,
-            block_timestamp,
-            indexed_transfer_leg_count,
-            token_addresses
-        FROM {TX_ADDRESS_INDEX_RELATION} FINAL
-        WHERE {' AND '.join(where)}
-    ),
-    transactions AS (
-        SELECT
-            transaction_hash,
-            max(block_number) AS block_number,
-            max(transaction_index) AS transaction_index,
-            max(block_timestamp) AS block_timestamp,
-            max(indexed_transfer_leg_count) AS leg_count,
-            length(
-                arrayDistinct(arrayFlatten(groupArray(token_addresses)))
-            ) AS token_count
-        FROM matching_evidence
-        GROUP BY transaction_hash
-    )
-    SELECT
-        transaction_hash,
-        block_number,
-        transaction_index,
-        toString(block_timestamp) AS block_timestamp,
-        leg_count,
-        token_count,
-        count() OVER () AS transaction_total
-    FROM transactions
-    ORDER BY {order}
-    LIMIT {{lim:UInt32}}
-    """
-    return sql, params
-
-
-def build_tx_index_horizon_sql() -> tuple[str, dict[str, Any]]:
-    """Per-source index watermarks; never infer freshness from result rows.
-
-    Both stages must be present. The safe RPC-tail cursor is the lower of the
-    two block horizons, because using the newer stage would leave a gap in the
-    slower evidence class.
-    """
-    return (
-        f"""
-        SELECT
-            activity_source,
-            toString(min(block_timestamp)) AS first_event_at,
-            toString(max(block_timestamp)) AS event_horizon,
-            max(source_horizon_block) AS block_horizon,
-            toString(max(indexed_at)) AS indexed_at
-        FROM {TX_ADDRESS_INDEX_RELATION} FINAL
-        WHERE chain_id = {{chain_id:UInt64}}
-          AND activity_source IN ('transactions', 'transfers')
-        GROUP BY activity_source
-        ORDER BY activity_source
-        """,
-        {"chain_id": 100},
-    )
-
-
-def build_indexed_tx_membership_sql(
-    *, address_id: str, tx_hashes: list[str]
-) -> tuple[str, dict[str, Any]]:
-    """Which RPC-tail hashes are already represented by either index stage."""
-    return (
-        f"""
-        SELECT DISTINCT transaction_hash
-        FROM {TX_ADDRESS_INDEX_RELATION} FINAL
-        WHERE chain_id = {{chain_id:UInt64}}
-          AND participant_address = {{address:String}}
-          AND transaction_hash IN {{hashes:Array(String)}}
-          AND activity_source IN ('transactions', 'transfers')
-        """,
-        {
-            "chain_id": 100,
-            "address": str(address_id).lower(),
-            "hashes": [str(value).lower() for value in tx_hashes if value],
-        },
-    )
-
-
-def build_latest_indexed_activity_sql(
-    *, address_id: str, before: str
-) -> tuple[str, dict[str, Any]]:
-    """Latest indexed activity before an empty discovery window."""
-    return (
-        f"""
-        SELECT toString(max(block_timestamp)) AS latest_before_t0
-        FROM {TX_ADDRESS_INDEX_RELATION}
-        WHERE chain_id = {{chain_id:UInt64}}
-          AND participant_address = {{address:String}}
-          AND block_timestamp < {{before:DateTime}}
-        """,
-        {"chain_id": 100, "address": str(address_id).lower(), "before": before},
-    )
 
 
 def build_leg_total_sql(
@@ -549,7 +497,7 @@ def build_token_contract_sql(
 
 
 def build_data_horizon_sql() -> tuple[str, dict[str, Any]]:
-    """Independent block-timestamp watermark for each chain relation.
+    """Independent block-timestamp watermark for each discovery relation.
 
     "Empty" must never be reported as "nothing happened" when it actually means
     the window sits past the ingest horizon.  Returning the two clocks instead
@@ -560,6 +508,6 @@ def build_data_horizon_sql() -> tuple[str, dict[str, Any]]:
         f"SELECT '{rel}' AS relation, max(block_timestamp) AS horizon, "
         f"max(block_number) AS block_horizon FROM {rel}"
         f" WHERE block_timestamp >= now() - INTERVAL 2 DAY"
-        for rel in CHAIN_LOG_RELATIONS
+        for rel in (*CHAIN_LOG_RELATIONS, *CHAIN_TRANSACTION_RELATIONS)
     ]
     return " UNION ALL ".join(parts), {}

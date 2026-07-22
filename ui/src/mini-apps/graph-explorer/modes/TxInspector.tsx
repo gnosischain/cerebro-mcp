@@ -1,10 +1,13 @@
 import type { ReactNode } from "react";
 import type { TxGroup, TxLegRow, TxNodeRow } from "../model/txLayout";
+import type { TxContextRow } from "../model/txContext";
 
 interface Props {
   txHash: string;
   transaction: TxGroup | undefined;
   receiptStatus: string;
+  context?: TxContextRow;
+  selectedEventKind?: "Mint" | "Burn" | "Transfer";
   selectedLeg: TxLegRow | undefined;
   selectedNode: TxNodeRow | undefined;
   graphVisible: boolean;
@@ -48,6 +51,8 @@ export function TxInspector({
   txHash,
   transaction,
   receiptStatus,
+  context,
+  selectedEventKind,
   selectedLeg,
   selectedNode,
   graphVisible,
@@ -77,6 +82,15 @@ export function TxInspector({
           <Kv label="receipt status">{receiptStatus || "unknown"}</Kv>
           <Kv label="block">{transaction?.blockNumber?.toLocaleString() ?? "unknown"}</Kv>
           <Kv label="timestamp">{transaction?.blockTimestamp || "unknown"}</Kv>
+          <Kv label="initiator"><code>{context?.initiator ?? "unknown"}</code></Kv>
+          <Kv label="called contract"><code>{context?.target ?? "contract creation or unknown"}</code></Kv>
+          <Kv label="method">{context?.methodSelector ?? "unknown"}</Kv>
+          <Kv label="nonce">{context?.nonce ?? "unknown"}</Kv>
+          <Kv label="native value (raw)"><code>{context?.nativeValueRaw ?? "unknown"}</code></Kv>
+          <Kv label="gas limit / used">{context?.gasLimit ?? "unknown"} / {context?.gasUsed ?? "unknown"}</Kv>
+          <Kv label="effective gas price"><code>{context?.effectiveGasPrice ?? "unknown"}</code></Kv>
+          <Kv label="fee (raw)"><code>{context?.feeRaw ?? "unknown"}</code></Kv>
+          <Kv label="matched because">{context?.matchedBecause.join(", ") || "explicit hash"}</Kv>
           <Kv label="ERC-20 legs">{legCount}</Kv>
           <Kv label="known USD subtotal">
             {fmtUsd(transaction && priced > 0 ? transaction.knownUsdTotal : null)}
@@ -99,6 +113,7 @@ export function TxInspector({
           <h3>Transfer leg</h3>
           <dl className="ge-kv">
             <Kv label="log order">{selectedLeg.seq + 1}</Kv>
+            <Kv label="event">{selectedEventKind ?? "Transfer"}</Kv>
             <Kv label="block / tx / log">
               {selectedLeg.blockNumber.toLocaleString()} / {selectedLeg.transactionIndex} / {selectedLeg.logIndex}
             </Kv>
@@ -130,7 +145,7 @@ export function TxInspector({
           <dl className="ge-kv">
             <Kv label="address"><code title={selectedNode.id}>{selectedNode.id}</code></Kv>
             <Kv label="role">{selectedNode.role || "address"}</Kv>
-            <Kv label="project">{selectedNode.project || "unknown"}</Kv>
+            <Kv label="project">{selectedNode.project || "No label in applied sources"}</Kv>
             <Kv label="legs in loaded scope">{selectedNode.legCount}</Kv>
             <Kv label="incoming USD">{fmtUsd(selectedNode.inUsd)}</Kv>
             <Kv label="outgoing USD">{fmtUsd(selectedNode.outUsd)}</Kv>

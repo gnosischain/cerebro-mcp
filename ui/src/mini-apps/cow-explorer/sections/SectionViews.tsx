@@ -1,0 +1,586 @@
+import type { ReactNode } from "react";
+import { ChartCard } from "../../../components/ChartCard";
+import { MaKpi, MaKpiGrid, MaSection, MaSkeletonKpiGrid, MaSkeletonRows } from "../../shared/MiniAppChrome";
+import type { DatasetDescriptor, PageRowsResponse } from "../../shared/miniAppTypes";
+import type { HydratedDataset } from "../../shared/useHydratedDatasets";
+import { CollapsibleSection } from "../../shared/CollapsibleSection";
+import { activityOption, candleOption, depthOption, rankingOption, referencePriceOption, shareHeatmapOption, volumeOption } from "../model/chartOptions";
+import { buildShareHeatmap, parseCandles, parseDepth, parseExecutionFlow, parseReferencePrices, rowsToObjects } from "../model/parseRows";
+import type { CowExplorerViewState, EntityType } from "../types";
+import { ChainBadge } from "../components/ChainBadge";
+import { CuratedTable } from "../components/CuratedTable";
+import { InfoBlocks, InfoPopover } from "../components/InfoPopover";
+import { DATASET_GROUP, datasetError } from "../model/datasetGroups";
+import { DATASET_DOCS } from "../model/datasetDocs";
+import { solverName } from "../model/solverRegistry";
+import { SankeySvg } from "../../shared/svg-flow/SankeySvg";
+import { LiveSection } from "./LiveSection";
+
+type FetchRows = (viewId: string, datasetKey: string, pageToken?: string) => Promise<PageRowsResponse | null>;
+
+interface Props {
+  state: CowExplorerViewState;
+  descriptors: Record<string, DatasetDescriptor>;
+  hydrated: Record<string, HydratedDataset>;
+  viewId: string;
+  fetchRows: FetchRows;
+  onEntity: (entityType: EntityType, identifier: string, chainId?: number) => void;
+  /** Switch the active section to a single network (chain quick-links). */
+  onSelectChain?: (chainId: number) => void;
+  /** Open a pair's market history (fills-count click on pair tables). */
+  onSelectPair?: (base: string, quote: string, chainId?: number) => void;
+  /** `${section}.${group}` keys whose deferred load failed (current scope). */
+  failedGroups?: string[];
+  onRetryGroup?: (section: string, group: string) => void;
+  /** Live section: re-enqueue the live dataset groups (poll tick). */
+  onRefreshLive?: () => void;
+  /** Live auto-refresh default (standalone true, embedded false). */
+  liveAutoDefault?: boolean;
+}
+
+function dataset(hydrated: Record<string, HydratedDataset>, key: string) {
+  const value = hydrated[key];
+  return value ? { columns: value.columns, rows: value.rows } : undefined;
+}
+
+function formatNumber(value: number): string {
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+/** Section KPI header: every section opens with headline numbers instead of
+ * dumping straight into a chart or table. */
+function KpiRow({ items, meta }: {
+  items: Array<{ label: string; value: string }>;
+  meta?: ReactNode;
+}) {
+  return (
+    <div className="cow-kpi-head">
+      <MaKpiGrid>
+        {items.map((item) => <MaKpi key={item.label} label={item.label} value={item.value} />)}
+      </MaKpiGrid>
+      {meta ? <div className="cow-kpi-head__meta">{meta}</div> : null}
+    </div>
+  );
+}
+
+function sumField(rows: Array<Record<string, unknown>>, field: string): number {
+  return rows.reduce((acc, row) => acc + Number(row[field] ?? 0), 0);
+}
+
+function GroupGate({ props, group, children }: {
+  props: Props;
+  group: string;
+  children: ReactNode;
+}) {
+  const section = props.state.section;
+  const key = `${section}.${group}`;
+  if (props.failedGroups?.includes(key)) {
+    return (
+      <div className="cow-group-error" role="alert">
+        <span>These datasets failed to load.</span>
+        <button type="button" onClick={() => props.onRetryGroup?.(section, group)}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+  if (props.state.loaded_groups?.[key] === false) {
+    return (
+      <div className="cow-skel" aria-busy="true" aria-label="Loading datasets">
+        {group === "core" ? <MaSkeletonKpiGrid /> : <div className="cow-skel__bar" />}
+        <MaSkeletonRows count={group === "core" ? 4 : 6} />
+      </div>
+    );
+  }
+  return <>{children}</>;
+}
+
+/** Explicit error card — a failed dataset must stay visible, never vanish. */
+export function DatasetErrorCard({ datasetKey, title, props, error }: {
+  datasetKey: string;
+  title: string;
+  props: Props;
+  error: string;
+}) {
+  const owner = DATASET_GROUP[datasetKey];
+  return (
+    <MaSection title={title}>
+      <div className="cow-dataset-error" role="alert">
+        <div className="cow-dataset-error__msg">
+          <strong>This dataset failed to load.</strong>
+          <span>{error}</span>
+        </div>
+        {owner ? (
+          <button
+            type="button"
+            onClick={() => props.onRetryGroup?.(owner.section, owner.group)}
+          >
+            Retry
+          </button>
+        ) : null}
+      </div>
+    </MaSection>
+  );
+}
+
+/** Chart wrapper with the same failure contract as Table: a dataset whose
+ * query failed renders an explicit error card, never a blank/empty chart. */
+function ChartSection({ datasetKey, title, metaLabel, props, children }: {
+  datasetKey: string;
+  title: string;
+  metaLabel?: string;
+  props: Props;
+  children: ReactNode;
+}) {
+  const descriptor = props.descriptors[datasetKey];
+  const error = descriptor ? datasetError(descriptor) : "";
+  if (error) {
+    return <DatasetErrorCard datasetKey={datasetKey} title={title} props={props} error={error} />;
+  }
+  return (
+    <MaSection title={title} meta={<CoverageInfo descriptor={descriptor} label={metaLabel} />}>
+      {children}
+    </MaSection>
+  );
+}
+
+function Table({ datasetKey, title, props }: { datasetKey: string; title: string; props: Props }) {
+  const descriptor = props.descriptors[datasetKey];
+  if (!descriptor) return null;
+  const error = datasetError(descriptor);
+  if (error) {
+    return <DatasetErrorCard datasetKey={datasetKey} title={title} props={props} error={error} />;
+  }
+  return (
+    <MaSection title={title} meta={<CoverageInfo descriptor={descriptor} />}>
+      <CuratedTable
+        datasetKey={datasetKey}
+        descriptor={descriptor}
+        state={props.state}
+        viewId={props.viewId}
+        fetchRows={props.fetchRows}
+        onEntity={props.onEntity}
+        onSelectPair={props.onSelectPair}
+      />
+    </MaSection>
+  );
+}
+
+function CoverageInfo({ descriptor, label = "About this data" }: { descriptor?: DatasetDescriptor; label?: string }) {
+  const docs = descriptor ? DATASET_DOCS[descriptor.key] : undefined;
+  return (
+    <InfoPopover label={label}>
+      <InfoBlocks what={docs?.what} method={docs?.method} coverage={coverageMeta(descriptor)} />
+    </InfoPopover>
+  );
+}
+
+function coverageMeta(descriptor?: DatasetDescriptor): string {
+  const coverage = descriptor?.provenance?.coverage as
+    | { actual_start?: string | null; actual_end?: string | null; mode?: string; latest_source_observation?: string | null; fetched_at?: string | null; truncated?: boolean }
+    | undefined;
+  if (!coverage) return "Indexed window disclosed in source metadata";
+  const range = [coverage.actual_start, coverage.actual_end].filter(Boolean).join(" → ");
+  return [
+    coverage.mode,
+    range,
+    coverage.latest_source_observation ? `source observed ${coverage.latest_source_observation}` : "",
+    coverage.fetched_at ? `fetched ${coverage.fetched_at}` : "",
+    coverage.truncated ? "result truncated" : "",
+  ].filter(Boolean).join(" · ") || "No matching rows in indexed window";
+}
+
+function Overview(props: Props) {
+  const summary = rowsToObjects(dataset(props.hydrated, "network_summary"));
+  const totals = summary.reduce<{ trades: number; orders: number; competitions: number }>(
+    (acc, row) => ({
+      trades: acc.trades + Number(row.trade_count ?? 0),
+      orders: acc.orders + Number(row.order_count ?? 0),
+      competitions: acc.competitions + Number(row.competition_count_all_indexed ?? 0),
+    }),
+    { trades: 0, orders: 0, competitions: 0 },
+  );
+  return (
+    <>
+      <KpiRow
+        items={[
+          { label: "Networks", value: formatNumber(summary.length) },
+          { label: "Settled fills", value: formatNumber(totals.trades) },
+          { label: "Observed orders", value: formatNumber(totals.orders) },
+          { label: "Settled competitions", value: formatNumber(totals.competitions) },
+        ]}
+        meta={<CoverageInfo descriptor={props.descriptors.network_summary} label="KPI methodology" />}
+      />
+      <Table datasetKey="coverage_matrix" title="Coverage matrix" props={props} />
+      <GroupGate props={props} group="breakdown">
+        <div className="cow-grid-2">
+          <ChartSection datasetKey="network_activity" title="Execution activity" props={props}>
+            {props.hydrated.network_activity ? <ChartCard renderer="svg" chartId="cow-network-activity" hideId title="Settled fills by network" spec={activityOption(dataset(props.hydrated, "network_activity"), "trade_count", "chain_id")} /> : null}
+          </ChartSection>
+          <Table datasetKey="top_pairs" title="Top pairs by fill count" props={props} />
+        </div>
+      </GroupGate>
+      <Table datasetKey="network_summary" title="Indexed network summary" props={props} />
+      <GroupGate props={props} group="breakdown">
+        <CollapsibleSection title="Indexed fee-policy counts" defaultOpen={false}>
+          <Table datasetKey="fee_policy_counts" title="Indexed fee-policy counts" props={props} />
+        </CollapsibleSection>
+      </GroupGate>
+    </>
+  );
+}
+
+function Markets(props: Props) {
+  const candles = parseCandles(dataset(props.hydrated, "price_candles"));
+  const auctionReferences = parseReferencePrices(dataset(props.hydrated, "auction_reference_prices"));
+  const nativeReferences = parseReferencePrices(dataset(props.hydrated, "native_reference_prices"));
+  return (
+    <>
+      <KpiRow
+        items={[
+          { label: "Base", value: props.state.pair.base_symbol || "Base" },
+          { label: "Quote", value: props.state.pair.quote_symbol || "Quote" },
+          { label: "Resolution", value: props.state.interval },
+          { label: "Candles", value: formatNumber(candles.length) },
+        ]}
+        meta={<CoverageInfo descriptor={props.descriptors.market_summary} label="Market methodology" />}
+      />
+      <GroupGate props={props} group="charts">
+        <div className="cow-grid-2">
+        <ChartSection datasetKey="price_candles" title="Execution prices (settled fills)" props={props}>
+          {candles.length ? <ChartCard renderer="svg" chartId="cow-candles" hideId spec={candleOption(candles)} /> : <div className="cow-empty">No normalized execution candles. Token decimals may be missing.</div>}
+        </ChartSection>
+        {candles.length > 0 && <MaSection title="Execution volume" meta={<CoverageInfo descriptor={props.descriptors.price_candles} label="Base units · coverage" />}><ChartCard renderer="svg" chartId="cow-volume" hideId spec={volumeOption(candles)} /></MaSection>}
+        <ChartSection datasetKey="auction_reference_prices" title="Auction reference prices" props={props}>
+          {auctionReferences.length > 0 ? <ChartCard renderer="svg" chartId="cow-auction-reference" hideId spec={referencePriceOption(auctionReferences, "Auction reference")} /> : <div className="cow-empty">No auction reference prices with mapped auction block timestamps in this indexed window.</div>}
+        </ChartSection>
+        <ChartSection datasetKey="native_reference_prices" title="Native-price API observations" props={props}>
+          {nativeReferences.length > 0 ? <ChartCard renderer="svg" chartId="cow-native-reference" hideId spec={referencePriceOption(nativeReferences, "Native-price observation")} /> : <div className="cow-empty">No matching native-price API observations in this indexed window.</div>}
+        </ChartSection>
+        </div>
+      </GroupGate>
+      <GroupGate props={props} group="tape">
+        <Table datasetKey="recent_market_trades" title="Recent settled fills" props={props} />
+      </GroupGate>
+    </>
+  );
+}
+
+function Trades(props: Props) {
+  const activityRows = rowsToObjects(dataset(props.hydrated, "trade_activity"));
+  return (
+    <GroupGate props={props} group="core">
+      <KpiRow
+        items={[
+          { label: "Settled fills", value: formatNumber(sumField(activityRows, "fill_count")) },
+          { label: "Settlement txs", value: formatNumber(sumField(activityRows, "settlement_transactions")) },
+          { label: "Active traders", value: formatNumber(sumField(activityRows, "owners")) },
+        ]}
+        meta={<CoverageInfo descriptor={props.descriptors.trade_activity} label="KPI methodology" />}
+      />
+      <ChartSection datasetKey="trade_activity" title="Settled fill activity" props={props}>
+        {props.hydrated.trade_activity ? <ChartCard renderer="svg" chartId="cow-trade-activity" hideId spec={activityOption(dataset(props.hydrated, "trade_activity"), "fill_count")} /> : null}
+      </ChartSection>
+      <Table datasetKey="trade_pair_breakdown" title="Pair breakdown" props={props} />
+      <GroupGate props={props} group="tape">
+        <Table datasetKey="trades" title="Settled fills" props={props} />
+      </GroupGate>
+    </GroupGate>
+  );
+}
+
+function Orders(props: Props) {
+  const depth = parseDepth(dataset(props.hydrated, "intent_depth"));
+  const statusRows = rowsToObjects(dataset(props.hydrated, "order_status_summary"));
+  const openCount = statusRows.filter((row) => String(row.status) === "open").reduce((acc, row) => acc + Number(row.order_count ?? 0), 0);
+  return (
+    <GroupGate props={props} group="core">
+      <KpiRow
+        items={[
+          { label: "Observed orders", value: formatNumber(sumField(statusRows, "order_count")) },
+          { label: "Known open intents", value: formatNumber(openCount) },
+          { label: "Statuses", value: formatNumber(statusRows.length) },
+        ]}
+        meta={<CoverageInfo descriptor={props.descriptors.order_status_summary} label="KPI methodology" />}
+      />
+      <div className="cow-inline-info"><InfoPopover label="What “known intents” means"><strong>Known open intents (observed snapshot).</strong> This is not a complete live orderbook. Freshness does not imply completeness.</InfoPopover></div>
+      <ChartSection datasetKey="order_activity" title="Observed order lifecycle" props={props}>
+        {props.hydrated.order_activity ? <ChartCard renderer="svg" chartId="cow-order-activity" hideId spec={activityOption(dataset(props.hydrated, "order_activity"), "order_count")} /> : null}
+      </ChartSection>
+      <Table datasetKey="order_status_summary" title="Observed status summary" props={props} />
+      <GroupGate props={props} group="intents">
+        <ChartSection datasetKey="intent_depth" title="Known intents" props={props}>
+          {depth.length ? <ChartCard renderer="svg" chartId="cow-depth" hideId spec={depthOption(depth)} /> : <div className="cow-empty">No executable normalized intent depth for this pair.</div>}
+        </ChartSection>
+        <Table datasetKey="known_intents" title="Known intent summary" props={props} />
+        <Table datasetKey="known_orders" title="Known open intents (observed snapshot)" props={props} />
+      </GroupGate>
+      <GroupGate props={props} group="quality">
+        <Table datasetKey="order_quality_summary" title="Execution quality — surplus vs limit, per day" props={props} />
+        <CollapsibleSection title="Quality distributions (latency + surplus)" defaultOpen={false}>
+          <div className="cow-grid-2">
+            <Table datasetKey="fill_latency_distribution" title="Creation-to-fill latency" props={props} />
+            <Table datasetKey="surplus_distribution" title="Surplus distribution (bps vs limit)" props={props} />
+          </div>
+        </CollapsibleSection>
+      </GroupGate>
+    </GroupGate>
+  );
+}
+
+function Auctions(props: Props) {
+  const activityRows = rowsToObjects(dataset(props.hydrated, "auction_activity"));
+  return (
+    <GroupGate props={props} group="core">
+      <KpiRow
+        items={[
+          { label: "Settled competitions", value: formatNumber(sumField(activityRows, "competition_count")) },
+          { label: "Days covered", value: formatNumber(activityRows.length) },
+        ]}
+        meta={<CoverageInfo descriptor={props.descriptors.auction_activity} label="KPI methodology" />}
+      />
+      <ChartSection datasetKey="auction_activity" title="Settled competitions per day" props={props}>
+        {rowsToObjects(dataset(props.hydrated, "auction_activity")).length > 0
+          ? <ChartCard renderer="svg" chartId="cow-auction-activity" hideId spec={activityOption(dataset(props.hydrated, "auction_activity"), "competition_count", "chain_id", "bar")} />
+          : <div className="cow-empty">No settled competitions indexed in this window on this chain — competition data comes from the CoW API enrichment and covers a shorter span than on-chain fills.</div>}
+      </ChartSection>
+      <GroupGate props={props} group="list">
+        <Table datasetKey="auctions" title="Indexed settled competitions" props={props} />
+      </GroupGate>
+    </GroupGate>
+  );
+}
+
+function CrossChainMatrix(props: Props) {
+  const rows = rowsToObjects(dataset(props.hydrated, "solver_cross_chain"));
+  if (rows.length === 0) {
+    // Never blank — an all-networks Solvers view with no cross-chain rows
+    // previously rendered NOTHING here, which read as a broken page.
+    return (
+      <MaSection title="Cross-chain comparison (wins / competitions)">
+        <div className="cow-empty">
+          No cross-chain competition rows in this indexed window. Widen the
+          time window, or select a single network to see per-chain solver
+          detail and the pair-to-executor flow.
+        </div>
+      </MaSection>
+    );
+  }
+  const chains = [...new Set(rows.map((row) => Number(row.chain_id)))].sort((a, b) => a - b);
+  const bySolver = new Map<string, Map<number, { wins: number; competitions: number }>>();
+  for (const row of rows) {
+    const solver = String(row.competition_solver);
+    const entry = bySolver.get(solver) ?? new Map();
+    entry.set(Number(row.chain_id), {
+      wins: Number(row.wins ?? 0),
+      competitions: Number(row.competitions ?? 0),
+    });
+    bySolver.set(solver, entry);
+  }
+  const solvers = [...bySolver.entries()]
+    .sort((a, b) => {
+      const total = (m: Map<number, { wins: number }>) =>
+        [...m.values()].reduce((acc, v) => acc + v.wins, 0);
+      return total(b[1]) - total(a[1]);
+    })
+    .slice(0, 25);
+  return (
+    <MaSection title="Cross-chain comparison (wins / competitions)" meta={<CoverageInfo descriptor={props.descriptors.solver_cross_chain} />}>
+      <div className="cow-matrix-scroll">
+        <table className="cow-matrix">
+          <thead>
+            <tr>
+              <th>Solver</th>
+              {chains.map((chainId) => <th key={chainId}><ChainBadge chainId={chainId} showName={false} /></th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {solvers.map(([solver, entry]) => (
+              <tr key={solver}>
+                <td>
+                  <button type="button" className="cow-live-side cow-solver" title={solver} onClick={() => props.onEntity("solver", solver)}>
+                    {solverName(props.state.chain_id || 1, solver) || `${solver.slice(0, 6)}…${solver.slice(-4)}`}
+                  </button>
+                </td>
+                {chains.map((chainId) => {
+                  const cell = entry.get(chainId);
+                  return (
+                    <td key={chainId} className={cell ? "" : "cow-matrix__empty"}>
+                      {cell ? `${cell.wins} / ${cell.competitions}` : "—"}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </MaSection>
+  );
+}
+
+function Solvers(props: Props) {
+  const flow = parseExecutionFlow(dataset(props.hydrated, "execution_flow"));
+  const allNetworks = props.state.chain_id === 0;
+  const statRows = rowsToObjects(dataset(props.hydrated, "solver_stats"));
+  return (
+    <GroupGate props={props} group="core">
+      <KpiRow
+        items={[
+          { label: "Competition solvers", value: formatNumber(statRows.length) },
+          { label: "Solutions", value: formatNumber(sumField(statRows, "solutions")) },
+          { label: "Wins", value: formatNumber(sumField(statRows, "wins")) },
+        ]}
+        meta={<CoverageInfo descriptor={props.descriptors.solver_stats} label="KPI methodology" />}
+      />
+      <ChartSection datasetKey="solver_activity" title="Competition entries per day (top solvers)" props={props}>
+        {rowsToObjects(dataset(props.hydrated, "solver_activity")).length > 0
+          ? <ChartCard renderer="svg" chartId="cow-solver-activity" hideId spec={activityOption(dataset(props.hydrated, "solver_activity"), "competitions", "competition_solver", "bar", (value) => solverName(props.state.chain_id || 1, value) || `${value.slice(0, 6)}…${value.slice(-4)}`)} />
+          : <div className="cow-empty">No competition entries indexed in this window on this chain — competition data comes from the CoW API enrichment and covers a shorter span than on-chain fills.</div>}
+      </ChartSection>
+      <GroupGate props={props} group="detail">
+        <ChartSection datasetKey="ranking_distribution" title="Solution ranking distribution" props={props}>
+          {props.hydrated.ranking_distribution ? <ChartCard renderer="svg" chartId="cow-rankings" hideId spec={rankingOption(dataset(props.hydrated, "ranking_distribution"))} /> : null}
+        </ChartSection>
+        {allNetworks ? (
+          <>
+            <CrossChainMatrix {...props} />
+            <div className="cow-inline-cta">
+              <span>The pair → settlement-executor flow is per-network.</span>
+              {(props.state.chain_options ?? []).slice(0, 6).map((chain) => (
+                <button
+                  key={chain.chain_id}
+                  type="button"
+                  onClick={() => props.onSelectChain?.(chain.chain_id)}
+                >
+                  <ChainBadge chainId={chain.chain_id} showName={false} /> {chain.name}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <ChartSection datasetKey="execution_flow" title="Pair → settlement executor" metaLabel="Flow methodology" props={props}>
+            {flow.length > 0 ? (
+              <SankeySvg
+                links={flow.map((link) => ({ source: link.source, target: link.target, value: link.value }))}
+                nodeLabel={(id, side) => side === "right"
+                  ? (solverName(props.state.chain_id || 1, id) || `${id.slice(0, 6)}…${id.slice(-4)}`)
+                  : id}
+                formatValue={(value) => `${value.toLocaleString()} fills`}
+                leftTitle="Token pair"
+                rightTitle="Settlement executor"
+                onNodeClick={(id, side) => { if (side === "right") props.onEntity("solver", id); }}
+              />
+            ) : <div className="cow-empty">No settlement-executor flow matches this pair, role filter, and indexed window.</div>}
+          </ChartSection>
+        )}
+      </GroupGate>
+      <Table datasetKey="solver_stats" title="Competition solver statistics" props={props} />
+    </GroupGate>
+  );
+}
+
+function Traders(props: Props) {
+  const leaderRows = rowsToObjects(dataset(props.hydrated, "trader_leaderboard"));
+  return (
+    <GroupGate props={props} group="core">
+      <KpiRow
+        items={[
+          { label: "Traders (top set)", value: formatNumber(leaderRows.length) },
+          { label: "Fills", value: formatNumber(sumField(leaderRows, "fill_count")) },
+          { label: "Distinct pairs", value: formatNumber(sumField(leaderRows, "distinct_pairs")) },
+        ]}
+        meta={<CoverageInfo descriptor={props.descriptors.trader_leaderboard} label="KPI methodology" />}
+      />
+      <ChartSection datasetKey="trader_activity" title="Active and new traders" props={props}>
+        {props.hydrated.trader_activity ? <ChartCard renderer="svg" chartId="cow-trader-activity" hideId spec={activityOption(dataset(props.hydrated, "trader_activity"), "active_traders")} /> : null}
+      </ChartSection>
+      <Table datasetKey="trader_leaderboard" title="Trader leaderboard" props={props} />
+    </GroupGate>
+  );
+}
+
+function Patterns(props: Props) {
+  const chainId = props.state.chain_id || 1;
+  const short = (value: unknown) => `${String(value).slice(0, 6)}…${String(value).slice(-4)}`;
+  const solverLabel = (row: Record<string, unknown>, field: string) =>
+    solverName(chainId, String(row[field] ?? "")) || short(row[field]);
+  const pairRows = rowsToObjects(dataset(props.hydrated, "solver_pair_matrix"));
+  const pairHeatmap = buildShareHeatmap({
+    rows: pairRows,
+    rowLabel: (row) => {
+      const t0 = String(row.token0_symbol || "") || short(row.token0);
+      const t1 = String(row.token1_symbol || "") || short(row.token1);
+      return t0 && t1 ? `${t0}/${t1}` : "";
+    },
+    colLabel: (row) => solverLabel(row, "settlement_executor"),
+    weightField: "fill_count",
+    shareField: "pair_share",
+  });
+  const affinityRows = rowsToObjects(dataset(props.hydrated, "trader_solver_affinity"));
+  const affinityHeatmap = buildShareHeatmap({
+    rows: affinityRows,
+    rowLabel: (row) => short(row.trader ?? row.owner),
+    colLabel: (row) => solverLabel(row, "settlement_executor"),
+    weightField: "fill_count",
+    shareField: "trader_share",
+    maxRows: 25,
+  });
+  return (
+    <>
+      <div className="cow-inline-info">
+        <InfoPopover label="What this section shows">
+          Correlations the official explorer does not surface: which solvers win which pairs (specialization), whose order flow each solver settles (affinity), and whether the protocol fee policy correlates with execution quality. All figures cover the indexed window only.
+        </InfoPopover>
+      </div>
+      <ChartSection datasetKey="solver_pair_matrix" title="Solver-pair specialization (share of each pair's fills)" props={props}>
+        {pairHeatmap.cells.length > 0
+          ? <ChartCard renderer="svg" chartId="cow-pair-matrix" hideId spec={shareHeatmapOption({ ...pairHeatmap, colorLabel: "pair share" })} />
+          : <div className="cow-empty">No settled fills with resolvable executors in this indexed window.</div>}
+      </ChartSection>
+      <CollapsibleSection title="Specialization rows (raw)" defaultOpen={false}>
+        <Table datasetKey="solver_pair_matrix" title="Solver-pair specialization (top 30 pairs)" props={props} />
+      </CollapsibleSection>
+      <GroupGate props={props} group="affinity">
+        <ChartSection datasetKey="trader_solver_affinity" title="Trader-solver affinity (share of each trader's fills)" props={props}>
+          {affinityHeatmap.cells.length > 0
+            ? <ChartCard renderer="svg" chartId="cow-affinity" hideId spec={shareHeatmapOption({ ...affinityHeatmap, colorLabel: "trader share" })} />
+            : <div className="cow-empty">No trader-solver affinity rows in this indexed window.</div>}
+        </ChartSection>
+        <CollapsibleSection title="Affinity rows (raw)" defaultOpen={false}>
+          <Table datasetKey="trader_solver_affinity" title="Trader-solver affinity (top 100 traders)" props={props} />
+        </CollapsibleSection>
+      </GroupGate>
+      <GroupGate props={props} group="quality">
+        <Table datasetKey="fee_policy_quality" title="Fee-policy impact on execution quality" props={props} />
+      </GroupGate>
+    </>
+  );
+}
+
+export function SectionViews(props: Props) {
+  switch (props.state.section) {
+    case "live":
+      return (
+        <GroupGate props={props} group="core">
+          <LiveSection
+            state={props.state}
+            descriptors={props.descriptors}
+            hydrated={props.hydrated}
+            onEntity={props.onEntity}
+            onRefreshLive={props.onRefreshLive}
+            liveAutoDefault={props.liveAutoDefault}
+          />
+        </GroupGate>
+      );
+    case "overview": return <Overview {...props} />;
+    case "markets": return <Markets {...props} />;
+    case "trades": return <Trades {...props} />;
+    case "orders": return <Orders {...props} />;
+    case "auctions": return <Auctions {...props} />;
+    case "solvers": return <Solvers {...props} />;
+    case "traders": return <Traders {...props} />;
+    case "patterns": return <Patterns {...props} />;
+    default: return null;
+  }
+}

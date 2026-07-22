@@ -212,6 +212,9 @@ export interface TransactionsState {
     counterparties: string[];
     tokens: string[];
     window: { t0: string; t1: string; source: string } | null;
+    activity_kinds?: Array<"direct" | "erc20">;
+    cursor?: string | null;
+    page_size?: number;
   };
   results?: {
     hashes: string[];
@@ -243,6 +246,17 @@ export interface TransactionsState {
    * actually applied, the data horizon, and the residuals this relation
    * cannot see. `exact` is true only when legs_returned === legs_total. */
   scope?: ForensicScope;
+  discovery_scope?: ForensicScope;
+  receipt_scope?: ForensicScope;
+  discovery_coverage?: {
+    complete: boolean;
+    total_exact: number | null;
+    total_lower_bound: number;
+    next_cursor: string | null;
+    scanned_ranges: Array<{ t0: string; t1: string }>;
+    uncovered_ranges: Array<{ t0: string; t1: string; reason: string }>;
+    older_history_unscanned: boolean;
+  };
 }
 
 /** Server-owned flows namespace. Seeds/t0/t1/counts/expanded/token_catalog

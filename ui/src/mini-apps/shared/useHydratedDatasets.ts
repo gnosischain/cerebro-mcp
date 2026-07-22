@@ -48,7 +48,27 @@ type FetchRows = (
   viewId: string,
   datasetKey: string,
   pageToken?: string,
+  options?: {
+    datasetRevision?: number;
+    pageSize?: number;
+  },
 ) => Promise<PageRowsResponse | null>;
+
+export type HydrationRowCap =
+  | number
+  | ((datasetKey: string, descriptor: DatasetDescriptor) => number);
+
+function resolveRowCap(
+  policy: HydrationRowCap,
+  key: string,
+  descriptor: DatasetDescriptor,
+): number {
+  const candidate =
+    typeof policy === "function" ? policy(key, descriptor) : policy;
+  return Number.isFinite(candidate) && candidate > 0
+    ? Math.floor(candidate)
+    : DEFAULT_ROW_CAP;
+}
 
 /** Unique per-run loop handle; compared by OBJECT identity (StrictMode-safe —
  * equal identity strings across remounts must not revive stale loops). */
@@ -89,7 +109,7 @@ export function useHydratedDatasets(
   descriptors: Record<string, DatasetDescriptor> | undefined,
   revisions: Record<string, number> | undefined,
   fetchRows: FetchRows,
-  rowCap: number = DEFAULT_ROW_CAP,
+  rowCap: HydrationRowCap = DEFAULT_ROW_CAP,
   publish: HydrationPublish = "every-page",
 ): Record<string, HydratedDataset> {
   const [datasets, setDatasets] = useState<Record<string, HydratedDataset>>({});
@@ -115,8 +135,10 @@ export function useHydratedDatasets(
 
   // Combined signal so the effect runs whenever ANY key's swap signal changes;
   // inside, each key is diffed against its own previous identity.
-  const identity = `${viewId ?? ""}|${rowCap}|${Object.entries(descriptors ?? {})
-    .map(([key, d]) => `${key}:${revisions?.[key] ?? 0}:${d.stats?.row_count ?? 0}`)
+  const identity = `${viewId ?? ""}|${Object.entries(descriptors ?? {})
+    .map(([key, d]) => `${key}:${resolveRowCap(rowCap, key, d)}:${
+      revisions?.[key] ?? 0
+    }:${d.stats?.row_count ?? 0}`)
     .sort()
     .join("|")}`;
 
@@ -140,7 +162,9 @@ export function useHydratedDatasets(
     });
 
     for (const [key, d] of entries) {
-      const keyIdentity = `${viewId ?? ""}|${key}|${rowCap}|${
+      const keyRowCap = resolveRowCap(rowCap, key, d);
+      const datasetRevision = revisions?.[key] ?? 0;
+      const keyIdentity = `${viewId ?? ""}|${key}|${keyRowCap}|${
         revisions?.[key] ?? 0
       }|${d.stats?.row_count ?? 0}`;
       // Unchanged key: keep its rows and any in-flight loop as-is.
@@ -153,10 +177,13 @@ export function useHydratedDatasets(
       const totalAvailable = expected ?? preview.length;
       let token = d.page_token ?? "";
       const canHydrate = Boolean(
-        viewId && token && preview.length < totalAvailable && preview.length < rowCap,
+        viewId &&
+          token &&
+          preview.length < totalAvailable &&
+          preview.length < keyRowCap,
       );
       const cappedRemainder =
-        preview.length < totalAvailable && preview.length >= rowCap;
+        preview.length < totalAvailable && preview.length >= keyRowCap;
       // A descriptor that promises more rows but supplies neither those rows
       // nor a continuation token is a broken hydration contract, not a
       // successful short dataset. Treating it as complete can make forensic
@@ -164,7 +191,7 @@ export function useHydratedDatasets(
       const missingInitialToken =
         Boolean(viewId) &&
         preview.length < totalAvailable &&
-        preview.length < rowCap &&
+        preview.length < keyRowCap &&
         !token;
       const initialPhase: HydrationPhase = !viewId
         ? "idle"
@@ -196,19 +223,35 @@ export function useHydratedDatasets(
         let lastPublished = Math.max(1, preview.length);
         let publishedOnce = false;
         try {
-          while (!stale() && token && acc.length < rowCap) {
+          while (!stale() && token && acc.length < keyRowCap) {
             const previousToken = token;
-            const page = await fetchRef.current(viewId, key, token);
+            const page = await fetchRef.current(viewId, key, token, {
+              datasetRevision,
+              pageSize: Math.min(5_000, keyRowCap - acc.length),
+            });
             if (stale()) return;
             if (!page) throw new Error(`No hydration page returned for ${key}`);
+            if (
+              page.dataset_revision != null &&
+              page.dataset_revision !== datasetRevision
+            ) {
+              throw new Error(
+                `Dataset revision changed for ${key}: expected ${datasetRevision}, received ${page.dataset_revision}`,
+              );
+            }
             const pageRows = page.rows ?? [];
             acc = acc.concat(pageRows);
             token = page.next_page_token ?? "";
             const responseTotal = Number(page.total_rows);
-            if (Number.isFinite(responseTotal) && responseTotal >= acc.length) {
+            if (Number.isFinite(responseTotal) && responseTotal < acc.length) {
+              throw new Error(
+                `Hydration exceeded advertised total for ${key}: loaded ${acc.length} of ${responseTotal}`,
+              );
+            }
+            if (Number.isFinite(responseTotal)) {
               rowsExpected = responseTotal;
             }
-            if (!pageRows.length && token && token === previousToken) {
+            if (token && token === previousToken) {
               throw new Error(`Hydration made no progress for ${key}`);
             }
             const shouldPublish =
@@ -243,7 +286,7 @@ export function useHydratedDatasets(
               !token &&
               rowsExpected != null &&
               acc.length < rowsExpected &&
-              acc.length < rowCap
+              acc.length < keyRowCap
             ) {
               throw new Error(
                 `Hydration ended early for ${key}: loaded ${acc.length} of ${rowsExpected}`,
@@ -263,7 +306,7 @@ export function useHydratedDatasets(
                 error: null,
                 hydrating: false,
                 truncated:
-                  acc.length >= rowCap &&
+                  acc.length >= keyRowCap &&
                   (Boolean(token) ||
                     (rowsExpected != null && acc.length < rowsExpected)),
               },

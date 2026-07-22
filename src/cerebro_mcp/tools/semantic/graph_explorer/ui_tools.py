@@ -1,10 +1,10 @@
 """Graph Explorer UI tools — the 4 agent-facing tools + 2 app-only tools.
 
 view_state v2: per-mode namespaces (``atlas`` / ``investigate``) sharing one
-canvas. Dataset writes are PER KEY (``attach_dataset``) — an investigate load
-must never drop the ``atlas_*`` datasets and vice versa. Limits are published
-via ``view_state["limits"]``; all limit reads go through ``constants.<NAME>``
-attribute access so tests can monkeypatch them.
+canvas. Each loader atomically replaces only the dataset keys it owns, so an
+investigate load never drops the ``atlas_*`` datasets and vice versa. Limits
+are published via ``view_state["limits"]``; all limit reads go through
+``constants.<NAME>`` attribute access so tests can monkeypatch them.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from mcp.types import CallToolResult
 
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
 from cerebro_mcp.models.mini_app import MiniAppPayload
+from cerebro_mcp.semantic.address_semantics import money_event_kind
 from cerebro_mcp.semantic.graph_profiles import (
     discover_profiles,
     profile_by_id,
@@ -36,7 +37,6 @@ from .fetch import (
     fetch_profile_edges,
     node_evidence_rows,
     pick_direction,
-    resolve_address_roles,
     resolve_address_roles_with_status,
 )
 from .forensics import (
@@ -116,6 +116,185 @@ def _normalize_node_id(node_id: str) -> str:
     the edge path must too). Non-address ids pass through unchanged."""
     value = (node_id or "").strip()
     return value.lower() if _EVM_ADDR_RE.match(value) else value
+
+
+def _node_annotation_rows(
+    *,
+    scope_id: str,
+    node_rows: list[list[Any]],
+    roles_by_node: dict[str, tuple[dict[str, Any], EvidenceQueryStatus]] | None = None,
+) -> list[list[Any]]:
+    """Publish label/type context without promoting graph roles into identity.
+
+    The roles relation can report a Dune project label, but it carries neither
+    label confidence nor EOA/contract bytecode evidence.  Those fields remain
+    null/unknown.  Profile endpoint kinds are retained separately as semantic
+    roles so callers cannot mistake ``safe`` or ``pool`` for an RPC-verified
+    address type.
+    """
+    resolved = roles_by_node or {}
+    rows: list[list[Any]] = []
+    for row in node_rows:
+        if not row or not row[0]:
+            continue
+        node_id = str(row[0])
+        normalized_address = (
+            _normalize_node_id(node_id) if _EVM_ADDR_RE.match(node_id) else None
+        )
+        semantic_kind = str(row[1]) if len(row) > 1 and row[1] else ""
+        roles, query_status = resolved.get(
+            node_id,
+            (
+                {},
+                EvidenceQueryStatus(
+                    succeeded=False,
+                    error="label source was not queried for this node",
+                ),
+            ),
+        )
+        selected_label = str(roles.get("dune_project") or "").strip() or None
+        label_source = (
+            f"dbt.{ADDRESS_ROLES_RELATION}" if selected_label else None
+        )
+        label_candidates = (
+            [
+                {
+                    "label": selected_label,
+                    "source": label_source,
+                    "status": "reported",
+                    "confidence": None,
+                    "as_of": None,
+                }
+            ]
+            if selected_label
+            else []
+        )
+        if selected_label:
+            label_status = "reported"
+        elif query_status.succeeded and query_status.complete:
+            label_status = "not_found_in_applied_source"
+        elif query_status.error == "label source was not queried for this node":
+            label_status = "not_queried"
+        else:
+            label_status = "unknown"
+        annotation_warnings = [
+            "Contract/EOA kind was not evaluated; semantic graph roles are not bytecode evidence."
+        ]
+        if not normalized_address:
+            annotation_warnings.append("Node id is not a normalized EVM address.")
+        if not query_status.succeeded and query_status.error:
+            annotation_warnings.append(str(query_status.error))
+        rows.append(
+            [
+                scope_id,
+                node_id,
+                normalized_address,
+                label_candidates,
+                selected_label,
+                label_source,
+                label_status,
+                None,
+                None,
+                "unknown",
+                None,
+                [semantic_kind] if semantic_kind else [],
+                annotation_warnings,
+            ]
+        )
+    return rows
+
+
+def _edge_pivot_rows(
+    edge_rows: list[list[Any]],
+    scope: dict[str, Any],
+) -> list[list[Any]]:
+    """Build one certified transaction pivot contract for every graph edge.
+
+    Only the explicit ``token_transfers`` profile is transfer-backed.  Other
+    semantic relationships still get a keyed record, but it is fail-closed and
+    explains why opening transaction discovery would be an unsupported leap.
+    The aggregate relationship edge has no token dimension, so the supported
+    pivot intentionally sends an empty token set (all ERC-20 candidates) rather
+    than inventing a token address.
+    """
+    predicate = dict(scope.get("predicate") or {})
+    scope_id = str(scope.get("scope_id") or "")
+    t0 = predicate.get("t0")
+    t1 = predicate.get("t1")
+    rows: list[list[Any]] = []
+    for edge in edge_rows:
+        if len(edge) < 4:
+            continue
+        edge_id = str(edge[0] or "")
+        source = str(edge[1] or "")
+        target = str(edge[2] or "")
+        profile_id = str(edge[3] or "")
+        supported = profile_id == "token_transfers"
+        rows.append(
+            [
+                edge_id,
+                supported,
+                (
+                    None
+                    if supported
+                    else "Semantic relationship is not certified transfer evidence."
+                ),
+                source,
+                target,
+                [],
+                money_event_kind(source, target) if supported else None,
+                t0,
+                t1,
+                scope_id,
+            ]
+        )
+    return rows
+
+
+def _membership_check(
+    *,
+    profile: Any,
+    subject: str,
+    direction: str,
+    status: str,
+    scope: dict[str, Any],
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Describe a complete profile-specific membership predicate outcome."""
+    predicate = dict(scope.get("predicate") or {})
+    temporal_semantics = profile.relationship_time
+    if temporal_semantics == "current_snapshot":
+        applied_predicate = {
+            "t0": None,
+            "t1": None,
+            "as_of": scope.get("retrieved_at"),
+        }
+    elif temporal_semantics == "state_at":
+        applied_predicate = {
+            "t0": None,
+            "t1": predicate.get("t1"),
+            "as_of": predicate.get("t1"),
+        }
+    else:
+        applied_predicate = {
+            "t0": predicate.get("t0"),
+            "t1": predicate.get("t1"),
+            "as_of": predicate.get("as_of"),
+        }
+    return {
+        "profile": profile.profile,
+        "subject": subject,
+        "status": status,
+        "reason": reason,
+        "source_relation": str(profile.relation_name or profile.model_name),
+        "direction": direction,
+        "source_column": profile.source_column,
+        "target_column": profile.target_column,
+        "temporal_semantics": temporal_semantics,
+        "predicate": applied_predicate,
+        "source_scope_id": str(scope.get("scope_id") or ""),
+        "sample_based": False,
+    }
 
 
 def _graph_metrics_rows(
@@ -470,6 +649,15 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 "edge_evidence": empty_dataset(
                     "edge_evidence", constants.EDGE_EVIDENCE_COLUMNS
                 ),
+                "node_annotations": empty_dataset(
+                    "node_annotations", constants.NODE_ANNOTATION_COLUMNS
+                ),
+                "focus_node_annotations": empty_dataset(
+                    "focus_node_annotations", constants.NODE_ANNOTATION_COLUMNS
+                ),
+                "edge_pivots": empty_dataset(
+                    "edge_pivots", constants.EDGE_PIVOT_COLUMNS
+                ),
                 "graph_metrics": empty_dataset(
                     "graph_metrics", constants.METRICS_COLUMNS
                 ),
@@ -514,7 +702,7 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             mini_apps.patch_view_state(
                 view_id, {"mode": requested_mode, "mode_revision": 1}
             )
-        record = mini_apps.get_view(view_id)
+        record = mini_apps.snapshot_view(view_id)
         assert record is not None
         payload = build_payload(record)
         return mini_apps.payload_to_call_tool_result(
@@ -550,7 +738,7 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         Window/neighbor limits default to the UI defaults published in
         `view_state["limits"]`.
         """
-        record = mini_apps.get_view(view_id)
+        record = mini_apps.snapshot_view(view_id)
         if record is None:
             return mini_apps.error_call_tool_result(
                 f"Unknown or expired view_id: {view_id}"
@@ -587,7 +775,31 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 request_id=request_id,
             )
 
-        roles = resolve_address_roles(ch, seed_id) if seed_id else {}
+        # Reserve the relationship revision before any source query.  A final
+        # newest-wins check alone is insufficient: request N-1 could otherwise
+        # commit after N starts but before N finishes.  Re-committing the same
+        # id at the end is accepted; an older in-flight request is rejected.
+        effective_request_id = mini_apps.reserve_view_request(
+            view_id,
+            request_channel="relationships",
+            request_id=request_id,
+        )
+        if effective_request_id is None:
+            current = mini_apps.snapshot_view(view_id)
+            assert current is not None
+            return mini_apps.payload_to_call_tool_result(
+                build_payload(current),
+                summary_text=f"Stale Relationships request {request_id} ignored.",
+            )
+        request_id = effective_request_id
+
+        if seed_id:
+            roles, roles_status = resolve_address_roles_with_status(ch, seed_id)
+        else:
+            roles, roles_status = {}, EvidenceQueryStatus(
+                succeeded=False,
+                error="address role source was not queried without a seed",
+            )
         if relation_types:
             chosen_ids = set(relation_types)
             profiles = [p for p in all_profiles if p.profile in chosen_ids]
@@ -608,11 +820,29 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         profiles, sources, source_failures = _relationship_sources(
             ch, selected_profiles
         )
-
-        # Determine seed_kind early so we can use it for direction picking.
+        # Determine seed_kind early so every membership record names the exact
+        # directional predicate that was (or would have been) applied.
         seed_kind = seed_kind_of(roles) if roles else ""
         if not seed_kind and seed_id and profiles:
             seed_kind = profiles[0].source_kind or "address"
+        usable_profile_ids = {profile.profile for profile in profiles}
+        membership_outcomes: dict[str, tuple[str, str, str | None]] = {}
+        for profile in selected_profiles:
+            direction = pick_direction(profile, seed_kind)
+            if profile.profile not in usable_profile_ids:
+                reason = next(
+                    (
+                        failure
+                        for failure in source_failures
+                        if failure.startswith(f"{profile.profile}:")
+                    ),
+                    "source contract failed",
+                )
+                membership_outcomes[profile.profile] = (
+                    direction,
+                    "failed",
+                    reason,
+                )
 
         all_nodes: list[dict[str, Any]] = []
         all_edges: list[dict[str, Any]] = []
@@ -631,6 +861,14 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             )
             _record_relationship_query_failure(
                 profile, warn, sources, source_failures
+            )
+            hard_query_failure = any(
+                "weight unknown for" not in warning for warning in warn
+            )
+            membership_outcomes[profile.profile] = (
+                direction,
+                "found" if edges else "failed" if hard_query_failure else "certified_absent",
+                "; ".join(warn) if hard_query_failure else None,
             )
             warnings.extend(warn)
             truncated = truncated or len(edges) >= limit
@@ -671,22 +909,32 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             truncation_rule=f"per-profile neighbour cap {limit}",
             subjects=[seed_id] if seed_id else [],
         )
-        # Per-key attach: investigate loads must NOT drop the atlas datasets.
-        mini_apps.attach_dataset(
-            view_id, "nodes", dataset_from_rows(constants.NODES_COLUMNS, node_rows, "nodes")
+        membership_checks = [
+            _membership_check(
+                profile=profile,
+                subject=seed_id,
+                direction=membership_outcomes.get(
+                    profile.profile,
+                    (pick_direction(profile, seed_kind), "failed", "query outcome unavailable"),
+                )[0],
+                status=membership_outcomes.get(
+                    profile.profile,
+                    ("both", "failed", "query outcome unavailable"),
+                )[1],
+                reason=membership_outcomes.get(
+                    profile.profile,
+                    ("both", "failed", "query outcome unavailable"),
+                )[2],
+                scope=scope,
+            )
+            for profile in selected_profiles
+        ]
+        annotation_rows = _node_annotation_rows(
+            scope_id=scope["scope_id"],
+            node_rows=node_rows,
+            roles_by_node={seed_id: (roles, roles_status)} if seed_id else {},
         )
-        mini_apps.attach_dataset(
-            view_id, "edges", dataset_from_rows(constants.EDGES_COLUMNS, edge_rows, "edges")
-        )
-        mini_apps.attach_dataset(
-            view_id,
-            "graph_metrics",
-            dataset_from_rows(
-                constants.METRICS_COLUMNS,
-                _graph_metrics_rows(node_rows, edge_rows, len(profiles), window_days),
-                "graph_metrics",
-            ),
-        )
+        pivot_rows = _edge_pivot_rows(edge_rows, scope)
 
         suggestions = suggested_next_hops(seed_kind or "address", all_profiles)
         node_roles_patch: dict[str, Any] = {}
@@ -697,9 +945,34 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         # commands (bumping mode_revision). The initial open-into-investigate
         # mode is set by open_graph_explorer; a refetch stays in whatever mode
         # the client is in.
-        mini_apps.patch_view_state(
+        accepted = mini_apps.commit_view_update(
             view_id,
-            {
+            request_channel="relationships",
+            request_id=request_id,
+            datasets={
+                "nodes": dataset_from_rows(
+                    constants.NODES_COLUMNS, node_rows, "nodes"
+                ),
+                "edges": dataset_from_rows(
+                    constants.EDGES_COLUMNS, edge_rows, "edges"
+                ),
+                "graph_metrics": dataset_from_rows(
+                    constants.METRICS_COLUMNS,
+                    _graph_metrics_rows(
+                        node_rows, edge_rows, len(profiles), window_days
+                    ),
+                    "graph_metrics",
+                ),
+                "node_annotations": dataset_from_rows(
+                    constants.NODE_ANNOTATION_COLUMNS,
+                    annotation_rows,
+                    "node_annotations",
+                ),
+                "edge_pivots": dataset_from_rows(
+                    constants.EDGE_PIVOT_COLUMNS, pivot_rows, "edge_pivots"
+                ),
+            },
+            state_patch={
                 "investigate": {
                     "seed": {"id": seed_id, "kind": seed_kind or ""},
                     "active_profiles": [p.profile for p in selected_profiles],
@@ -717,14 +990,21 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     "nodes": scope["scope_id"],
                     "edges": scope["scope_id"],
                     "graph_metrics": scope["scope_id"],
+                    "node_annotations": scope["scope_id"],
+                    "edge_pivots": scope["scope_id"],
                 },
                 "node_roles": node_roles_patch,
+                "catalog_membership": {
+                    "subject": seed_id,
+                    "scope_id": scope["scope_id"],
+                    "checks": membership_checks,
+                },
                 "suggested_next_hops": suggestions,
                 "warnings": warnings,
             },
         )
 
-        record = mini_apps.get_view(view_id)
+        record = mini_apps.snapshot_view(view_id)
         assert record is not None
         payload = build_payload(record)
         return mini_apps.payload_to_call_tool_result(
@@ -732,6 +1012,8 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             summary_text=(
                 f"Loaded {len(edge_rows)} edges across {len(selected_profiles)} profiles "
                 f"(view_id={view_id[:8]})"
+                if accepted
+                else f"Stale Relationships request {request_id} ignored."
             ),
         )
 
@@ -754,7 +1036,7 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         Capped at `MAX_HOPS` total hops per load session; reseed to explore
         further.
         """
-        record = mini_apps.get_view(view_id)
+        record = mini_apps.snapshot_view(view_id)
         if record is None:
             return mini_apps.error_call_tool_result(
                 f"Unknown or expired view_id: {view_id}"
@@ -774,6 +1056,19 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             return mini_apps.error_call_tool_result(
                 "direction must be 'in', 'out', or 'both'"
             )
+        effective_request_id = mini_apps.reserve_view_request(
+            view_id,
+            request_channel="relationships",
+            request_id=request_id,
+        )
+        if effective_request_id is None:
+            current = mini_apps.snapshot_view(view_id)
+            assert current is not None
+            return mini_apps.payload_to_call_tool_result(
+                build_payload(current),
+                summary_text=f"Stale Relationships request {request_id} ignored.",
+            )
+        request_id = effective_request_id
 
         chosen_ids = (
             set(relation_types)
@@ -800,7 +1095,9 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         # direction per profile (avoids type errors on asymmetric profiles
         # when a bare-address node is expanded against profile whose target
         # is non-string).
-        expand_roles = resolve_address_roles(ch, node_id)
+        expand_roles, expand_roles_status = resolve_address_roles_with_status(
+            ch, node_id
+        )
         expand_kind = seed_kind_of(expand_roles) if expand_roles else ""
         if not expand_kind:
             # Fall back to what the node-row carries in the dataset.
@@ -994,31 +1291,10 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             for e in walk_edges.values()
         ]
 
-        mini_apps.attach_dataset(
-            view_id,
-            "nodes",
-            dataset_from_rows(constants.NODES_COLUMNS, merged_nodes, "nodes"),
-        )
-        mini_apps.attach_dataset(
-            view_id,
-            "edges",
-            dataset_from_rows(constants.EDGES_COLUMNS, merged_edges, "edges"),
-        )
         # Refresh graph_metrics and active_profiles so the UI status bar and
         # chip group stay consistent with the real graph after expand.
         profile_ids_in_graph = sorted(
             set(str(e[3]) for e in merged_edges if len(e) > 3)
-        )
-        mini_apps.attach_dataset(
-            view_id,
-            "graph_metrics",
-            dataset_from_rows(
-                constants.METRICS_COLUMNS,
-                _graph_metrics_rows(
-                    merged_nodes, merged_edges, len(profile_ids_in_graph), window_days
-                ),
-                "graph_metrics",
-            ),
         )
         # The caller's profile set is authoritative — do NOT union with the
         # previously-persisted actives (that resurrected locally-removed edge
@@ -1052,14 +1328,62 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             ),
             subjects=[node_id],
         )
+        annotation_roles: dict[
+            str, tuple[dict[str, Any], EvidenceQueryStatus]
+        ] = {node_id: (expand_roles, expand_roles_status)}
+        for existing_id, existing_roles in dict(state.get("node_roles") or {}).items():
+            if existing_roles and str(existing_id) not in annotation_roles:
+                annotation_roles[str(existing_id)] = (
+                    dict(existing_roles),
+                    EvidenceQueryStatus(
+                        succeeded=True,
+                        source_rows_returned=1,
+                        complete=True,
+                    ),
+                )
+        annotation_rows = _node_annotation_rows(
+            scope_id=scope["scope_id"],
+            node_rows=merged_nodes,
+            roles_by_node=annotation_roles,
+        )
+        pivot_rows = _edge_pivot_rows(merged_edges, scope)
         # Only a round that actually grew the graph consumes a hop. Only ids
         # whose fetches actually RAN count as expanded — a budget-truncated
         # round skips the rest of the frontier, and those leaves must stay
         # expandable so the next Expand continues instead of stranding them.
         new_expanded = sorted(expanded_ids | walk.expanded_frontier)
-        mini_apps.patch_view_state(
+        node_roles_patch = {node_id: expand_roles} if expand_roles else {}
+        accepted = mini_apps.commit_view_update(
             view_id,
-            {
+            request_channel="relationships",
+            request_id=request_id,
+            datasets={
+                "nodes": dataset_from_rows(
+                    constants.NODES_COLUMNS, merged_nodes, "nodes"
+                ),
+                "edges": dataset_from_rows(
+                    constants.EDGES_COLUMNS, merged_edges, "edges"
+                ),
+                "graph_metrics": dataset_from_rows(
+                    constants.METRICS_COLUMNS,
+                    _graph_metrics_rows(
+                        merged_nodes,
+                        merged_edges,
+                        len(profile_ids_in_graph),
+                        window_days,
+                    ),
+                    "graph_metrics",
+                ),
+                "node_annotations": dataset_from_rows(
+                    constants.NODE_ANNOTATION_COLUMNS,
+                    annotation_rows,
+                    "node_annotations",
+                ),
+                "edge_pivots": dataset_from_rows(
+                    constants.EDGE_PIVOT_COLUMNS, pivot_rows, "edge_pivots"
+                ),
+            },
+            state_patch={
                 "investigate": {
                     "hops_used": (
                         min(current_hops + hops_to_run, constants.MAX_HOPS)
@@ -1074,11 +1398,14 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     "nodes": scope["scope_id"],
                     "edges": scope["scope_id"],
                     "graph_metrics": scope["scope_id"],
+                    "node_annotations": scope["scope_id"],
+                    "edge_pivots": scope["scope_id"],
                 },
+                "node_roles": node_roles_patch,
                 "warnings": warnings,
             },
         )
-        updated = mini_apps.get_view(view_id)
+        updated = mini_apps.snapshot_view(view_id)
         assert updated is not None
         return mini_apps.payload_to_call_tool_result(
             build_payload(updated),
@@ -1086,7 +1413,9 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 f"Expanded {short_id(node_id)}: +{gained_nodes} node(s), "
                 f"+{gained_edges} edge(s); {len(merged_nodes)} nodes / "
                 f"{len(merged_edges)} edges total."
-                if gained
+                if accepted and gained
+                else f"Stale Relationships request {request_id} ignored."
+                if not accepted
                 else (
                     f"Expand of {short_id(node_id)} found nothing new "
                     f"({len(merged_nodes)} nodes / {len(merged_edges)} edges "
@@ -1121,7 +1450,7 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         publish together; omitting a subject keeps the legacy clear-on-switch
         behavior.
         """
-        record = mini_apps.get_view(view_id)
+        record = mini_apps.snapshot_view(view_id)
         if record is None:
             return mini_apps.error_call_tool_result(
                 f"Unknown or expired view_id: {view_id}"
@@ -1135,7 +1464,10 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 "Select either a node or an edge, not both."
             )
         current_selection = dict(record.view_state.get("selection") or {})
-        current_request_id = int(current_selection.get("request_id") or 0)
+        current_request_id = max(
+            int(current_selection.get("request_id") or 0),
+            int(record.request_revisions.get("focus", 0)),
+        )
         if request_id and request_id < current_request_id:
             return mini_apps.error_call_tool_result(
                 f"Stale focus request {request_id}; current request is "
@@ -1200,32 +1532,53 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 )
             patch["semantic_status_filter"] = semantic_status_filter
 
+        reserved_focus_id = mini_apps.reserve_view_request(
+            view_id,
+            request_channel="focus",
+            request_id=effective_request_id,
+        )
+        if reserved_focus_id is None:
+            current = mini_apps.snapshot_view(view_id)
+            assert current is not None
+            return mini_apps.error_call_tool_result(
+                f"Stale focus request {effective_request_id}; current request is "
+                f"{int(current.request_revisions.get('focus', 0))}."
+            )
+        effective_request_id = reserved_focus_id
+        if "selection" in patch:
+            patch["selection"]["request_id"] = effective_request_id
+
         evidence_query_status: EvidenceQueryStatus | None = None
+        evidence_datasets: dict[str, Any] = {}
+        node_evidence_rows_local: list[list[Any]] = []
+        edge_evidence_rows_local: list[list[Any]] = []
+        focused_roles: dict[str, Any] = {}
+        focused_roles_status = EvidenceQueryStatus(
+            succeeded=False,
+            error="no node selected",
+        )
         if selected_node_id:
             # Refresh role info + cross-sector suggestions for the newly
             # selected node so the details panel stays in sync.
             roles, evidence_query_status = resolve_address_roles_with_status(
                 ch, selected_node_id
             )
-            node_roles = dict(record.view_state.get("node_roles") or {})
-            node_roles[selected_node_id] = roles
-            patch["node_roles"] = node_roles
+            focused_roles = roles
+            focused_roles_status = evidence_query_status
+            patch["node_roles"] = {selected_node_id: roles}
             patch["suggested_next_hops"] = suggested_next_hops(
                 seed_kind_of(roles), discover_profiles()
             )
-            mini_apps.attach_dataset(
-                view_id,
+            node_evidence_rows_local = node_evidence_rows(
+                selected_node_id,
+                roles,
+                request_id=effective_request_id,
+                subject_kind="node",
+            )
+            evidence_datasets["node_evidence"] = dataset_from_rows(
+                constants.NODE_EVIDENCE_COLUMNS,
+                node_evidence_rows_local,
                 "node_evidence",
-                dataset_from_rows(
-                    constants.NODE_EVIDENCE_COLUMNS,
-                    node_evidence_rows(
-                        selected_node_id,
-                        roles,
-                        request_id=effective_request_id,
-                        subject_kind="node",
-                    ),
-                    "node_evidence",
-                ),
             )
             if not selected_edge_id:
                 # Selecting a NODE retires any edge selection. Without this the
@@ -1235,12 +1588,8 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 # selection.edge_id == "" — evidence attributed to the wrong
                 # object, which is the most dangerous failure a forensic panel
                 # can have.
-                mini_apps.attach_dataset(
-                    view_id,
-                    "edge_evidence",
-                    dataset_from_rows(
-                        constants.EDGE_EVIDENCE_COLUMNS, [], "edge_evidence"
-                    ),
+                evidence_datasets["edge_evidence"] = dataset_from_rows(
+                    constants.EDGE_EVIDENCE_COLUMNS, [], "edge_evidence"
                 )
 
         if selected_edge_id:
@@ -1251,24 +1600,17 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 request_id=effective_request_id,
                 subject_kind="edge",
             )
-            mini_apps.attach_dataset(
-                view_id,
+            edge_evidence_rows_local = edge_rows
+            evidence_datasets["edge_evidence"] = dataset_from_rows(
+                constants.EDGE_EVIDENCE_COLUMNS,
+                edge_evidence_rows_local,
                 "edge_evidence",
-                dataset_from_rows(
-                    constants.EDGE_EVIDENCE_COLUMNS,
-                    edge_rows,
-                    "edge_evidence",
-                ),
             )
             # Mirror of the node branch: an edge selection retires all node
             # evidence.  Both datasets ride on every focus patch, so leaving
             # this attached would attribute the prior node to the selected edge.
-            mini_apps.attach_dataset(
-                view_id,
-                "node_evidence",
-                dataset_from_rows(
-                    constants.NODE_EVIDENCE_COLUMNS, [], "node_evidence"
-                ),
+            evidence_datasets["node_evidence"] = dataset_from_rows(
+                constants.NODE_EVIDENCE_COLUMNS, [], "node_evidence"
             )
 
         if (
@@ -1276,28 +1618,16 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             or (request_id and not mode and not selected_node_id and not selected_edge_id)
         ):
             # Mode/background clears are first-class focus operations.
-            mini_apps.attach_dataset(
-                view_id,
-                "node_evidence",
-                dataset_from_rows(
-                    constants.NODE_EVIDENCE_COLUMNS, [], "node_evidence"
-                ),
+            evidence_datasets["node_evidence"] = dataset_from_rows(
+                constants.NODE_EVIDENCE_COLUMNS, [], "node_evidence"
             )
-            mini_apps.attach_dataset(
-                view_id,
-                "edge_evidence",
-                dataset_from_rows(
-                    constants.EDGE_EVIDENCE_COLUMNS, [], "edge_evidence"
-                ),
+            evidence_datasets["edge_evidence"] = dataset_from_rows(
+                constants.EDGE_EVIDENCE_COLUMNS, [], "edge_evidence"
             )
 
         if "selection" in patch:
-            interim = mini_apps.get_view(view_id)
-            assert interim is not None
-            node_dataset = interim.datasets.get("node_evidence")
-            edge_dataset = interim.datasets.get("edge_evidence")
-            node_rows_count = len(node_dataset.rows) if node_dataset else 0
-            edge_rows_count = len(edge_dataset.rows) if edge_dataset else 0
+            node_rows_count = len(node_evidence_rows_local)
+            edge_rows_count = len(edge_evidence_rows_local)
             focus_sources, focus_warnings = _focus_source_context(
                 ch,
                 selected_node_id,
@@ -1380,32 +1710,105 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             patch["dataset_scopes"] = {
                 "node_evidence": focus_scope["scope_id"],
                 "edge_evidence": focus_scope["scope_id"],
+                "focus_node_annotations": focus_scope["scope_id"],
             }
+            focus_annotation_node_rows: list[list[Any]] = []
+            if selected_node_id:
+                node_kind = ""
+                node_profiles: list[Any] = []
+                for dataset_key in ("nodes", "atlas_nodes", "atlas_preview_nodes"):
+                    candidate = record.datasets.get(dataset_key)
+                    if candidate is None:
+                        continue
+                    match = next(
+                        (
+                            row
+                            for row in candidate.rows
+                            if row and str(row[0]) == selected_node_id
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        node_kind = str(match[1]) if len(match) > 1 else ""
+                        node_profiles = list(match[3] or []) if len(match) > 3 else []
+                        break
+                focus_annotation_node_rows = [
+                    [
+                        selected_node_id,
+                        node_kind,
+                        short_id(selected_node_id),
+                        node_profiles,
+                    ]
+                ]
+            evidence_datasets["focus_node_annotations"] = dataset_from_rows(
+                constants.NODE_ANNOTATION_COLUMNS,
+                _node_annotation_rows(
+                    scope_id=focus_scope["scope_id"],
+                    node_rows=focus_annotation_node_rows,
+                    roles_by_node=(
+                        {
+                            selected_node_id: (
+                                focused_roles,
+                                focused_roles_status,
+                            )
+                        }
+                        if selected_node_id
+                        else {}
+                    ),
+                ),
+                "focus_node_annotations",
+            )
 
         if not patch and not selected_node_id and not selected_edge_id:
             return mini_apps.error_call_tool_result("no fields to update")
-        if patch:
-            mini_apps.patch_view_state(view_id, patch)
+        accepted = mini_apps.commit_view_update(
+            view_id,
+            request_channel="focus",
+            request_id=effective_request_id,
+            datasets=evidence_datasets,
+            state_patch=patch,
+        )
 
-        updated = mini_apps.get_view(view_id)
+        updated = mini_apps.snapshot_view(view_id)
         assert updated is not None
         # Surface any evidence datasets refreshed above so the details panel
         # can render them without a full INITIAL_LOAD (which would reset the
         # graph layout/zoom). dataset_revisions ride along so the frontend
         # re-hydrates exactly the replaced keys.
         dataset_patch: dict[str, Any] = {}
-        for key in ("node_evidence", "edge_evidence"):
+        response_patch = patch if accepted else {
+            "selection": dict(updated.view_state.get("selection") or {}),
+            "focus_scope": dict(updated.view_state.get("focus_scope") or {}),
+            "dataset_scopes": {
+                key: value
+                for key, value in dict(
+                    updated.view_state.get("dataset_scopes") or {}
+                ).items()
+                if key in {
+                    "node_evidence",
+                    "edge_evidence",
+                    "focus_node_annotations",
+                }
+            },
+        }
+        for key in (
+            "node_evidence",
+            "edge_evidence",
+            "focus_node_annotations",
+        ):
             dataset = updated.datasets.get(key)
             if dataset is not None:
                 dataset_patch[key] = mini_apps.build_dataset_descriptor(
                     key=key,
                     dataset=dataset,
                     title=constants.DATASET_TITLES.get(key, key),
-                    scope_id=str((patch.get("dataset_scopes") or {}).get(key) or "") or None,
-                    provenance=dict(patch.get("focus_scope") or {}),
+                    scope_id=str(
+                        (response_patch.get("dataset_scopes") or {}).get(key) or ""
+                    ) or None,
+                    provenance=dict(response_patch.get("focus_scope") or {}),
                 )
         view_state_patch = {
-            **patch,
+            **response_patch,
             "dataset_revisions": dict(updated.dataset_revisions),
         }
         payload = MiniAppPayload(
@@ -1419,7 +1822,12 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             else {"view_state": view_state_patch},
         )
         return mini_apps.payload_to_call_tool_result(
-            payload, summary_text="Graph Explorer focus updated."
+            payload,
+            summary_text=(
+                "Graph Explorer focus updated."
+                if accepted
+                else f"Stale focus request {effective_request_id} ignored."
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -1434,7 +1842,7 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         window_days: int = 0,
         request_id: int = 0,
     ) -> CallToolResult:
-        record = mini_apps.get_view(view_id)
+        record = mini_apps.snapshot_view(view_id)
         if record is None:
             return mini_apps.error_call_tool_result(
                 f"Unknown or expired view_id: {view_id}"
@@ -1455,6 +1863,19 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         per_profile = max(1, int(sample_size or constants.DEFAULT_ATLAS_SAMPLE))
         win = max(1, int(window_days or constants.UI_DEFAULT_WINDOW_DAYS))
         request_id = max(0, int(request_id or 0))
+        effective_request_id = mini_apps.reserve_view_request(
+            view_id,
+            request_channel="relationships",
+            request_id=request_id,
+        )
+        if effective_request_id is None:
+            current = mini_apps.snapshot_view(view_id)
+            assert current is not None
+            return mini_apps.payload_to_call_tool_result(
+                build_payload(current),
+                summary_text=f"Stale Relationships request {request_id} ignored.",
+            )
+        request_id = effective_request_id
         selected_profile_objs = list(profile_objs)
         profile_objs, sources, source_failures = _relationship_sources(
             ch, selected_profile_objs
@@ -1494,22 +1915,22 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             truncation_rule=f"top-weight sample cap {per_profile} per relationship",
         )
 
-        mini_apps.attach_dataset(
-            view_id,
-            "atlas_nodes",
-            dataset_from_rows(constants.NODES_COLUMNS, node_rows, "atlas_nodes"),
-        )
-        mini_apps.attach_dataset(
-            view_id,
-            "atlas_edges",
-            dataset_from_rows(constants.EDGES_COLUMNS, edge_rows, "atlas_edges"),
-        )
         # Data loader: atlas namespace + datasets only. mode/selection are
         # owned by explicit mode commands (Atlas is already the client's mode
         # when it samples), so this must not write them.
-        mini_apps.patch_view_state(
+        accepted = mini_apps.commit_view_update(
             view_id,
-            {
+            request_channel="relationships",
+            request_id=request_id,
+            datasets={
+                "atlas_nodes": dataset_from_rows(
+                    constants.NODES_COLUMNS, node_rows, "atlas_nodes"
+                ),
+                "atlas_edges": dataset_from_rows(
+                    constants.EDGES_COLUMNS, edge_rows, "atlas_edges"
+                ),
+            },
+            state_patch={
                 "atlas": {
                     "selected_profiles": requested,
                     "sample_size": per_profile,
@@ -1523,13 +1944,15 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 "warnings": warnings,
             },
         )
-        updated = mini_apps.get_view(view_id)
+        updated = mini_apps.snapshot_view(view_id)
         assert updated is not None
         return mini_apps.payload_to_call_tool_result(
             build_payload(updated),
             summary_text=(
                 f"Atlas sample: {len(edge_rows)} edges across "
                 f"{len(profile_objs)} profile(s)."
+                if accepted
+                else f"Stale Relationships request {request_id} ignored."
             ),
         )
 
@@ -1542,7 +1965,7 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         request_id: int = 0,
     ) -> CallToolResult:
         """Load one inspect-only relationship sample without applying it."""
-        record = mini_apps.get_view(view_id)
+        record = mini_apps.snapshot_view(view_id)
         if record is None:
             return mini_apps.error_call_tool_result(
                 f"Unknown or expired view_id: {view_id}"
@@ -1555,6 +1978,19 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         limit = max(1, min(int(sample_size or 25), constants.DEFAULT_ATLAS_SAMPLE))
         win = max(1, int(window_days or constants.UI_DEFAULT_WINDOW_DAYS))
         request_id = max(0, int(request_id or 0))
+        effective_request_id = mini_apps.reserve_view_request(
+            view_id,
+            request_channel="relationships.preview",
+            request_id=request_id,
+        )
+        if effective_request_id is None:
+            current = mini_apps.snapshot_view(view_id)
+            assert current is not None
+            return mini_apps.payload_to_call_tool_result(
+                build_payload(current),
+                summary_text=f"Stale Relationship preview {request_id} ignored.",
+            )
+        request_id = effective_request_id
         usable, sources, source_failures = _relationship_sources(
             ch, [profile_obj]
         )
@@ -1590,23 +2026,19 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             truncated=truncated,
             truncation_rule=f"top-weight preview cap {limit}",
         )
-        mini_apps.attach_dataset(
+        accepted = mini_apps.commit_view_update(
             view_id,
-            "atlas_preview_nodes",
-            dataset_from_rows(
-                constants.NODES_COLUMNS, node_rows, "atlas_preview_nodes"
-            ),
-        )
-        mini_apps.attach_dataset(
-            view_id,
-            "atlas_preview_edges",
-            dataset_from_rows(
-                constants.EDGES_COLUMNS, edge_rows, "atlas_preview_edges"
-            ),
-        )
-        mini_apps.patch_view_state(
-            view_id,
-            {
+            request_channel="relationships.preview",
+            request_id=request_id,
+            datasets={
+                "atlas_preview_nodes": dataset_from_rows(
+                    constants.NODES_COLUMNS, node_rows, "atlas_preview_nodes"
+                ),
+                "atlas_preview_edges": dataset_from_rows(
+                    constants.EDGES_COLUMNS, edge_rows, "atlas_preview_edges"
+                ),
+            },
+            state_patch={
                 "atlas_preview": {
                     "profile": profile_obj.profile,
                     "sample_size": limit,
@@ -1620,13 +2052,15 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 },
             },
         )
-        updated = mini_apps.get_view(view_id)
+        updated = mini_apps.snapshot_view(view_id)
         assert updated is not None
         return mini_apps.payload_to_call_tool_result(
             build_payload(updated),
             summary_text=(
                 f"Relationship preview {profile_obj.profile}: "
                 f"{len(edge_rows)} edge(s); applied Atlas graph unchanged."
+                if accepted
+                else f"Stale Relationship preview {request_id} ignored."
             ),
         )
 
@@ -1665,7 +2099,7 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         unknown keys are rejected. Selection changes go through
         ``update_graph_explorer_focus`` (it also refreshes evidence).
         """
-        record = mini_apps.get_view(view_id)
+        record = mini_apps.snapshot_view(view_id)
         if record is None or record.app_id != constants.GRAPH_EXPLORER_APP_ID:
             return mini_apps.error_call_tool_result(
                 f"Unknown or expired Graph Explorer view_id: {view_id}"
@@ -1698,28 +2132,24 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         if "mode" in patch:
             # An explicit mode command: bump mode_revision (authorizes client
             # adoption) and clear selection (matches update_graph_explorer_focus).
-            current_request_id = int(
-                ((record.view_state.get("selection") or {}).get("request_id")) or 0
+            current_request_id = mini_apps.reserve_view_request(
+                view_id,
+                request_channel="focus",
+                request_id=0,
             )
+            assert current_request_id is not None
             patch = {
                 **patch,
                 "mode_revision": int(record.view_state.get("mode_revision", 0)) + 1,
                 "selection": {
                     "node_id": "",
                     "edge_id": "",
-                    "request_id": current_request_id + 1,
+                    "request_id": current_request_id,
                 },
             }
-            mini_apps.attach_dataset(
-                view_id,
-                "node_evidence",
-                dataset_from_rows(
-                    constants.NODE_EVIDENCE_COLUMNS, [], "node_evidence"
-                ),
-            )
             clear_scope = forensic_scope(
-                scope_id=new_scope_id("focus", current_request_id + 1),
-                request_id=current_request_id + 1,
+                scope_id=new_scope_id("focus", current_request_id),
+                request_id=current_request_id,
                 status="ready",
                 t0=None,
                 t1=None,
@@ -1740,20 +2170,45 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             patch["dataset_scopes"] = {
                 "node_evidence": clear_scope["scope_id"],
                 "edge_evidence": clear_scope["scope_id"],
+                "focus_node_annotations": clear_scope["scope_id"],
             }
-            mini_apps.attach_dataset(
-                view_id,
-                "edge_evidence",
-                dataset_from_rows(
+        focus_clear_datasets = (
+            {
+                "node_evidence": dataset_from_rows(
+                    constants.NODE_EVIDENCE_COLUMNS, [], "node_evidence"
+                ),
+                "edge_evidence": dataset_from_rows(
                     constants.EDGE_EVIDENCE_COLUMNS, [], "edge_evidence"
                 ),
-            )
-        mini_apps.patch_view_state(view_id, patch)
+                "focus_node_annotations": dataset_from_rows(
+                    constants.NODE_ANNOTATION_COLUMNS,
+                    [],
+                    "focus_node_annotations",
+                ),
+            }
+            if "mode" in patch
+            else {}
+        )
+        mini_apps.commit_view_update(
+            view_id,
+            request_channel="focus" if "mode" in patch else "",
+            request_id=(
+                int((patch.get("selection") or {}).get("request_id") or 0)
+                if "mode" in patch
+                else 0
+            ),
+            datasets=focus_clear_datasets,
+            state_patch=patch,
+        )
         dataset_patch: dict[str, Any] = {}
         if "mode" in patch:
-            updated = mini_apps.get_view(view_id)
+            updated = mini_apps.snapshot_view(view_id)
             assert updated is not None
-            for key in ("node_evidence", "edge_evidence"):
+            for key in (
+                "node_evidence",
+                "edge_evidence",
+                "focus_node_annotations",
+            ):
                 dataset = updated.datasets.get(key)
                 if dataset is not None:
                     dataset_patch[key] = mini_apps.build_dataset_descriptor(

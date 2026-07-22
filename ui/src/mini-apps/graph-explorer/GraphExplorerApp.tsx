@@ -38,13 +38,33 @@ import type {
 import { readUrl, writeUrl } from "./urlState";
 
 const APP_ID = "graph_explorer";
-/** Graph node/edge datasets are row-hungry; hydrate up to 120k rows each —
- * must exceed the server's GRAPH_EXPLORER_BFS_NODE_CAP (50k) plus the edge
- * count dense graphs carry at that size, or hydration silently clips.
- * (Evidence/metrics datasets are tiny and never approach the cap.) */
-const GRAPH_ROW_CAP = 120_000;
+const GRAPH_TOPOLOGY_DATASETS = new Set([
+  "atlas_nodes",
+  "atlas_edges",
+  "atlas_preview_nodes",
+  "atlas_preview_edges",
+  "nodes",
+  "edges",
+  "flow_nodes",
+  "flow_edges",
+  "timeline_nodes",
+  "timeline_edges",
+]);
 
-const MOCK_PAYLOAD = buildMockPayload();
+/** Hydration is evidence-class aware. A receipt cannot legitimately approach
+ * the topology cap, while large graph datasets must not be silently clipped
+ * at the shared hook's conservative default. Kept outside the component so
+ * its identity remains stable across every render. */
+function graphDatasetRowCap(key: string): number {
+  if (GRAPH_TOPOLOGY_DATASETS.has(key)) return 120_000;
+  if (key === "tx_legs") return 5_000;
+  if (key === "tx_list") return 20_000;
+  if (key === "timeline_narrative") return 20_000;
+  if (key.endsWith("_evidence")) return 5_000;
+  return 20_000;
+}
+
+const MOCK_PAYLOAD = import.meta.env.DEV ? buildMockPayload() : undefined;
 
 function isGraphMode(value: string): value is GraphMode {
   return (
@@ -67,7 +87,7 @@ export default function GraphExplorerApp() {
     view?.datasets,
     revisions,
     fetchRows,
-    GRAPH_ROW_CAP,
+    graphDatasetRowCap,
     // Geometric publication: a 90+-page hydration publishes ~8 times with
     // growing spacing instead of once per 500-row page — each publish
     // rebuilds the graph model, so per-page publishing froze the sim in a
@@ -84,6 +104,16 @@ export default function GraphExplorerApp() {
     useGraphSync(view?.view_id, server, revisionsKey, callTool);
 
   const viewId = view?.view_id ?? "";
+  const timelineRequestRevision = Number(
+    server?.timeline?.forensic_scope?.request_id ?? 0,
+  );
+  const moneyRequestRevision = Number(server?.flows?.scope?.request_id ?? 0);
+  const transactionRequestRevision = Math.max(
+    Number(server?.transactions?.scope?.request_id ?? 0),
+    Number(server?.transactions?.discovery_scope?.request_id ?? 0),
+    Number(server?.transactions?.receipt_scope?.request_id ?? 0),
+    Number(server?.transactions?.last_attempt?.request_id ?? 0),
+  );
   const focusLoader = useSerializedLoader<Record<string, unknown>>(
     (snapshot) => callTool("update_graph_explorer_focus", snapshot),
     (err) => console.warn("[graph_explorer] focus sync failed", err),
@@ -250,6 +280,7 @@ export default function GraphExplorerApp() {
   const timelineLoader = useSerializedLoader<Record<string, unknown>>(
     (snapshot) => callTool("load_graph_timeline", snapshot),
     (err) => console.error("[graph_explorer] timeline load failed", err),
+    timelineRequestRevision,
   );
   const timelineLoading = timelineLoader.loading;
   const requestTimeline = (settings: Partial<TimelineSettings>) => {
@@ -275,6 +306,7 @@ export default function GraphExplorerApp() {
   const flowsLoader = useSerializedLoader<Record<string, unknown>>(
     (snapshot) => callTool("load_graph_flows", snapshot),
     (err) => console.error("[graph_explorer] flows load failed", err),
+    moneyRequestRevision,
   );
   const flowsLoading = flowsLoader.loading;
   /** Full re-trace (REPLACE semantics) — the complete snapshot is built at
@@ -298,6 +330,7 @@ export default function GraphExplorerApp() {
   const txLoader = useSerializedLoader<Record<string, unknown>>(
     (snapshot) => callTool("load_graph_transactions", snapshot),
     (err) => console.error("[graph_explorer] transactions load failed", err),
+    transactionRequestRevision,
   );
   const txLoading = txLoader.loading;
   /** Open transactions. Either explicit hashes ("what did this tx do?") or an
@@ -555,14 +588,21 @@ export default function GraphExplorerApp() {
       focusCall({ mode: "transactions", selected_node_id: "", selected_edge_id: "" });
       txLoader.enqueue({
         view_id: view.view_id,
+        operation: u.txhashes.length ? "receipt" : "discover",
         tx_hashes: u.txhashes,
         seed_node_id: u.txhashes.length ? "" : u.txseed,
         counterparty_ids: u.txcounterparties,
         tokens: u.txtokens,
         t0: u.txt0,
         t1: u.txt1,
-        range_days: u.txrange || 30,
+        // Legacy txrange remains readable for URL compatibility, but address
+        // discovery is all stored history unless the analyst supplied exact
+        // UTC bounds. Never synthesize an arbitrary lookback here.
+        range_days: 0,
         max_txs: u.txmax || 25,
+        page_size: u.txmax || 25,
+        cursor: "",
+        activity_kinds: ["direct", "erc20"],
         min_usd: 0,
         expand_node_id: "",
         after_block: 0,
@@ -678,6 +718,9 @@ export default function GraphExplorerApp() {
     server?.flows?.seeds,
     server?.transactions?.tx_hashes,
     server?.transactions?.seed,
+    server?.transactions?.query?.kind,
+    server?.transactions?.query?.address,
+    server?.transactions?.query?.hashes,
     server?.transactions?.counterparties,
     server?.transactions?.tokens,
     server?.transactions?.range_days,
@@ -829,6 +872,7 @@ export default function GraphExplorerApp() {
             onBrowseInvestigate={() => onModeChange("investigate")}
             onOpenTransactions={(edge, appliedWindow) => {
               requestTransactions({
+                operation: "discover",
                 txHashes: [],
                 seed: edge.source,
                 counterparties: [edge.target],
@@ -848,6 +892,7 @@ export default function GraphExplorerApp() {
             txNodes={datasets.tx_nodes}
             txLegs={datasets.tx_legs}
             txList={datasets.tx_list}
+            txContext={datasets.tx_context}
             nodeEvidence={datasets.node_evidence}
             edgeEvidence={datasets.edge_evidence}
             evidenceExpectation={evidenceExpectation}

@@ -128,6 +128,7 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "update_metric_lab_chart": _RO,
     "open_report_studio": _RO,
     "open_contract_explorer": _RO,
+    "open_cow_explorer": _RO,
     "load_contract_explorer_address": _RO,
     "contract_explorer_call_function": _RO,
     "open_graph_explorer": _RO,
@@ -199,6 +200,11 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     # ── app_only ─────────────────────────────────────────────────────
     "get_mini_app_rows": _AO,
     "get_mini_app_state": _AO,
+    "load_cow_explorer_section": _AO,
+    "search_cow_explorer": _AO,
+    "load_cow_entity": _AO,
+    "load_cow_explorer_datasets": _AO,
+    "load_cow_icon_overlay": _AO,
     # metric lab (frontend-only helpers)
     "search_metric_catalog": _AO,
     "get_metric_catalog_entry": _AO,

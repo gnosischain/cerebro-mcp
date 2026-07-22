@@ -1,4 +1,4 @@
-.PHONY: build-ui build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio install dev test serve-catalog status-catalog stop-catalog restart-catalog
+.PHONY: build-ui build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-cow-explorer build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio install dev test serve-catalog status-catalog stop-catalog restart-catalog
 
 # Serve the mini-apps over HTTP so they open in a browser (Data Catalog at
 # /app/data_catalog). Reuses .env for ClickHouse/SEMANTIC config — the only
@@ -23,7 +23,7 @@ restart-catalog:
 # server is enough for the app's new bundle to take effect. The top-level
 # build-ui target simply fans out to all per-app targets.
 
-build-ui: build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio
+build-ui: build-ui-report build-ui-metric-lab build-ui-portfolio build-ui-graph-explorer build-ui-data-catalog build-ui-cow-explorer build-ui-contract-explorer build-ui-model-lineage build-ui-report-studio
 
 build-ui-report:
 	cd ui && npm ci && CEREBRO_UI_ENTRY=report npm run build
@@ -42,19 +42,33 @@ build-ui-portfolio:
 	cp ui/dist/portfolio.html src/cerebro_mcp/static/portfolio.html
 
 build-ui-graph-explorer:
-	cd ui && CEREBRO_UI_ENTRY=graphExplorer npm run build
-	cp ui/dist/graph-explorer.html src/cerebro_mcp/static/graph_explorer.html
+	rm -rf ui/dist-graph-explorer-inline ui/dist-graph-explorer-web
+	cd ui && CEREBRO_UI_ENTRY=graphExplorer CEREBRO_UI_OUT_DIR=dist-graph-explorer-inline npm run build
+	cp ui/dist-graph-explorer-inline/graph-explorer.html src/cerebro_mcp/static/graph_explorer.html
+	cd ui && CEREBRO_UI_ENTRY=graphExplorerWeb CEREBRO_UI_OUT_DIR=dist-graph-explorer-web npm run build
+	! rg -q '0xv1c|ge_force_flows' ui/dist-graph-explorer-inline ui/dist-graph-explorer-web
+	cp ui/dist-graph-explorer-web/graph-explorer.html src/cerebro_mcp/static/graph_explorer_web.html
+	rm -rf src/cerebro_mcp/static/assets/graph_explorer
+	mkdir -p src/cerebro_mcp/static/assets/graph_explorer
+	cp -R ui/dist-graph-explorer-web/assets/. src/cerebro_mcp/static/assets/graph_explorer/
 
-# Data Catalog is a SPLIT bundle: a small HTML shell + hashed JS/CSS/woff2 under
-# dist/assets/, copied to static/assets/ and served (cacheable) at
-# /app/data_catalog/assets/. Clean stale hashed files on each build.
+# Split bundles use isolated Vite output and packaged asset namespaces. Building
+# one app can never remove another app's hashed assets.
 build-ui-data-catalog:
-	rm -rf ui/dist/assets
-	cd ui && CEREBRO_UI_ENTRY=dataCatalog npm run build
-	cp ui/dist/data-catalog.html src/cerebro_mcp/static/data_catalog.html
-	rm -rf src/cerebro_mcp/static/assets
-	mkdir -p src/cerebro_mcp/static/assets
-	cp -R ui/dist/assets/. src/cerebro_mcp/static/assets/
+	rm -rf ui/dist-data-catalog
+	cd ui && CEREBRO_UI_ENTRY=dataCatalog CEREBRO_UI_OUT_DIR=dist-data-catalog npm run build
+	cp ui/dist-data-catalog/data-catalog.html src/cerebro_mcp/static/data_catalog.html
+	rm -rf src/cerebro_mcp/static/assets/data_catalog
+	mkdir -p src/cerebro_mcp/static/assets/data_catalog
+	cp -R ui/dist-data-catalog/assets/. src/cerebro_mcp/static/assets/data_catalog/
+
+build-ui-cow-explorer:
+	rm -rf ui/dist-cow-explorer
+	cd ui && CEREBRO_UI_ENTRY=cowExplorer CEREBRO_UI_OUT_DIR=dist-cow-explorer npm run build
+	cp ui/dist-cow-explorer/cow-explorer.html src/cerebro_mcp/static/cow_explorer.html
+	rm -rf src/cerebro_mcp/static/assets/cow_explorer
+	mkdir -p src/cerebro_mcp/static/assets/cow_explorer
+	cp -R ui/dist-cow-explorer/assets/. src/cerebro_mcp/static/assets/cow_explorer/
 
 build-ui-contract-explorer:
 	cd ui && CEREBRO_UI_ENTRY=contractExplorer npm run build

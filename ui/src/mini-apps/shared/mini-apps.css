@@ -1932,3 +1932,15 @@ button.data-card:hover { border-color: var(--border-hover); transform: translate
 .mini-app-scope::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
 .mini-app-scope ::-webkit-scrollbar-corner,
 .mini-app-scope::-webkit-scrollbar-corner { background: transparent; }
+
+/* svg-flow: shared hand-rolled SVG sankey (MoneySankey visual language) */
+.sfl{width:100%;height:auto;display:block}
+.sfl rect{fill:var(--primary);opacity:.95}
+.sfl__node--clickable{cursor:pointer}
+.sfl__node--clickable:hover rect,.sfl__node--clickable:focus-visible rect{opacity:1}
+.sfl__ribbon{fill:var(--primary);stroke:none;opacity:.28;transition:opacity .15s}
+.sfl__ribbon:hover{opacity:.6}
+.sfl__ribbon--dim{opacity:.07}
+.sfl__label{fill:var(--text-primary);font:11px var(--font-mono)}
+.sfl__value{fill:var(--text-muted);font:9.5px var(--font-mono)}
+.sfl__title{fill:var(--text-secondary);font:600 11px var(--font-body);letter-spacing:.04em;text-transform:uppercase}

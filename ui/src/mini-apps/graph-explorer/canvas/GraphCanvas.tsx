@@ -138,13 +138,18 @@ export function GraphCanvas({
     };
   }
   const [retryRevision, setRetryRevision] = useState(0);
-  const rendererResetKey = `${staticLayout ? "static" : "force"}:${modelRevisionRef.current.revision}:${retryRevision}`;
+  // Cosmos is an expensive WebGL allocation. Dataset revisions reset only the
+  // error boundary; they must not remount a healthy renderer. Layout regime
+  // changes and an explicit Retry still require a new constructor because
+  // `enableSimulation` is create-time Cosmos configuration.
+  const rendererMountKey = `${staticLayout ? "static" : "force"}:${retryRevision}`;
+  const boundaryResetKey = `${rendererMountKey}:${modelRevisionRef.current.revision}`;
   const [rendererFailure, setRendererFailure] = useState<{
     resetKey: string;
     error: Error;
   } | null>(null);
   const activeRendererFailure =
-    rendererFailure?.resetKey === rendererResetKey
+    rendererFailure?.resetKey === boundaryResetKey
       ? rendererFailure.error
       : null;
 
@@ -171,7 +176,7 @@ export function GraphCanvas({
   }), [model, visibleProfiles]);
 
   const activateFallback = (error: Error) => {
-    setRendererFailure({ resetKey: rendererResetKey, error });
+    setRendererFailure({ resetKey: boundaryResetKey, error });
   };
 
   const runRendererAction = (phase: string, action: () => void) => {
@@ -505,13 +510,13 @@ export function GraphCanvas({
       <div className="ge-graph-stage">
       {activeRendererFailure ? fallback(activeRendererFailure) : (
         <GraphErrorBoundary
-          resetKey={rendererResetKey}
+          resetKey={boundaryResetKey}
           fallback={(error, retry) => fallback(error, retry)}
         >
           <CosmosCanvas
             // Remount when the layout regime flips or an explicit retry is
             // requested: enableSimulation and WebGL setup are create-time.
-            key={rendererResetKey}
+            key={rendererMountKey}
             model={model}
             selectedNodeId={selectedNodeId}
             selectedEdgeId={rendererSelectedEdgeId}

@@ -15,6 +15,7 @@ export interface MiniAppTab {
 /** Cross-app navigation. Each mini-app passes `activeTabId` to highlight its slot. */
 export const DEFAULT_APP_TABS: MiniAppTab[] = [
   { id: "catalog", label: "Catalog", href: "/data-catalog.html", appId: "data_catalog" },
+  { id: "cow", label: "CoW", href: "/cow-explorer.html", appId: "cow_explorer" },
   { id: "portfolio", label: "Portfolio", href: "/portfolio.html", appId: "portfolio" },
   { id: "contract", label: "Contract", href: "/contract-explorer.html", appId: "contract_explorer" },
   { id: "graph", label: "Graph", href: "/graph-explorer.html", appId: "graph_explorer" },
@@ -246,7 +247,7 @@ export function MaKpi({ label, value, delta, deltaTone = "neutral" }: MaKpiProps
 interface MaSectionProps {
   index?: string;
   title: string;
-  meta?: string;
+  meta?: ReactNode;
   children: ReactNode;
 }
 

@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import type { MiniAppPayload, PageRowsResponse } from "./miniAppTypes";
+import type {
+  DatasetAppendDelta,
+  DatasetDescriptor,
+  MiniAppPayload,
+  PageRowsResponse,
+} from "./miniAppTypes";
 
 declare global {
   interface Window {
@@ -56,6 +61,10 @@ export interface MiniAppHandle<TState> {
     viewId: string,
     datasetKey: string,
     pageToken?: string,
+    options?: {
+      datasetRevision?: number;
+      pageSize?: number;
+    },
   ) => Promise<PageRowsResponse | null>;
   updateModelContext: (lines: Record<string, unknown>) => void;
   sendMessage: (text: string) => Promise<boolean>;
@@ -94,28 +103,118 @@ function deepMerge<T>(base: T, overlay: Partial<T> | Record<string, unknown>): T
   return out as T;
 }
 
-function applyPatch<TState>(
+function datasetRevisions<TState>(
+  payload: MiniAppPayload<TState>,
+): Record<string, number> {
+  const state = (payload.view_state ?? {}) as Record<string, unknown>;
+  const revisions = state.dataset_revisions;
+  return revisions && typeof revisions === "object"
+    ? (revisions as Record<string, number>)
+    : {};
+}
+
+/** Apply one atomic PATCH_VIEW_STATE message.
+ *
+ * Dataset append deltas are optimistic: only an exact base revision with all
+ * base rows materialised may append locally.  Any missing base falls back to
+ * the supplied zero-preview descriptor, which restarts ordinary revision-safe
+ * hydration from offset zero.  Duplicate/out-of-order patches whose target
+ * revision is no newer are ignored as a whole so their state cannot regress
+ * alongside their dataset.
+ */
+export function applyMiniAppPatch<TState>(
   prev: MiniAppPayload<TState>,
   patch: Record<string, unknown> | undefined,
 ): MiniAppPayload<TState> {
   if (!patch) return prev;
+  const rawDeltas =
+    patch.dataset_deltas && typeof patch.dataset_deltas === "object"
+      ? (patch.dataset_deltas as Record<string, DatasetAppendDelta>)
+      : {};
+  const deltaEntries = Object.entries(rawDeltas);
+  const previousRevisions = datasetRevisions(prev);
+  // A duplicate notification or a genuinely late response must not roll the
+  // transaction scope/cursor back after its dataset revision was accepted.
+  if (
+    deltaEntries.length > 0 &&
+    deltaEntries.every(
+      ([key, delta]) =>
+        Number(delta.dataset_revision) <= Number(previousRevisions[key] ?? 0),
+    )
+  ) {
+    return prev;
+  }
   // A patch may carry a nested `datasets` map (descriptors keyed by name) that
   // should replace the matching entries while leaving the rest intact.
-  const patchedDatasets =
+  let patchedDatasets =
     patch.datasets && typeof patch.datasets === "object"
       ? {
           ...(prev.datasets ?? {}),
           ...(patch.datasets as NonNullable<MiniAppPayload<TState>["datasets"]>),
         }
       : prev.datasets;
+  for (const [key, delta] of deltaEntries) {
+    const currentRevision = Number(previousRevisions[key] ?? 0);
+    const targetRevision = Number(delta.dataset_revision);
+    if (!Number.isFinite(targetRevision) || targetRevision <= currentRevision) {
+      continue;
+    }
+    const fallback = delta.fallback as DatasetDescriptor | undefined;
+    if (!fallback) continue;
+    const previousDescriptor = patchedDatasets?.[key];
+    const previousRows = previousDescriptor?.preview_rows ?? [];
+    const canAppend =
+      currentRevision === Number(delta.base_revision) &&
+      previousRows.length === Number(delta.base_row_count);
+    const appendedRows = canAppend
+      ? [...previousRows, ...(Array.isArray(delta.rows) ? delta.rows : [])]
+      : [];
+    const expectedRows = Number(fallback.stats?.row_count);
+    const appendIsComplete =
+      canAppend &&
+      Number.isFinite(expectedRows) &&
+      appendedRows.length === expectedRows;
+    patchedDatasets = {
+      ...(patchedDatasets ?? {}),
+      [key]: appendIsComplete
+        ? {
+            ...fallback,
+            preview_rows: appendedRows,
+            page_token: null,
+          }
+        : fallback,
+    };
+  }
   // view_state may be carried either nested under `view_state` or flat.
   const statePatch =
     (patch.view_state as Partial<TState> | undefined) ??
     (patch as Partial<TState>);
+  const mergedState = deepMerge((prev.view_state ?? {}) as TState, statePatch);
+  // Protect mixed/malformed multi-delta messages too: accepted dataset
+  // revisions are monotonic even if an older state patch arrives later.
+  if (deltaEntries.length > 0) {
+    const mergedRecord = mergedState as Record<string, unknown>;
+    const incoming =
+      mergedRecord.dataset_revisions &&
+      typeof mergedRecord.dataset_revisions === "object"
+        ? (mergedRecord.dataset_revisions as Record<string, number>)
+        : {};
+    mergedRecord.dataset_revisions = Object.fromEntries(
+      Array.from(
+        new Set([...Object.keys(previousRevisions), ...Object.keys(incoming)]),
+      ).map((key) => [
+        key,
+        Math.max(
+          Number(previousRevisions[key] ?? 0),
+          Number(incoming[key] ?? 0),
+        ),
+      ]),
+    );
+  }
   return {
     ...prev,
     datasets: patchedDatasets,
-    view_state: deepMerge((prev.view_state ?? {}) as TState, statePatch),
+    view_state: mergedState,
   };
 }
 
@@ -173,9 +272,21 @@ export function useMiniApp<TState = Record<string, unknown>>(
     if (payload.type === "INITIAL_LOAD") {
       setView(payload);
     } else if (payload.type === "PATCH_VIEW_STATE") {
-      setView((prev) =>
-        prev ? applyPatch(prev, payload.patch as Record<string, unknown>) : prev,
-      );
+      setView((prev) => {
+        if (!prev) return prev;
+        let next = applyMiniAppPatch(
+          prev,
+          payload.patch as Record<string, unknown>,
+        );
+        // Additive dataset delivery: a PATCH payload may carry descriptors for
+        // datasets attached AFTER the initial load (e.g. deferred group loads).
+        // Merging (not replacing) keeps concurrent group loads race-free —
+        // each patch only ever adds/updates its own keys.
+        if (payload.datasets && Object.keys(payload.datasets).length > 0) {
+          next = { ...next, datasets: { ...next.datasets, ...payload.datasets } };
+        }
+        return next;
+      });
     } else if (payload.type === "SHOW_WARNING") {
       setView((prev) => (prev ? pushWarnings(prev, payload.warnings) : prev));
     }
@@ -353,6 +464,7 @@ export function useMiniApp<TState = Record<string, unknown>>(
     viewId: string,
     datasetKey: string,
     pageToken: string = "",
+    options: { datasetRevision?: number; pageSize?: number } = {},
   ): Promise<PageRowsResponse | null> => {
     // Hydration is best-effort: failures should not crash the UI, so we
     // swallow errors here (callTool now throws on isError).
@@ -361,6 +473,10 @@ export function useMiniApp<TState = Record<string, unknown>>(
         view_id: viewId,
         dataset_key: datasetKey,
         page_token: pageToken,
+        ...(options.datasetRevision == null
+          ? {}
+          : { dataset_revision: options.datasetRevision }),
+        ...(options.pageSize == null ? {} : { page_size: options.pageSize }),
       });
     } catch (err) {
       console.warn("[useMiniApp] fetchRows failed", err);

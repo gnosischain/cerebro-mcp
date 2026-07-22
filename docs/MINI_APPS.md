@@ -1,6 +1,6 @@
 # Cerebro Mini-Apps
 
-Cerebro ships five interactive mini-apps that run inside any MCP-aware host
+Cerebro ships interactive mini-apps that run inside any MCP-aware host
 (Claude Desktop, Claude Code, custom hosts). Each is a React + ECharts UI
 built by Vite into a single-file HTML bundle, served by the cerebro-mcp server
 over an `ui://cerebro/<app>` resource URI, and driven by MCP tools.
@@ -19,6 +19,7 @@ it, how to develop it, and how it talks to the backend.
 | Portfolio (dev-only) | `ui://cerebro/portfolio`         | Address-centric portfolio across Circles / GPay / yields. Registered only when `DEV_MINI_APPS_ENABLED=true`. | `open_portfolio`              |
 | Graph Explorer     | `ui://cerebro/graph_explorer`      | Cross-sector semantic graph (Circles trust, Safe, pools, …)  | `open_graph_explorer`         |
 | Contract Explorer  | `ui://cerebro/contract_explorer`   | Per-contract: ABI, callable functions, view-call, tx decode  | `open_contract_explorer`      |
+| CoW Data Explorer  | `ui://cerebro/cow_explorer`        | Indexed CoW fills, markets, intents, auctions, solvers, and entity evidence | `open_cow_explorer` |
 
 All apps share the same plumbing:
 
@@ -176,6 +177,7 @@ Open any of:
 - `http://localhost:5173/portfolio.html`            — Portfolio
 - `http://localhost:5173/graph-explorer.html`       — Graph Explorer
 - `http://localhost:5173/contract-explorer.html`    — Contract Explorer
+- `http://localhost:5173/cow-explorer.html`         — CoW Data Explorer
 
 Or from the repo root: `make dev`.
 
@@ -272,6 +274,78 @@ Per-contract inspection backed by direct JSON-RPC reads (not dbt). Workflow:
 Use this for **single-address current state**: `balanceOf`, `totalSupply`, `owner`, `paused`, `allowance`, etc. For multi-address sweeps, historical balances, USD valuation, or aggregations, use the dbt path (`execute_query` over `fct_*_balances` etc.).
 
 Standalone (non-mini-app) RPC tools — `contract_explore`, `contract_call_function`, `contract_decode_transaction_input`, `contract_decode_receipt_logs` — live in [`tools/rpc.py`](../src/cerebro_mcp/tools/rpc.py) and use the same `call_view_function` engine. Archive reads (non-`latest` block) require `GNOSIS_ARCHIVE_RPC_URL` in `.env`.
+
+---
+
+## CoW Data Explorer
+
+**Resource**: `ui://cerebro/cow_explorer`
+
+**Standalone**: `/app/cow_explorer`
+
+**Source**: [`ui/src/mini-apps/cow-explorer/`](../ui/src/mini-apps/cow-explorer/) · [`cow_explorer.py`](../src/cerebro_mcp/tools/visualization/cow_explorer.py)
+
+**Agent tool**: `open_cow_explorer`
+**App-only tools**: `load_cow_explorer_section`, `search_cow_explorer`, `load_cow_entity`, `load_cow_explorer_datasets`, `load_cow_icon_overlay`
+
+The explorer reads `cow_db` through Cerebro's read-only ClickHouse client. It
+provides Live, Overview, Markets, Trades, Orders, Auctions, Solvers, Traders,
+and Patterns, plus chain-scoped order, transaction, address, token, auction,
+and solver details. Production starts as a ten-network Overview; Sepolia is
+available through the explicit testnet selector. Blockscout is the outbound
+explorer on its eight verified networks, with BscScan, Avalanche Explorer, and
+Plasmascan fallbacks. No explorer API is called at runtime; token/chain icons
+come from cached CoinGecko lists fetched in the background (never blocking).
+
+v2 load model — `open_cow_explorer` runs ZERO ClickHouse queries. Each
+section's `core` dataset group loads on section apply; every other group
+streams in through `load_cow_explorer_datasets` (additive `PATCH_VIEW_STATE`
+with a stale-scope guard). Up to four sections' datasets are retained per view
+(LRU), so tab returns with an unchanged scope fingerprint render instantly
+with no queries. Multi-chain aggregates read the BASE `trades` table with
+checkpoint bounding and dedup-invariant `uniqExact` aggregates as per-chain
+UNION arms — expanding the reorg-safe `trades_canonical` view across ten
+chains exceeded the ClickHouse instance's memory; the coverage mode
+`checkpoint_bounded_base_dedup` discloses the marginal orphaned-row overcount.
+Row-level tapes keep the canonical view (single-chain) or `LIMIT 1 BY`
+version dedup (cross-chain).
+
+Live view: per-chain indexing pulse (checkpoint lag chips), last-hour fills /
+settlements feeds, open intents waiting to execute, and the order-lifecycle
+stream. The frontend polls every 30 s (5 min when the chain's checkpoint lag
+exceeds 10 min — a "catching up" banner replaces the live framing), pauses
+while the tab is hidden, and short server TTLs (10–30 s) make concurrent
+viewers share cache.
+
+Solver dashboards: the solver entity carries "Settlement imbalance
+(order-level, trade-implied, 30d)" — per-settlement/per-token net flow between
+traders and the settlement contract valued at the auction's clearing prices
+(`native_wei = atoms x price / 1e18`, live-verified). AMM leg amounts, plain
+ERC20 transfers, and buffer balances are NOT in `cow_db`, so this is a
+behavioral signal, not audited buffer books; true buffer accounting needs a
+cow-indexer extension that decodes ERC20 Transfer logs for settlement
+transactions. `reference_score` is always a JSON map keyed by solver address;
+multi-winner combinatorial auctions make winner ranking≠1 informational, not
+a violation. Solver display names come from a bundled registry generated from
+the Dune spellbook (`scripts/dev/gen_cow_solver_registry.py` regenerates
+`ui/src/mini-apps/cow-explorer/model/solverRegistry.ts`).
+
+Methodology is part of the UI contract:
+
+- “Execution prices (settled fills),” “Auction reference prices,” and
+  “Native-price API observations” are separate series.
+- “Known open intents (observed snapshot)” is incomplete by design and is not
+  presented as a live or complete orderbook.
+- Every dataset carries its requested and actual indexed window, source/fetch
+  freshness, row cap, source row count, truncation state, and warnings.
+- Cross-chain Overview aggregates counts only. It never combines token amounts
+  or prices, and fee-policy amounts remain grouped by token and raw policy.
+- Competition solvers and settlement executors remain separately labelled
+  unless indexed transaction/competition evidence connects them.
+
+The app and Data Catalog use isolated split bundles. Their public assets remain
+`/app/{app_id}/assets/{file}`, while the package stores each bundle in
+`static/assets/{app_id}/` so independent builds cannot erase sibling assets.
 
 ---
 
