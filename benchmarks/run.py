@@ -40,9 +40,12 @@ _SCRATCH_ENV = {
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="benchmarks.run", description=__doc__)
     p.add_argument("--suite", required=True,
-                   choices=["latency", "load", "workflows", "search", "semantic"])
-    p.add_argument("--mode", choices=["inprocess", "sse"], default=None,
-                   help="default: per-suite (load->sse, others->inprocess)")
+                   choices=["latency", "load", "workflows", "search", "semantic", "templates"])
+    p.add_argument("--mode", choices=["inprocess", "sse", "headless"], default=None,
+                   help="default: per-suite (load->sse, templates->headless, others->inprocess)")
+    p.add_argument("--model", default=None,
+                   help="templates suite: model for headless agent runs "
+                        "(default claude-sonnet-5)")
     p.add_argument("--iters", type=int, default=None)
     p.add_argument("--warmup", type=int, default=None)
     p.add_argument("--concurrency", default="1,4,8,16",
@@ -111,8 +114,13 @@ def main(argv: list[str] | None = None) -> int:
         update_golden=args.update_golden,
         replay=args.replay,
         replay_last=args.replay_last,
-        extra={"replay_log_dir": replay_log_dir},
+        extra={"replay_log_dir": replay_log_dir, "model": args.model},
     )
+
+    # Templates suite: deliverables/traces/review verdicts must survive for
+    # inspection (and each run costs real money) — always keep scratch.
+    if args.suite == "templates":
+        args.keep_scratch = True
 
     suite_mod = get_suite(args.suite)
     supported = getattr(suite_mod, "SUPPORTED_MODES", frozenset({"inprocess", "sse"}))

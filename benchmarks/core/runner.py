@@ -23,6 +23,7 @@ SUITES: dict[str, str] = {
     "workflows": "benchmarks.suites.workflows",
     "search": "benchmarks.suites.search_quality",
     "semantic": "benchmarks.suites.semantic",
+    "templates": "benchmarks.suites.templates_headless",
 }
 
 DEFAULT_MODE: dict[str, str] = {
@@ -31,6 +32,7 @@ DEFAULT_MODE: dict[str, str] = {
     "workflows": "inprocess",
     "search": "inprocess",
     "semantic": "inprocess",
+    "templates": "headless",
 }
 
 
@@ -62,6 +64,8 @@ class BenchContext:
         """Mode string recorded in result files: distinguishes fake vs real data."""
         if self.mode == "sse":
             return "sse-real"
+        if self.mode == "headless":
+            return "headless-real"
         return "inprocess-real" if self.real_clickhouse else "inprocess-fake"
 
 
