@@ -50,7 +50,21 @@ VALID_SECTIONS = {
 }
 #: Sections that support the all-networks scope (chain_id=0). Every other
 #: section coerces to a concrete chain WITH an explicit warning.
-ALL_NETWORK_SECTIONS = {"overview", "trades", "solvers", "traders", "auctions"}
+#: orders: status/type analytics are multi-chain; the pair-scoped intents and
+#: the trades-join quality groups stay single-chain (skipped at chain=0).
+#: live: feeds merge every in-scope chain (the 1h bound keeps the dedup hash
+#: tiny at ten chains — same safety mechanism as single-chain).
+ALL_NETWORK_SECTIONS = {
+    "overview", "trades", "solvers", "traders", "auctions", "orders", "live",
+}
+#: Trader growth accounting (new/returning/reactivated/churned) displays this
+#: many trailing months; scans bound to N+1 months for the warm-up period.
+#: Sizing (live-verified 2026-07-22): uniq(owner) all-time = 719,470 (~90 MB
+#: min-state hash for the first-seen CTE) and (owner, month) pairs over 13
+#: months = 696,213 (~80 MB grouped-scan hash; full classification query ran
+#: 3.2s). Each dynamics dataset is the SOLE member of its load group, so the
+#: two hashes never stack with sibling queries. Re-verify yearly.
+TRADER_DYNAMICS_MONTHS = 12
 #: Per-arm over-fetch for top-N tape arms: 3x the row cap absorbs the <0.1%
 #: ReplacingMergeTree duplicate rate so the post-dedup global top-ROW_CAP is
 #: correct. Each arm is a bounded heap sort — memory-safe at any window.
@@ -97,10 +111,16 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
     "overview": {
         "core": ("network_summary", "coverage_matrix"),
         "breakdown": ("network_activity", "top_pairs", "fee_policy_counts"),
+        "protocol": ("protocol_kpis", "alltime_chain_totals"),
+        "share": ("chain_share_trend",),
     },
     "markets": {
         "core": ("market_summary", "pair_options"),
         "charts": ("price_candles", "auction_reference_prices", "native_reference_prices"),
+        "depth": ("pair_depth", "depth_horizon", "open_intent_pairs"),
+        # Depth-over-time heatmap — a SEPARATE deferred group from `depth` so it
+        # loads only when the Heatmap tab is opened, never on a history-slider tick.
+        "depth_heatmap": ("pair_depth_heatmap",),
         "tape": ("recent_market_trades",),
     },
     "trades": {
@@ -109,8 +129,14 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "orders": {
         "core": ("order_status_summary", "order_activity"),
+        # intents (pair-scoped) and the trades-join quality groups exist only
+        # single-chain; types/programmatic are dual-mode — a group load simply
+        # skips absent keys (execution_flow precedent).
         "intents": ("known_orders", "known_intents", "intent_depth"),
         "quality": ("order_quality_summary", "fill_latency_distribution", "surplus_distribution"),
+        "types": ("order_type_summary", "order_flavor_mix", "order_type_trend"),
+        "programmatic": ("conditional_order_activity", "appdata_order_classes"),
+        "class_quality": ("surplus_by_class",),
     },
     "auctions": {
         "core": ("auction_activity",),
@@ -121,18 +147,25 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
         # execution_flow exists only single-chain; solver_cross_chain only in
         # the all-networks rollup — a group load simply skips absent keys.
         "detail": ("ranking_distribution", "execution_flow", "solver_cross_chain"),
+        "directory": ("solver_directory",),
+        "quality": ("solver_score_gaps",),
     },
     "traders": {
         "core": ("trader_leaderboard", "trader_activity"),
+        # Growth accounting and retention are each the SOLE member of their
+        # group: their all-time first-seen hash (~90 MB) must never run
+        # concurrently with a sibling scan (see TRADER_DYNAMICS_MONTHS).
+        "dynamics": ("trader_dynamics",),
+        "retention": ("trader_retention",),
     },
     "patterns": {
         "core": ("solver_pair_matrix",),
         "affinity": ("trader_solver_affinity",),
-        "quality": ("fee_policy_quality",),
+        "quality": ("fee_policy_quality", "quote_delta_quality"),
     },
     "live": {
         "core": ("live_pulse",),
-        "feed": ("live_trades", "live_settlements"),
+        "feed": ("live_trades", "live_settlements", "live_minute_activity"),
         "intents": ("live_open_orders", "live_order_events"),
     },
 }
@@ -860,19 +893,35 @@ tr AS (
     AND t.block_number<=cp.b AND {_arm_window(0, range_state)}
   GROUP BY t.chain_id
 )"""
+    # Counts + open-count are split so NEITHER deduplicates the whole orders
+    # table. Once the historical backfill grew `orders` past ~4M rows, the old
+    # `argMax(...) GROUP BY (chain_id, order_uid)` dedup over EVERY order built a
+    # multi-million-entry hash and blew the 2 GiB per-query budget (code 241).
+    # og:  creation_date is IMMUTABLE per order_uid, so counts/date-range read
+    #      the raw window-filtered scan directly — uniq(order_uid) is HLL
+    #      (constant memory) and the GROUP BY chain_id hash is tiny.
+    # ogopen: the open count needs the LATEST status, so it must dedup — but a
+    #      currently-open order MUST be unexpired (valid_to > now, immutable), a
+    #      tiny live set, so the argMax runs over that only; expired backfilled
+    #      history drops out and never bloats the hash.
     orders_cte = f"""
 og AS (
-  SELECT chain_id,count() AS a,countIf(status='open') AS b,
+  SELECT chain_id,uniq(order_uid) AS a,
          minOrNull(creation_date) AS c,maxOrNull(creation_date) AS d,
-         maxOrNull(obs_at) AS e
+         maxOrNull(observed_at) AS e
+  FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND {order_window(0)}
+  GROUP BY chain_id
+),
+ogopen AS (
+  SELECT chain_id,countIf(status='open') AS b
   FROM (
-    SELECT chain_id,order_uid,argMax(status,observed_at) AS status,
-           argMax(creation_date,observed_at) AS creation_date,
-           max(observed_at) AS obs_at
+    SELECT chain_id,order_uid,argMax(status,observed_at) AS status
     FROM cow_db.orders
     WHERE environment={{env:String}} AND chain_id IN ({ids})
+      AND valid_to>toUnixTimestamp(now())
     GROUP BY chain_id,order_uid
-  ) WHERE {order_window(0)}
+  )
   GROUP BY chain_id
 )"""
     network_summary = (
@@ -880,7 +929,7 @@ og AS (
         f"{trades_cte},{orders_cte}\n"
         f"SELECT spine.chain_id AS chain_id,coalesce(tr.a,0) AS trade_count,"
         "coalesce(tr.b,0) AS settlement_transactions,coalesce(og.a,0) AS order_count,"
-        "coalesce(og.b,0) AS observed_open_orders,"
+        "coalesce(ogopen.b,0) AS observed_open_orders,"
         "coalesce(cc.a,0) AS competition_count_all_indexed,"
         "tr.c AS indexed_from,tr.d AS indexed_to,"
         "tr.e AS source_observed_at,og.c AS order_indexed_from,"
@@ -889,6 +938,7 @@ og AS (
         f"FROM (SELECT arrayJoin([{ids}]) AS chain_id) AS spine\n"
         "LEFT JOIN tr ON tr.chain_id=spine.chain_id\n"
         "LEFT JOIN og ON og.chain_id=spine.chain_id\n"
+        "LEFT JOIN ogopen ON ogopen.chain_id=spine.chain_id\n"
         "LEFT JOIN cc ON cc.chain_id=spine.chain_id\n"
         "ORDER BY spine.chain_id"
     )
@@ -1028,12 +1078,105 @@ SELECT u.chain_id AS chain_id, u.token AS token,
 FROM ({fee_union}) AS u
 LEFT JOIN tmx AS tm ON tm.chain_id=u.chain_id AND tm.token=u.token
 ORDER BY u.fee_entries DESC, u.chain_id, u.token, u.policy_raw"""
+    # ---- Protocol-wide aggregates (Dune-style KPI tiles, pies, share) ----
+    # Volume valuation: cow_db has NO historical price source (native_prices
+    # is a live snapshot; auction_prices is patchy), so protocol KPIs are
+    # counts-first. An approximate native-denominated volume is attached ONLY
+    # for short relative windows (<= 7 days), valued at the CURRENT
+    # native_prices snapshot (atoms x price / 1e18 = native wei), and is NULL
+    # otherwise — the estimate label is a frontend/disclosure concern.
+    volume_ok = (
+        range_state["kind"] == "relative"
+        and int(range_state.get("window_days") or 0) <= 7
+    )
+    if volume_ok:
+        np_cte = f""",
+np AS (
+  SELECT chain_id, token, argMax(native_price, observed_at) AS native_price
+  FROM cow_db.native_prices
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+  GROUP BY chain_id, token
+)"""
+        np_join = "  LEFT JOIN np ON np.chain_id=t.chain_id AND np.token=t.sell_token\n"
+        vol_expr = (
+            "sumIf(toFloat64(t.sell_amount)*toFloat64OrZero(np.native_price)/1e36,"
+            "np.token!='') AS approx_native_volume"
+        )
+    else:
+        np_cte = ""
+        np_join = ""
+        vol_expr = "CAST(NULL AS Nullable(Float64)) AS approx_native_volume"
+    kpi_where = (
+        f"t.environment={{env:String}} AND t.chain_id IN ({ids})"
+        f" AND t.block_number<=cp.b AND t.block_timestamp IS NOT NULL"
+        f" AND {_arm_window(0, range_state)}"
+    )
+    kpi_select = f"""
+  SELECT uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
+         uniq(t.owner) AS unique_traders,
+         uniq(tuple(least(t.sell_token,t.buy_token),greatest(t.sell_token,t.buy_token))) AS unique_pairs,
+         {vol_expr},
+         minOrNull(t.block_timestamp) AS indexed_from,
+         maxOrNull(t.block_timestamp) AS indexed_to,
+         max(t.observed_at) AS source_observed_at
+  FROM cow_db.trades AS t
+  INNER JOIN cp ON cp.chain_id=t.chain_id
+{np_join}  WHERE {kpi_where}"""
+    protocol_kpis = f"""WITH {shared_ctes}{np_cte}
+SELECT * FROM (
+  SELECT t.chain_id AS chain_id,{kpi_select.replace("SELECT ", "", 1)}
+  GROUP BY t.chain_id
+UNION ALL
+  SELECT toUInt64(0) AS chain_id,{kpi_select.replace("SELECT ", "", 1)}
+) ORDER BY chain_id"""
+    # All-time totals feed the distribution pies. Deliberately ignores the
+    # global window (always all indexed history — disclosed) and deliberately
+    # KEEPS NULL-timestamp rows (BNB) in the counts: an all-time count needs
+    # no time axis, and excluding BNB here would silently understate it.
+    alltime_totals = f"""WITH {shared_ctes}
+SELECT t.chain_id AS chain_id,
+       uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
+       uniq(t.owner) AS unique_traders,
+       minOrNull(t.block_timestamp) AS first_trade_at,
+       maxOrNull(t.block_timestamp) AS last_trade_at,
+       minOrNull(t.block_timestamp) AS indexed_from,
+       maxOrNull(t.block_timestamp) AS indexed_to,
+       max(t.observed_at) AS source_observed_at
+FROM cow_db.trades AS t
+INNER JOIN cp ON cp.chain_id=t.chain_id
+WHERE t.environment={{env:String}} AND t.chain_id IN ({ids}) AND t.block_number<=cp.b
+GROUP BY t.chain_id
+ORDER BY t.chain_id"""
+    # Share-over-time: ONE grouped scan (bucket x chain hash stays tiny even
+    # at all-history — weeks x 10 chains), NOT ten UNION arms. The frontend
+    # normalizes per bucket for the 100%-share view.
+    share_bucket = (
+        "toStartOfWeek(t.block_timestamp)"
+        if range_state["kind"] == "all"
+        or int(range_state.get("window_days") or 0) > 180
+        else "toStartOfDay(t.block_timestamp)"
+    )
+    chain_share_trend = f"""WITH {shared_ctes}
+SELECT {share_bucket} AS bucket,t.chain_id AS chain_id,
+       uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
+       min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
+       max(t.observed_at) AS source_observed_at
+FROM cow_db.trades AS t
+INNER JOIN cp ON cp.chain_id=t.chain_id
+WHERE t.environment={{env:String}} AND t.chain_id IN ({ids})
+  AND t.block_number<=cp.b AND t.block_timestamp IS NOT NULL
+  AND {_arm_window(0, range_state)}
+GROUP BY bucket,t.chain_id
+ORDER BY bucket,t.chain_id"""
     return [
         QuerySpec("network_summary", "Indexed network summary", network_summary, p, "block_timestamp", BASE_DEDUP_MODE),
         QuerySpec("coverage_matrix", "Coverage matrix", coverage, params, "observed_at", "observed_series", 60),
         QuerySpec("network_activity", "Execution activity", activity, p, "block_timestamp", BASE_DEDUP_MODE),
         QuerySpec("top_pairs", "Top token pairs", top_pairs, p, "block_timestamp", BASE_DEDUP_MODE, 900),
         QuerySpec("fee_policy_counts", "Indexed fee-policy counts", fees, p, "observed_at", "observed_series", 900),
+        QuerySpec("protocol_kpis", "Protocol KPIs by network", protocol_kpis, p, "block_timestamp", BASE_DEDUP_MODE, 900),
+        QuerySpec("alltime_chain_totals", "All-time totals by network", alltime_totals, dict(params), "block_timestamp", BASE_DEDUP_MODE, 3600),
+        QuerySpec("chain_share_trend", "Network share of activity over time", chain_share_trend, p, "block_timestamp", BASE_DEDUP_MODE, 900),
     ]
 
 
@@ -1116,6 +1259,8 @@ def _market_specs(
     pair: tuple[str, str],
     interval: str,
     range_state: dict[str, Any],
+    depth_at: str = "",
+    heatmap_window: str = "7d",
 ) -> list[QuerySpec]:
     base, quote = pair
     # Pair picker options: the 50 busiest pairs of the last 30 days with
@@ -1153,7 +1298,9 @@ ORDER BY p.fill_count DESC,p.token0,p.token1"""
         "block_timestamp", BASE_DEDUP_MODE, 900,
     )
     if not base or not quote:
-        return [pair_options_spec]
+        # The horizon row is pair-independent — return it so the depth group
+        # still loads (coverage disclosure) when no pair could be resolved.
+        return [pair_options_spec, *_pair_depth_specs(chain, ("", ""), depth_at)]
     params = {
         **_scope_parameters(chain.environment, chain),
         "base": base,
@@ -1333,6 +1480,457 @@ ORDER BY blocks.auction_timestamp"""
         QuerySpec("recent_market_trades", "Recent settled fills", recent, params, "block_timestamp", "checkpoint_bounded", 60, exact_count=False),
         QuerySpec("auction_reference_prices", "Auction reference prices", auction_reference, params, "auction_block_timestamp", "observed_series"),
         QuerySpec("native_reference_prices", "Native-price API observations", native_reference, params, "observed_at", "observed_series", 60),
+        *_pair_depth_specs(chain, pair, depth_at),
+        *_pair_depth_heatmap_specs(chain, pair, heatmap_window),
+    ]
+
+
+def _validate_depth_at(value: str) -> str:
+    """Normalize a historical-book timestamp to a UTC ISO string.
+
+    Only format and future bounds are enforced here — how far BACK
+    reconstruction is honest is a data property surfaced by ``depth_horizon``
+    (per-chain min(observed_at)) plus the empty-book state, never a
+    hard-coded date.
+    """
+    try:
+        at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("depth_at must be an ISO-8601 timestamp or 'live'") from exc
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    at = at.astimezone(timezone.utc)
+    if at > datetime.now(timezone.utc):
+        raise ValueError("depth_at cannot be in the future")
+    if at.year < 2020:
+        raise ValueError("depth_at predates CoW Protocol")
+    return at.isoformat().replace("+00:00", "Z")
+
+
+def _pair_depth_specs(
+    chain: ChainInfo,
+    pair: tuple[str, str],
+    depth_at: str = "",
+) -> list[QuerySpec]:
+    """Order-book depth ladder for one pair — live or reconstructed at T.
+
+    ONE per-order dataset serves the depth chart, the order list, and the
+    count line (books are tiny — busiest observed pair ~91 open orders);
+    cumulative sums, Flip, and range zoom are client-side re-projections.
+    ``price`` is ALWAYS quote-per-base for BOTH sides: asks are orders
+    selling the BASE token, bids are orders selling the QUOTE token.
+
+    The historical shape reconstructs open-at-T from the captured orders
+    subset: created<=T<valid_to, minus fills before T (trades, pruned by
+    order_uid IN cand — order_uid IS in the orders sort key and the candidate
+    set is tiny) and terminal events before T (order_events; API-observed
+    cancel times carry minutes of jitter — disclosed). status:fulfilled is
+    the fallback terminal for BNB fills whose trade rows lack timestamps.
+    Live-verified 2026-07-23 (0.09s at T-1d on the busiest BNB pair; the cand
+    CTE must NOT self-alias argMax to filtered column names — code 184).
+    """
+    horizon = """
+SELECT min(observed_at) AS earliest_supported_at,
+       max(observed_at) AS latest_observed_at,
+       uniqExact(order_uid) AS captured_orders,
+       min(creation_date) AS earliest_creation_seen,
+       max(observed_at) AS source_observed_at
+FROM cow_db.orders
+WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+ORDER BY earliest_supported_at"""
+    # Pairs that HAVE a standing book right now (chain-scoped, pair-agnostic).
+    # Some chains (Gnosis) run almost entirely on short-lived market orders and
+    # hold ZERO open intents at any given moment — without this list the depth
+    # panel dead-ends on an empty book with no path to data. Orders table is
+    # tiny; argMax-dedup subquery, projected-column WHERE (no alias-in-WHERE
+    # shadowing: the status/valid_to filters sit a level ABOVE the argMax).
+    open_pairs = f"""
+WITH {_token_metadata_cte()}
+SELECT p.token0 AS token0,p.token1 AS token1,
+       if(m0.token='','',m0.symbol) AS token0_symbol,
+       if(m1.token='','',m1.symbol) AS token1_symbol,
+       p.open_orders AS open_orders,
+       p.obs AS source_observed_at
+FROM (
+  SELECT least(sell_token,buy_token) AS token0,
+         greatest(sell_token,buy_token) AS token1,
+         count() AS open_orders,max(obs_at) AS obs
+  FROM (
+    SELECT order_uid,
+           argMax(sell_token,observed_at) AS sell_token,
+           argMax(buy_token,observed_at) AS buy_token,
+           argMax(status,observed_at) AS status,
+           argMax(valid_to,observed_at) AS valid_to,
+           max(observed_at) AS obs_at
+    FROM cow_db.orders
+    WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    GROUP BY order_uid
+  )
+  WHERE status='open' AND valid_to>toUnixTimestamp(now())
+  GROUP BY token0,token1
+) AS p
+LEFT JOIN tm AS m0 ON m0.token=p.token0
+LEFT JOIN tm AS m1 ON m1.token=p.token1
+ORDER BY p.open_orders DESC,p.token0,p.token1
+LIMIT 30"""
+    specs = [
+        QuerySpec(
+            "depth_horizon", "Depth reconstruction horizon", horizon,
+            _scope_parameters(chain.environment, chain),
+            "observed_at", "observed_series", 300,
+        ),
+        QuerySpec(
+            "open_intent_pairs", "Pairs with open intents", open_pairs,
+            _scope_parameters(chain.environment, chain),
+            "observed_at", "observed_snapshot", 60,
+        ),
+    ]
+    base, quote = pair
+    if not base or not quote:
+        return specs
+    token_cte = _token_metadata_cte()
+    ladder_projection = """
+SELECT order_uid,owner,kind,side,order_class,partially_fillable,
+       creation_date,valid_to,sell_token,buy_token,sell_symbol,buy_symbol,
+       sell_decimals,buy_decimals,price,amount_base,amount_quote,
+       sell_amount_raw,buy_amount_raw,
+       creation_date AS indexed_from,creation_date AS indexed_to,
+       source_observed_at
+FROM priced
+WHERE isFinite(price) AND price>0
+ORDER BY side,price,order_uid"""
+    if not depth_at:
+        server_as_of = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        live_params = {
+            **_scope_parameters(chain.environment, chain),
+            "base": base,
+            "quote": quote,
+            "server_as_of": server_as_of.isoformat().replace("+00:00", "Z"),
+        }
+        live_sql = f"""
+WITH {token_cte}, open_orders AS (
+ SELECT o.*,
+   if(o.executed_sell_amount<o.sell_amount,
+      toUInt256(o.sell_amount-o.executed_sell_amount),toUInt256(0)) AS residual_sell_raw,
+   if(o.executed_buy_amount<o.buy_amount,
+      toUInt256(o.buy_amount-o.executed_buy_amount),toUInt256(0)) AS residual_buy_raw,
+   if(o.kind='buy',
+      toFloat64(o.sell_amount)*toFloat64(residual_buy_raw)
+        /nullIf(toFloat64(o.buy_amount),0),
+      toFloat64(residual_sell_raw)) AS remaining_sell_float,
+   if(o.kind='buy',
+      toFloat64(residual_buy_raw),
+      toFloat64(o.buy_amount)*toFloat64(residual_sell_raw)
+        /nullIf(toFloat64(o.sell_amount),0)) AS remaining_buy_float
+ FROM cow_db.orders AS o FINAL
+ WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}}
+   AND o.status='open'
+   AND o.valid_to>toUnixTimestamp(parseDateTime64BestEffort({{server_as_of:String}}))
+   AND ((o.sell_token={{base:String}} AND o.buy_token={{quote:String}})
+        OR (o.sell_token={{quote:String}} AND o.buy_token={{base:String}}))
+), enriched AS (
+ SELECT o.*,
+   if(s.token='','',s.symbol) AS sell_symbol,
+   if(b.token='','',b.symbol) AS buy_symbol,
+   if(s.token='',NULL,s.decimals) AS sell_decimals,
+   if(b.token='',NULL,b.decimals) AS buy_decimals,
+   if(s.token='',NULL,remaining_sell_float/pow(10,toFloat64(s.decimals))) AS remaining_sell,
+   if(b.token='',NULL,remaining_buy_float/pow(10,toFloat64(b.decimals))) AS remaining_buy,
+   if(o.sell_token={{base:String}},'ask','bid') AS side
+ FROM open_orders o
+ LEFT JOIN tm s ON s.token=o.sell_token
+ LEFT JOIN tm b ON b.token=o.buy_token
+ WHERE remaining_sell_float>0 AND remaining_buy_float>0
+), priced AS (
+ SELECT *, class AS order_class,
+   if(side='ask',remaining_buy/nullIf(remaining_sell,0),
+                 remaining_sell/nullIf(remaining_buy,0)) AS price,
+   if(side='ask',remaining_sell,remaining_buy) AS amount_base,
+   if(side='ask',remaining_buy,remaining_sell) AS amount_quote,
+   toString(sell_amount) AS sell_amount_raw,
+   toString(buy_amount) AS buy_amount_raw,
+   observed_at AS source_observed_at
+ FROM enriched
+ WHERE sell_decimals IS NOT NULL AND buy_decimals IS NOT NULL
+)
+{ladder_projection}"""
+        specs.append(QuerySpec(
+            "pair_depth", "Order-book depth (known open intents)", live_sql,
+            live_params, "creation_date", "observed_snapshot", 60,
+        ))
+        return specs
+    at_ts = _validate_depth_at(depth_at)
+    hist_params = {
+        **_scope_parameters(chain.environment, chain),
+        "base": base,
+        "quote": quote,
+        "at_ts": at_ts,
+    }
+    hist_sql = f"""
+WITH {token_cte}, cand AS (
+  SELECT order_uid,
+         argMax(owner,observed_at) AS owner_l,
+         argMax(kind,observed_at) AS kind_l,
+         argMax(class,observed_at) AS class_l,
+         argMax(partially_fillable,observed_at) AS pf_l,
+         argMax(sell_token,observed_at) AS st,
+         argMax(buy_token,observed_at) AS bt,
+         argMax(sell_amount,observed_at) AS sa,
+         argMax(buy_amount,observed_at) AS ba,
+         argMax(creation_date,observed_at) AS created,
+         argMax(valid_to,observed_at) AS vt,
+         max(observed_at) AS obs
+  FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND ((sell_token={{base:String}} AND buy_token={{quote:String}})
+         OR (sell_token={{quote:String}} AND buy_token={{base:String}}))
+  GROUP BY order_uid
+  HAVING created<=parseDateTime64BestEffort({{at_ts:String}})
+     AND toDateTime(vt)>parseDateTime64BestEffort({{at_ts:String}})
+), fills AS (
+  SELECT order_uid,sum(fsa) AS filled_sell,sum(fba) AS filled_buy
+  FROM (
+    SELECT t.order_uid AS order_uid,t.tx_hash,t.log_index,
+           argMax(t.sell_amount,t.observed_at) AS fsa,
+           argMax(t.buy_amount,t.observed_at) AS fba
+    FROM cow_db.trades AS t
+    WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}}
+      AND t.order_uid IN (SELECT order_uid FROM cand)
+      AND t.block_timestamp IS NOT NULL
+      AND t.block_timestamp<=parseDateTime64BestEffort({{at_ts:String}})
+    GROUP BY t.order_uid,t.tx_hash,t.log_index
+  ) GROUP BY order_uid
+), term AS (
+  SELECT order_uid,min(event_timestamp) AS terminated_at
+  FROM cow_db.order_events
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND order_uid IN (SELECT order_uid FROM cand)
+    AND event_type IN ('OrderInvalidated','OrderInvalidation','status:cancelled','status:fulfilled')
+    AND event_timestamp IS NOT NULL
+    AND event_timestamp<=parseDateTime64BestEffort({{at_ts:String}})
+  GROUP BY order_uid
+), book AS (
+  -- Explicit column list: a qualified asterisk (c.*) through this joined CTE
+  -- does NOT preserve plain column names on the server (code 47 downstream).
+  SELECT c.order_uid AS order_uid,c.owner_l AS owner_l,c.kind_l AS kind_l,
+    c.class_l AS class_l,c.pf_l AS pf_l,c.st AS st,c.bt AS bt,
+    c.sa AS sa,c.ba AS ba,c.created AS created,c.vt AS vt,c.obs AS obs,
+    if(f.filled_sell<c.sa,toUInt256(c.sa-f.filled_sell),toUInt256(0)) AS residual_sell_raw,
+    if(f.filled_buy<c.ba,toUInt256(c.ba-f.filled_buy),toUInt256(0)) AS residual_buy_raw,
+    if(c.kind_l='buy',
+       toFloat64(c.sa)*toFloat64(residual_buy_raw)/nullIf(toFloat64(c.ba),0),
+       toFloat64(residual_sell_raw)) AS remaining_sell_float,
+    if(c.kind_l='buy',
+       toFloat64(residual_buy_raw),
+       toFloat64(c.ba)*toFloat64(residual_sell_raw)/nullIf(toFloat64(c.sa),0)) AS remaining_buy_float
+  FROM cand AS c
+  LEFT JOIN fills AS f ON f.order_uid=c.order_uid
+  LEFT JOIN term AS x ON x.order_uid=c.order_uid
+  WHERE x.order_uid=''
+), enriched AS (
+  SELECT bk.*,
+    if(s.token='','',s.symbol) AS sell_symbol,
+    if(b.token='','',b.symbol) AS buy_symbol,
+    if(s.token='',NULL,s.decimals) AS sell_decimals,
+    if(b.token='',NULL,b.decimals) AS buy_decimals,
+    if(s.token='',NULL,remaining_sell_float/pow(10,toFloat64(s.decimals))) AS remaining_sell,
+    if(b.token='',NULL,remaining_buy_float/pow(10,toFloat64(b.decimals))) AS remaining_buy,
+    if(bk.st={{base:String}},'ask','bid') AS side
+  FROM book bk
+  LEFT JOIN tm s ON s.token=bk.st
+  LEFT JOIN tm b ON b.token=bk.bt
+  WHERE remaining_sell_float>0 AND remaining_buy_float>0
+), priced AS (
+  SELECT order_uid,owner_l AS owner,kind_l AS kind,side,class_l AS order_class,
+    pf_l AS partially_fillable,created AS creation_date,vt AS valid_to,
+    st AS sell_token,bt AS buy_token,sell_symbol,buy_symbol,
+    sell_decimals,buy_decimals,
+    if(side='ask',remaining_buy/nullIf(remaining_sell,0),
+                  remaining_sell/nullIf(remaining_buy,0)) AS price,
+    if(side='ask',remaining_sell,remaining_buy) AS amount_base,
+    if(side='ask',remaining_buy,remaining_sell) AS amount_quote,
+    toString(sa) AS sell_amount_raw,toString(ba) AS buy_amount_raw,
+    obs AS source_observed_at
+  FROM enriched
+  WHERE sell_decimals IS NOT NULL AND buy_decimals IS NOT NULL
+)
+{ladder_projection}"""
+    specs.append(QuerySpec(
+        "pair_depth", "Order-book depth (reconstructed)", hist_sql,
+        hist_params, "creation_date", "reconstructed_point_in_time", 3600,
+    ))
+    return specs
+
+
+#: Time spans the depth heatmap can grid over. "all" spans the whole
+#: order-capture horizon (min(observed_at)); 24h/7d are clamped to it.
+_HEATMAP_WINDOWS = ("24h", "7d", "all")
+
+
+def _validate_heatmap_window(value: str) -> str:
+    """Normalize the depth-heatmap window to one of ``_HEATMAP_WINDOWS``."""
+    window = (value or "").strip().lower()
+    if window not in _HEATMAP_WINDOWS:
+        raise ValueError(f"heatmap_window must be one of {list(_HEATMAP_WINDOWS)}")
+    return window
+
+
+def _pair_depth_heatmap_specs(
+    chain: ChainInfo,
+    pair: tuple[str, str],
+    window: str = "7d",
+) -> list[QuerySpec]:
+    """Depth-over-time heatmap source for one pair.
+
+    Reconstructs the *shape* of the book across a grid of ~60 timestamps in ONE
+    query — the ``depth`` group's ``hist_sql`` returns a single instant, this
+    returns many. Per (time bucket, order) it emits the order's resting price,
+    side, and base-normalized size while the order is alive at that bucket:
+    ``created <= t < valid_to`` and no terminal event (fill / cancel) has landed
+    by ``t``. This is a deliberate lower-fidelity model than the 2-D ladder: an
+    order rests at its FULL captured size until a terminal event removes it, so
+    intra-window partial fills are not decremented gradually (disclosed via the
+    ``depth_heatmap_reconstructed`` warning). Terminal events — the dominant
+    effect, since a filled order leaves the book entirely — ARE honored. The
+    client bins price into levels and sums ``depth_base`` per (bucket, level,
+    side); ``amount_base`` is used for BOTH sides so one magnitude scale works.
+
+    Row count is bounded by (<=60 buckets) x (open orders for the pair, tens),
+    so the result stays small and memory-safe per the depth-panel budget.
+    """
+    base, quote = pair
+    if not base or not quote:
+        return []
+    win = _validate_heatmap_window(window)
+    token_cte = _token_metadata_cte()
+    params = {
+        **_scope_parameters(chain.environment, chain),
+        "base": base,
+        "quote": quote,
+        "window": win,
+    }
+    # Grid derivation is split across CTEs so each expression references only a
+    # PRIOR CTE alias (ClickHouse same-SELECT sibling-alias refs are fragile).
+    heatmap_sql = f"""
+WITH {token_cte},
+bounds AS (
+  SELECT now() AS t_now,
+         ifNull(
+           (SELECT min(observed_at) FROM cow_db.orders
+              WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}),
+           now() - INTERVAL 30 DAY) AS cap_start
+),
+win AS (
+  SELECT t_now, cap_start,
+         greatest(cap_start,
+           multiIf({{window:String}}='24h', t_now - INTERVAL 24 HOUR,
+                   {{window:String}}='7d',  t_now - INTERVAL 7 DAY,
+                   cap_start)) AS w_start
+  FROM bounds
+),
+grid AS (
+  SELECT w_start,
+         greatest(1, toUInt32(dateDiff('second', w_start, t_now))) AS span_s
+  FROM win
+),
+grid_step AS (
+  SELECT w_start, span_s, greatest(300, intDiv(span_s, 60)) AS step_s FROM grid
+),
+grid_n AS (
+  SELECT w_start, step_s, least(72, toUInt32(intDiv(span_s, step_s)) + 1) AS n_buckets
+  FROM grid_step
+),
+buckets AS (
+  SELECT arrayJoin(arrayMap(i -> w_start + toUInt32(i) * step_s, range(n_buckets))) AS bucket_ts,
+         step_s
+  FROM grid_n
+),
+dims AS (
+  SELECT (SELECT anyOrNull(decimals) FROM tm WHERE token={{base:String}}) AS base_dec,
+         (SELECT anyOrNull(decimals) FROM tm WHERE token={{quote:String}}) AS quote_dec
+),
+cand AS (
+  SELECT order_uid,
+         argMax(sell_token,observed_at) AS st,
+         argMax(sell_amount,observed_at) AS sa,
+         argMax(buy_amount,observed_at) AS ba,
+         argMax(creation_date,observed_at) AS created,
+         argMax(valid_to,observed_at) AS vt
+  FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND ((sell_token={{base:String}} AND buy_token={{quote:String}})
+         OR (sell_token={{quote:String}} AND buy_token={{base:String}}))
+  GROUP BY order_uid
+),
+term AS (
+  SELECT order_uid, min(event_timestamp) AS terminated_at
+  FROM cow_db.order_events
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND order_uid IN (SELECT order_uid FROM cand)
+    AND event_type IN ('OrderInvalidated','OrderInvalidation','status:cancelled','status:fulfilled')
+    AND event_timestamp IS NOT NULL
+  GROUP BY order_uid
+),
+fill AS (
+  -- Order_events does NOT reliably carry a terminal row for every filled order
+  -- (most fills are trades, not status events), so without this an order that
+  -- was filled but never got a status:fulfilled event would rest forever and
+  -- the cross-join explodes. Use the LAST fill as the completion proxy: a
+  -- fully-filled order leaves the book at its (only) fill; a partially-fillable
+  -- order keeps resting until its final slice. Intra-fill size decay is not
+  -- modeled (disclosed via depth_heatmap_reconstructed).
+  SELECT order_uid, max(block_timestamp) AS filled_out_ts
+  FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND order_uid IN (SELECT order_uid FROM cand)
+    AND block_timestamp IS NOT NULL
+  GROUP BY order_uid
+),
+priced AS (
+  SELECT c.order_uid AS order_uid,
+    if(c.st={{base:String}},'ask','bid') AS side,
+    if(c.st={{base:String}},
+       toFloat64(c.sa)/pow(10,toFloat64(d.base_dec)),
+       toFloat64(c.ba)/pow(10,toFloat64(d.base_dec))) AS base_amt,
+    if(c.st={{base:String}},
+       toFloat64(c.ba)/pow(10,toFloat64(d.quote_dec)),
+       toFloat64(c.sa)/pow(10,toFloat64(d.quote_dec))) AS quote_amt,
+    c.created AS created,
+    -- The book removes an order at the EARLIEST of: expiry, terminal event,
+    -- and completing fill. Far-future sentinel keeps never-terminated resting
+    -- orders alive across the window.
+    least(toDateTime(c.vt),
+          ifNull(t.terminated_at, toDateTime('2099-01-01 00:00:00')),
+          ifNull(f.filled_out_ts, toDateTime('2099-01-01 00:00:00'))) AS alive_until
+  FROM cand AS c
+  CROSS JOIN dims AS d
+  LEFT JOIN term AS t ON t.order_uid=c.order_uid
+  LEFT JOIN fill AS f ON f.order_uid=c.order_uid
+  WHERE d.base_dec IS NOT NULL AND d.quote_dec IS NOT NULL
+)
+SELECT
+  formatDateTime(b.bucket_ts, '%Y-%m-%dT%H:%i:%SZ') AS bucket,
+  p.quote_amt / nullIf(p.base_amt, 0) AS price,
+  p.side AS side,
+  p.base_amt AS depth_base,
+  b.bucket_ts AS indexed_from,
+  b.bucket_ts AS indexed_to
+FROM buckets AS b
+CROSS JOIN priced AS p
+-- Interval overlap, not point-in-time: an order lights a bucket if its resting
+-- span [created, alive_until) touches the bucket interval [bucket_ts, +step).
+-- CoW books are transient (orders often rest minutes, buckets are ~an hour), so
+-- a boundary snapshot would miss most orders and leave the heatmap near-empty.
+WHERE p.created < (b.bucket_ts + b.step_s)
+  AND p.alive_until > b.bucket_ts
+  AND isFinite(price) AND price > 0 AND p.base_amt > 0
+ORDER BY b.bucket_ts, p.side, price"""
+    return [
+        QuerySpec(
+            "pair_depth_heatmap", "Order-book depth over time", heatmap_sql,
+            params, "creation_date", "reconstructed_point_in_time", 3600,
+            exact_count=False,
+        ),
     ]
 
 
@@ -1540,6 +2138,36 @@ ORDER BY u.block_timestamp DESC,u.log_index DESC,u.tx_hash DESC,u.order_uid DESC
     ]
 
 
+def _trader_dynamics_ctes(ids: str) -> str:
+    """Shared CTE text for the trader growth-accounting datasets.
+
+    ``om`` = (owner, month) activity over the trailing TRADER_DYNAMICS_MONTHS
+    + 1 warm-up month, anchored on the scope-global latest trade (``ta`` from
+    ``_shared_arm_ctes`` must precede this text). ``fsall`` = ALL-TIME
+    first-seen per owner — a deliberate, documented departure from the
+    90d-capped ``fs`` used by trader_activity: here the hash is built ONCE in
+    a query that is the sole member of its load group (no arm concurrency),
+    and true first-seen is what makes "new" honest. Sizing at
+    TRADER_DYNAMICS_MONTHS (live 2026-07-22): om ~696K entries / fsall ~719K.
+    """
+    months = TRADER_DYNAMICS_MONTHS + 1
+    return f"""
+om AS (
+  SELECT owner,toStartOfMonth(block_timestamp) AS period,max(observed_at) AS obs_at
+  FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+    AND block_timestamp IS NOT NULL
+    AND block_timestamp>=toStartOfMonth((SELECT max(a) FROM ta))-toIntervalMonth({months})
+  GROUP BY owner,period
+), fsall AS (
+  SELECT owner,min(block_timestamp) AS first_seen
+  FROM cow_db.trades
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+    AND block_timestamp IS NOT NULL
+  GROUP BY owner
+)"""
+
+
 def _traders_specs(
     scope: str,
     chain: ChainInfo | None,
@@ -1626,18 +2254,314 @@ LIMIT 200"""
         "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
         + "\n) ORDER BY bucket,chain_id"
     )
+    # ---- Growth accounting + retention (fixed trailing window) ----
+    # Deliberately IGNORES the global window (the _capped_analytical_range
+    # pattern in the other direction): monthly growth accounting needs exactly
+    # TRADER_DYNAMICS_MONTHS trailing periods, disclosed in the dataset docs.
+    # Classification shape live-verified 2026-07-23 (3.2s, sane accounting:
+    # new + returning + reactivated == active on every row).
+    dynamics_ctes = _trader_dynamics_ctes(ids)
+    dyn_params = _scope_parameters(scope, None)
+    dynamics = f"""
+WITH {shared_ctes},{dynamics_ctes},
+monthly AS (
+  SELECT o.period AS period,
+         count() AS active_traders,
+         countIf(toStartOfMonth(f.first_seen)=o.period) AS new_traders,
+         countIf(p.owner!='') AS returning_traders,
+         countIf(p.owner='' AND toStartOfMonth(f.first_seen)<o.period) AS reactivated_traders,
+         max(o.obs_at) AS obs_at
+  FROM om AS o
+  INNER JOIN fsall AS f ON f.owner=o.owner
+  LEFT JOIN (SELECT owner,period+toIntervalMonth(1) AS period FROM om) AS p
+    ON p.owner=o.owner AND p.period=o.period
+  GROUP BY period
+)
+SELECT period,active_traders,new_traders,returning_traders,reactivated_traders,
+       prev_active-returning_traders AS churned_traders,
+       (new_traders+reactivated_traders)/nullIf(prev_active-returning_traders,0) AS quick_ratio,
+       returning_traders/nullIf(prev_active,0) AS retention_rate,
+       period AS indexed_from,period AS indexed_to,
+       obs_at AS source_observed_at
+FROM (
+  SELECT *,lagInFrame(active_traders,1) OVER (ORDER BY period ASC
+           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS prev_active
+  FROM monthly
+)
+WHERE prev_active>0
+ORDER BY period"""
+    retention = f"""
+WITH {shared_ctes},{dynamics_ctes},
+coh AS (
+  SELECT owner,toStartOfMonth(first_seen) AS cohort_month
+  FROM fsall
+  WHERE first_seen>=toStartOfMonth((SELECT max(a) FROM ta))-toIntervalMonth({TRADER_DYNAMICS_MONTHS})
+), csize AS (
+  SELECT cohort_month,uniqExact(owner) AS cohort_size FROM coh GROUP BY cohort_month
+)
+SELECT c.cohort_month AS cohort_month,
+       dateDiff('month',c.cohort_month,om.period) AS month_index,
+       any(cs.cohort_size) AS cohort_size,
+       uniqExact(om.owner) AS active_traders,
+       uniqExact(om.owner)/nullIf(any(cs.cohort_size),0) AS retention_share,
+       c.cohort_month AS indexed_from,max(om.period) AS indexed_to,
+       max(om.obs_at) AS source_observed_at
+FROM om
+INNER JOIN coh AS c ON c.owner=om.owner
+INNER JOIN csize AS cs ON cs.cohort_month=c.cohort_month
+WHERE om.period>=c.cohort_month
+GROUP BY cohort_month,month_index
+ORDER BY cohort_month,month_index"""
     return [
         QuerySpec("trader_leaderboard", "Trader leaderboard", leaderboard, dict(params), "block_timestamp", BASE_DEDUP_MODE, 900),
         QuerySpec("trader_activity", "Active and new traders", activity, dict(params), "block_timestamp", BASE_DEDUP_MODE, 900),
+        QuerySpec("trader_dynamics", "Trader growth accounting (12 months)", dynamics, dict(dyn_params), "block_timestamp", BASE_DEDUP_MODE, 1800),
+        QuerySpec("trader_retention", "Cohort retention (12 months)", retention, dict(dyn_params), "block_timestamp", BASE_DEDUP_MODE, 1800),
+    ]
+
+
+def _order_multi_core_specs(
+    scope: str,
+    chains: list[ChainInfo],
+    range_state: dict[str, Any],
+    filters: dict[str, str],
+) -> list[QuerySpec]:
+    """All-networks order lifecycle core (status summary + creation activity).
+
+    Same output columns as the single-chain shapes so the frontend renders
+    them unchanged; the argMax-dedup grouped subquery replaces FINAL in
+    multi-chain mode (the ``og`` CTE precedent in the overview).
+    """
+    ids = ",".join(str(c.chain_id) for c in chains)
+    params = {**_scope_parameters(scope, None), **_time_params(range_state)}
+    extra: list[str] = []
+    status = filters.get("status", "").strip()
+    owner = _normalize_hex(filters.get("owner", ""))
+    if status:
+        params["status"] = status
+        extra.append("status={status:String}")
+    if owner:
+        if not ADDRESS_RE.fullmatch(owner):
+            raise ValueError("owner filter must be an EVM address")
+        params["owner"] = owner
+        extra.append("owner={owner:String}")
+    oa_cte = f"""
+oa AS (
+  SELECT max(creation_date) AS a FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+)"""
+    if range_state["kind"] == "all":
+        window = "1"
+    elif range_state["kind"] == "absolute":
+        window = (
+            "creation_date>=parseDateTime64BestEffort({start_at:String}) AND "
+            "creation_date<=parseDateTime64BestEffort({end_at:String})"
+        )
+    else:
+        window = "creation_date>=(SELECT a FROM oa)-toIntervalDay({window_days:UInt32})"
+    # creation_date window pushed INTO the dedup (immutable → filtering raw ==
+    # filtering deduped), bounding the argMax hash to the window rather than the
+    # whole backfilled orders table. status/owner filters stay OUTER: they match
+    # the LATEST (deduped) status/owner, so they cannot move inside the argMax.
+    outer = " AND ".join(extra) if extra else "1"
+    o_dedup = f"""
+  SELECT chain_id,order_uid,argMax(status,observed_at) AS status,
+         argMax(owner,observed_at) AS owner,
+         argMax(creation_date,observed_at) AS creation_date,
+         max(observed_at) AS obs_at
+  FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND {window}
+  GROUP BY chain_id,order_uid"""
+    summary = f"""WITH {oa_cte}
+SELECT status,count() AS order_count,uniqExact(owner) AS owners,
+       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
+       max(obs_at) AS source_observed_at
+FROM ({o_dedup})
+WHERE {outer}
+GROUP BY status
+ORDER BY order_count DESC,status"""
+    activity = f"""WITH {oa_cte}
+SELECT toStartOfDay(creation_date) AS bucket,count() AS order_count,
+       countIf(status='open') AS currently_open,
+       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
+       max(obs_at) AS source_observed_at
+FROM ({o_dedup})
+WHERE {outer}
+GROUP BY bucket
+ORDER BY bucket"""
+    return [
+        QuerySpec("order_status_summary", "Observed order lifecycle", summary, dict(params), "creation_date", "observed_snapshot", 60),
+        QuerySpec("order_activity", "Order creation activity", activity, dict(params), "creation_date", "observed_snapshot", 60),
+    ]
+
+
+def _order_type_specs(
+    scope: str,
+    chains: list[ChainInfo],
+    range_state: dict[str, Any],
+) -> list[QuerySpec]:
+    """Order-type analytics (dual-mode: single-chain or all-networks).
+
+    Everything here runs on the SMALL orders (~100K rows) and order_events
+    (~1M rows) tables — argMax-dedup grouped scans with tiny hashes. Coverage
+    caveat baked into the docs: the orderbook sync is a PARTIAL subset (~78K
+    orders, limit-heavy and recent), so class mixes describe the observed
+    subset, never all CoW orders.
+    """
+    ids = ",".join(str(c.chain_id) for c in chains)
+    params = {**_scope_parameters(scope, None), **_time_params(range_state)}
+    oa_cte = f"""
+oa AS (
+  SELECT max(creation_date) AS a FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+)"""
+
+    def order_window(column: str = "creation_date") -> str:
+        if range_state["kind"] == "all":
+            return "1"
+        if range_state["kind"] == "absolute":
+            return (
+                f"{column}>=parseDateTime64BestEffort({{start_at:String}}) AND "
+                f"{column}<=parseDateTime64BestEffort({{end_at:String}})"
+            )
+        return f"{column}>=(SELECT a FROM oa)-toIntervalDay({{window_days:UInt32}})"
+
+    # The creation_date window is pushed INTO the dedup (creation_date is
+    # immutable per order_uid, so filtering the raw rows is equivalent to
+    # filtering deduped rows). This keeps the argMax GROUP BY hash bounded by
+    # the WINDOW, not the whole (now multi-million-row, backfilled) orders
+    # table: the default 30d view dedups ~300k rows / 0.7s instead of ~4M / 12s.
+    # "All history" is unbounded by design and remains the heaviest selection.
+    o_dedup = f"""
+  SELECT chain_id,order_uid,argMax(class,observed_at) AS order_class,
+         argMax(kind,observed_at) AS order_kind,
+         argMax(signing_scheme,observed_at) AS signing_scheme,
+         argMax(partially_fillable,observed_at) AS partially_fillable,
+         argMax(status,observed_at) AS status,
+         argMax(owner,observed_at) AS owner,
+         argMax(creation_date,observed_at) AS creation_date,
+         max(observed_at) AS obs_at
+  FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND {order_window()}
+  GROUP BY chain_id,order_uid"""
+    type_summary = f"""WITH {oa_cte}
+SELECT chain_id,order_class,count() AS order_count,uniqExact(owner) AS owners,
+       countIf(status='fulfilled') AS fulfilled,countIf(status='expired') AS expired,
+       countIf(status='cancelled') AS cancelled,countIf(status='open') AS open_now,
+       countIf(status='fulfilled')/nullIf(count(),0) AS fulfilled_share,
+       countIf(partially_fillable) AS partially_fillable_count,
+       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
+       max(obs_at) AS source_observed_at
+FROM ({o_dedup})
+GROUP BY chain_id,order_class
+ORDER BY chain_id,order_count DESC"""
+    flavor_mix = f"""WITH {oa_cte}
+SELECT chain_id,order_kind,signing_scheme,partially_fillable,
+       count() AS order_count,uniqExact(owner) AS owners,
+       countIf(status='fulfilled')/nullIf(count(),0) AS fulfilled_share,
+       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
+       max(obs_at) AS source_observed_at
+FROM ({o_dedup})
+GROUP BY chain_id,order_kind,signing_scheme,partially_fillable
+ORDER BY chain_id,order_count DESC"""
+    type_trend = f"""WITH {oa_cte}
+SELECT toStartOfDay(creation_date) AS bucket,chain_id,order_class,
+       count() AS order_count,countIf(status='fulfilled') AS fulfilled_count,
+       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
+       max(obs_at) AS source_observed_at
+FROM ({o_dedup})
+GROUP BY bucket,chain_id,order_class
+ORDER BY bucket,chain_id,order_class"""
+    # ComposableCoW / programmatic footprint. event_timestamp is Nullable —
+    # bucket on coalesce(event_timestamp, observed_at), disclosed in docs.
+    oea_cte = f"""
+oea AS (
+  SELECT max(coalesce(event_timestamp,observed_at)) AS a FROM cow_db.order_events
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+)"""
+    event_ts = "coalesce(event_timestamp,observed_at)"
+    if range_state["kind"] == "all":
+        event_window = "1"
+    elif range_state["kind"] == "absolute":
+        event_window = (
+            f"{event_ts}>=parseDateTime64BestEffort({{start_at:String}}) AND "
+            f"{event_ts}<=parseDateTime64BestEffort({{end_at:String}})"
+        )
+    else:
+        event_window = (
+            f"{event_ts}>=(SELECT a FROM oea)-toIntervalDay({{window_days:UInt32}})"
+        )
+    conditional_activity = f"""WITH {oea_cte}
+SELECT toStartOfDay({event_ts}) AS bucket,chain_id,event_type,
+       uniq(event_id) AS events,uniq(owner) AS creators,
+       min({event_ts}) AS indexed_from,max({event_ts}) AS indexed_to,
+       max(observed_at) AS source_observed_at
+FROM cow_db.order_events
+WHERE environment={{env:String}} AND chain_id IN ({ids})
+  AND event_type IN ('ConditionalOrderCreated','MerkleRootSet','OrderInvalidation','SwapGuardSet')
+  AND {event_window}
+GROUP BY bucket,chain_id,event_type
+ORDER BY bucket,chain_id,event_type"""
+    # App-data orderClass tags (the ONLY honest TWAP signal: TWAP children
+    # land as class='limit', so orders.class never says twap). The doubly-
+    # nested JSON path is live-verified (probe 2026-07-23). Buckets:
+    # 'unresolved' = order's app_data_hash is not in the stored app_data set
+    # (~55% of order rows — the coverage disclosure), 'untagged' = doc exists
+    # but carries no orderClass. Snapshot over the whole observed subset.
+    # This is an all-time snapshot (no window to push in), so instead of
+    # deduping the whole backfilled orders table to order grain we GROUP the raw
+    # scan by (chain_id, app_data_hash) — app_data_hash is IMMUTABLE per order,
+    # so uniq(order_uid) per hash counts its distinct orders, and the GROUP BY is
+    # bounded by the ~1.2k distinct app-data hashes (NOT the millions of orders).
+    # owners stay exact via uniqExact state-merge across the hashes of a class.
+    appdata_classes = f"""
+WITH ad AS (
+  SELECT app_data_hash,
+         JSONExtractString(JSONExtractString(argMax(full_app_data,observed_at),'fullAppData'),
+                           'metadata','orderClass','orderClass') AS order_class
+  FROM cow_db.app_data
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+  GROUP BY app_data_hash
+),
+od AS (
+  SELECT chain_id,app_data_hash,uniq(order_uid) AS orders,
+         uniqExactState(owner) AS owners_state,max(observed_at) AS obs_at
+  FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+  GROUP BY chain_id,app_data_hash
+)
+SELECT od.chain_id AS chain_id,
+       multiIf(od.app_data_hash='','unresolved',
+               ad.app_data_hash='','unresolved',
+               ad.order_class='','untagged',ad.order_class) AS order_class,
+       sum(od.orders) AS orders,uniqExactMerge(od.owners_state) AS owners,
+       uniqExactIf(od.app_data_hash,ad.app_data_hash!='') AS appdata_hashes,
+       max(od.obs_at) AS source_observed_at
+FROM od
+LEFT JOIN ad ON ad.app_data_hash=od.app_data_hash
+GROUP BY od.chain_id,order_class
+ORDER BY od.chain_id,orders DESC"""
+    snapshot_params = _scope_parameters(scope, None)
+    return [
+        QuerySpec("order_type_summary", "Orders by class (observed subset)", type_summary, dict(params), "creation_date", "observed_snapshot", 300),
+        QuerySpec("order_flavor_mix", "Order flavor mix (kind x scheme)", flavor_mix, dict(params), "creation_date", "observed_snapshot", 300),
+        QuerySpec("order_type_trend", "Order classes over time", type_trend, dict(params), "creation_date", "observed_snapshot", 900),
+        QuerySpec("conditional_order_activity", "Programmatic order activity (ComposableCoW)", conditional_activity, dict(params), "observed_at", "observed_series", 900),
+        QuerySpec("appdata_order_classes", "App-data order classes (TWAP tags)", appdata_classes, dict(snapshot_params), "observed_at", "observed_snapshot", 900),
     ]
 
 
 def _order_specs(
-    chain: ChainInfo,
+    scope: str,
+    chain: ChainInfo | None,
     pair: tuple[str, str],
     range_state: dict[str, Any],
     filters: dict[str, str],
 ) -> list[QuerySpec]:
+    chains = [chain] if chain is not None else _chains_for_scope(scope)
+    type_specs = _order_type_specs(scope, chains, range_state)
+    if chain is None:
+        return [*_order_multi_core_specs(scope, chains, range_state, filters), *type_specs]
     base, quote = pair
     params = _scope_parameters(chain.environment, chain)
     anchor = (
@@ -1750,12 +2674,52 @@ FROM ({quality_source})
 GROUP BY surplus_bucket
 ORDER BY surplus_bucket"""
     quality_full_params = {**params, **quality_params}
+    # Surplus by order class: the quality_join shape with class carried
+    # through the deduped orders build. Same 90d analytical cap; sole member
+    # of its own load group so it never stacks with the quality trio.
+    class_source = f"""
+SELECT o.klass AS klass,
+       {surplus} AS surplus_bps,
+       t.block_timestamp, t.observed_at
+FROM cow_db.trades AS t
+INNER JOIN (
+  SELECT order_uid,
+         argMax(sell_amount,observed_at) AS sell_amount,
+         argMax(buy_amount,observed_at) AS buy_amount,
+         argMax(class,observed_at) AS klass
+  FROM cow_db.orders
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+  GROUP BY order_uid
+) AS o ON o.order_uid=t.order_uid
+WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}}
+  AND t.block_number<=(
+    SELECT argMax(block_number,updated_at) FROM cow_db.indexing_checkpoints
+    WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc')
+  AND t.block_timestamp IS NOT NULL AND {quality_time}"""
+    surplus_by_class = f"""
+SELECT klass AS order_class,
+       multiIf(surplus_bps IS NULL,'unknown',
+               surplus_bps< -50,'< -50 bps',
+               surplus_bps<0,'-50-0 bps',
+               surplus_bps<10,'0-10 bps',
+               surplus_bps<50,'10-50 bps',
+               surplus_bps<200,'50-200 bps','> 200 bps') AS surplus_bucket,
+       count() AS fills,
+       avgOrNull(surplus_bps) AS avg_surplus_bps,
+       quantile(0.5)(surplus_bps) AS median_surplus_bps,
+       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
+       max(observed_at) AS source_observed_at
+FROM ({class_source})
+GROUP BY order_class, surplus_bucket
+ORDER BY order_class, surplus_bucket"""
     specs = [
         QuerySpec("order_status_summary", "Observed order lifecycle", summary, dict(params), "creation_date", "observed_snapshot", 60),
         QuerySpec("order_activity", "Order creation activity", activity, dict(params), "creation_date", "observed_snapshot", 60),
         QuerySpec("order_quality_summary", "Execution quality (surplus vs limit)", quality_summary, dict(quality_full_params), "block_timestamp", "checkpoint_bounded", 900),
         QuerySpec("fill_latency_distribution", "Creation-to-fill latency", latency_distribution, dict(quality_full_params), "block_timestamp", "checkpoint_bounded", 900),
         QuerySpec("surplus_distribution", "Surplus distribution (bps vs limit)", surplus_distribution, dict(quality_full_params), "block_timestamp", "checkpoint_bounded", 900),
+        QuerySpec("surplus_by_class", "Surplus by order class", surplus_by_class, dict(quality_full_params), "block_timestamp", "checkpoint_bounded", 900),
+        *type_specs,
     ]
     if not base or not quote:
         return specs
@@ -2053,10 +3017,88 @@ SELECT s.ranking,count() AS solution_count,countIf(s.is_winner) AS winners,
 {common}
 GROUP BY s.ranking
 ORDER BY s.ranking"""
+    # ---- Solver directory (all-time presence, dual-mode) ----
+    # ONE full settlements streaming scan into a ~558-entry (chain, solver)
+    # hash (live-verified 1.6s) + the small competition tables. All-time by
+    # design: presence/first-seen/last-seen need no window (disclosed). The
+    # per-chain anchor ships in every row so the frontend computes activity
+    # tiers against the CHAIN's own freshness — a stale indexer (BNB) must
+    # not mark its solvers inactive. keys via UNION DISTINCT (not FULL OUTER
+    # JOIN — ClickHouse empty-key default quirks).
+    directory = f"""
+WITH st AS (
+  SELECT chain_id,solver,
+         minOrNull(block_timestamp) AS first_settlement_at,
+         maxOrNull(block_timestamp) AS last_settlement_at,
+         uniq(tx_hash) AS settlements_all_time,
+         max(observed_at) AS obs_st
+  FROM cow_db.settlements
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+  GROUP BY chain_id,solver
+), cs AS (
+  SELECT chain_id,solver,uniqExact(auction_id) AS competitions_all,
+         countIf(is_winner) AS wins_all,
+         max(observed_at) AS obs_cs
+  FROM cow_db.competition_solutions FINAL
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+  GROUP BY chain_id,solver
+), sa AS (
+  SELECT chain_id,maxOrNull(block_timestamp) AS chain_anchor_at
+  FROM cow_db.settlements
+  WHERE environment={{env:String}} AND chain_id IN ({ids})
+  GROUP BY chain_id
+), dkeys AS (
+  SELECT chain_id,solver FROM st
+  UNION DISTINCT
+  SELECT chain_id,solver FROM cs
+)
+SELECT k.chain_id AS chain_id,k.solver AS solver,
+       st.first_settlement_at AS first_settlement_at,
+       st.last_settlement_at AS last_settlement_at,
+       coalesce(st.settlements_all_time,0) AS settlements_all_time,
+       coalesce(cs.competitions_all,0) AS competitions_all,
+       coalesce(cs.wins_all,0) AS wins_all,
+       sa.chain_anchor_at AS chain_anchor_at,
+       st.first_settlement_at AS indexed_from,
+       st.last_settlement_at AS indexed_to,
+       greatest(coalesce(st.obs_st,toDateTime64(0,3,'UTC')),
+                coalesce(cs.obs_cs,toDateTime64(0,3,'UTC'))) AS source_observed_at
+FROM dkeys AS k
+LEFT JOIN st ON st.chain_id=k.chain_id AND st.solver=k.solver
+LEFT JOIN cs ON cs.chain_id=k.chain_id AND cs.solver=k.solver
+LEFT JOIN sa ON sa.chain_id=k.chain_id
+ORDER BY settlements_all_time DESC,k.chain_id,k.solver
+LIMIT 3000"""
+    # ---- Winner score gap vs reference (dual-mode) ----
+    # reference_score is ALWAYS a JSON map keyed by solver address; scores are
+    # opaque big-int strings — parse defensively, surface failures as a count
+    # instead of dropping rows silently.
+    gap_expr = (
+        "toFloat64OrNull(s.score)"
+        "-toFloat64OrNull(JSONExtractString(c.reference_score,s.solver))"
+    )
+    score_gaps = f"""
+WITH {blocks_cte}
+SELECT s.chain_id AS chain_id,s.solver AS competition_solver,
+       count() AS wins_scored,
+       countIf(({gap_expr}) IS NULL) AS parse_failures,
+       avgOrNull({gap_expr}) AS avg_score_gap,
+       quantile(0.5)({gap_expr}) AS median_score_gap,
+       quantile(0.9)({gap_expr}) AS p90_score_gap,
+       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
+       max(s.observed_at) AS source_observed_at
+{common_joins}
+{common_where} AND s.is_winner
+GROUP BY chain_id,competition_solver
+ORDER BY wins_scored DESC,chain_id,competition_solver
+LIMIT 2000"""
+    dir_params = _scope_parameters(scope, None)
     specs = [
         QuerySpec("solver_stats", "Competition solver statistics", stats, params, "auction_block_timestamp", "observed_series"),
         QuerySpec("solver_activity", "Competition solver activity", activity, params, "auction_block_timestamp", "observed_series"),
         QuerySpec("ranking_distribution", "Solution ranking distribution", ranking, params, "auction_block_timestamp", "observed_series"),
+        QuerySpec("solver_directory", "Solver directory (observed presence)", directory, dict(dir_params), "block_timestamp", BASE_DEDUP_MODE, 1800),
+        QuerySpec("solver_score_gaps", "Winner score gap vs reference", score_gaps, dict(params), "auction_block_timestamp", "observed_series", 900),
     ]
     if chain is None:
         cross_chain = f"""
@@ -2261,24 +3303,87 @@ FROM (
 GROUP BY policy_family
 ORDER BY fills DESC
 LIMIT 20"""
+    # Quote-vs-execution delta: priceImprovement fee policies EMBED a
+    # reference quote — the ONLY quote source in cow_db (the quotes table is
+    # empty). policy is a Python-repr string, NOT JSON (single quotes; fixed
+    # keys and numeric values only), so a quote swap makes it JSON-parseable.
+    # Rows without an embedded quote land in the 'unquoted' bucket instead of
+    # being dropped. This is quote-vs-execution delta, not user slippage.
+    policy_json = "replaceAll(q.policy,'\\'','\"')"
+    quote_sell = (
+        f"toFloat64OrNull(JSON_VALUE({policy_json},"
+        "'$.priceImprovement.quote.sellAmount'))"
+    )
+    quote_buy = (
+        f"toFloat64OrNull(JSON_VALUE({policy_json},"
+        "'$.priceImprovement.quote.buyAmount'))"
+    )
+    quote_delta_expr = SURPLUS_BPS.format(
+        eb="q.buy_amount", ls=quote_sell, es="q.sell_amount", lb=quote_buy,
+    )
+    quote_delta = f"""
+WITH pol AS (
+  SELECT order_uid, tx_hash, log_index, any(policy) AS policy
+  FROM cow_db.protocol_fees FINAL
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+  GROUP BY order_uid, tx_hash, log_index
+)
+SELECT policy_family,
+       multiIf(delta_bps IS NULL,'unquoted',
+               delta_bps< -50,'< -50 bps',
+               delta_bps<0,'-50-0 bps',
+               delta_bps<10,'0-10 bps',
+               delta_bps<50,'10-50 bps',
+               delta_bps<200,'50-200 bps','> 200 bps') AS delta_bucket,
+       count() AS fills, uniqExact(order_uid) AS orders,
+       avgOrNull(delta_bps) AS avg_delta_bps,
+       quantile(0.5)(delta_bps) AS median_delta_bps,
+       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
+       max(observed_at) AS source_observed_at
+FROM (
+  SELECT q.order_uid AS order_uid,
+         multiIf(positionCaseInsensitive(q.policy,'priceImprovement')>0,'price_improvement',
+                 positionCaseInsensitive(q.policy,'surplus')>0,'surplus',
+                 positionCaseInsensitive(q.policy,'volume')>0,'volume','other') AS policy_family,
+         {quote_delta_expr} AS delta_bps,
+         q.block_timestamp AS block_timestamp, q.observed_at AS observed_at
+  FROM (
+    SELECT f.order_uid AS order_uid, pol.policy AS policy,
+           f.buy_amount AS buy_amount, f.sell_amount AS sell_amount,
+           f.block_timestamp AS block_timestamp, f.observed_at AS observed_at
+    FROM cow_db.trades AS f
+    INNER JOIN pol ON pol.order_uid=f.order_uid AND pol.tx_hash=f.tx_hash
+     AND pol.log_index=f.log_index
+    WHERE f.environment={{env:String}} AND f.chain_id={{chain_id:UInt64}}
+      AND f.block_timestamp IS NOT NULL
+      AND {time_pred.replace('t.block_timestamp', 'f.block_timestamp')}
+  ) AS q
+)
+GROUP BY policy_family, delta_bucket
+ORDER BY policy_family, delta_bucket"""
     return [
         QuerySpec("solver_pair_matrix", "Solver-pair specialization", pair_matrix, dict(params), "block_timestamp", "checkpoint_bounded", 900),
         QuerySpec("trader_solver_affinity", "Trader-solver affinity", affinity, dict(params), "block_timestamp", "checkpoint_bounded", 900),
         QuerySpec("fee_policy_quality", "Fee-policy impact on execution quality", fee_quality, dict(params), "block_timestamp", "checkpoint_bounded", 900),
+        QuerySpec("quote_delta_quality", "Execution vs embedded quote (priceImprovement)", quote_delta, dict(params), "block_timestamp", "checkpoint_bounded", 900),
     ]
 
 
-def _live_specs(scope: str, chain: ChainInfo) -> list[QuerySpec]:
+def _live_specs(scope: str, chain: ChainInfo | None) -> list[QuerySpec]:
     """Live section: tight, short-TTL queries the frontend polls.
 
     ``live_pulse`` reads checkpoints for EVERY chain in scope (cheap; powers
-    the per-chain lag/catch-up bars); the feed datasets are single-chain and
-    hard-bounded to the last hour + small LIMITs — the base tables are not
-    time-sorted, so wide live scans are never acceptable.
+    the per-chain lag/catch-up bars). Feed datasets are chain-optional:
+    ``chain=None`` merges every in-scope chain into one newest-first tape —
+    still hard-bounded to the last hour + small LIMITs, which keeps the argMax
+    dedup hash to an hour of rows across ten chains (thousands, not millions;
+    live-verified 0.2s). The base tables are not time-sorted, so wide live
+    scans remain unacceptable in EITHER mode.
     """
     params = _scope_parameters(scope, chain)
     ids = ",".join(str(c.chain_id) for c in _chains_for_scope(scope))
-    token_cte = _token_metadata_cte()
+    feed_pred = _scope_predicate(chain, "", scope)
+    tmx_cte = _token_metadata_cte_multi(scope, chain)
     pulse = f"""
 WITH cp AS (
   SELECT chain_id, argMax(block_number, updated_at) AS checkpoint_block,
@@ -2311,8 +3416,9 @@ ORDER BY n.chain_id"""
     # coexist), so a raw base-table read shows every fresh fill twice. The
     # 1-hour bound keeps the argMax GROUP BY tiny.
     trades = f"""
-WITH {token_cte}
-SELECT u.block_ts AS block_timestamp,u.tx_hash,u.log_index,u.order_uid,u.owner,
+WITH {tmx_cte}
+SELECT u.block_ts AS block_timestamp,u.chain_id AS chain_id,
+       u.tx_hash,u.log_index,u.order_uid,u.owner,
        u.sell_token,if(s.token='','',s.symbol) AS sell_symbol,
        if(s.token='',NULL,s.decimals) AS sell_decimals,
        toString(u.sell_amount) AS sell_amount_raw,
@@ -2323,7 +3429,7 @@ SELECT u.block_ts AS block_timestamp,u.tx_hash,u.log_index,u.order_uid,u.owner,
        if(b.token='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
        u.obs_at AS source_observed_at
 FROM (
-  SELECT tx_hash,log_index,order_uid,
+  SELECT chain_id,tx_hash,log_index,order_uid,
          argMax(block_timestamp,observed_at) AS block_ts,
          argMax(owner,observed_at) AS owner,
          argMax(sell_token,observed_at) AS sell_token,
@@ -2332,25 +3438,26 @@ FROM (
          argMax(buy_amount,observed_at) AS buy_amount,
          max(observed_at) AS obs_at
   FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+  WHERE {feed_pred}
     AND block_timestamp >= {LIVE_WINDOW_SQL}
-  GROUP BY tx_hash,log_index,order_uid
+  GROUP BY chain_id,tx_hash,log_index,order_uid
   ORDER BY block_ts DESC,log_index DESC
   LIMIT 50
 ) AS u
-LEFT JOIN tm AS s ON s.token=u.sell_token
-LEFT JOIN tm AS b ON b.token=u.buy_token
+LEFT JOIN tmx AS s ON s.chain_id=u.chain_id AND s.token=u.sell_token
+LEFT JOIN tmx AS b ON b.chain_id=u.chain_id AND b.token=u.buy_token
 ORDER BY u.block_ts DESC,u.log_index DESC
 LIMIT 50"""
     settlements = f"""
 WITH fills AS (
-  SELECT tx_hash, uniq(tuple(log_index,order_uid)) AS fill_count
+  SELECT chain_id,tx_hash, uniq(tuple(log_index,order_uid)) AS fill_count
   FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+  WHERE {feed_pred}
     AND block_timestamp >= {LIVE_WINDOW_SQL}
-  GROUP BY tx_hash
+  GROUP BY chain_id,tx_hash
 )
-SELECT u.block_ts AS block_timestamp,u.tx_hash,u.block_num AS block_number,
+SELECT u.block_ts AS block_timestamp,u.chain_id AS chain_id,
+       u.tx_hash,u.block_num AS block_number,
        u.settlement_executor,
        coalesce(fills.fill_count,0) AS fill_count,
        u.obs_at AS source_observed_at
@@ -2359,24 +3466,24 @@ FROM (
   -- also appears in a same-level WHERE makes ClickHouse bind the WHERE
   -- identifier to the aggregate → ILLEGAL_AGGREGATION (code 184). A distinct
   -- alias keeps this safe even if a block_number predicate is added later.
-  SELECT tx_hash,log_index,
+  SELECT chain_id,tx_hash,log_index,
          argMax(block_timestamp,observed_at) AS block_ts,
          argMax(block_number,observed_at) AS block_num,
          argMax(solver,observed_at) AS settlement_executor,
          max(observed_at) AS obs_at
   FROM cow_db.settlements
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+  WHERE {feed_pred}
     AND block_timestamp >= {LIVE_WINDOW_SQL}
-  GROUP BY tx_hash,log_index
+  GROUP BY chain_id,tx_hash,log_index
   ORDER BY block_ts DESC,log_index DESC
   LIMIT 30
 ) AS u
-LEFT JOIN fills ON fills.tx_hash=u.tx_hash
+LEFT JOIN fills ON fills.chain_id=u.chain_id AND fills.tx_hash=u.tx_hash
 ORDER BY u.block_ts DESC,u.log_index DESC
 LIMIT 30"""
     open_orders = f"""
-WITH {token_cte}
-SELECT o.order_uid,o.owner,o.kind,o.status,o.creation_date,o.valid_to,
+WITH {tmx_cte}
+SELECT o.order_uid,o.chain_id AS chain_id,o.owner,o.kind,o.status,o.creation_date,o.valid_to,
        o.partially_fillable,
        o.sell_token,if(s.token='','',s.symbol) AS sell_symbol,
        if(s.token='',NULL,s.decimals) AS sell_decimals,
@@ -2390,24 +3497,37 @@ SELECT o.order_uid,o.owner,o.kind,o.status,o.creation_date,o.valid_to,
           least(1,toFloat64(o.executed_sell_amount)/toFloat64(o.sell_amount)),0) AS fill_ratio,
        o.observed_at AS source_observed_at
 FROM cow_db.orders AS o FINAL
-LEFT JOIN tm AS s ON s.token=o.sell_token
-LEFT JOIN tm AS b ON b.token=o.buy_token
-WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}}
+LEFT JOIN tmx AS s ON s.chain_id=o.chain_id AND s.token=o.sell_token
+LEFT JOIN tmx AS b ON b.chain_id=o.chain_id AND b.token=o.buy_token
+WHERE {_scope_predicate(chain, 'o', scope)}
   AND o.status='open' AND o.valid_to>toUnixTimestamp(now())
 ORDER BY o.creation_date DESC,o.order_uid DESC
 LIMIT 100"""
-    events = """
-SELECT event_type,order_uid,owner,block_number,transaction_hash,event_timestamp,
+    events = f"""
+SELECT event_type,chain_id,order_uid,owner,block_number,transaction_hash,event_timestamp,
        observed_at AS source_observed_at
 FROM cow_db.order_events FINAL
-WHERE environment={env:String} AND chain_id={chain_id:UInt64}
+WHERE {feed_pred}
   AND observed_at >= now() - INTERVAL 1 HOUR
 ORDER BY observed_at DESC,event_id DESC
 LIMIT 50"""
+    # Minute-bucketed heartbeat for the live band chart: 1h bound keeps the
+    # (minute x chain) hash at <= 60 x 10 entries regardless of load.
+    minute_activity = f"""
+SELECT toStartOfMinute(block_timestamp) AS bucket,chain_id,
+       uniq({TRADE_KEY}) AS fills,uniq(tx_hash) AS settlements,
+       min(block_timestamp) AS indexed_from,max(block_timestamp) AS indexed_to,
+       max(observed_at) AS source_observed_at
+FROM cow_db.trades
+WHERE {feed_pred}
+  AND block_timestamp >= {LIVE_WINDOW_SQL}
+GROUP BY bucket,chain_id
+ORDER BY bucket,chain_id"""
     return [
         QuerySpec("live_pulse", "Indexing pulse", pulse, {"env": scope}, "observed_at", "observed_series", 10),
         QuerySpec("live_trades", "Latest settled fills", trades, dict(params), "block_timestamp", "checkpoint_bounded", 15),
         QuerySpec("live_settlements", "Latest settlements", settlements, dict(params), "block_timestamp", "checkpoint_bounded", 15),
+        QuerySpec("live_minute_activity", "Last-hour heartbeat", minute_activity, dict(params), "block_timestamp", BASE_DEDUP_MODE, 15),
         QuerySpec("live_open_orders", "Waiting to execute (observed open intents)", open_orders, dict(params), "creation_date", "observed_snapshot", 30),
         QuerySpec("live_order_events", "Order lifecycle stream", events, dict(params), "observed_at", "observed_series", 30),
     ]
@@ -3058,6 +4178,8 @@ def _section_specs(
     interval: str,
     range_state: dict[str, Any],
     filters: dict[str, str],
+    depth_at: str = "",
+    heatmap_window: str = "7d",
 ) -> list[QuerySpec]:
     if section == "overview":
         return _overview_specs(scope, range_state, chain)
@@ -3069,15 +4191,15 @@ def _section_specs(
         return _traders_specs(scope, chain, range_state)
     if section == "auctions":
         return _auction_specs(chain, range_state, scope)
-    assert chain is not None
-    if section == "markets":
-        return _market_specs(chain, pair, interval, range_state)
     if section == "orders":
-        return _order_specs(chain, pair, range_state, filters)
-    if section == "patterns":
-        return _patterns_specs(scope, chain, range_state)
+        return _order_specs(scope, chain, pair, range_state, filters)
     if section == "live":
         return _live_specs(scope, chain)
+    assert chain is not None
+    if section == "markets":
+        return _market_specs(chain, pair, interval, range_state, depth_at, heatmap_window)
+    if section == "patterns":
+        return _patterns_specs(scope, chain, range_state)
     raise ValueError(f"Unsupported section: {section}")
 
 
@@ -3126,8 +4248,12 @@ def _coverage_from_dataset(
         warning_codes.append("no_indexed_data")
     if dataset.stats.truncated:
         warning_codes.append("result_truncated")
-    if spec.key in {"known_orders", "known_intents", "intent_depth"}:
+    if spec.key in {"known_orders", "known_intents", "intent_depth", "pair_depth", "open_intent_pairs"}:
         warning_codes.append("known_intents_incomplete")
+    if spec.key == "pair_depth" and spec.parameters.get("at_ts"):
+        warning_codes.append("depth_reconstructed")
+    if spec.key == "pair_depth_heatmap":
+        warning_codes.append("depth_heatmap_reconstructed")
     if spec.key == "coverage_matrix":
         checkpoint_idx = columns.get("checkpoint_block")
         if checkpoint_idx is None or any(
@@ -3693,6 +4819,11 @@ def _apply_section_load(
         "selected_entity": None,
         "breadcrumbs": [],
         "applied_request_id": int(request_id),
+        # Scope changes always return the depth panel to the LIVE book; the
+        # historical timestamp is a per-scope ephemeral, not a fingerprint key.
+        "depth_at": "",
+        # Depth-heatmap window resets to the default on every section apply.
+        "heatmap_window": "7d",
         "scope_id": scope_id,
         "coverage": {**(current.get("coverage") or {}), **coverage},
         "coverage_warnings": [w for w in warnings if " " not in w],
@@ -3837,6 +4968,8 @@ def _apply_group_load(
     group: str,
     scope_id: str,
     force_refresh: bool,
+    depth_at: str = "",
+    heatmap_window: str = "",
 ) -> tuple[MiniAppPayload, str]:
     """Load ONE deferred dataset group additively and return a PATCH payload.
 
@@ -3880,8 +5013,25 @@ def _apply_group_load(
         key: str((state.get("filters") or {}).get(key) or "")
         for key in ("status", "owner", "solver", "token")
     }
+    # depth_at contract: "" reuses the view's current value (so ordinary group
+    # retries keep the historical book on screen), the literal "live" clears
+    # it, and any other value is a validated ISO timestamp. Only the
+    # markets.depth group consumes it.
+    if depth_at == "":
+        effective_depth_at = str(state.get("depth_at") or "")
+    elif depth_at.strip().lower() == "live":
+        effective_depth_at = ""
+    else:
+        effective_depth_at = _validate_depth_at(depth_at)
+    # heatmap_window contract: "" reuses the view's current value (default "7d");
+    # only the markets.depth_heatmap group consumes it.
+    if heatmap_window == "":
+        effective_heatmap_window = str(state.get("heatmap_window") or "7d")
+    else:
+        effective_heatmap_window = _validate_heatmap_window(heatmap_window)
     specs = _section_specs(
-        section_key, scope, chain, pair, interval, range_state, filters
+        section_key, scope, chain, pair, interval, range_state, filters,
+        effective_depth_at, effective_heatmap_window,
     )
     group_specs = [spec for spec in specs if spec.key in group_keys]
     datasets, coverage, load_warnings = _load_specs_safe(
@@ -3910,6 +5060,8 @@ def _apply_group_load(
     )
     patch: dict[str, Any] = {
         "loaded_groups": {f"{section_key}.{group_key}": "partial" if group_failed else True},
+        "depth_at": effective_depth_at,
+        "heatmap_window": effective_heatmap_window,
         "coverage": coverage,
         "dataset_revisions": {
             key: updated.dataset_revisions.get(key, 0) for key in datasets
@@ -4146,11 +5298,23 @@ def register_cow_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         group: str,
         scope_id: str = "",
         force_refresh: bool = False,
+        depth_at: str = "",
+        heatmap_window: str = "",
     ) -> CallToolResult:
-        """[App-only] Load one deferred CoW dataset group (additive)."""
+        """[App-only] Load one deferred CoW dataset group (additive).
+
+        ``depth_at``: "" keeps the view's current depth timestamp, "live"
+        returns the markets depth panel to the live book, and an ISO-8601
+        timestamp reconstructs the pair's open book at that moment.
+
+        ``heatmap_window``: "" keeps the view's current depth-heatmap window
+        (default "7d"); "24h"/"7d"/"all" pick the span the markets.depth_heatmap
+        group grids over.
+        """
         try:
             payload, summary = _apply_group_load(
-                ch, view_id, section, group, scope_id, force_refresh
+                ch, view_id, section, group, scope_id, force_refresh, depth_at,
+                heatmap_window,
             )
             return mini_apps.payload_to_call_tool_result(payload, summary)
         except Exception as exc:

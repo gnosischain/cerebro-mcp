@@ -210,9 +210,15 @@ def test_all_network_sections_and_single_chain_coercion():
     ).structuredContent
     assert applied["view_state"]["chain_id"] == 1
     assert "all_networks_unsupported" in applied["view_state"]["warnings"]
-    # Live defaults to the freshest chain (Gnosis) without the warning.
+    # Live joined ALL_NETWORK_SECTIONS in v3: chain 0 stays all-networks
+    # (merged feeds), no coercion and no warning.
     live = _tool(server, "open_cow_explorer")(section="live", chain_id=0)
-    assert live.structuredContent["view_state"]["chain_id"] == 100
+    live_state = live.structuredContent["view_state"]
+    assert live_state["chain_id"] == 0
+    assert "all_networks_unsupported" not in live_state["warnings"]
+    # Orders joined too: status/type analytics are multi-chain.
+    orders = _tool(server, "open_cow_explorer")(section="orders", chain_id=0)
+    assert orders.structuredContent["view_state"]["chain_id"] == 0
 
 
 def test_section_transition_retains_other_sections_and_fingerprint_short_circuits():
@@ -436,7 +442,7 @@ def test_sql_contracts_cover_price_depth_fee_and_solver_invariants():
     assert "auction_prices" in market["auction_reference_prices"].sql
     assert "chain_blocks" in market["auction_reference_prices"].sql
     assert "pow(10" in market["auction_reference_prices"].sql
-    orders = {s.key: s for s in cow_explorer._order_specs(chain, (TOKEN_A, TOKEN_B), cow_explorer._range_state("orders", 30, "", ""), {})}
+    orders = {s.key: s for s in cow_explorer._order_specs("production", chain, (TOKEN_A, TOKEN_B), cow_explorer._range_state("orders", 30, "", ""), {})}
     depth = orders["intent_depth"].sql
     assert "executed_sell_amount<o.sell_amount" in depth
     assert "executed_buy_amount<o.buy_amount" in depth
@@ -489,6 +495,55 @@ def test_sql_contracts_cover_price_depth_fee_and_solver_invariants():
         assert len(spec.sql) <= 9_900
 
 
+def test_depth_heatmap_window_validation():
+    assert cow_explorer._validate_heatmap_window("24h") == "24h"
+    assert cow_explorer._validate_heatmap_window("7d") == "7d"
+    assert cow_explorer._validate_heatmap_window(" ALL ") == "all"
+    for bad in ("", "1h", "30d", "week", "foo"):
+        with pytest.raises(ValueError):
+            cow_explorer._validate_heatmap_window(bad)
+
+
+def test_depth_heatmap_spec_contract():
+    chain = cow_explorer.COW_CHAINS[1]
+    relative = cow_explorer._range_state("markets", 30, "", "")
+    # The heatmap spec is built by _market_specs and belongs to its own group.
+    assert cow_explorer.SECTION_GROUPS["markets"]["depth_heatmap"] == ("pair_depth_heatmap",)
+    market = {
+        s.key: s
+        for s in cow_explorer._market_specs(chain, (TOKEN_A, TOKEN_B), "1h", relative, "", "7d")
+    }
+    spec = market["pair_depth_heatmap"]
+    assert spec.cache_ttl_seconds == 3600
+    assert spec.exact_count is False
+    assert spec.parameters["window"] == "7d"
+    assert spec.parameters["base"] == TOKEN_A and spec.parameters["quote"] == TOKEN_B
+    sql = spec.sql
+    # Time-grid reconstruction shape.
+    assert "arrayJoin(arrayMap(" in sql
+    assert "multiIf({window:String}='24h'" in sql
+    # Both fill-completion (trades) and terminal-event (order_events) removal so
+    # filled-but-not-status-marked orders don't rest forever.
+    assert "cow_db.trades" in sql and "filled_out_ts" in sql
+    assert "cow_db.order_events" in sql and "terminated_at" in sql
+    assert "alive_until" in sql
+    # Interval-overlap predicate, not point-in-time.
+    assert "p.created < (b.bucket_ts + b.step_s)" in sql
+    assert "p.alive_until > b.bucket_ts" in sql
+    # Base-normalized depth for both sides + one row per (bucket, order).
+    assert "AS depth_base" in sql and "AS side" in sql and "AS bucket" in sql
+    # Standard CoW spec invariants.
+    assert "cow_db." in sql
+    assert "SETTINGS" not in sql.upper()
+    assert len(sql) <= 9_900
+
+
+def test_depth_heatmap_specs_require_a_pair():
+    chain = cow_explorer.COW_CHAINS[1]
+    assert cow_explorer._pair_depth_heatmap_specs(chain, ("", ""), "7d") == []
+    assert cow_explorer._pair_depth_heatmap_specs(chain, (TOKEN_A, ""), "all") == []
+
+
 #: v2 invariant — every dataset that surfaces token addresses must project the
 #: matching display symbols so the UI never falls back to bare addresses when
 #: metadata exists. Keys map dataset → required symbol column aliases.
@@ -523,7 +578,7 @@ def test_every_token_bearing_dataset_projects_symbols():
         specs[spec.key] = spec.sql
     for spec in cow_explorer._trade_specs("production", chain, relative, {}):
         specs[spec.key] = spec.sql
-    for spec in cow_explorer._order_specs(chain, (TOKEN_A, TOKEN_B), relative, {}):
+    for spec in cow_explorer._order_specs("production", chain, (TOKEN_A, TOKEN_B), relative, {}):
         specs[spec.key] = spec.sql
     for spec in cow_explorer._solver_specs("production", chain, relative):
         specs[spec.key] = spec.sql
@@ -664,6 +719,7 @@ def test_orders_cache_parameters_are_stable_and_pair_scoped():
     specs = {
         spec.key: spec
         for spec in cow_explorer._order_specs(
+            "production",
             chain,
             (TOKEN_A, TOKEN_B),
             cow_explorer._range_state("orders", 30, "", ""),
@@ -932,3 +988,256 @@ def test_no_unbounded_chain_blocks_final_or_view_builds():
     auction = {s.key: s for s in cow_explorer._entity_specs("auction", "12345", cow_explorer.COW_CHAINS[100])}
     assert "chain_blocks AS b FINAL" not in auction["auction_detail"].sql
     assert "block_number IN (SELECT auction_block" in auction["auction_detail"].sql
+
+
+# ---------------------------------------------------------------------------
+# v3 additions: order types, solver directory, trader dynamics, live
+# all-networks, pair depth
+# ---------------------------------------------------------------------------
+
+
+def _range(kind_days: int) -> dict:
+    return cow_explorer._range_state("orders", kind_days, "", "")
+
+
+def test_trader_dynamics_is_period_capped_and_isolated():
+    """Dynamics/retention ignore the global window (fixed 13-month scan bound)
+    and each key is the SOLE member of its load group — the all-time first-seen
+    hash must never run beside a sibling scan."""
+    specs = {
+        s.key: s
+        for s in cow_explorer._traders_specs("production", None, _range(0))
+    }
+    for key in ("trader_dynamics", "trader_retention"):
+        sql = specs[key].sql
+        months = cow_explorer.TRADER_DYNAMICS_MONTHS
+        assert f"toIntervalMonth({months + 1})" in sql  # om warm-up bound
+        assert "fsall" in sql  # deliberate all-time first-seen CTE
+        assert "window_days" not in specs[key].parameters
+        assert specs[key].cache_ttl_seconds >= 1800
+        # fsall appears once as a definition per statement.
+        assert sql.count("fsall AS (") == 1
+    groups = cow_explorer.SECTION_GROUPS["traders"]
+    assert groups["dynamics"] == ("trader_dynamics",)
+    assert groups["retention"] == ("trader_retention",)
+
+
+def test_solver_directory_uses_small_hash_grouped_scan():
+    """The directory is one settlements streaming scan into a tiny
+    (chain, solver) hash + small competition tables — no FINAL on settlements,
+    no chain_blocks, no trades join, keys via UNION DISTINCT."""
+    specs = {
+        s.key: s
+        for s in cow_explorer._solver_specs("production", None, _range(30))
+    }
+    sql = specs["solver_directory"].sql
+    assert "settlements FINAL" not in sql
+    assert "chain_blocks" not in sql
+    assert "cow_db.trades" not in sql
+    assert "UNION DISTINCT" in sql
+    assert "GROUP BY chain_id,solver" in sql
+    assert "chain_anchor_at" in sql
+    assert specs["solver_directory"].cache_ttl_seconds >= 1800
+    # Score gaps: defensive parsing of bigint score strings + JSON map.
+    gaps = specs["solver_score_gaps"].sql
+    assert "toFloat64OrNull(s.score)" in gaps
+    assert "JSONExtractString(c.reference_score,s.solver)" in gaps
+    assert "parse_failures" in gaps
+
+
+def test_live_all_networks_feeds_stay_hour_bounded_and_deduped():
+    specs = {s.key: s for s in cow_explorer._live_specs("production", None)}
+    ids = ",".join(
+        str(c.chain_id)
+        for c in cow_explorer.COW_CHAINS.values()
+        if c.environment == "production"
+    )
+    for key in ("live_trades", "live_settlements", "live_minute_activity"):
+        sql = specs[key].sql
+        assert cow_explorer.LIVE_WINDOW_SQL in sql
+        assert f"chain_id IN ({ids})" in sql
+    # Merged feeds dedup per chain and keep the single-chain LIMITs.
+    assert "GROUP BY chain_id,tx_hash,log_index,order_uid" in specs["live_trades"].sql
+    assert "LIMIT 50" in specs["live_trades"].sql
+    assert "GROUP BY chain_id,tx_hash,log_index" in specs["live_settlements"].sql
+    assert "LIMIT 30" in specs["live_settlements"].sql
+    # Single-chain mode still binds the concrete chain.
+    single = {
+        s.key: s
+        for s in cow_explorer._live_specs("production", cow_explorer.COW_CHAINS[100])
+    }
+    assert "chain_id={chain_id:UInt64}" in single["live_trades"].sql
+
+
+def test_orders_all_networks_skips_pair_and_quality_groups():
+    multi = {
+        s.key
+        for s in cow_explorer._order_specs(
+            "production", None, ("", ""), _range(30), {}
+        )
+    }
+    assert "order_status_summary" in multi
+    assert "order_type_summary" in multi
+    assert "conditional_order_activity" in multi
+    # Pair-scoped intents and the trades-join quality datasets are single-chain.
+    assert not multi & {
+        "known_orders", "known_intents", "intent_depth",
+        "order_quality_summary", "fill_latency_distribution",
+        "surplus_distribution", "surplus_by_class",
+    }
+
+
+def test_order_type_specs_dedup_orders_via_argmax_not_final():
+    for chain in (None, cow_explorer.COW_CHAINS[1]):
+        specs = cow_explorer._order_specs(
+            "production", chain, ("", ""), _range(30), {}
+        )
+        for spec in specs:
+            if spec.key in {
+                "order_type_summary", "order_flavor_mix", "order_type_trend",
+            }:
+                assert "orders AS o FINAL" not in spec.sql
+                assert "argMax(class,observed_at)" in spec.sql
+                assert "GROUP BY chain_id,order_uid" in spec.sql
+    # TWAP signal comes from the doubly-nested app-data JSON path (live-verified).
+    appdata = {
+        s.key: s
+        for s in cow_explorer._order_specs(
+            "production", None, ("", ""), _range(30), {}
+        )
+    }["appdata_order_classes"]
+    assert "JSONExtractString(JSONExtractString(argMax(full_app_data,observed_at),'fullAppData')" in appdata.sql
+    assert "'metadata','orderClass','orderClass'" in appdata.sql
+
+
+def test_quote_delta_parses_python_repr_policy_defensively():
+    """protocol_fees.policy is Python-repr (single quotes), so the embedded
+    priceImprovement quote is read via a quote swap + JSON_VALUE, never raw
+    JSONExtract on the original string."""
+    specs = {
+        s.key: s
+        for s in cow_explorer._patterns_specs(
+            "production", cow_explorer.COW_CHAINS[100], _range(30)
+        )
+    }
+    sql = specs["quote_delta_quality"].sql
+    assert "replaceAll(q.policy,'\\'','\"')" in sql
+    assert "priceImprovement.quote.sellAmount" in sql
+    assert "toFloat64OrNull(JSON_VALUE" in sql
+    assert "'unquoted'" in sql
+
+
+def test_protocol_kpis_volume_overlay_only_for_short_windows():
+    """Counts are always present; the approximate native-volume overlay exists
+    ONLY for relative windows <= 7 days (current-snapshot valuation — there is
+    no historical price source), NULL otherwise."""
+    short = {
+        s.key: s for s in cow_explorer._overview_specs("production", _range(7))
+    }
+    assert "cow_db.native_prices" in short["protocol_kpis"].sql
+    assert "approx_native_volume" in short["protocol_kpis"].sql
+    for days in (30, 0):
+        wide = {
+            s.key: s
+            for s in cow_explorer._overview_specs("production", _range(days))
+        }
+        sql = wide["protocol_kpis"].sql
+        assert "cow_db.native_prices" not in sql
+        assert "NULL AS Nullable(Float64)) AS approx_native_volume" in sql
+    # All-time totals keep BNB (no block_timestamp filter on the counts).
+    alltime = short["alltime_chain_totals"].sql
+    assert "block_timestamp IS NOT NULL" not in alltime
+    # Share trend coarsens to weeks beyond 180d / at all-history.
+    assert "toStartOfDay" in short["chain_share_trend"].sql
+    assert "toStartOfWeek" in {
+        s.key: s for s in cow_explorer._overview_specs("production", _range(0))
+    }["chain_share_trend"].sql
+
+
+def test_pair_depth_live_and_historical_sql_shapes():
+    chain = cow_explorer.COW_CHAINS[56]
+    live = {
+        s.key: s
+        for s in cow_explorer._pair_depth_specs(chain, (TOKEN_A, TOKEN_B))
+    }
+    assert set(live) == {"depth_horizon", "pair_depth", "open_intent_pairs"}
+    # The open-pairs rescue list is chain-scoped and returned even pairless
+    # (an empty Gnosis book must still steer users toward pairs with intents).
+    pairless = {
+        s.key for s in cow_explorer._pair_depth_specs(chain, ("", ""))
+    }
+    assert pairless == {"depth_horizon", "open_intent_pairs"}
+    pairs_sql = live["open_intent_pairs"].sql
+    assert "status='open'" in pairs_sql
+    assert "orders AS o FINAL" not in pairs_sql
+    assert "token0_symbol" in pairs_sql
+    sql = live["pair_depth"].sql
+    assert "o.status='open'" in sql
+    assert "server_as_of" in live["pair_depth"].parameters
+    assert live["pair_depth"].parameters["server_as_of"].endswith(":00Z")
+    assert live["pair_depth"].cache_ttl_seconds == 60
+    # Orientation invariants: price is quote-per-base for BOTH sides; both
+    # denominations ship so Flip is a client-side re-projection.
+    for column in ("side", "price", "amount_base", "amount_quote",
+                   "sell_symbol", "buy_symbol", "order_uid", "owner"):
+        assert column in sql
+    hist = {
+        s.key: s
+        for s in cow_explorer._pair_depth_specs(
+            chain, (TOKEN_A, TOKEN_B), "2026-07-21T12:00:00Z"
+        )
+    }
+    hsql = hist["pair_depth"].sql
+    assert hist["pair_depth"].cache_ttl_seconds == 3600  # point-in-time immutable
+    assert hist["pair_depth"].coverage_mode == "reconstructed_point_in_time"
+    assert hist["pair_depth"].parameters["at_ts"] == "2026-07-21T12:00:00+00:00Z".replace("+00:00", "")
+    # Bounded joins pruned by the tiny candidate set; no FINAL on trades.
+    assert hsql.count("order_uid IN (SELECT order_uid FROM cand)") == 2
+    assert "trades AS t FINAL" not in hsql
+    assert "block_timestamp<=parseDateTime64BestEffort({at_ts:String})" in hsql
+    assert "event_timestamp<=parseDateTime64BestEffort({at_ts:String})" in hsql
+    # cand must not self-alias argMax to filtered column names (code 184).
+    assert "argMax(sell_token,observed_at) AS sell_token" not in hsql
+    assert len(hsql) <= 9_900
+    # depth_at validation: future and garbage rejected.
+    with pytest.raises(ValueError):
+        cow_explorer._validate_depth_at("not-a-date")
+    with pytest.raises(ValueError):
+        cow_explorer._validate_depth_at("2999-01-01T00:00:00Z")
+
+
+def test_depth_at_group_reload_patches_state_and_resets_on_section_apply():
+    server, ch = _server()
+    opened = _tool(server, "open_cow_explorer")()
+    view_id = opened.structuredContent["view_id"]
+    applied = _tool(server, "load_cow_explorer_section")(
+        view_id=view_id, request_id=1, section="markets", chain_id=100,
+    ).structuredContent
+    assert applied["view_state"]["depth_at"] == ""
+    scope_id = applied["view_state"]["scope_id"]
+    patched = _tool(server, "load_cow_explorer_datasets")(
+        view_id=view_id, request_id=2, section="markets", group="depth",
+        scope_id=scope_id, depth_at="2026-07-21T12:00:00Z",
+    ).structuredContent
+    assert patched["patch"]["depth_at"] == "2026-07-21T12:00:00+00:00".replace("+00:00", "Z")
+    # "" keeps the current timestamp on retries; "live" clears it.
+    kept = _tool(server, "load_cow_explorer_datasets")(
+        view_id=view_id, request_id=3, section="markets", group="depth",
+        scope_id=scope_id,
+    ).structuredContent
+    assert kept["patch"]["depth_at"].endswith("Z") and kept["patch"]["depth_at"] != ""
+    cleared = _tool(server, "load_cow_explorer_datasets")(
+        view_id=view_id, request_id=4, section="markets", group="depth",
+        scope_id=scope_id, depth_at="live",
+    ).structuredContent
+    assert cleared["patch"]["depth_at"] == ""
+    # A section apply always returns the panel to the live book (the reset is
+    # part of every full section-apply state build).
+    _tool(server, "load_cow_explorer_datasets")(
+        view_id=view_id, request_id=5, section="markets", group="depth",
+        scope_id=scope_id, depth_at="2026-07-21T12:00:00Z",
+    )
+    reapplied = _tool(server, "load_cow_explorer_section")(
+        view_id=view_id, request_id=6, section="trades", chain_id=100,
+    ).structuredContent
+    assert reapplied["view_state"]["depth_at"] == ""

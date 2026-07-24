@@ -145,6 +145,62 @@ const LABEL_OVERRIDES: Record<string, string> = {
   realized_surplus_bps: "Realized surplus (bps)",
   fill_ratio: "Fill ratio",
   first_fill_at: "First fill",
+  // ---- v3: protocol KPIs / all-time totals / share trend ----
+  unique_traders: "Traders",
+  unique_pairs: "Pairs",
+  approx_native_volume: "Volume (native, est.)",
+  first_trade_at: "First trade",
+  last_trade_at: "Last trade",
+  // ---- v3: order types / programmatic / class quality ----
+  order_class: "Class",
+  order_kind: "Kind",
+  signing_scheme: "Signing",
+  order_count: "Orders",
+  owners: "Owners",
+  fulfilled_share: "Fulfilled share",
+  open_now: "Open now",
+  fulfilled_count: "Fulfilled",
+  partially_fillable_count: "Partially fillable",
+  event_type: "Event",
+  events: "Events",
+  creators: "Creators",
+  appdata_hashes: "App-data docs",
+  // ---- v3: solver directory / score gaps ----
+  settlements_all_time: "Settlements (all time)",
+  competitions_all: "Competitions (all time)",
+  wins_all: "Wins (all time)",
+  first_settlement_at: "First settlement",
+  last_settlement_at: "Last settlement",
+  chain_anchor_at: "Chain latest",
+  wins_scored: "Scored wins",
+  parse_failures: "Parse failures",
+  avg_score_gap: "Avg score gap",
+  median_score_gap: "Median score gap",
+  p90_score_gap: "P90 score gap",
+  // ---- v3: trader dynamics / retention ----
+  period: "Month",
+  returning_traders: "Returning",
+  reactivated_traders: "Reactivated",
+  churned_traders: "Churned",
+  quick_ratio: "Quick ratio",
+  retention_rate: "Retention rate",
+  cohort_month: "Cohort",
+  month_index: "Month #",
+  cohort_size: "Cohort size",
+  retention_share: "Retention share",
+  // ---- v3: quote-delta quality ----
+  delta_bucket: "Delta band",
+  avg_delta_bps: "Avg delta (bps)",
+  median_delta_bps: "Median delta (bps)",
+  // ---- v3: pair depth / horizon ----
+  amount_base: "Amount (base)",
+  amount_quote: "Amount (quote)",
+  earliest_supported_at: "Capture began",
+  latest_observed_at: "Latest observed",
+  captured_orders: "Captured orders",
+  earliest_creation_seen: "Earliest creation seen",
+  // ---- v3: live heartbeat ----
+  settlements: "Settlements",
 };
 
 export function labelForColumn(name: string): string {
@@ -181,6 +237,40 @@ export const COLUMN_CONFIGS: Record<string, ColumnSpec[]> = {
   solver_imbalance_tokens: [
     // The raw net matters when decimals are unknown; keep it visible.
     { key: "net_amount_raw", label: "Net (raw units)" },
+  ],
+  // ---- v3 datasets. Empty arrays mean the default heuristics (chain_id →
+  // chain badge, solver/competition_solver → solver entity, owner → address,
+  // *_at → time, *_raw/*_decimals/*_symbol hidden) already do the right
+  // thing; only deviations are listed.
+  protocol_kpis: [],
+  alltime_chain_totals: [],
+  chain_share_trend: [],
+  order_type_summary: [],
+  order_flavor_mix: [],
+  order_type_trend: [],
+  conditional_order_activity: [],
+  appdata_order_classes: [],
+  surplus_by_class: [],
+  solver_directory: [],
+  solver_score_gaps: [],
+  trader_dynamics: [
+    // Month-start date; not matched by the time-column heuristics.
+    { key: "period", kind: "time" },
+  ],
+  trader_retention: [{ key: "cohort_month", kind: "time" }],
+  quote_delta_quality: [],
+  live_minute_activity: [],
+  pair_depth: [
+    { key: "kind", label: "Kind" },
+    { key: "side", label: "Side" },
+    // Ladder price is ALWAYS quote-per-base for both sides (server contract).
+    { key: "price", label: "Limit price", kind: "number" },
+    { key: "amount_base", kind: "number" },
+    { key: "amount_quote", kind: "number" },
+  ],
+  depth_horizon: [],
+  open_intent_pairs: [
+    { key: "open_orders", label: "Open intents", kind: "number" },
   ],
 };
 

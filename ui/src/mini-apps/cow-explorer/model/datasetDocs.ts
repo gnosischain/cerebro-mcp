@@ -18,6 +18,10 @@ const TAPE_NOTE =
   "Newest-first bounded selection: the database keeps only the top rows by block time (memory-safe at any window), then deduplicates indexer versions and joins token symbols onto the selected rows only.";
 const CAP_NOTE =
   " Correlation matrices join two large tables, so they are computed over at most the last 90 indexed days (a rolling analytical window) regardless of the global time selector — this keeps them memory-safe on the shared warehouse and is separate from the Trades/Markets history, which is never capped.";
+const ORDERBOOK_SUBSET_NOTE =
+  "The orderbook sync is a PARTIAL subset (~78K orders; limit-heavy, skewed to recent years) — class mixes describe the observed subset, NOT all CoW orders.";
+const DYNAMICS_WINDOW_NOTE =
+  "Fixed trailing 12-month analytical window regardless of the global time selector. A trader is an address. 'New' means first indexed fill EVER (all-time first-seen, not window-scoped). BNB fills lack block timestamps and are excluded; a stalled chain indexer depresses recent actives until it catches up.";
 
 export const DATASET_DOCS: Record<string, DatasetDoc> = {
   // ---- overview -----------------------------------------------------------
@@ -40,6 +44,18 @@ export const DATASET_DOCS: Record<string, DatasetDoc> = {
   fee_policy_counts: {
     what: "How many indexed fills carried each protocol fee policy family (volume / surplus / price improvement) and in which fee tokens.",
     method: "Fee rows exist only for API-enriched trades — coverage is a subset of all fills. The policy string is classified into families by keyword.",
+  },
+  protocol_kpis: {
+    what: "Protocol-wide KPI tiles: settled fills, settlement transactions, distinct traders, and distinct pairs per network, plus one protocol-wide total row (chain 0) with exact cross-network distinct counts.",
+    method: `Counts are exact over indexed trades. approx_native_volume is an ESTIMATE, not an exact figure: sell amounts valued at the CURRENT native-price snapshot (no historical price source exists in the index), expressed in each chain's own native unit — populated only for relative windows of 7 days or less, NULL otherwise and NULL on the protocol-wide row (native units are not comparable across chains). ${CHECKPOINT_NOTE}`,
+  },
+  alltime_chain_totals: {
+    what: "All-time per-network totals: settled fills, settlement transactions, distinct traders, and first/last trade dates — the feed for the distribution pies.",
+    method: "Always all indexed history, regardless of the global time selector (an all-time count needs no time axis). BNB is deliberately included: its trade rows lack block timestamps, so first/last dates may be NULL while the counts are real — excluding it would silently understate the totals.",
+  },
+  chain_share_trend: {
+    what: "Each network's share of settled fills and settlement transactions over time.",
+    method: `One grouped scan by (bucket, network): daily buckets, or weekly when the window exceeds 180 days (or is all history). The 100%-share view is normalized client-side per bucket. ${DEDUP_NOTE}`,
   },
   // ---- markets ------------------------------------------------------------
   pair_options: {
@@ -65,6 +81,22 @@ export const DATASET_DOCS: Record<string, DatasetDoc> = {
   recent_market_trades: {
     what: "The newest settled fills for the selected pair, with normalized amounts and fees.",
     method: TAPE_NOTE,
+  },
+  pair_depth: {
+    what: "Per-order depth ladder for the selected pair: every known open order's limit price (ALWAYS quote-per-base, both sides), remaining base/quote amounts, and identity — the raw material for the depth chart and its order list. Asks sell the base token; bids sell the quote token.",
+    method: "Known open intents ONLY — never the complete orderbook (intents the indexer never saw are absent). Historical mode reconstructs the book at a point in time from captured orders minus prior fills and cancellation events, and is bounded by the per-chain order-capture start (read from the depth horizon; continuous capture began ~2026-07-20, so the window is days deep and grows daily). API-observed cancel times carry minutes of jitter; BNB partial fills cannot be time-resolved (full fills fall back to status events).",
+  },
+  pair_depth_heatmap: {
+    what: "Depth of the selected pair's book over time: one cell per (time bucket, price level). Colour INTENSITY = total resting depth (asks+bids) at that level, HUE = the dominant side (red ask-heavy, green bid-heavy); the per-bucket median price is overlaid. On CoW, intents rest on both sides at the market price rather than forming a spread, so total-depth-with-dominant-side is used instead of a net (ask−bid) scale that would blank the busiest levels. Powers the Heatmap tab.",
+    method: "For each of ~60 time buckets across the chosen window (24h / 7d / all, clamped to the order-capture start), an order lights a bucket if its resting span overlaps that interval: created before the bucket end and not yet removed by expiry, a cancellation event, or its completing fill. Order size (base-normalized so both sides share one scale) is held constant across the resting span — intra-fill decay is NOT modeled, and API-observed cancel times carry minutes of jitter. Known open intents only, never the complete orderbook.",
+  },
+  depth_horizon: {
+    what: "How far back historical depth reconstruction can honestly go on this network: earliest and latest order observations and how many orders have been captured.",
+    method: "Read from the order index's own observation bookkeeping (pair-independent). Continuous order capture began ~2026-07-20 on all chains — the reconstruction window is a data property that grows daily, never a hard-coded date.",
+  },
+  open_intent_pairs: {
+    what: "Pairs on this network that currently have a standing book: open, unexpired intents grouped by pair — the depth panel's rescue list when the selected pair (or the whole chain) has no open orders.",
+    method: "Chain-scoped snapshot over known open intents only (never the complete orderbook). Some networks — Gnosis in particular — run almost entirely on short-lived market orders and legitimately hold zero standing intents at a given moment; that absence is shown, not hidden.",
   },
   // ---- trades -------------------------------------------------------------
   trade_activity: {
@@ -112,6 +144,30 @@ export const DATASET_DOCS: Record<string, DatasetDoc> = {
     what: "Distribution of realized surplus vs limit price across fills, in basis-point bands.",
     method: "Same surplus formula as the quality summary; negative bands mean worse than the limit implies (e.g. fee accounting), positive bands mean price improvement.",
   },
+  order_type_summary: {
+    what: "Observed orders grouped by class (market / limit) per network: counts, distinct owners, lifecycle status splits, fulfilled share, and how many are partially fillable.",
+    method: `Latest version per order (argMax by observation time). ${ORDERBOOK_SUBSET_NOTE}`,
+  },
+  order_flavor_mix: {
+    what: "Order flavor mix per network: kind (sell / buy) x signing scheme x partial fillability, with owner counts and fulfilled share.",
+    method: `Latest version per order. ${ORDERBOOK_SUBSET_NOTE}`,
+  },
+  order_type_trend: {
+    what: "Orders created per day by class and network, with how many were eventually fulfilled.",
+    method: `Day-bucketed on order creation dates, latest-version status. ${ORDERBOOK_SUBSET_NOTE}`,
+  },
+  conditional_order_activity: {
+    what: "Programmatic (ComposableCoW) order activity: ConditionalOrderCreated and related lifecycle events per day, network, and event type, with distinct creators. The ~19.8K ConditionalOrderCreated events are the programmatic footprint — broader than any app-data tag.",
+    method: "On-chain lifecycle events from the order-events index. Some events lack a chain timestamp and bucket on observation time instead (disclosed by the coalesce, not dropped).",
+  },
+  appdata_order_classes: {
+    what: "Observed orders grouped by the orderClass tag in their app-data document (market / limit / twap), plus honest 'unresolved' (no stored app-data doc) and 'untagged' (doc without a tag) buckets.",
+    method: `Only ~45% of order rows resolve a stored app-data document — the 'unresolved' bucket is the disclosed remainder, never dropped. TWAP tags exist on only ~63 orders (TWAP children land as class='limit', so this tag is the only honest TWAP signal); ConditionalOrderCreated events are the broader programmatic footprint. ${ORDERBOOK_SUBSET_NOTE}`,
+  },
+  surplus_by_class: {
+    what: "Realized surplus vs limit price (bps) segmented by order class, bucketed into bands with per-class averages and medians.",
+    method: `Same kind-independent surplus formula as the quality summary (positive always means better than limit); computed over at most the last 90 indexed days. ${ORDERBOOK_SUBSET_NOTE}`,
+  },
   // ---- auctions -----------------------------------------------------------
   auction_activity: {
     what: "Settled solver competitions per day.",
@@ -142,6 +198,14 @@ export const DATASET_DOCS: Record<string, DatasetDoc> = {
     what: "The same solver's wins/competitions on every network side by side.",
     method: "Per-solver, per-chain aggregate over competition solutions; addresses are matched exactly across chains (deployments may differ per chain).",
   },
+  solver_directory: {
+    what: "Every (network, solver) presence observed in the index: first/last settlement, all-time settlements, competitions entered, and wins — the solver directory.",
+    method: "Presence is derived from indexed settlements + competition entries — an ACTIVITY PROXY, NOT the on-chain allow-list. Prod/barn labels come from the bundled registry; unregistered addresses render raw. All-time by design (presence needs no window). Each row ships its chain's own latest settlement (chain_anchor_at) so activity tiers are computed against the CHAIN's freshness — a stale indexer does not fake solver inactivity.",
+  },
+  solver_score_gaps: {
+    what: "Winning score minus the protocol's reference score, per solver and network — the competitive margin over the protocol's benchmark for auctions the solver won.",
+    method: "reference_score is a JSON map keyed by solver address; scores are opaque big-int strings parsed defensively — rows that fail to parse are counted in parse_failures instead of being silently dropped.",
+  },
   // ---- traders ------------------------------------------------------------
   trader_leaderboard: {
     what: "The most active traders by settled fills: fills, settlement transactions, distinct pairs, first/last seen.",
@@ -150,6 +214,14 @@ export const DATASET_DOCS: Record<string, DatasetDoc> = {
   trader_activity: {
     what: "Active and first-time traders per day.",
     method: "A trader is 'new' on the day of their first indexed fill ever (not just in the window).",
+  },
+  trader_dynamics: {
+    what: "Monthly trader growth accounting: active, new, returning, reactivated, and churned traders, plus quick ratio ((new + reactivated) / churned) and month-over-month retention rate.",
+    method: DYNAMICS_WINDOW_NOTE,
+  },
+  trader_retention: {
+    what: "Cohort retention triangle: for each monthly first-trade cohort, how many traders are still active N months later and what share of the cohort that is.",
+    method: DYNAMICS_WINDOW_NOTE,
   },
   // ---- patterns -----------------------------------------------------------
   solver_pair_matrix: {
@@ -164,18 +236,26 @@ export const DATASET_DOCS: Record<string, DatasetDoc> = {
     what: "Does the protocol fee policy correlate with execution quality? Surplus vs limit (bps) segmented by policy family.",
     method: "Fills joined to their fee rows (API-enriched subset only) and orders; median/p90 surplus per policy family. Correlation, not causation." + CAP_NOTE,
   },
+  quote_delta_quality: {
+    what: "Execution vs quoted price (bps) in basis-point bands per fee-policy family — how realized execution compared with the quote embedded in the fill's fee policy.",
+    method: "Only fills carrying a priceImprovement fee policy have an embedded quote — the ONLY quote source in the index (the quotes table is empty). Fills without one land in the 'unquoted' bucket instead of being dropped. This is quote-vs-execution delta, NOT user-perceived slippage." + CAP_NOTE,
+  },
   // ---- live ---------------------------------------------------------------
   live_pulse: {
     what: "Per-network indexing heartbeat: committed checkpoint block/time and how many seconds behind wall-clock the index is.",
     method: "Read from indexer checkpoints only (cheap; safe to poll). Drives the stale-chain banner and polling backoff.",
   },
   live_trades: {
-    what: "Fills executed in the last hour on this network, newest first.",
+    what: "Fills executed in the last hour on the selected network(s), newest first.",
     method: "Hard-bounded to one hour + small row limit; polled on a short shared cache so concurrent viewers cost one query.",
   },
   live_settlements: {
     what: "Settlement transactions landed in the last hour, with executor and fill counts.",
     method: "Same 1-hour bound; executor names from the bundled registry.",
+  },
+  live_minute_activity: {
+    what: "Last-hour heartbeat: settled fills and settlement transactions per minute and network — the band chart above the live feeds.",
+    method: "Hard-bounded to the last hour (the minute x network aggregate stays tiny at any load); polled on the same short shared cache as the feeds.",
   },
   live_open_orders: {
     what: "Orders currently waiting to execute: observed open, unexpired intents, newest first, with age and partial-fill progress.",

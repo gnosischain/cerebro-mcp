@@ -14,13 +14,24 @@ import { InfoBlocks, InfoPopover } from "../components/InfoPopover";
 import { datasetError } from "../../shared/datasetError";
 import { DATASET_GROUP } from "../model/datasetGroups";
 import { DATASET_DOCS } from "../model/datasetDocs";
+import { FACET_VIEWS, type FacetHostProps } from "../model/navGroups";
 import { solverName } from "../model/solverRegistry";
 import { SankeySvg } from "../../shared/svg-flow/SankeySvg";
+import { DepthPanel, type DepthHostProps } from "../components/DepthPanel";
 import { LiveSection } from "./LiveSection";
+import { OverviewSection } from "./OverviewSection";
+import { OrderTypesSection } from "./OrderTypesSection";
+import { SolverDirectorySection } from "./SolverDirectorySection";
+import { TraderDynamicsSection } from "./TraderDynamicsSection";
 
 type FetchRows = (viewId: string, datasetKey: string, pageToken?: string) => Promise<PageRowsResponse | null>;
 
-interface Props {
+/** The prop contract every section (and facet) view renders against.
+ * FACET-HOOK: `facet` arrives via FacetHostProps (model/navGroups.ts) and is
+ * non-null only when its host section equals the rendered `state.section`.
+ * DEPTH-HOOK: `onLoadDepthAt` arrives via DepthHostProps (components/
+ * DepthPanel.tsx) and is forwarded to the Markets depth panel. */
+export interface SectionProps extends FacetHostProps, DepthHostProps {
   state: CowExplorerViewState;
   descriptors: Record<string, DatasetDescriptor>;
   hydrated: Record<string, HydratedDataset>;
@@ -40,11 +51,13 @@ interface Props {
   liveAutoDefault?: boolean;
 }
 
-function toDataset(value?: HydratedDataset) {
+type Props = SectionProps;
+
+export function toDataset(value?: HydratedDataset) {
   return value ? { columns: value.columns, rows: value.rows } : undefined;
 }
 
-function dataset(hydrated: Record<string, HydratedDataset>, key: string) {
+export function dataset(hydrated: Record<string, HydratedDataset>, key: string) {
   return toDataset(hydrated[key]);
 }
 
@@ -52,13 +65,13 @@ function dataset(hydrated: Record<string, HydratedDataset>, key: string) {
 // inputs) — ChartCard renders with notMerge, so an unstable spec identity
 // tears down and re-animates the chart on every unrelated parent render.
 
-function formatNumber(value: number): string {
+export function formatNumber(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
 /** Section KPI header: every section opens with headline numbers instead of
  * dumping straight into a chart or table. */
-function KpiRow({ items, meta }: {
+export function KpiRow({ items, meta }: {
   items: Array<{ label: string; value: string }>;
   meta?: ReactNode;
 }) {
@@ -72,11 +85,35 @@ function KpiRow({ items, meta }: {
   );
 }
 
-function sumField(rows: Array<Record<string, unknown>>, field: string): number {
+export function sumField(rows: Array<Record<string, unknown>>, field: string): number {
   return rows.reduce((acc, row) => acc + Number(row[field] ?? 0), 0);
 }
 
-function GroupGate({ props, group, children }: {
+/** Tiny segmented control (e.g. the Absolute | Share % chart toggles). */
+export function SegmentedToggle<T extends string>({ value, options, onChange, label }: {
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  onChange: (value: T) => void;
+  label?: string;
+}) {
+  return (
+    <div className="cow-seg" role="group" aria-label={label ?? "View mode"}>
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          className={option.value === value ? "is-active" : ""}
+          aria-pressed={option.value === value}
+          onClick={() => onChange(option.value)}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function GroupGate({ props, group, children }: {
   props: Props;
   group: string;
   children: ReactNode;
@@ -134,11 +171,13 @@ export function DatasetErrorCard({ datasetKey, title, props, error }: {
 
 /** Chart wrapper with the same failure contract as Table: a dataset whose
  * query failed renders an explicit error card, never a blank/empty chart. */
-function ChartSection({ datasetKey, title, metaLabel, props, children }: {
+export function ChartSection({ datasetKey, title, metaLabel, props, actions, children }: {
   datasetKey: string;
   title: string;
   metaLabel?: string;
   props: Props;
+  /** Extra header affordances (e.g. an Absolute|Share toggle). */
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   const descriptor = props.descriptors[datasetKey];
@@ -146,14 +185,17 @@ function ChartSection({ datasetKey, title, metaLabel, props, children }: {
   if (error) {
     return <DatasetErrorCard datasetKey={datasetKey} title={title} props={props} error={error} />;
   }
+  const meta = actions
+    ? <span className="cow-section-actions">{actions}<CoverageInfo descriptor={descriptor} label={metaLabel} /></span>
+    : <CoverageInfo descriptor={descriptor} label={metaLabel} />;
   return (
-    <MaSection title={title} meta={<CoverageInfo descriptor={descriptor} label={metaLabel} />}>
+    <MaSection title={title} meta={meta}>
       {children}
     </MaSection>
   );
 }
 
-function Table({ datasetKey, title, props }: { datasetKey: string; title: string; props: Props }) {
+export function Table({ datasetKey, title, props }: { datasetKey: string; title: string; props: Props }) {
   const descriptor = props.descriptors[datasetKey];
   if (!descriptor) return null;
   const error = datasetError(descriptor);
@@ -175,7 +217,7 @@ function Table({ datasetKey, title, props }: { datasetKey: string; title: string
   );
 }
 
-function CoverageInfo({ descriptor, label = "About this data" }: { descriptor?: DatasetDescriptor; label?: string }) {
+export function CoverageInfo({ descriptor, label = "About this data" }: { descriptor?: DatasetDescriptor; label?: string }) {
   const docs = descriptor ? DATASET_DOCS[descriptor.key] : undefined;
   return (
     <InfoPopover label={label}>
@@ -184,7 +226,7 @@ function CoverageInfo({ descriptor, label = "About this data" }: { descriptor?: 
   );
 }
 
-function coverageMeta(descriptor?: DatasetDescriptor): string {
+export function coverageMeta(descriptor?: DatasetDescriptor): string {
   const coverage = descriptor?.provenance?.coverage as
     | { actual_start?: string | null; actual_end?: string | null; mode?: string; latest_source_observation?: string | null; fetched_at?: string | null; truncated?: boolean }
     | undefined;
@@ -197,51 +239,6 @@ function coverageMeta(descriptor?: DatasetDescriptor): string {
     coverage.fetched_at ? `fetched ${coverage.fetched_at}` : "",
     coverage.truncated ? "result truncated" : "",
   ].filter(Boolean).join(" · ") || "No matching rows in indexed window";
-}
-
-function Overview(props: Props) {
-  const networkActivity = props.hydrated.network_activity;
-  const networkActivitySpec = useMemo(
-    () => activityOption(toDataset(networkActivity), "trade_count", "chain_id"),
-    [networkActivity],
-  );
-  const summary = rowsToObjects(dataset(props.hydrated, "network_summary"));
-  const totals = summary.reduce<{ trades: number; orders: number; competitions: number }>(
-    (acc, row) => ({
-      trades: acc.trades + Number(row.trade_count ?? 0),
-      orders: acc.orders + Number(row.order_count ?? 0),
-      competitions: acc.competitions + Number(row.competition_count_all_indexed ?? 0),
-    }),
-    { trades: 0, orders: 0, competitions: 0 },
-  );
-  return (
-    <>
-      <KpiRow
-        items={[
-          { label: "Networks", value: formatNumber(summary.length) },
-          { label: "Settled fills", value: formatNumber(totals.trades) },
-          { label: "Observed orders", value: formatNumber(totals.orders) },
-          { label: "Settled competitions", value: formatNumber(totals.competitions) },
-        ]}
-        meta={<CoverageInfo descriptor={props.descriptors.network_summary} label="KPI methodology" />}
-      />
-      <Table datasetKey="coverage_matrix" title="Coverage matrix" props={props} />
-      <GroupGate props={props} group="breakdown">
-        <div className="cow-grid-2">
-          <ChartSection datasetKey="network_activity" title="Execution activity" props={props}>
-            {networkActivity ? <ChartCard renderer="svg" chartId="cow-network-activity" hideId title="Settled fills by network" spec={networkActivitySpec} /> : null}
-          </ChartSection>
-          <Table datasetKey="top_pairs" title="Top pairs by fill count" props={props} />
-        </div>
-      </GroupGate>
-      <Table datasetKey="network_summary" title="Indexed network summary" props={props} />
-      <GroupGate props={props} group="breakdown">
-        <CollapsibleSection title="Indexed fee-policy counts" defaultOpen={false}>
-          <Table datasetKey="fee_policy_counts" title="Indexed fee-policy counts" props={props} />
-        </CollapsibleSection>
-      </GroupGate>
-    </>
-  );
 }
 
 function Markets(props: Props) {
@@ -279,6 +276,12 @@ function Markets(props: Props) {
           {nativeReferences.length > 0 ? <ChartCard renderer="svg" chartId="cow-native-reference" hideId spec={nativeRefSpec} /> : <div className="cow-empty">No matching native-price API observations in this indexed window.</div>}
         </ChartSection>
         </div>
+      </GroupGate>
+      {/* DEPTH-HOOK mount: the pair order-book depth panel (markets.depth
+        * group). DepthPanelProps is a subset of SectionProps + onLoadDepthAt,
+        * so the full section props spread satisfies it. */}
+      <GroupGate props={props} group="depth">
+        <DepthPanel {...props} />
       </GroupGate>
       <GroupGate props={props} group="tape">
         <Table datasetKey="recent_market_trades" title="Recent settled fills" props={props} />
@@ -383,7 +386,7 @@ function Auctions(props: Props) {
   );
 }
 
-function CrossChainMatrix(props: Props) {
+export function CrossChainMatrix(props: Props) {
   const rows = rowsToObjects(dataset(props.hydrated, "solver_cross_chain"));
   if (rows.length === 0) {
     // Never blank — an all-networks Solvers view with no cross-chain rows
@@ -597,12 +600,25 @@ function Patterns(props: Props) {
       </GroupGate>
       <GroupGate props={props} group="quality">
         <Table datasetKey="fee_policy_quality" title="Fee-policy impact on execution quality" props={props} />
+        <Table datasetKey="quote_delta_quality" title="Execution vs quote (bps) by fee-policy family" props={props} />
       </GroupGate>
     </>
   );
 }
 
 export function SectionViews(props: Props) {
+  // FACET-HOOK dispatch: a non-null facet whose host section is the rendered
+  // server section replaces the host section's default view. CowExplorerApp
+  // guarantees the host equality by construction; the check here keeps a
+  // stale facet prop from ever rendering over the wrong section's datasets.
+  const facet = props.facet ?? null;
+  if (facet && FACET_VIEWS[facet].section === props.state.section) {
+    switch (facet) {
+      case "order_types": return <OrderTypesSection {...props} />;
+      case "solver_directory": return <SolverDirectorySection {...props} />;
+      case "trader_dynamics": return <TraderDynamicsSection {...props} />;
+    }
+  }
   switch (props.state.section) {
     case "live":
       return (
@@ -617,7 +633,7 @@ export function SectionViews(props: Props) {
           />
         </GroupGate>
       );
-    case "overview": return <Overview {...props} />;
+    case "overview": return <OverviewSection {...props} />;
     case "markets": return <Markets {...props} />;
     case "trades": return <Trades {...props} />;
     case "orders": return <Orders {...props} />;

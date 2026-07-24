@@ -29,3 +29,27 @@ export const CHAIN_SHORT_NAMES: Record<number, string> = {
   59144: "Linea",
   11155111: "Sepolia",
 };
+
+/** Stable per-chain series hues so chain-keyed charts match everywhere
+ * (share trend, live heartbeat, pies, treemaps). Mid-lightness picks chosen
+ * to stay distinguishable on BOTH the dark (#12161c) and light (white) card
+ * surfaces — no pair differs only in lightness. Sepolia is deliberately a
+ * neutral grey (testnet). */
+export const CHAIN_SERIES_COLORS: Record<number, string> = {
+  1: "#7B9CE1", // Ethereum — periwinkle blue
+  56: "#F5B14C", // BNB — amber
+  100: "#34d399", // Gnosis — green
+  137: "#A78BFA", // Polygon — violet
+  8453: "#5B7FE8", // Base — deeper cobalt (kept apart from Ethereum's lighter blue)
+  9745: "#FDBA74", // Plasma — light orange (warmer + lighter than BNB)
+  42161: "#67e8f9", // Arbitrum — cyan
+  43114: "#FF7A9C", // Avalanche — pink-red
+  57073: "#C6A6FF", // Ink — lavender (lighter than Polygon's violet)
+  59144: "#94a3b8", // Linea — slate
+  11155111: "#9ca3af", // Sepolia — neutral grey (testnet)
+};
+
+/** Series color for a chain id; deterministic fallback for unknown chains. */
+export function chainSeriesColor(chainId: number): string {
+  return CHAIN_SERIES_COLORS[chainId] ?? "#8b9db0";
+}

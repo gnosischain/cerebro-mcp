@@ -4,7 +4,7 @@ import { COW_EXPLORER_HELP } from "../shared/helpContent";
 import { MiniAppChrome } from "../shared/MiniAppChrome";
 import { ToastStack } from "../shared/ToastStack";
 import { WarningBanner } from "../shared/WarningBanner";
-import { useHydratedDatasets } from "../shared/useHydratedDatasets";
+import { useHydratedDatasets, type HydratedDataset } from "../shared/useHydratedDatasets";
 import { useMiniApp } from "../shared/useMiniApp";
 import { useSerializedLoader } from "../shared/useSerializedLoader";
 import { EntityDetail } from "./detail/EntityDetail";
@@ -12,25 +12,30 @@ import { MOCK_PAYLOAD } from "./devFixture";
 import { SectionViews } from "./sections/SectionViews";
 import { buildSectionToolArgs } from "./state/toolArgs";
 import { useGroupLoader } from "./state/useGroupLoader";
-import type { CowExplorerViewState, CowSection, EntityType, EnvironmentScope } from "./types";
+import {
+  FACET_VIEWS,
+  isCowFacet,
+  type CowNavDestination,
+  type FacetHostProps,
+} from "./model/navGroups";
+import type { CowExplorerViewState, CowFacet, CowSection, EntityType, EnvironmentScope } from "./types";
 import { readUrl, writeUrl, type CowUrlState } from "./urlState";
+import { CowNav } from "./components/CowNav";
+import type { DepthHostProps } from "./components/DepthPanel";
 import { InfoPopover } from "./components/InfoPopover";
 
 const APP_ID = "cow_explorer";
-const SECTIONS: Array<{ id: Exclude<CowSection, "entity">; label: string }> = [
-  { id: "live", label: "Live" },
-  { id: "overview", label: "Overview" },
-  { id: "markets", label: "Markets" },
-  { id: "trades", label: "Trades" },
-  { id: "orders", label: "Orders" },
-  { id: "auctions", label: "Auctions" },
-  { id: "solvers", label: "Solvers" },
-  { id: "traders", label: "Traders" },
-  { id: "patterns", label: "Patterns" },
-];
 const LIVE_GROUPS = ["core", "feed", "intents"];
+//: Deferred groups that must NOT be background-streamed — they run an expensive
+//: query and only make sense on explicit user action. `markets.depth_heatmap`
+//: loads when the Heatmap tab is opened (see DepthPanel's DEPTH-HEATMAP-HOOK).
+const ON_DEMAND_GROUPS = new Set(["markets.depth_heatmap"]);
 //: Mirror of the server's ALL_NETWORK_SECTIONS — sections that accept chain 0.
-const ALL_NETWORK_SECTIONS = new Set<CowSection>(["overview", "trades", "solvers", "traders", "auctions"]);
+//: Facets inherit their HOST section's membership (order_types→orders,
+//: solver_directory→solvers, trader_dynamics→traders).
+const ALL_NETWORK_SECTIONS = new Set<CowSection>([
+  "overview", "trades", "solvers", "traders", "auctions", "orders", "live",
+]);
 const LARGE_DATASETS = new Set(["recent_market_trades", "trades", "known_orders", "auctions"]);
 
 const WARNING_COPY: Record<string, string> = {
@@ -45,7 +50,36 @@ const WARNING_COPY: Record<string, string> = {
   coarsened_interval: "The requested candle interval was coarsened for this time window.",
   no_indexed_data: "No matching rows were found in the indexed window.",
   all_networks_unsupported: "This section is single-chain; a concrete network was selected for you.",
+  depth_reconstructed: "Historical book reconstructed from captured orders, fills, and cancellation events — bounded by the order-capture window.",
+  depth_heatmap_reconstructed: "Depth-over-time heatmap reconstructed from captured orders, fills, and cancellations; an order rests at full size until its completing fill (intra-fill size decay is not modeled).",
+  stale_scope: "A background dataset request arrived for a superseded scope and was ignored.",
 };
+
+//: Columns whose values are token addresses — the source of the visible-token
+//: set the icon overlay resolves. Mirrors the token-identity columns the
+//: curated cells render (cells.tsx) so the skip key covers exactly what shows.
+const TOKEN_COLUMNS = new Set(["token", "sell_token", "buy_token", "token0", "token1"]);
+
+/** Stable fingerprint of every token address visible in the hydrated
+ * datasets (sorted, lowercased, joined). The icon-overlay effect skips its
+ * server call when this key is unchanged since the last call — live polls
+ * re-attach the same feeds every 30s and must not re-resolve icons each time. */
+export function visibleTokenKey(hydrated: Record<string, HydratedDataset>): string {
+  const tokens = new Set<string>();
+  for (const dataset of Object.values(hydrated)) {
+    const indexes = dataset.columns
+      .map((column, index) => (TOKEN_COLUMNS.has(column) ? index : -1))
+      .filter((index) => index >= 0);
+    if (indexes.length === 0) continue;
+    for (const row of dataset.rows) {
+      for (const index of indexes) {
+        const value = row[index];
+        if (typeof value === "string" && value.startsWith("0x")) tokens.add(value.toLowerCase());
+      }
+    }
+  }
+  return [...tokens].sort().join(",");
+}
 
 function resolveWarnings(state: CowExplorerViewState): string[] {
   return [...new Set([...(state.coverage_warnings ?? []), ...(state.warnings ?? [])])]
@@ -125,10 +159,22 @@ export default function CowExplorerApp() {
   const [startAt, setStartAt] = useState("");
   const [endAt, setEndAt] = useState("");
   const [windowDays, setWindowDays] = useState("30");
+  // Active frontend facet (CLIENT-only view over a server section; the server
+  // never sees it). Seeded from the ?facet= URL param on first load.
+  const [facet, setFacet] = useState<CowFacet | null>(() =>
+    typeof window !== "undefined" ? (readUrl().facet || null) : null,
+  );
   const previousSection = useRef<Exclude<CowSection, "entity">>("overview");
   const groupLoader = useGroupLoader(callTool);
   const bootScopeRef = useRef("");
   const iconRetriedRef = useRef<Set<string>>(new Set());
+  // Icon-overlay economy: the `${view_id}|${visibleTokenKey}` of the LAST
+  // overlay call — an unchanged key (live polls re-attaching the same feeds)
+  // skips the call entirely. Read at fire time via hydratedRef so the key
+  // reflects whatever pages have landed by then.
+  const iconTokenKeyRef = useRef<string | null>(null);
+  const hydratedRef = useRef(hydrated);
+  hydratedRef.current = hydrated;
   // One-shot URL deep-link seed (standalone mode): filters/window/entity that
   // the server open route cannot map are applied by the FIRST section apply.
   const urlSeedRef = useRef<CowUrlState | null | undefined>(undefined);
@@ -148,7 +194,6 @@ export default function CowExplorerApp() {
     setStartAt(state.date_range.kind === "absolute" ? state.date_range.start_at.replace("Z", "").slice(0, 16) : "");
     setEndAt(state.date_range.kind === "absolute" ? state.date_range.end_at.replace("Z", "").slice(0, 16) : "");
     if (state.date_range.kind === "relative" && state.date_range.window_days) setWindowDays(String(state.date_range.window_days));
-    if (typeof window !== "undefined" && window.__MINI_APP_API__) writeUrl(state);
     updateModelContext({
       section: state.section,
       scope: state.environment_scope,
@@ -162,6 +207,14 @@ export default function CowExplorerApp() {
   // Depending on the full state object made controlled inputs snap back on
   // every local keystroke because some hosts recreate payload objects.
   }, [state?.scope_id, state?.applied_request_id]);
+
+  // URL sync lives apart from the draft-sync effect above because the facet
+  // is CLIENT state: toggling it must rewrite the URL without snapping the
+  // draft filter inputs back to server state.
+  useEffect(() => {
+    if (!state) return;
+    if (typeof window !== "undefined" && window.__MINI_APP_API__) writeUrl(state, facet);
+  }, [state?.scope_id, state?.applied_request_id, facet]);
 
   // Deferred-load driver. open_cow_explorer attaches NO datasets; this effect
   // (a) applies the initial section once (loads its core group), then
@@ -203,8 +256,14 @@ export default function CowExplorerApp() {
           }
           urlSeedRef.current = null;
         }
+        // A ?facet= deep link implies its HOST section (the facet is
+        // client-only; the server open route cannot map it). `facet` state
+        // was already seeded from the same URL read.
+        const bootSection = seed?.facet && FACET_VIEWS[seed.facet].section !== section
+          ? FACET_VIEWS[seed.facet].section
+          : section;
         loader.enqueue(buildSectionToolArgs(
-          view.view_id, state, section,
+          view.view_id, state, bootSection,
           { base, quote, status, owner, token, solver },
           overrides,
         ));
@@ -212,12 +271,30 @@ export default function CowExplorerApp() {
       return;
     }
     const missing = Object.entries(groups)
-      .filter(([key, value]) => key.startsWith(`${section}.`) && value === false)
+      .filter(([key, value]) => key.startsWith(`${section}.`) && value === false && !ON_DEMAND_GROUPS.has(key))
       .map(([key]) => key.slice(section.length + 1));
     if (missing.length > 0) {
       groupLoader.sync(view.view_id, section, missing, state.scope_id);
     }
   }, [view?.view_id, state?.scope_id, loadedGroupsKey, groupLoader.tick]);
+
+  // Facet group sync (mirrors the LIVE_GROUPS sync): once a facet's HOST
+  // section is applied, eagerly enqueue the facet's dataset groups so its
+  // view hydrates ahead of the generic background streaming above. Guarded
+  // until view_id/scope_id exist and the host core apply has landed; groups
+  // the server does not expose yet simply never flip to `false` and are
+  // skipped (safe while the backend groups land separately).
+  useEffect(() => {
+    if (!view || !state || !facet) return;
+    const { section: hostSection, groups: facetGroups } = FACET_VIEWS[facet];
+    if (state.section !== hostSection || !state.scope_id) return;
+    const groups = state.loaded_groups ?? {};
+    if (groups[`${hostSection}.core`] === false) return; // host apply pending
+    const missing = facetGroups.filter((group) => groups[`${hostSection}.${group}`] === false);
+    if (missing.length > 0) {
+      groupLoader.sync(view.view_id, hostSection, missing, state.scope_id);
+    }
+  }, [view?.view_id, facet, state?.scope_id, loadedGroupsKey, groupLoader.tick]);
 
   // Async token-icon overlay: after datasets settle, ask the server to map
   // visible tokens to CoinGecko icons (never blocks data loads). One retry
@@ -228,6 +305,14 @@ export default function CowExplorerApp() {
     if (Object.keys(state.dataset_revisions ?? {}).length === 0) return;
     const viewIdNow = view.view_id;
     const timer = setTimeout(() => {
+      // Skip when the visible token set is unchanged since the last call —
+      // the overlay for those tokens is already resolved (or pending its one
+      // retry below). An empty key means hydration has not surfaced any
+      // token column yet; stay conservative and let the server decide.
+      const tokenKey = visibleTokenKey(hydratedRef.current);
+      const callKey = `${viewIdNow}|${tokenKey}`;
+      if (tokenKey && callKey === iconTokenKeyRef.current) return;
+      iconTokenKeyRef.current = callKey;
       void callTool("load_cow_icon_overlay", { view_id: viewIdNow }).then((result) => {
         const payload = result as { warnings?: string[] } | null;
         if (
@@ -249,13 +334,36 @@ export default function CowExplorerApp() {
   }
 
   const viewId = view.view_id;
-  const sendSection = (
+  // Raw section apply — never touches facet state (navigate() manages it).
+  const applySection = (
     section: Exclude<CowSection, "entity">,
     overrides: Record<string, unknown> = {},
   ) => {
     loader.enqueue(buildSectionToolArgs(
       viewId, state, section, { base, quote, status, owner, token, solver }, overrides,
     ));
+  };
+  const sendSection = (
+    section: Exclude<CowSection, "entity">,
+    overrides: Record<string, unknown> = {},
+  ) => {
+    // Leaving a facet's host section (pair click-through, chain quick-links,
+    // entity back into another section, …) deactivates the facet; re-applying
+    // the host (filters, refresh, network change) keeps it.
+    if (facet && FACET_VIEWS[facet].section !== section) setFacet(null);
+    applySection(section, overrides);
+  };
+  const navigate = (dest: CowNavDestination) => {
+    if (isCowFacet(dest)) {
+      const hostSection = FACET_VIEWS[dest].section;
+      setFacet(dest);
+      // Same host already applied → the facet sync effect loads its groups;
+      // otherwise apply the host section first (groups follow once it lands).
+      if (state.section !== hostSection) applySection(hostSection);
+      return;
+    }
+    setFacet(null);
+    applySection(dest);
   };
   const loadEntity = (entityType: EntityType, identifier: string, chainId = state.chain_id) => {
     if (!identifier || !chainId) return;
@@ -267,6 +375,61 @@ export default function CowExplorerApp() {
   };
   const persistentWarnings = resolveWarnings(state);
   const activeSection = state.section === "entity" ? previousSection.current : state.section;
+  // Nav highlight: the facet wins over the raw server section (entity view
+  // keeps the previousSection fallback via activeSection above).
+  const activeDestination: CowNavDestination = facet ?? activeSection;
+  // The active destination's HOST server section — drives capability checks
+  // (all-networks support) even while the host apply is still in flight.
+  const hostSection = facet ? FACET_VIEWS[facet].section : activeSection;
+  // FACET-HOOK: threaded into <SectionViews> below via typed object spread.
+  // `facet` is non-null ONLY when its host section is the currently rendered
+  // server section, so the sections agent can dispatch on it directly:
+  //   props.facet === "order_types"      → render OrderTypesSection
+  //   props.facet === "solver_directory" → render SolverDirectorySection
+  //   props.facet === "trader_dynamics"  → render TraderDynamicsSection
+  // SectionViews' Props (sections/SectionViews.tsx) does not declare `facet`
+  // yet — extend it with FacetHostProps from model/navGroups.ts. Until then
+  // the prop is ignored and the host section's normal view renders.
+  const facetHostProps: FacetHostProps = {
+    facet: facet && FACET_VIEWS[facet].section === state.section ? facet : null,
+  };
+  // DEPTH-HOOK: threaded into <SectionViews> below via typed object spread,
+  // same channel as FACET-HOOK. The Markets depth panel
+  // (components/DepthPanel.tsx) calls this to move the pair book in time:
+  // "live" clears back to the live book, an ISO-8601 timestamp reconstructs
+  // the book at that moment. It is ONE additive `markets.depth` group load —
+  // the applied value is patched into state.depth_at server-side, and every
+  // section apply resets it to "". Routed through the serialized loader (the
+  // same mechanism section applies and entity loads use) so a burst of slider
+  // moves coalesces to the latest snapshot; the loader stamps request_id
+  // (group loads ignore it server-side). SectionViews' Props does not declare
+  // `onLoadDepthAt` yet — the sections agent extends it with DepthHostProps
+  // and forwards the prop to <DepthPanel {...props} />.
+  const depthHostProps: DepthHostProps = {
+    onLoadDepthAt: (ts) => {
+      loader.enqueue({
+        __tool: "load_cow_explorer_datasets",
+        view_id: viewId,
+        section: "markets",
+        group: "depth",
+        scope_id: state.scope_id,
+        depth_at: ts,
+      });
+    },
+    // DEPTH-HEATMAP-HOOK: one additive markets.depth_heatmap group load for the
+    // chosen window. Excluded from the background auto-sync below, so it only
+    // runs when the user opens the Heatmap tab (or changes its window).
+    onLoadDepthHeatmap: (heatmapWindow) => {
+      loader.enqueue({
+        __tool: "load_cow_explorer_datasets",
+        view_id: viewId,
+        section: "markets",
+        group: "depth_heatmap",
+        scope_id: state.scope_id,
+        heatmap_window: heatmapWindow,
+      });
+    },
+  };
   const utcValue = (value: string) => value ? `${value.length === 16 ? `${value}:00` : value}Z` : "";
 
   const controls = (
@@ -276,6 +439,7 @@ export default function CowExplorerApp() {
         value={state.environment_scope}
         onChange={(event) => {
           const scope = event.target.value as EnvironmentScope;
+          setFacet(null); // scope switch resets to overview — no facet host
           loader.enqueue({
             __tool: "load_cow_explorer_section", view_id: viewId, section: "overview",
             environment_scope: scope, chain_id: 0, window_days: 30,
@@ -289,7 +453,7 @@ export default function CowExplorerApp() {
         value={state.chain_id}
         onChange={(event) => sendSection(state.section === "entity" ? previousSection.current : state.section, { chain_id: Number(event.target.value), base_token: "", quote_token: "" })}
       >
-        {ALL_NETWORK_SECTIONS.has(activeSection) && <option value={0}>All networks</option>}
+        {ALL_NETWORK_SECTIONS.has(hostSection) && <option value={0}>All networks</option>}
         {state.chain_options.map((chain) => <option key={chain.chain_id} value={chain.chain_id}>{chain.name}</option>)}
       </select>
       <button type="button" disabled={loader.loading} onClick={() => sendSection(state.section === "entity" ? previousSection.current : state.section, { force_refresh: true })}>↻ Refresh</button>
@@ -298,15 +462,16 @@ export default function CowExplorerApp() {
   );
 
   const subBar = (
-    <div className="cow-subbar">
-      <div className="cow-section-tabs">
-        {SECTIONS.map((section) => <button key={section.id} type="button" className={state.section === section.id ? "is-active" : ""} onClick={() => sendSection(section.id)}>{section.label}</button>)}
-      </div>
-      <form className="cow-search" onSubmit={(event) => { event.preventDefault(); submitSearch(); }}>
-        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Order UID, tx, address, auction ID, symbol" aria-label="Universal CoW search" />
-        <button type="submit" disabled={loader.loading || !search.trim()}>Search</button>
-      </form>
-    </div>
+    <CowNav
+      activeDestination={activeDestination}
+      onNavigate={navigate}
+      searchSlot={(
+        <form className="cow-search" onSubmit={(event) => { event.preventDefault(); submitSearch(); }}>
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Order UID, tx, address, auction ID, symbol" aria-label="Universal CoW search" />
+          <button type="submit" disabled={loader.loading || !search.trim()}>Search</button>
+        </form>
+      )}
+    />
   );
 
   return (
@@ -398,6 +563,8 @@ export default function CowExplorerApp() {
           <EntityDetail state={state} descriptors={descriptors} hydrated={entityHydrated} viewId={viewId} fetchRows={fetchRows} onBack={() => sendSection(previousSection.current)} onEntity={loadEntity} openExternal={(url) => void openLink(url)} />
         ) : (
           <SectionViews
+            {...facetHostProps} /* FACET-HOOK: see facetHostProps above */
+            {...depthHostProps} /* DEPTH-HOOK: see depthHostProps above */
             state={state}
             descriptors={descriptors}
             hydrated={hydrated}
@@ -419,8 +586,11 @@ export default function CowExplorerApp() {
               groupLoader.sync(viewId, "live", LIVE_GROUPS, state.scope_id);
             }}
             liveAutoDefault={Boolean(
-              import.meta.env.DEV
-              || (typeof window !== "undefined" && window.__MINI_APP_API__),
+              // Auto-poll only where tool calls can actually reach the server
+              // (standalone web mode). Embedded hosts default to paused
+              // (existing behavior), and so does the pure-vite mock fixture —
+              // its polls could only fail and flip live groups to error cards.
+              typeof window !== "undefined" && window.__MINI_APP_API__,
             )}
           />
         )}

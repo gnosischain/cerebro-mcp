@@ -10,6 +10,12 @@ export type CowSection =
   | "patterns"
   | "entity";
 
+/** Frontend-only nav facets: client-side views over an existing server
+ * section (see model/navGroups.ts FACET_VIEWS). The server never sees a
+ * facet — it lives purely in client state plus the optional ?facet= URL
+ * param; the server keeps its flat 9-section model. */
+export type CowFacet = "order_types" | "solver_directory" | "trader_dynamics";
+
 export type EnvironmentScope = "production" | "testnet";
 export type EntityType = "order" | "transaction" | "address" | "token" | "auction" | "solver";
 
@@ -117,6 +123,14 @@ export interface CowExplorerViewState {
   section_lru?: string[];
   /** Async CoinGecko icon overlay: chain_id (string) → token → icon URL. */
   icon_overlay?: Record<string, Record<string, string>>;
+  /** Markets depth panel timestamp: "" = live book, ISO = reconstructed at T.
+   * Patched by `load_cow_explorer_datasets(depth_at=…)`; reset to "" on every
+   * section apply (scope change → live book). */
+  depth_at?: string;
+  /** Markets depth-heatmap window: "24h" | "7d" | "all". Patched by
+   * `load_cow_explorer_datasets(heatmap_window=…)`; reset to "7d" on every
+   * section apply. */
+  heatmap_window?: string;
   /** Persisted dataset titles for keys whose specs are no longer in scope. */
   dataset_titles?: Record<string, string>;
   title?: string;

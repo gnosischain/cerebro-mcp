@@ -1,11 +1,12 @@
-import type { CowExplorerViewState, CowSection, EnvironmentScope } from "./types";
+import { FACET_VIEWS, isCowFacet } from "./model/navGroups";
+import type { CowExplorerViewState, CowFacet, CowSection, EnvironmentScope } from "./types";
 
 // Managed query keys. writeUrl deletes ONLY these before re-setting, so
 // unmanaged params (?token=… auth) always survive. Defaults are omitted to
 // keep shared links clean.
 const URL_KEYS = [
   "scope", "chain", "section", "base", "quote", "interval", "start", "end",
-  "entity", "id", "days", "owner", "token_f", "status", "solver",
+  "entity", "id", "days", "owner", "token_f", "status", "solver", "facet",
 ];
 
 //: Mirror of the server's SECTION_DEFAULT_DAYS — default windows are omitted
@@ -38,15 +39,22 @@ export interface CowUrlState {
   token: string;
   status: string;
   solver: string;
+  /** Frontend-only facet view; "" when absent/invalid. A valid facet implies
+   * its host section (readUrl coerces `section` accordingly). */
+  facet: CowFacet | "";
 }
 
 export function readUrl(): CowUrlState {
   const p = new URLSearchParams(window.location.search);
   const days = p.get("days");
+  const rawFacet = p.get("facet") || "";
+  const facet: CowFacet | "" = isCowFacet(rawFacet) ? rawFacet : "";
   return {
     scope: (p.get("scope") as EnvironmentScope | null) ?? "",
     chain: Number(p.get("chain")) || 0,
-    section: (p.get("section") as CowSection | null) ?? "",
+    // A valid facet implies its host server section — the facet itself is
+    // client-only, so links like ?facet=order_types must still land on orders.
+    section: facet ? FACET_VIEWS[facet].section : ((p.get("section") as CowSection | null) ?? ""),
     base: p.get("base") || "",
     quote: p.get("quote") || "",
     interval: p.get("interval") || "",
@@ -59,10 +67,15 @@ export function readUrl(): CowUrlState {
     token: p.get("token_f") || "",
     status: p.get("status") || "",
     solver: p.get("solver") || "",
+    facet,
   };
 }
 
-export function writeUrl(state: CowExplorerViewState, push = false): void {
+export function writeUrl(
+  state: CowExplorerViewState,
+  facet: CowFacet | null = null,
+  push = false,
+): void {
   const p = new URLSearchParams(window.location.search);
   URL_KEYS.forEach((key) => p.delete(key));
   if (state.environment_scope !== "production") p.set("scope", state.environment_scope);
@@ -90,6 +103,12 @@ export function writeUrl(state: CowExplorerViewState, push = false): void {
   if (state.selected_entity) {
     p.set("entity", state.selected_entity.entity_type);
     p.set("id", state.selected_entity.identifier);
+  }
+  // Facet is CLIENT state (never in CowExplorerViewState) — the caller passes
+  // it alongside the server state. Only written while its host section (or
+  // the entity view over it) is active, so section+facet stay consistent.
+  if (facet && (state.section === FACET_VIEWS[facet].section || state.section === "entity")) {
+    p.set("facet", facet);
   }
   const qs = p.toString();
   const url = window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
