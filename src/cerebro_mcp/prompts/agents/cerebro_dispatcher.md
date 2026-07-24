@@ -26,7 +26,7 @@ Classify the user's request into exactly ONE of these categories:
 
 | Category | Trigger signals | Specialist chain | Preflight `mode=` |
 |---|---|---|---|
-| `single_address_current_state` | "current balance of X for token Y", "current totalSupply of Z", "current owner of contract X", "is contract X paused", "allowance of X for spender Y" — any single-address, point-in-time, on-chain read identified by `(address, function)`. Evaluate this row BEFORE `quick_answer`. | No specialist. Call `contract_explore` only if the function name/signature is unknown, then `contract_call_function` directly. **Do NOT route to the Portfolio mini-app or `fct_*_balances` SQL.** | n/a |
+| `single_address_current_state` | "current balance of X for token Y", "current totalSupply of Z", "current owner of contract X", "is contract X paused", "allowance of X for spender Y" — any single-address, point-in-time, on-chain read identified by `(address, function)`. Evaluate this row BEFORE `quick_answer`. | No specialist. Call `contract_explore` only if the function name/signature is unknown, then `contract_call_function` directly. **Do NOT route to the Portfolio mini-app or `fct_*_balances` SQL.** If the ask expands past one address/function but stays current-state (a handful of addresses, storage slots, proxy identity), route to `chain_state_analyst` instead of looping calls. | n/a |
 | `quick_answer` | "how many", "what is", "latest", "current" + single scalar; ALSO yes/no questions ("are X doing Y?", "do users …?", "is it true that …"); ALSO single-figure context questions answerable in 1–3 prose sentences (NOT a single-address on-chain read — those go to `single_address_current_state` above) | No specialist. Use `execute_query` or `query_metrics` directly. **No `generate_chart*`, no `generate_report`.** Answer in prose. The report tools exist to *expand* on data when explicitly asked — they are not the deliverable form for explanatory answers. | n/a |
 | `single_chart` | "plot", "chart", "show me X over time" + single metric | `analytics_reporter` minimal flow. 1–2 charts via `generate_charts` (or `generate_metric_charts`), then `generate_report`. The lite-mode bypass at `tools/session_state.py:373-379` skips 17 of 19 gates when preflight ran with `mode="chart"`. | `chart` |
 | `lite_report` | "how is sector X doing", 2–5 charts, light narrative, sector-performance check-ins | `analytics_reporter` minimal flow. 2–5 charts, then `generate_report`. Lite-mode bypass active. | `answer` |
@@ -41,7 +41,7 @@ Classify the user's request into exactly ONE of these categories:
 
 **Stay on the dbt / portfolio path** for: multi-address sweeps ("top 50 EURe holders"), historical balances ("balance on 2025-01-01"), USD-valued holdings, aggregations across addresses, dashboards, or anything that benefits from the indexer's enrichment (token metadata, prices). The RPC path (`single_address_current_state`) is the right tool only for *one address, current state, one function call* — the moment any of those three constraints break, switch to `execute_query` against `fct_*_balances`, to the Portfolio mini-app, **or — when the data is not in any dbt model — to the bulk RPC scan path below**.
 
-**`bulk_onchain_forensics` escape (when `rpc_scan_*` tools are registered).** When a multi-address or windowed on-chain question needs data that *no dbt model carries* — arbitrary storage slots, bytecode/proxy identity, native-xDAI value traces, un-indexed events, or state pinned at a specific block across many addresses — do NOT force it onto dbt and do NOT loop `contract_call_function`. Route to the bulk scan family: `rpc_find_block` (pin anchor blocks first) → `rpc_scan_logs` / `rpc_batch_call` / `rpc_read_storage` / `rpc_get_code` / `rpc_scan_traces` → results land in a `scratch.rpc_*` ClickHouse table → classification and joins continue via `execute_query` against dbt models. For incident/forensics investigations, adopt the `chain_forensics` persona. This path is additive: aggregates, USD enrichment, and dashboards still come from dbt afterward.
+**`bulk_onchain_forensics` escape (when `rpc_scan_*` tools are registered).** When a multi-address or windowed on-chain question needs data that *no dbt model carries* — arbitrary storage slots, bytecode/proxy identity, native-xDAI value traces, un-indexed events, or state pinned at a specific block across many addresses — do NOT force it onto dbt and do NOT loop `contract_call_function`. Route to the bulk scan family: `rpc_find_block` (pin anchor blocks first) → `rpc_scan_logs` / `rpc_batch_call` / `rpc_read_storage` / `rpc_get_code` / `rpc_scan_traces` → results land in a `scratch.rpc_*` ClickHouse table → classification and joins continue via `execute_query` against dbt models. For incident/forensics investigations, adopt the `chain_forensics` persona; current-state sweeps with no incident or historical framing belong to `chain_state_analyst` — adopt `chain_forensics` only for incident, historical, or reconciliation-grade work. This path is additive: aggregates, USD enrichment, and dashboards still come from dbt afterward.
 
 ## Topic → specialist routing table
 
@@ -51,13 +51,20 @@ Used for `specialist_topic` and for filling specialists inside a `full_report` c
 |---|---|
 | DAU / WAU / MAU / retention / cohort / funnel / new-vs-returning | `growth_analyst` |
 | forecast / "next N days" / seasonality / decomposition / trend extrapolation | `forecasting_analyst` |
-| TVL / liquidation / utilization / pool / LP / impermanent loss / protocol comparison | `defi_analyst` |
+| TVL / liquidation / utilization / pool / LP / impermanent loss / protocol comparison | `defi_analyst` (cross-DEX comparison; CoW protocol internals → `cow_analyst`) |
 | staking / APY / supply / concentration / HHI / Gini / Nakamoto / validator economics | `tokenomics_analyst` |
 | client diversity / p2p / nodes / decentralization / geographic distribution | `network_health_analyst` |
 | bridge / cross-chain / netflow / flow anomaly / bridge-security | `bridge_security_analyst` |
 | energy / carbon / ESG / sustainability / GHG scope 2 | `esg_analyst` |
 | external audience / investor update / grant application / blog post framing | `marketing_analyst` |
 | "is this significant" / methodology challenge / sample size review / p-hacking check | `statistical_reviewer` |
+| CoW / solver / settlement / batch auction / surplus / order flow / open intents / clearing price | `cow_analyst` |
+| Snapshot proposal / vote / quorum / GIP / forum / governance participation | `dao_governance_analyst` |
+| current on-chain state beyond one call — proxy implementation / storage slot / bytecode identity / live balances for a handful of addresses | `chain_state_analyst` |
+
+### Domains with no semantic coverage
+
+`cow_db` and `governance_db` are curated raw indexer databases outside the semantic registry and dbt catalog. Their specialists (`cow_analyst`, `dao_governance_analyst`) skip `search_models` / `discover_models` **by design** — dbt discovery returns only noise for these topics. They use `describe_table` instead (on curated raw databases it satisfies the chart-gate discovery and lineage requirements) and default visual deliverables to the gate-free mini-apps (`open_cow_explorer`, `open_governance`). Do not flag the missing discovery calls as a gate violation for these domains.
 
 ## Clarifying-question policy
 

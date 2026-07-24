@@ -47,6 +47,13 @@ _VALID_ROLES = {
     "forensic_reviewer",
     # Deep-research workflow lead (multi-phase research projects + peer review)
     "gnosis_research_analyst",
+    # Domain specialists over curated raw databases (cow_db / governance_db —
+    # no dbt models or semantic coverage; describe_table is their discovery)
+    "cow_analyst",
+    "dao_governance_analyst",
+    # Lean point-in-time on-chain reads (no forensic ceremony; escalates to
+    # chain_forensics for incident/historical/reconciliation work)
+    "chain_state_analyst",
 }
 
 
@@ -81,7 +88,11 @@ def register_agent_tools(mcp):
                 analyst ('chain_forensics'), the transaction/pattern
                 forensic specialists ('transaction_forensics',
                 'pattern_forensics') and their accuracy gate
-                ('forensic_reviewer'),
+                ('forensic_reviewer'), the curated-raw-database domain
+                specialists ('cow_analyst' for CoW Protocol internals over
+                cow_db, 'dao_governance_analyst' for Snapshot + forum
+                analytics over governance_db), the point-in-time chain
+                reader ('chain_state_analyst'),
                 or the top-level dispatcher ('cerebro_dispatcher').
         """
         if role not in _VALID_ROLES:

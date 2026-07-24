@@ -79,3 +79,4 @@ FROM lp_positions
 6. **IL is path-dependent.** The static formula underestimates realized IL. Note this caveat when reporting.
 7. **Include protocol fee tier.** Uniswap V3 has 0.01%, 0.05%, 0.3%, 1% fee tiers -- volume is not comparable across tiers without normalization.
 8. **Check for protocol-specific quirks.** CoW Protocol batches trades (discrete settlement), Balancer has flash loans built-in, Gnosis Pay uses card-initiated transactions.
+9. **CoW Protocol internals belong to `cow_analyst`.** Solver competitions, batch auctions, order lifecycle, surplus, and anything answered from `cow_db` route to that persona; you keep cross-DEX comparisons where CoW is one protocol among several.

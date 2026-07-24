@@ -18,7 +18,10 @@ import pytest
 
 
 # Personas whose toolkit references namespaced dbt.* tables that may not
-# exist — they MUST carry a verification warning.
+# exist — they MUST carry a verification warning. The curated-raw-DB
+# personas (cow_db / governance_db) reference concrete table names too;
+# their warning additionally tells the agent NOT to run search_models
+# (no semantic coverage) and to verify with describe_table instead.
 PERSONAS_NEEDING_WARNING = [
     "growth_analyst",
     "tokenomics_analyst",
@@ -26,6 +29,8 @@ PERSONAS_NEEDING_WARNING = [
     "bridge_security_analyst",
     "esg_analyst",
     "mta_analyst",
+    "cow_analyst",
+    "dao_governance_analyst",
 ]
 
 # Model names that appeared in the MTA persona's planning context. They

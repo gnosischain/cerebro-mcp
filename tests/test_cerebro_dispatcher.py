@@ -76,6 +76,10 @@ SPECIALISTS_DISPATCHER_MUST_NAME = [
     "storyteller_orchestrator",
     "analytics_reporter",
     "reality_checker",
+    # domain data-plane specialists (curated raw DBs + point-in-time chain)
+    "cow_analyst",
+    "dao_governance_analyst",
+    "chain_state_analyst",
 ]
 
 
@@ -169,6 +173,9 @@ def test_dispatcher_prompt_registered_in_templates():
         "mta_analyst",
         "unified_causal_reviewer",
         "unified_allocator",
+        "cow_analyst",
+        "dao_governance_analyst",
+        "chain_state_analyst",
     ],
 )
 def test_existing_roles_still_registered(role):
