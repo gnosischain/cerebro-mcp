@@ -2,9 +2,18 @@ import type { NumberDisplaySpec } from "../types";
 
 interface Props {
   spec: NumberDisplaySpec;
+  /** Title already rendered by the hosting card — suppress the duplicate
+   * eyebrow when the spec's title matches it. */
+  cardTitle?: string;
 }
 
-export function NumberDisplay({ spec }: Props) {
+function sameTitle(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  return norm(a) === norm(b);
+}
+
+export function NumberDisplay({ spec, cardTitle }: Props) {
   const formattedValue = formatScalar(spec.value, spec.format);
   const changeDirection = spec.change?.direction ?? inferDirection(spec.change?.value);
   const formattedChange = spec.change
@@ -20,7 +29,9 @@ export function NumberDisplay({ spec }: Props) {
 
   return (
     <div className="number-display number-display--gnosis">
-      {spec.title && <div className="nd-eyebrow">{spec.title}</div>}
+      {spec.title && !sameTitle(spec.title, cardTitle) && (
+        <div className="nd-eyebrow">{spec.title}</div>
+      )}
       <div className="nd-value">{formattedValue}</div>
       {spec.change && (
         <div className={deltaClass}>

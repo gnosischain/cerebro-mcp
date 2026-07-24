@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 
 import "../lib/echarts-setup";
+import { applyReportPresentation } from "../lib/chartPresentation";
 import { getWatermarkGraphic } from "../assets/watermark";
 import { useTheme } from "../hooks/useTheme";
+import { ChartSurfaceContext } from "./chartSurface";
 import { isNumberDisplay, type ChartSpec } from "../types";
 import { NumberDisplay } from "./NumberDisplay";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -18,6 +20,10 @@ interface Props {
   /** Hide the CHART_NN id badge (mini-app hosts have no chart numbering). */
   hideId?: boolean;
   onEvents?: Record<string, (params: unknown) => void>;
+  /** Called once with the ECharts instance when the chart mounts — for
+   * low-level wiring (e.g. zrender clicks + convertFromPixel) not expressible
+   * through onEvents. */
+  onChartReady?: (chart: unknown) => void;
   /**
    * ECharts renderer. Defaults to canvas (existing behavior for reports and
    * other mini-apps). "svg" renders vector text/marks that stay crisp at any
@@ -112,8 +118,19 @@ function chartLabel(chartId: string): string {
   return chartId.replace(/^chart[_-]?/i, "CHART_").toUpperCase();
 }
 
-function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEvents, renderer = "canvas" }: Props) {
+function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEvents, onChartReady, renderer = "canvas" }: Props) {
   const { isDark } = useTheme();
+  // Mini-app surfaces (near-black/white paper) need the `-mini` label themes;
+  // reports keep the indigo/cream "Terminal" themes.
+  const surface = useContext(ChartSurfaceContext);
+  const echartsTheme =
+    surface === "mini"
+      ? isDark
+        ? "cerebro-dark-mini"
+        : "cerebro-light-mini"
+      : isDark
+        ? "cerebro-dark"
+        : "cerebro-light";
   const [showSql, setShowSql] = useState(false);
 
   const label = chartLabel(chartId);
@@ -128,7 +145,7 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEven
           <div className="chart-card-title">{title || spec.title || ""}</div>
           {!hideId && <div className="chart-card-id">{label}</div>}
         </div>
-        <NumberDisplay spec={spec} />
+        <NumberDisplay spec={spec} cardTitle={title || spec.title} />
         {sql && (
           <div className="chart-card-foot chart-card-foot--kpi">
             <span className="spacer" />
@@ -152,7 +169,14 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEven
   }
 
   const echartsOption = useMemo(() => {
-    const opt = { ...(spec as EChartsOption) };
+    // Reports get the editorial presentation pass (compact axis values,
+    // date-aware ticks, humanized names). Mini-app surfaces ship curated
+    // specs and are left untouched.
+    const base =
+      surface === "mini"
+        ? (spec as EChartsOption)
+        : applyReportPresentation(spec as EChartsOption, title);
+    const opt = { ...base };
     opt.graphic = getWatermarkGraphic(isDark);
     opt.animation = true;
     opt.animationDuration = 1000;
@@ -185,7 +209,7 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEven
       },
     };
     return opt;
-  }, [spec, isDark]);
+  }, [spec, isDark, surface, title]);
 
   const chartHeight =
     ((spec as Record<string, unknown>)?._cerebro_height as string) || "350px";
@@ -231,10 +255,11 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEven
         <ReactECharts
           ref={echartsRef}
           option={echartsOption}
-          theme={isDark ? "cerebro-dark" : "cerebro-light"}
+          theme={echartsTheme}
           style={{ width: "100%", height: chartHeight }}
           notMerge
           onEvents={onEvents}
+          onChartReady={onChartReady as ((instance: unknown) => void) | undefined}
           opts={rendererOpts}
         />
       </div>

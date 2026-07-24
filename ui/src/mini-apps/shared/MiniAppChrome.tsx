@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { MaThemeToggle } from "./MaThemeToggle";
+import { ChartSurfaceContext } from "../../components/chartSurface";
 import "./mini-app-chrome.css";
 
 export interface MiniAppTab {
@@ -117,6 +118,10 @@ export function MiniAppChrome({
   const homeHref = catalogHref();
 
   return (
+    // Every chart mounted under the mini-app chrome renders on the cool
+    // near-black `.mini-app-scope` surface — flag the surface so ChartCard
+    // picks the `cerebro-*-mini` ECharts themes instead of the report themes.
+    <ChartSurfaceContext.Provider value="mini">
     <div className="ma-chrome mini-app-scope">
       <nav className="ma-bar">
         {/* The brand doubles as "home" — the way back to the app catalog.
@@ -188,6 +193,7 @@ export function MiniAppChrome({
         {children}
       </div>
     </div>
+    </ChartSurfaceContext.Provider>
   );
 }
 

@@ -1,11 +1,23 @@
-// Gnosis "Terminal" — LIGHT ECharts theme.
-// Series order: index 0 = line, 1 = bar, full array = donut. Lime darkens to
-// #5E7A0A so it holds contrast on the cream canvas.
-const palette = ["#5E7A0A", "#5B44E0", "#D64B6A", "#1E9AA8", "#8A6DEF", "#C08A2E"];
+// Report LIGHT ECharts theme — editorial "research desk" palette.
+// Slot order is fixed (teal, amber, blue, rose, violet, cyan, olive, magenta)
+// and validated with the dataviz six-checks validator against the white chart
+// surface: lightness band, chroma floor, adjacent-pair CVD separation, and
+// >=3:1 mark contrast all pass with no waivers. Do not reorder or eyeball-
+// tweak slots — re-run the validator if a hue must change.
+const palette = [
+  "#0E8C6E", // teal    — lead series (value / USD in most reports)
+  "#C0862A", // amber   — counter series (EUR / secondary)
+  "#3B66C4", // blue
+  "#C2547A", // rose
+  "#7C5BD2", // violet
+  "#0F86A1", // cyan
+  "#6A8A2A", // olive
+  "#A84FB0", // magenta
+];
 
 const ink = "#14102e";
 const muted = "#726c97";
-const rule = "rgba(20,16,46,0.12)";
+const rule = "rgba(20,16,46,0.10)";
 const surface = "#ffffff";
 
 const fontMono = "JetBrains Mono, ui-monospace, Menlo, monospace";
@@ -19,6 +31,10 @@ export const ECHARTS_LIGHT = {
   },
   legend: {
     textStyle: { color: muted, fontFamily: fontMono, fontSize: 11 },
+    itemWidth: 14,
+    itemHeight: 8,
+    icon: "roundRect",
+    itemGap: 18,
   },
   tooltip: {
     backgroundColor: "rgba(255,255,255,0.97)",
@@ -31,18 +47,34 @@ export const ECHARTS_LIGHT = {
   categoryAxis: {
     axisLine: { show: false },
     axisTick: { show: false },
-    axisLabel: { color: muted, fontFamily: fontMono, fontSize: 10 },
+    axisLabel: { color: muted, fontFamily: fontMono, fontSize: 11, hideOverlap: true },
+    // valueAxis/logAxis already carry nameTextStyle; categoryAxis was missing it.
+    nameTextStyle: { color: muted, fontFamily: fontMono, fontSize: 11 },
     splitLine: { show: false },
   },
   valueAxis: {
     axisLine: { show: false },
     axisTick: { show: false },
-    axisLabel: { color: muted, fontFamily: fontMono, fontSize: 10 },
+    axisLabel: { color: muted, fontFamily: fontMono, fontSize: 11 },
+    nameTextStyle: { color: muted, fontFamily: fontMono, fontSize: 11 },
     splitLine: {
       lineStyle: { color: rule, type: [2, 3] as unknown as "dashed" },
     },
   },
-  line: { lineStyle: { width: 2.4 }, smooth: true, symbolSize: 0 },
+  logAxis: {
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: { color: muted, fontFamily: fontMono, fontSize: 11 },
+    nameTextStyle: { color: muted, fontFamily: fontMono, fontSize: 11 },
+    splitLine: {
+      lineStyle: { color: rule, type: [2, 3] as unknown as "dashed" },
+    },
+  },
+  line: { lineStyle: { width: 2 }, smooth: 0.15, symbolSize: 0, symbol: "none" },
   bar: { itemStyle: { borderRadius: [3, 3, 0, 0] } },
-  pie: { itemStyle: { borderColor: surface, borderWidth: 2 } },
+  scatter: { itemStyle: { borderColor: "rgba(255,255,255,0.9)", borderWidth: 1 } },
+  pie: { itemStyle: { borderColor: surface, borderWidth: 2 }, label: { color: ink } },
+  // On-canvas node/flow labels don't inherit textStyle.color.
+  sankey: { label: { color: ink } },
+  graph: { label: { color: ink } },
 };

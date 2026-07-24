@@ -44,6 +44,31 @@ export function ResearchReportLayout({ data }: Props) {
     );
     setTocEntries(entries);
 
+    // Financial-table treatment: right-align + tabular-nums for columns that
+    // are predominantly numeric ($1.2M, 45%, 39,914 …). Detected per column
+    // so label columns stay left-aligned.
+    const NUMERIC_CELL = /^[\s$€£+-]*[\d,.]+\s*([%KMBT]|bps|pp)?\s*$/;
+    root.querySelectorAll<HTMLTableElement>("table").forEach((table) => {
+      const bodyRows = Array.from(table.tBodies).flatMap((b) =>
+        Array.from(b.rows)
+      );
+      if (bodyRows.length === 0) return;
+      const colCount = Math.max(...bodyRows.map((r) => r.cells.length));
+      for (let c = 0; c < colCount; c++) {
+        const cells = bodyRows
+          .map((r) => r.cells[c])
+          .filter((cell): cell is HTMLTableCellElement => cell != null);
+        const numeric = cells.filter((cell) =>
+          NUMERIC_CELL.test(cell.textContent ?? "")
+        );
+        if (cells.length > 0 && numeric.length >= cells.length * 0.7) {
+          cells.forEach((cell) => cell.classList.add("rr-num"));
+          const head = table.tHead?.rows[0]?.cells[c];
+          head?.classList.add("rr-num");
+        }
+      }
+    });
+
     const mounts: { chartId: string; el: HTMLElement }[] = [];
     root.querySelectorAll<HTMLElement>(".chart-container").forEach((el) => {
       const idAttr = el.id;
@@ -113,6 +138,10 @@ export function ResearchReportLayout({ data }: Props) {
             {readingMinutes != null && (
               <span className="rr-reading">{readingMinutes} min read</span>
             )}
+            <span className="rr-stamp">
+              Data as of {formatStamp(data.timestamp)} · Cerebro / Gnosis dbt
+              warehouse
+            </span>
           </div>
         </header>
 
@@ -196,6 +225,8 @@ function ChartHost({ chartId, spec, title, queries }: ChartHostProps) {
       spec={spec}
       title={title}
       sql={queries?.[chartId]?.sql}
+      sourceModel={queries?.[chartId]?.source_model}
+      hideId
     />
   );
 }
@@ -215,7 +246,7 @@ function ResearchTOC({
       <div className="rr-toc-inner">
         <div className="rr-toc-label">Contents</div>
         <ol className="rr-toc-list">
-          {entries.map((e) => (
+          {entries.map((e, i) => (
             <li
               key={e.id}
               className={
@@ -223,7 +254,12 @@ function ResearchTOC({
                 (activeId === e.id ? " rr-toc-item--active" : "")
               }
             >
-              <a href={`#${e.id}`}>{e.title}</a>
+              <a href={`#${e.id}`}>
+                <span className="rr-toc-num">
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+                {e.title}
+              </a>
             </li>
           ))}
         </ol>
@@ -303,6 +339,17 @@ function formatPublishedDate(iso?: string): string {
   return d.toLocaleDateString(undefined, {
     year: "numeric",
     month: "long",
+    day: "numeric",
+  });
+}
+
+function formatStamp(iso?: string): string {
+  if (!iso) return "latest snapshot";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
     day: "numeric",
   });
 }

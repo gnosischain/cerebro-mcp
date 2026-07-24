@@ -120,6 +120,12 @@
   color: var(--text-secondary);
   font-weight: 500;
 }
+.rr-stamp {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
 
 /* --- Key takeaways --- */
 .rr-takeaways {
@@ -216,6 +222,16 @@
   transition: color 0.15s;
   display: block;
 }
+.rr-toc-num {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  margin-right: 0.5rem;
+  letter-spacing: 0.04em;
+}
+.rr-toc-item--active .rr-toc-num {
+  color: var(--primary);
+}
 .rr-toc-item a:hover {
   color: var(--text-primary);
 }
@@ -233,6 +249,7 @@
   font-size: var(--rr-body-size);
   line-height: var(--rr-body-line);
   color: var(--text-primary);
+  counter-reset: rr-section;
 }
 .rr-prose p {
   margin: 0 0 1.25rem;
@@ -244,8 +261,21 @@
   line-height: 1.2;
   letter-spacing: -0.01em;
   color: var(--text-primary);
-  margin: 3rem 0 1.25rem;
+  margin: 3.5rem 0 1.25rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
   scroll-margin-top: 5rem;
+  counter-increment: rr-section;
+}
+.rr-prose h2.rr-section-heading::before {
+  content: counter(rr-section, decimal-leading-zero);
+  display: block;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--primary);
+  margin-bottom: 0.5rem;
 }
 .rr-prose h3 {
   font-family: var(--rr-serif);
@@ -311,6 +341,16 @@
   padding: 0.75rem 0.5rem;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
+}
+/* Numeric columns (detected at mount): right-aligned tabular figures */
+.rr-prose th.rr-num,
+.rr-prose td.rr-num {
+  text-align: right;
+}
+.rr-prose td.rr-num {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
 }
 .rr-prose blockquote {
   margin: 1.5rem 0 1.75rem;
@@ -402,21 +442,52 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface-1);
-  padding: 1.25rem;
+  padding: 0.5rem 0.5rem 0.25rem;
+}
+/* The ChartCard portal renders its own .chart-card inside the figure frame —
+   flatten it so the figure shows a single clean border, and promote its
+   title row to a proper figure heading. */
+.rr-prose .rr-figure-chart .chart-card {
+  border: none;
+  background: transparent;
+  margin: 0;
+  border-radius: 0;
+}
+.rr-prose .rr-figure-chart .chart-card-head {
+  padding: 0.85rem 0.9rem 0.35rem;
+}
+.rr-prose .rr-figure-chart .chart-card-title {
+  font-family: var(--rr-sans);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.rr-prose .rr-figure-chart .chart-card-foot {
+  border-top: none;
+  padding: 0.15rem 0.9rem 0.5rem;
+  font-size: 10.5px;
+}
+.rr-prose .rr-figure-chart .chart-card-foot .src {
+  color: var(--text-muted);
 }
 .rr-prose .rr-figure-caption {
-  margin-top: 0.75rem;
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--border);
   font-family: var(--rr-sans);
   font-size: 0.8125rem;
-  line-height: 1.5;
-  color: var(--text-muted);
+  line-height: 1.55;
+  color: var(--text-secondary);
   text-align: left;
 }
 .rr-prose .rr-figure-source {
-  display: inline-block;
-  margin-left: 0.75rem;
+  display: block;
+  margin-top: 0.35rem;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.6875rem;
   color: var(--text-muted);
-  font-style: italic;
+  font-style: normal;
+  letter-spacing: 0.02em;
 }
 .rr-prose .rr-figure--missing {
   padding: 2rem;
