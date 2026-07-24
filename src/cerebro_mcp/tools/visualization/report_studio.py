@@ -1,5 +1,10 @@
-"""Report Studio mini app — browse, preview, and manage the report archive,
-and compose new dashboard reports from recent chart records.
+"""Report Studio mini app — the report Archive (landing tab) plus a catalog
+of benchmarked instruction templates whose agent runs produce those reports.
+
+The template catalog itself is COMPILE-TIME data shipped inside the UI bundle
+(``ui/src/mini-apps/report-studio/model/catalog.gen.json``, generated from
+``catalog/templates/*.md`` by ``make gen-catalog``); the backend serves only
+the archive surface. There is deliberately no construction/composer surface.
 
 Archive source of truth: the flat HTML files in the report directory
 (``CEREBRO_REPORT_DIR``, default ``~/.cerebro/reports``). The gallery lists
@@ -7,10 +12,10 @@ filename-derived metadata only (cheap — no multi-MB HTML reads); opening an
 entry extracts the embedded ``<script id="report-data">`` payload for a
 native in-app preview.
 
-TRUST MODEL: report files and the chart-record registry are process-global
-with no per-user owner. Mutations (delete/rename/compose) AND chart-record
-reads are gated by ``settings.REPORT_STUDIO_ALLOW_MUTATIONS`` — shared SSE
-deployments should turn that off.
+TRUST MODEL: report files are process-global with no per-user owner.
+Mutations (delete/rename) are gated by
+``settings.REPORT_STUDIO_ALLOW_MUTATIONS`` — shared SSE deployments should
+turn that off.
 """
 
 from __future__ import annotations
@@ -37,11 +42,6 @@ DEFAULT_TITLE = "Report Studio"
 
 _ARCHIVE_MAX_LIMIT = 200
 _MAX_TITLE = 200
-_MAX_SUBTITLE = 300
-_MAX_SECTIONS = 40
-_MAX_SECTION_MARKDOWN = 20_000
-_MAX_TOTAL_CHARTS = 30
-_MAX_SUMMARY_NUMBERS = 12
 
 
 # --- Bundled React UI ---
@@ -217,8 +217,12 @@ def _mutations_blocked() -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# Registration
+# Composer helpers (shared across report | research | case_study kinds)
 # ---------------------------------------------------------------------------
+
+_MAX_DECK = 240
+_MIN_HIGHLIGHTS = 3  # key_takeaways (research) / key_points (case study)
+_MAX_HIGHLIGHTS = 6
 
 
 def register_report_studio_tools(
@@ -244,11 +248,12 @@ def register_report_studio_tools(
     def open_report_studio(
         query: str = "", kind: str = "", report: str = ""
     ) -> CallToolResult:
-        """Open the Report Studio: browse, preview, and manage generated
-        reports, and compose new dashboards from recent chart records.
+        """Open the Report Studio: browse and manage the archive of generated
+        reports, plus a catalog of benchmarked instruction templates
+        (copyable prompts with measured delivery time, tokens, and cost).
 
-        Call when the user asks to see/browse/manage their reports or the
-        report archive interactively.
+        Call when the user asks for report/analysis templates, example
+        prompts, "what can I ask", or to browse/manage their report archive.
 
         Args:
             query: Optional archive search (matches filename slug/id).
@@ -280,11 +285,6 @@ def register_report_studio_tools(
                 "screen": "preview" if entry and entry.get("ok") else "archive",
                 "archive": archive,
                 "selected_entry": entry,
-                # Chart records are process-global (server-wide, 2h TTL) —
-                # omitted entirely when the composer surface is disabled.
-                "session_charts": (
-                    {"charts": _charts.list_chart_records()} if allow else None
-                ),
                 "report_dir": str(_report_dir_no_create()),
                 "mutations_enabled": allow,
             },
@@ -458,253 +458,12 @@ def register_report_studio_tools(
             "link": _charts._get_report_link(new_path),
         }
 
-    # ------------------------------------------------------------------
-    # App-only: composer (gated with ALL chart-record surfaces)
-    # ------------------------------------------------------------------
-
-    @mcp.tool(meta=mini_apps.APP_ONLY_META)
-    def list_session_charts() -> dict[str, Any]:
-        """[App-only] Recent chart records (server-wide registry, 2h TTL),
-        WITHOUT the heavy ECharts options."""
-        if (blocked := _mutations_blocked()) is not None:
-            return blocked
-        return {"ok": True, "charts": _charts.list_chart_records()}
-
-    @mcp.tool(meta=mini_apps.APP_ONLY_META)
-    def get_session_chart(chart_id: str) -> dict[str, Any]:
-        """[App-only] One chart record incl. its ECharts option (lazy
-        thumbnail hydration for the composer picker)."""
-        if (blocked := _mutations_blocked()) is not None:
-            return blocked
-        record = _charts.get_chart_record(chart_id)
-        if record is None:
-            return {"ok": False, "error": f"Unknown or expired chart '{chart_id}'."}
-        return {"ok": True, **record}
-
-    @mcp.tool(meta=mini_apps.APP_ONLY_META)
-    def create_studio_chart(
-        sql: str,
-        chart_type: str = "line",
-        x_field: str = "",
-        y_field: str = "",
-        series_field: str = "",
-        change_field: str = "",
-        title: str = "",
-        database: str = "dbt",
-        max_rows: int = 500,
-    ) -> dict[str, Any]:
-        """[App-only] Run SQL and register a chart record for the composer.
-
-        Human-driven chart creation from inside the Report Studio — the
-        agent's raw-chart gates and session counters are bypassed by
-        construction; the SQL still runs through the full ClickHouse guard
-        stack (SELECT-only validation, allowed databases, readonly session).
-        The new record lands in the same registry the composer picks from
-        (2h TTL).
-        """
-        if (blocked := _mutations_blocked()) is not None:
-            return blocked
-        if ch is None:
-            return {"ok": False, "error": "No database connection available."}
-        head = (sql or "").lstrip()[:8].upper()
-        if not (head.startswith("SELECT") or head.startswith("WITH")):
-            return {
-                "ok": False,
-                "error": "Chart SQL must start with SELECT or WITH.",
-            }
-        if len((title or "")) > _MAX_TITLE:
-            return {"ok": False, "error": f"Title exceeds {_MAX_TITLE} chars."}
-        return _charts.create_chart_record_from_sql(
-            ch,
-            sql,
-            database=database,
-            chart_type=chart_type,
-            x_field=x_field,
-            y_field=y_field,
-            change_field=change_field,
-            series_field=series_field,
-            title=title,
-            max_rows=max_rows,
-        )
-
-    @mcp.tool(meta=mini_apps.APP_ONLY_META)
-    def compose_report(
-        title: str,
-        sections: list[dict[str, Any]],
-        subtitle: str = "",
-        summary_numbers: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """[App-only] Assemble a dashboard report from chart records +
-        markdown sections (human-composed: the agent quality gates are
-        bypassed by construction; chart existence and layout rules still
-        apply).
-
-        ``sections`` is an ordered list where each item has EXACTLY one of:
-        ``{"markdown": "..."}`` or ``{"charts": ["chart_1", ...]}``.
-        """
-        if (blocked := _mutations_blocked()) is not None:
-            return blocked
-        title = (title or "").strip()
-        if not title or len(title) > _MAX_TITLE:
-            return {"ok": False, "error": f"Title must be 1-{_MAX_TITLE} characters."}
-        if len(subtitle or "") > _MAX_SUBTITLE:
-            return {"ok": False, "error": f"Subtitle exceeds {_MAX_SUBTITLE} chars."}
-        if summary_numbers is not None and (
-            not isinstance(summary_numbers, list)
-            or len(summary_numbers) > _MAX_SUMMARY_NUMBERS
-            or not all(isinstance(s, dict) for s in summary_numbers)
-        ):
-            return {
-                "ok": False,
-                "error": f"summary_numbers must be a list of at most "
-                f"{_MAX_SUMMARY_NUMBERS} objects.",
-            }
-        if not isinstance(sections, list) or not sections:
-            return {"ok": False, "error": "sections must be a non-empty list."}
-        if len(sections) > _MAX_SECTIONS:
-            return {"ok": False, "error": f"At most {_MAX_SECTIONS} sections."}
-
-        all_ids: list[str] = []
-        for i, section in enumerate(sections):
-            if not isinstance(section, dict):
-                return {"ok": False, "error": f"sections[{i}] must be an object."}
-            has_md = bool(section.get("markdown"))
-            has_charts = bool(section.get("charts"))
-            if has_md == has_charts:
-                return {
-                    "ok": False,
-                    "error": f"sections[{i}] needs exactly one of "
-                    "markdown|charts.",
-                }
-            if has_md:
-                if not isinstance(section["markdown"], str) or len(
-                    section["markdown"]
-                ) > _MAX_SECTION_MARKDOWN:
-                    return {
-                        "ok": False,
-                        "error": f"sections[{i}].markdown must be a string of "
-                        f"at most {_MAX_SECTION_MARKDOWN} chars.",
-                    }
-            else:
-                ids = section["charts"]
-                if not isinstance(ids, list) or not all(
-                    isinstance(c, str) and c for c in ids
-                ):
-                    return {
-                        "ok": False,
-                        "error": f"sections[{i}].charts must be a list of "
-                        "chart-id strings.",
-                    }
-                if len(set(ids)) != len(ids):
-                    return {
-                        "ok": False,
-                        "error": f"sections[{i}].charts has duplicate ids.",
-                    }
-                all_ids.extend(ids)
-        if len(all_ids) > _MAX_TOTAL_CHARTS:
-            return {
-                "ok": False,
-                "error": f"At most {_MAX_TOTAL_CHARTS} charts per report.",
-            }
-        available = {c["chart_id"] for c in _charts.list_chart_records()}
-        missing = [c for c in all_ids if c not in available]
-        if missing:
-            return {
-                "ok": False,
-                "error": "Unknown or expired chart ids (chart records expire "
-                "after 2h).",
-                "missing": missing,
-                "available": sorted(available),
-            }
-
-        # --- markdown assembly ---
-        # KPI handling is REPORT-WIDE: with >=2 KPI charts anywhere, EVERY
-        # KPI must land inside a {{grid:N}}..{{/grid}} block (the layout
-        # gate rejects otherwise), chunked to the supported sizes 2-4.
-        kpi_ids = {
-            c
-            for c in all_ids
-            if (_charts.get_chart_record(c) or {}).get("chart_type")
-            == "numberDisplay"
-        }
-        group_kpis = len(kpi_ids) >= 2
-        solo_kpis: list[str] = []  # KPIs stranded alone in their section
-
-        def _grid_block(ids: list[str]) -> str:
-            lines = "\n".join("{{chart:%s}}" % c for c in ids)
-            return "{{grid:%d}}\n%s\n{{/grid}}" % (len(ids), lines)
-
-        blocks: list[str] = []
-        for section in sections:
-            if section.get("markdown"):
-                blocks.append(section["markdown"])
-                continue
-            ids = list(section["charts"])
-            if not group_kpis:
-                blocks.append("\n\n".join("{{chart:%s}}" % c for c in ids))
-                continue
-            kpis = [c for c in ids if c in kpi_ids]
-            rest = [c for c in ids if c not in kpi_ids]
-            if len(kpis) == 1:
-                # A lone KPI cannot form a grid — collect and emit all solo
-                # KPIs together in one synthetic grid section at the end.
-                solo_kpis.extend(kpis)
-            else:
-                for start in range(0, len(kpis), 4):
-                    chunk = kpis[start : start + 4]
-                    if len(chunk) == 1:
-                        solo_kpis.extend(chunk)
-                    else:
-                        blocks.append(_grid_block(chunk))
-            if rest:
-                blocks.append("\n\n".join("{{chart:%s}}" % c for c in rest))
-        if solo_kpis:
-            if len(solo_kpis) == 1:
-                # Exactly one stranded KPI while the others already sit in
-                # grids — the report has a grid, so a standalone card is
-                # accepted by the layout gate.
-                blocks.append("{{chart:%s}}" % solo_kpis[0])
-            else:
-                # All stranded KPIs gather into one synthetic grid section
-                # (covers "two KPIs in two separate sections").
-                for start in range(0, len(solo_kpis), 4):
-                    chunk = solo_kpis[start : start + 4]
-                    if len(chunk) == 1:
-                        blocks.append("{{chart:%s}}" % chunk[0])
-                    else:
-                        blocks.append(_grid_block(chunk))
-        content_markdown = "\n\n".join(blocks)
-
-        try:
-            report = _charts.create_report_artifact(
-                title,
-                content_markdown,
-                enforce_quality_gate=False,   # human-composed
-                reset_session_state=False,    # never touch the agent's session
-                presentation_mode="report",
-                subtitle=subtitle or None,
-                summary_numbers=summary_numbers,
-            )
-        except (ValueError, OSError) as exc:
-            return {"ok": False, "error": str(exc)}
-        return {
-            "ok": True,
-            "report_id": report["report_id"],
-            "file_uri": report.get("file_uri"),
-            "filename": Path(str(report.get("report_path", ""))).name,
-            "title": title,
-        }
-
     for name in (
         "list_report_archive",
         "get_report_archive_entry",
         "get_report_export_info",
         "delete_report_archive_entry",
         "rename_report_archive_entry",
-        "list_session_charts",
-        "get_session_chart",
-        "create_studio_chart",
-        "compose_report",
     ):
         mini_apps.mark_app_only(name)
 
@@ -714,7 +473,9 @@ def register_report_studio_tools(
         html_loader=get_report_studio_html,
         title="Report Studio",
         description=(
-        "Browse, preview and manage generated reports. Compose new ones from saved charts and rename or archive the back catalogue."
+            "Browse benchmarked instruction templates — copy a ready-made "
+            "prompt with measured delivery time, tokens, and cost, and hand "
+            "it to the agent to execute. Includes the report archive."
         ),
         icon="▥",
         tools={
@@ -724,10 +485,6 @@ def register_report_studio_tools(
             "get_report_export_info": get_report_export_info,
             "delete_report_archive_entry": delete_report_archive_entry,
             "rename_report_archive_entry": rename_report_archive_entry,
-            "list_session_charts": list_session_charts,
-            "get_session_chart": get_session_chart,
-            "create_studio_chart": create_studio_chart,
-            "compose_report": compose_report,
         },
     )
 

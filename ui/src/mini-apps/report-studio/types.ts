@@ -1,6 +1,9 @@
-// Report Studio types — mirror of the view_state built by
+// Template Gallery types — mirror of the view_state built by
 // src/cerebro_mcp/tools/visualization/report_studio.py. New backend fields
 // stay optional so the frontend never requires a lockstep deploy.
+//
+// The template catalog itself is compile-time data (model/catalog.ts) and does
+// NOT travel through view_state.
 
 import type { ChartSpec, QueryInfo } from "../../types";
 
@@ -55,26 +58,10 @@ export interface ReportEntry {
   };
 }
 
-export interface ChartRecord {
-  chart_id: string;
-  title: string;
-  chart_type: string;
-  data_points?: number;
-  created_at?: string;
-  source?: string;
-  source_model?: string;
-}
-
-/** A composer section: exactly one of markdown | charts. */
-export type ComposerSection =
-  | { id: number; markdown: string; charts?: undefined }
-  | { id: number; charts: string[]; markdown?: undefined };
-
 export interface StudioState {
-  screen: "archive" | "preview" | "compose";
+  screen: "archive" | "preview";
   archive: ArchivePage;
   selected_entry: ReportEntry | null;
-  session_charts: { charts: ChartRecord[] } | null;
   report_dir: string;
   mutations_enabled: boolean;
 }

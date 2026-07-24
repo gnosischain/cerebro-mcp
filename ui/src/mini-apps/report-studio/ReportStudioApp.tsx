@@ -1,6 +1,8 @@
-// Report Studio root: Archive (gallery -> native preview) | Composer.
-// Archive pages and selected entries are plain-dict tool results held in
-// local state; only open_report_studio returns a typed INITIAL_LOAD payload.
+// Report Studio root: Archive (gallery -> native preview, the landing tab) |
+// Templates (catalog -> detail). The template catalog is compile-time data
+// (model/catalog.ts); only the archive talks to the server. There is
+// deliberately NO construction surface — templates are copied and handed to
+// an agent to execute.
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import { MiniAppChrome, MaSkeletonKpiGrid } from "../shared/MiniAppChrome";
@@ -8,9 +10,11 @@ import { SegmentedControl } from "../shared/SegmentedControl";
 import { WarningBanner } from "../shared/WarningBanner";
 import { useMiniApp } from "../shared/useMiniApp";
 import { ArchiveGallery } from "./ArchiveGallery";
-import { ComposerPanel } from "./ComposerPanel";
+import { CatalogScreen } from "./CatalogScreen";
 import { ReportPreview } from "./ReportPreview";
+import { TemplateDetail } from "./TemplateDetail";
 import { buildMockPayload } from "./devFixture";
+import { templateById } from "./model/catalog";
 import { APP_ID, type ReportEntry, type StudioState } from "./types";
 
 export default function ReportStudioApp() {
@@ -36,7 +40,8 @@ export default function ReportStudioApp() {
   const state = view?.view_state ?? null;
   const mutationsEnabled = Boolean(state?.mutations_enabled);
 
-  const [screen, setScreen] = useState<"archive" | "compose">("archive");
+  const [tab, setTab] = useState<"templates" | "archive">("archive");
+  const [templateId, setTemplateId] = useState<string | null>(null);
   const [entry, setEntry] = useState<ReportEntry | null>(null);
   const [entryError, setEntryError] = useState("");
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -46,6 +51,7 @@ export default function ReportStudioApp() {
   if (!adoptedEntry.current && state?.selected_entry?.ok) {
     adoptedEntry.current = true;
     setEntry(state.selected_entry);
+    setTab("archive");
   }
 
   const openEntry = useCallback(
@@ -67,12 +73,7 @@ export default function ReportStudioApp() {
     [callTool],
   );
 
-  const askAgentForCharts = useCallback(() => {
-    void sendMessage(
-      "Generate a few charts for the topic I care about so I can compose a "
-        + "report from them in the Report Studio.",
-    );
-  }, [sendMessage]);
+  const template = templateId ? templateById(templateId) : undefined;
 
   return (
     <MiniAppChrome activeTabId="reports">
@@ -84,17 +85,15 @@ export default function ReportStudioApp() {
             <WarningBanner warnings={view.warnings ?? []} />
             {entryError && <div className="rst-error">{entryError}</div>}
 
-            {!entry && (
+            {!entry && !template && (
               <div className="rst-nav">
-                <SegmentedControl<"archive" | "compose">
+                <SegmentedControl<"templates" | "archive">
                   ariaLabel="Report Studio section"
-                  value={screen}
-                  onChange={setScreen}
+                  value={tab}
+                  onChange={setTab}
                   options={[
                     { value: "archive", label: "Archive" },
-                    ...(mutationsEnabled
-                      ? [{ value: "compose" as const, label: "Composer" }]
-                      : []),
+                    { value: "templates", label: "Templates" },
                   ]}
                 />
               </div>
@@ -116,24 +115,23 @@ export default function ReportStudioApp() {
                   void openEntry(reportRef);
                 }}
               />
-            ) : screen === "compose" && mutationsEnabled ? (
-              <ComposerPanel
-                records={state.session_charts?.charts ?? []}
-                callTool={callTool}
-                onAskAgent={askAgentForCharts}
-                onComposed={(reportId) => {
-                  setScreen("archive");
-                  setRefreshNonce((n) => n + 1);
-                  void openEntry(reportId);
+            ) : template ? (
+              <TemplateDetail
+                template={template}
+                onBack={() => setTemplateId(null)}
+                onSendToAgent={(instructions) => {
+                  void sendMessage(instructions);
                 }}
               />
-            ) : (
+            ) : tab === "archive" ? (
               <ArchiveGallery
                 initial={state.archive}
                 callTool={callTool}
                 onOpen={openEntry}
                 refreshNonce={refreshNonce}
               />
+            ) : (
+              <CatalogScreen onOpen={setTemplateId} />
             )}
           </>
         )}

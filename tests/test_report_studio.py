@@ -8,6 +8,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -330,9 +331,6 @@ APP_ONLY_STUDIO_TOOLS = {
     "get_report_export_info",
     "delete_report_archive_entry",
     "rename_report_archive_entry",
-    "list_session_charts",
-    "get_session_chart",
-    "compose_report",
 }
 
 
@@ -363,7 +361,7 @@ def test_open_report_studio_initial_load(studio, report_dir):
     assert vs["archive"]["total"] == 1
     assert vs["archive"]["reports"][0]["id"] == rid
     assert vs["mutations_enabled"] is True
-    assert vs["session_charts"] == {"charts": []}
+    assert "session_charts" not in vs  # composer surface removed (v2 pivot)
 
     # deep link straight into the preview
     deep = open_fn(report=rid[:8]).structuredContent
@@ -552,267 +550,76 @@ def test_mutations_disabled_flag(studio, report_dir, monkeypatch):
     for name, kwargs in (
         ("delete_report_archive_entry", {"report_ref": rid, "confirm": True}),
         ("rename_report_archive_entry", {"report_ref": rid, "title": "t"}),
-        ("list_session_charts", {}),
-        ("get_session_chart", {"chart_id": "chart_1"}),
-        ("compose_report", {"title": "t", "sections": [{"markdown": "x"}]}),
     ):
         result = _tool(studio, name)(**kwargs)
         assert result["ok"] is False and "disabled" in result["error"], name
-    # initial payload omits chart records + flags the UI off
     sc = _tool(studio, "open_report_studio")().structuredContent
     assert sc["view_state"]["mutations_enabled"] is False
-    assert sc["view_state"]["session_charts"] is None
 
 
-# --- B2: composer ---
+
+# --- Template catalog contract (the harness + UI both trust catalog.gen.json) ---
+
+CATALOG_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "ui" / "src" / "mini-apps" / "report-studio" / "model" / "catalog.gen.json"
+)
+CATALOG_CATEGORIES = {
+    "answer", "chart", "sector_health", "deep_dive", "narrative",
+    "attribution", "forecast", "governance", "utility",
+}
+CATALOG_TIERS = {
+    "quick_answer", "single_chart", "lite_report", "full_report", "persona_workflow",
+}
+CATALOG_VERIFY = {"report_file", "charts", "answer", "export"}
 
 
-@pytest.fixture
-def seeded_charts():
-    from datetime import datetime as _dt
+def _load_catalog():
+    import json
 
-    with charts._chart_lock:
-        saved = dict(charts._chart_registry)
-        charts._chart_registry.clear()
-        for cid, ctype in (
-            ("chart_1", "line"),
-            ("chart_2", "numberDisplay"),
-            ("chart_3", "numberDisplay"),
-            ("chart_4", "bar"),
-        ):
-            charts._chart_registry[cid] = {
-                "chart_id": cid,
-                "title": f"T {cid}",
-                "chart_type": ctype,
-                "data_points": 10,
-                "created_at": _dt.now(),
-                "source": "test",
-                "source_model": "api_x",
-                "option": {"series": []},
-            }
-    yield
-    with charts._chart_lock:
-        charts._chart_registry.clear()
-        charts._chart_registry.update(saved)
+    return json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
 
 
-def test_list_and_get_session_charts(studio, seeded_charts):
-    listed = _tool(studio, "list_session_charts")()
-    assert listed["ok"] is True
-    assert {c["chart_id"] for c in listed["charts"]} == {
-        "chart_1", "chart_2", "chart_3", "chart_4",
-    }
-    assert all("option" not in c for c in listed["charts"])
+def test_catalog_gen_json_contract():
+    catalog = _load_catalog()
+    assert catalog["schema_version"] == 1
+    templates = catalog["templates"]
+    assert len(templates) >= 20
+    ids = [t["id"] for t in templates]
+    assert len(set(ids)) == len(ids)
+    import re
 
-    got = _tool(studio, "get_session_chart")(chart_id="chart_1")
-    assert got["ok"] is True and got["option"] == {"series": []}
-    miss = _tool(studio, "get_session_chart")(chart_id="chart_99")
-    assert miss["ok"] is False
+    placeholder = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+    for t in templates:
+        assert t["category"] in CATALOG_CATEGORIES, t["id"]
+        assert t["tier"] in CATALOG_TIERS, t["id"]
+        assert t["benchmark"]["verify"] in CATALOG_VERIFY, t["id"]
+        assert t["instructions"].strip(), t["id"]
+        declared = {p["name"] for p in t["params"]}
+        used = set(placeholder.findall(t["instructions"]))
+        assert used == declared, f"{t['id']}: params/body drift {used ^ declared}"
 
 
-def test_compose_report_validations(studio, seeded_charts):
-    compose = _tool(studio, "compose_report")
-    assert compose(title="", sections=[{"markdown": "x"}])["ok"] is False
-    assert compose(title="t", sections=[])["ok"] is False
-    assert compose(title="t", sections=[{}])["ok"] is False
-    assert (
-        compose(title="t", sections=[{"markdown": "x", "charts": ["chart_1"]}])["ok"]
-        is False
+def test_catalog_personas_match_server_registry():
+    """Codegen keeps a literal mirror of _VALID_ROLES — drift fails here."""
+    from cerebro_mcp.tools.governance.agents import _VALID_ROLES
+
+    catalog = _load_catalog()
+    for t in catalog["templates"]:
+        for role in [*t["personas"], *t.get("verify_personas", [])]:
+            assert role in _VALID_ROLES, f"{t['id']}: unknown persona {role}"
+
+
+def test_catalog_codegen_is_fresh():
+    """catalog.gen.json must be regenerated whenever catalog/templates change."""
+    import subprocess
+    import sys
+
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts" / "dev" / "gen_instruction_catalog.py"
     )
-    assert (
-        compose(title="t", sections=[{"charts": ["chart_1", "chart_1"]}])["ok"]
-        is False
+    proc = subprocess.run(
+        [sys.executable, str(script), "--check"], capture_output=True, text=True
     )
-    missing = compose(title="t", sections=[{"charts": ["chart_1", "chart_99"]}])
-    assert missing["ok"] is False
-    assert missing["missing"] == ["chart_99"]
-    assert "chart_1" in missing["available"]
-
-
-def test_compose_report_generates_and_grids_kpis(studio, seeded_charts, report_dir):
-    compose = _tool(studio, "compose_report")
-    with patch.object(charts, "create_report_artifact") as mock_create:
-        mock_create.return_value = {
-            "report_id": str(uuid.uuid4()),
-            "report_path": report_dir / "cerebro_report_x.html",
-            "file_uri": "file:///x",
-        }
-        # KPIs split across two separate sections must still grid together
-        result = compose(
-            title="Composed",
-            sections=[
-                {"markdown": "## Intro"},
-                {"charts": ["chart_2"]},
-                {"charts": ["chart_3", "chart_1"]},
-                {"charts": ["chart_4"]},
-            ],
-        )
-        assert result["ok"] is True, result
-        md = mock_create.call_args.args[1]
-        # both solo KPIs gathered into ONE complete grid block
-        assert "{{grid:2}}\n{{chart:chart_2}}\n{{chart:chart_3}}\n{{/grid}}" in md
-        assert "{{chart:chart_1}}" in md and "{{chart:chart_4}}" in md
-        kwargs = mock_create.call_args.kwargs
-        assert kwargs["enforce_quality_gate"] is False
-        assert kwargs["reset_session_state"] is False
-        assert kwargs["presentation_mode"] == "report"
-
-
-def test_compose_report_end_to_end_bypasses_gates(studio, seeded_charts, report_dir):
-    """Real create_report_artifact run: no session state, gates untouched."""
-    compose = _tool(studio, "compose_report")
-    result = compose(
-        title="E2E Composed Report",
-        sections=[
-            {"markdown": "## Overview\nSome prose."},
-            {"charts": ["chart_2", "chart_3"]},   # 2 KPIs -> one grid
-            {"charts": ["chart_1", "chart_4"]},
-        ],
-        subtitle="From the studio",
-    )
-    assert result["ok"] is True, result
-    files = list(report_dir.glob("cerebro_report_*.html"))
-    assert len(files) == 1
-    structured = charts._extract_structured_from_html(
-        files[0].read_text(encoding="utf-8")
-    )
-    assert structured["title"] == "E2E Composed Report"
-    assert structured["subtitle"] == "From the studio"
-    assert result["filename"] == files[0].name
-
-
-def test_compose_chunk_large_grid(studio, report_dir):
-    from datetime import datetime as _dt
-
-    with charts._chart_lock:
-        saved = dict(charts._chart_registry)
-        charts._chart_registry.clear()
-        for i in range(1, 7):
-            charts._chart_registry[f"chart_{i}"] = {
-                "chart_id": f"chart_{i}", "title": f"K{i}",
-                "chart_type": "numberDisplay", "data_points": 1,
-                "created_at": _dt.now(), "source": "t", "source_model": "m",
-            }
-    try:
-        compose = _tool(studio, "compose_report")
-        with patch.object(charts, "create_report_artifact") as mock_create:
-            mock_create.return_value = {
-                "report_id": str(uuid.uuid4()),
-                "report_path": report_dir / "x.html",
-                "file_uri": "file:///x",
-            }
-            result = compose(
-                title="Six KPIs",
-                sections=[{"charts": [f"chart_{i}" for i in range(1, 7)]}],
-            )
-            assert result["ok"] is True
-            md = mock_create.call_args.args[1]
-            # 6 KPIs -> grid:4 + grid:2, never grid:6 or grid:1
-            assert "{{grid:4}}" in md and "{{grid:2}}" in md
-            assert "{{grid:6}}" not in md and "{{grid:1}}" not in md
-            assert md.count("{{/grid}}") == 2
-    finally:
-        with charts._chart_lock:
-            charts._chart_registry.clear()
-            charts._chart_registry.update(saved)
-
-
-# --- create_studio_chart (composer chart creation) ---
-
-
-class ChartStubCH:
-    """Stub returning a small date/value table for chart creation."""
-
-    def run_query(self, sql, database="dbt", requested_max_rows=500,
-                  audience="tool", fetch_mode="auto", parameters=None):
-        from cerebro_mcp.clients.clickhouse import ExecutedQuery
-
-        rows = [[f"2026-04-{i + 1:02d}", i * 10] for i in range(5)]
-        return ExecutedQuery(
-            sql=sql, executed_sql=sql, database=database,
-            columns=["date", "total"], rows=rows, row_count=len(rows),
-            elapsed_seconds=0.01, fetch_mode="rows", warnings=[],
-        )
-
-
-@pytest.fixture
-def studio_with_ch(report_dir, clean_chart_registry):
-    mini_apps.reset_views_for_tests()
-    server = FastMCP("test-studio-ch")
-    mini_apps.register_mini_app_infra(server, None)
-    register_report_studio_tools(server, ChartStubCH())
-    yield server
-    mini_apps.reset_views_for_tests()
-
-
-def test_create_studio_chart_registers_record(studio_with_ch):
-    create = _tool(studio_with_ch, "create_studio_chart")
-    result = create(
-        sql="SELECT date, sum(v) AS total FROM dbt.t GROUP BY date",
-        chart_type="bar",
-        title="Studio Bar",
-    )
-    assert result["ok"] is True, result
-    chart_id = result["chart_id"]
-    assert result["chart_type"] == "bar"
-    assert result["data_points"] == 5
-
-    # the record is immediately available to the composer picker
-    listed = _tool(studio_with_ch, "list_session_charts")()
-    assert chart_id in {c["chart_id"] for c in listed["charts"]}
-    got = _tool(studio_with_ch, "get_session_chart")(chart_id=chart_id)
-    assert got["ok"] is True and got["option"]
-
-    # ...and composable end-to-end
-    composed = _tool(studio_with_ch, "compose_report")(
-        title="With Studio Chart",
-        sections=[{"charts": [chart_id]}],
-    )
-    assert composed["ok"] is True, composed
-
-
-def test_create_studio_chart_does_not_touch_agent_session():
-    from cerebro_mcp.tools.governance.session_state import state
-
-    with charts._chart_lock:
-        saved = dict(charts._chart_registry)
-        charts._chart_registry.clear()
-    try:
-        with state.lock:
-            before = state.generate_chart_count
-        result = charts.create_chart_record_from_sql(
-            ChartStubCH(), "SELECT date, total FROM t", chart_type="line"
-        )
-        assert result["ok"] is True
-        with state.lock:
-            assert state.generate_chart_count == before
-    finally:
-        with charts._chart_lock:
-            charts._chart_registry.clear()
-            charts._chart_registry.update(saved)
-
-
-def test_create_studio_chart_guards(studio_with_ch, monkeypatch):
-    create = _tool(studio_with_ch, "create_studio_chart")
-    assert create(sql="DROP TABLE t")["ok"] is False
-    assert create(sql="SHOW TABLES")["ok"] is False
-    assert create(sql="SELECT 1", title="x" * 201)["ok"] is False
-    bad_type = create(sql="SELECT date, total FROM t", chart_type="hologram")
-    assert bad_type["ok"] is False and "Unknown chart type" in bad_type["error"]
-
-    monkeypatch.setattr(settings, "REPORT_STUDIO_ALLOW_MUTATIONS", False)
-    gated = create(sql="SELECT date, total FROM t")
-    assert gated["ok"] is False and "disabled" in gated["error"]
-
-
-def test_create_studio_chart_without_ch(studio):
-    result = _tool(studio, "create_studio_chart")(sql="SELECT 1")
-    assert result["ok"] is False and "connection" in result["error"]
-
-
-def test_create_studio_chart_hidden_from_model(studio_with_ch):
-    assert "create_studio_chart" in mini_apps.get_app_only_tool_names()
-    names = [t.name for t in asyncio.run(studio_with_ch.list_tools())]
-    assert "create_studio_chart" not in names
-    cfg = web_apps.WEB_APP_CONFIGS["report_studio"]
-    assert "create_studio_chart" in cfg.allowed_tools
+    assert proc.returncode == 0, proc.stderr or proc.stdout

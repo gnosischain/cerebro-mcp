@@ -1,5 +1,5 @@
-// Dev-mode fixture for the Report Studio (plain page = archive with a few
-// synthetic entries). Only used when import.meta.env.DEV.
+// Dev-mode fixture for the Template Gallery (boots into the catalog; the
+// Archive tab shows a few synthetic entries). Only used when import.meta.env.DEV.
 
 import type { MiniAppPayload } from "../shared/miniAppTypes";
 import { APP_ID, type StudioState } from "./types";
@@ -62,31 +62,6 @@ export function buildMockPayload(): MiniAppPayload<StudioState> {
         warning_count: 0,
       },
       selected_entry: null,
-      session_charts: {
-        charts: [
-          {
-            chart_id: "chart_1",
-            title: "Daily bridge volume",
-            chart_type: "line",
-            data_points: 90,
-            source_model: "api_bridges_flows_daily",
-          },
-          {
-            chart_id: "chart_2",
-            title: "Total TVL",
-            chart_type: "numberDisplay",
-            data_points: 1,
-            source_model: "fct_bridges_kpis_snapshot",
-          },
-          {
-            chart_id: "chart_3",
-            title: "Active users",
-            chart_type: "numberDisplay",
-            data_points: 1,
-            source_model: "api_execution_transactions_daily",
-          },
-        ],
-      },
       report_dir: "~/.cerebro/reports",
       mutations_enabled: true,
     },

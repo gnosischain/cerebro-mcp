@@ -1,0 +1,1065 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "claude-opus-4-8": "20260724T042253Z_templates_headless-real.json",
+    "claude-sonnet-5": "20260723T213837Z_templates_headless-real.json"
+  },
+  "templates": {
+    "case_study_growth_story": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.887,
+          "median": 1.709,
+          "min": 1.53
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 325627,
+          "median": 299901.5,
+          "min": 274176
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 27.5,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 833860.0,
+          "in_fresh": 31.0,
+          "out": 22012.0
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 2.012,
+          "median": 1.811,
+          "min": 1.61
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 272900,
+          "median": 255066.5,
+          "min": 237233
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 30.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 971626.0,
+          "in_fresh": 36.0,
+          "out": 24374.0
+        }
+      }
+    },
+    "cow_trading_analysis": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.312,
+          "median": 1.071,
+          "min": 1.01
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 231021,
+          "median": 211316,
+          "min": 189222
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 16,
+        "review_passed": 0,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 413753,
+          "in_fresh": 24,
+          "out": 16714
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 1.497,
+          "median": 1.361,
+          "min": 1.326
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 240096,
+          "median": 227367,
+          "min": 202561
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 23,
+        "review_passed": 1,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 685490,
+          "in_fresh": 34,
+          "out": 22893
+        }
+      }
+    },
+    "cross_product_behavior": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.285,
+          "median": 1.22,
+          "min": 1.08
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 241899,
+          "median": 225079,
+          "min": 199316
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 15,
+        "review_passed": 0,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 469456,
+          "in_fresh": 22,
+          "out": 17235
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 1.84,
+          "median": 1.351,
+          "min": 1.332
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 216664,
+          "median": 187428,
+          "min": 174882
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 21,
+        "review_passed": 0,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 595163,
+          "in_fresh": 24,
+          "out": 19297
+        }
+      }
+    },
+    "current_onchain_state": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 0.556,
+          "median": 0.493,
+          "min": 0.45
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 75062,
+          "median": 60434,
+          "min": 51891
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 14,
+        "review_passed": 2,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 185966,
+          "in_fresh": 16,
+          "out": 3483
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 0.63,
+          "median": 0.619,
+          "min": 0.511
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 78570,
+          "median": 69451,
+          "min": 53832
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 15,
+        "review_passed": 3,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 320925,
+          "in_fresh": 22,
+          "out": 4176
+        }
+      }
+    },
+    "defi_protocol_deep_dive": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.948,
+          "median": 1.639,
+          "min": 1.329
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 375920,
+          "median": 299741.0,
+          "min": 223562
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 21.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 695986.5,
+          "in_fresh": 26.0,
+          "out": 23451.5
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 2.268,
+          "median": 2.03,
+          "min": 1.792
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 295999,
+          "median": 265267.5,
+          "min": 234536
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 31.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 918040.5,
+          "in_fresh": 30.0,
+          "out": 26532.0
+        }
+      }
+    },
+    "export_conversion": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.052,
+          "median": 0.913,
+          "min": 0.773
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 132631,
+          "median": 111356.0,
+          "min": 90081
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 22.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 566336.0,
+          "in_fresh": 31.0,
+          "out": 6979.5
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 0.929,
+          "median": 0.833,
+          "min": 0.738
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 81198,
+          "median": 73336.0,
+          "min": 65474
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 20.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 534640.5,
+          "in_fresh": 31.0,
+          "out": 5679.5
+        }
+      }
+    },
+    "forecast_outlook": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 2.767,
+          "median": 2.694,
+          "min": 2.621
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 637530,
+          "median": 582288.0,
+          "min": 527046
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 27.5,
+        "review_passed": 1,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 1270174.0,
+          "in_fresh": 40.0,
+          "out": 47760.5
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 7.501,
+          "median": 6.642,
+          "min": 5.783
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 1133451,
+          "median": 1002122.5,
+          "min": 870794
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 68.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 4732327.5,
+          "in_fresh": 112.0,
+          "out": 79449.5
+        }
+      }
+    },
+    "governance_brief": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.007,
+          "median": 0.999,
+          "min": 0.892
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 184805,
+          "median": 162827,
+          "min": 159513
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 17,
+        "review_passed": 1,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 482869,
+          "in_fresh": 26,
+          "out": 12633
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 1.526,
+          "median": 1.232,
+          "min": 1.119
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 210850,
+          "median": 168519,
+          "min": 165356
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 25,
+        "review_passed": 0,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 754418,
+          "in_fresh": 38,
+          "out": 16108
+        }
+      }
+    },
+    "growth_retention_check": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.703,
+          "median": 1.645,
+          "min": 1.405
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 375568,
+          "median": 365378,
+          "min": 300805
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 20,
+        "review_passed": 2,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 549626,
+          "in_fresh": 24,
+          "out": 25419
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 2.29,
+          "median": 1.924,
+          "min": 1.852
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 418990,
+          "median": 312238,
+          "min": 302471
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 28,
+        "review_passed": 1,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 891614,
+          "in_fresh": 36,
+          "out": 29944
+        }
+      }
+    },
+    "mmm_roi_attribution": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 4.381,
+          "median": 3.572,
+          "min": 2.764
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 968178,
+          "median": 775769.5,
+          "min": 583361
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 35.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 1804289.5,
+          "in_fresh": 44.0,
+          "out": 56870.0
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 6.303,
+          "median": 5.479,
+          "min": 4.655
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 1140539,
+          "median": 984876.0,
+          "min": 829213
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 54.5,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 3137414.5,
+          "in_fresh": 83.0,
+          "out": 72106.0
+        }
+      }
+    },
+    "mta_journey_attribution": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 2.223,
+          "median": 2.035,
+          "min": 1.847
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 510448,
+          "median": 462503.0,
+          "min": 414558
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 22.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 713308.0,
+          "in_fresh": 24.0,
+          "out": 35982.5
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 3.88,
+          "median": 3.534,
+          "min": 3.188
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 571936,
+          "median": 490206.0,
+          "min": 408476
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 40.0,
+        "review_passed": 1,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 2160711.0,
+          "in_fresh": 46.0,
+          "out": 41705.0
+        }
+      }
+    },
+    "quick_scalar_answer": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 0.51,
+          "median": 0.475,
+          "min": 0.464
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 36959,
+          "median": 36342,
+          "min": 34405
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 8,
+        "review_passed": 3,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 192189,
+          "in_fresh": 16,
+          "out": 1607
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 0.484,
+          "median": 0.459,
+          "min": 0.4
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 30908,
+          "median": 30010,
+          "min": 23378
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 8,
+        "review_passed": 2,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 185923,
+          "in_fresh": 16,
+          "out": 1341
+        }
+      }
+    },
+    "research_essay": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.377,
+          "median": 1.314,
+          "min": 1.251
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 274120,
+          "median": 268953.0,
+          "min": 263786
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 22.0,
+        "review_passed": 1,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 382080.0,
+          "in_fresh": 19.0,
+          "out": 19606.0
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 2.429,
+          "median": 2.189,
+          "min": 1.95
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 395367,
+          "median": 355075.5,
+          "min": 314784
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 34.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 969454.5,
+          "in_fresh": 36.0,
+          "out": 34853.5
+        }
+      }
+    },
+    "reviewed_dashboard": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.34,
+          "median": 1.283,
+          "min": 1.227
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 216687,
+          "median": 208078.0,
+          "min": 199469
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 20.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 596107.0,
+          "in_fresh": 26.0,
+          "out": 14664.0
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 1.857,
+          "median": 1.699,
+          "min": 1.541
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 234630,
+          "median": 221364.0,
+          "min": 208098
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 28.5,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 1019051.5,
+          "in_fresh": 39.0,
+          "out": 19935.0
+        }
+      }
+    },
+    "sector_checkin_full": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 3.013,
+          "median": 2.073,
+          "min": 1.133
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 581195,
+          "median": 394326.5,
+          "min": 207458
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 29.5,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 1028093.0,
+          "in_fresh": 29.0,
+          "out": 28853.5
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 3.08,
+          "median": 2.632,
+          "min": 2.184
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 433011,
+          "median": 392223.5,
+          "min": 351436
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 38.5,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 1633977.5,
+          "in_fresh": 47.0,
+          "out": 37581.5
+        }
+      }
+    },
+    "sector_checkin_lite": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.02,
+          "median": 0.959,
+          "min": 0.756
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 185093,
+          "median": 156721,
+          "min": 112504
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 14,
+        "review_passed": 1,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 309759,
+          "in_fresh": 20,
+          "out": 11466
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 1.199,
+          "median": 1.091,
+          "min": 0.973
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 179376,
+          "median": 110808,
+          "min": 105971
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 22,
+        "review_passed": 2,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 499869,
+          "in_fresh": 26,
+          "out": 9478
+        }
+      }
+    },
+    "single_chart": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 0.645,
+          "median": 0.556,
+          "min": 0.48
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 61434,
+          "median": 57545,
+          "min": 46903
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 11,
+        "review_passed": 1,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 298913,
+          "in_fresh": 20,
+          "out": 3162
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 0.628,
+          "median": 0.513,
+          "min": 0.488
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 42446,
+          "median": 37884,
+          "min": 33675
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 11,
+        "review_passed": 3,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 250849,
+          "in_fresh": 18,
+          "out": 2834
+        }
+      }
+    },
+    "storyteller_decision_brief": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 2.386,
+          "median": 2.031,
+          "min": 1.676
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 436511,
+          "median": 397169.0,
+          "min": 357827
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 31.5,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 1118633.5,
+          "in_fresh": 33.0,
+          "out": 27790.5
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 5.775,
+          "median": 5.02,
+          "min": 4.264
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 1018544,
+          "median": 778927.0,
+          "min": 539310
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 76.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 3880352.0,
+          "in_fresh": 91.0,
+          "out": 59868.0
+        }
+      }
+    },
+    "tokenomics_concentration": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.478,
+          "median": 1.091,
+          "min": 1.068
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 307513,
+          "median": 194053,
+          "min": 181268
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 21,
+        "review_passed": 1,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 468822,
+          "in_fresh": 24,
+          "out": 15185
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 1.799,
+          "median": 1.732,
+          "min": 1.655
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 324904,
+          "median": 286525,
+          "min": 281816
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 30,
+        "review_passed": 1,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 885673,
+          "in_fresh": 36,
+          "out": 25122
+        }
+      }
+    },
+    "tx_forensics_review": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.868,
+          "median": 1.759,
+          "min": 1.65
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 424207,
+          "median": 415531.5,
+          "min": 406856
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 29.0,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 915721.0,
+          "in_fresh": 34.0,
+          "out": 23226.0
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 4.079,
+          "median": 3.898,
+          "min": 3.718
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 709436,
+          "median": 668982.0,
+          "min": 628528
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 63.5,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 3744011.0,
+          "in_fresh": 91.0,
+          "out": 38568.5
+        }
+      }
+    },
+    "weekly_review_full": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.389,
+          "median": 1.33,
+          "min": 1.272
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 240249,
+          "median": 225566.0,
+          "min": 210883
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 2,
+        "num_turns_median": 21.5,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 536845.0,
+          "in_fresh": 22.0,
+          "out": 17308.5
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 1.629,
+          "median": 1.491,
+          "min": 1.352
+        },
+        "delivered": 2,
+        "duration_ms": {
+          "max": 236131,
+          "median": 214323.5,
+          "min": 192516
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 2,
+        "num_turns_median": 21.5,
+        "review_passed": 0,
+        "review_total": 2,
+        "tokens": {
+          "cache_read": 722928.0,
+          "in_fresh": 32.0,
+          "out": 21020.0
+        }
+      }
+    },
+    "weekly_review_lite": {
+      "claude-opus-4-8": {
+        "cost_usd": {
+          "max": 1.016,
+          "median": 0.986,
+          "min": 0.959
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 235668,
+          "median": 210450,
+          "min": 207317
+        },
+        "measured_at": "2026-07-24T04:22:53+00:00",
+        "n_runs": 3,
+        "num_turns_median": 13,
+        "review_passed": 2,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 339961,
+          "in_fresh": 20,
+          "out": 15228
+        }
+      },
+      "claude-sonnet-5": {
+        "cost_usd": {
+          "max": 1.557,
+          "median": 1.203,
+          "min": 0.962
+        },
+        "delivered": 3,
+        "duration_ms": {
+          "max": 203040,
+          "median": 191641,
+          "min": 126483
+        },
+        "measured_at": "2026-07-23T21:38:37+00:00",
+        "n_runs": 3,
+        "num_turns_median": 18,
+        "review_passed": 2,
+        "review_total": 3,
+        "tokens": {
+          "cache_read": 435688,
+          "in_fresh": 22,
+          "out": 18883
+        }
+      }
+    }
+  }
+}

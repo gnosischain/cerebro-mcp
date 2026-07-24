@@ -222,16 +222,12 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "load_graph_timeline": _AO,         # read-only bucketed-edge queries into view datasets
     "load_graph_flows": _AO,            # read-only fund-flow trace queries into view datasets
     "load_graph_transactions": _AO,     # read-only per-transfer-leg tx queries into view datasets
-    # report studio
+    # template gallery (report_studio app id) — archive surface only
     "list_report_archive": _AO,
     "get_report_archive_entry": _AO,
     "get_report_export_info": _AO,
-    "list_session_charts": _AO,
-    "get_session_chart": _AO,
     "delete_report_archive_entry": _AO_SW,
     "rename_report_archive_entry": _AO_SW,
-    "create_studio_chart": _AO_SW,   # registers a chart record (read-only SQL)
-    "compose_report": _AO_SW,
 
     # ── web3 / contract explorer (read-only RPC) ─────────────────────
     "contract_explore": _RO,
