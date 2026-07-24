@@ -330,3 +330,76 @@ def test_every_spec_executes_against_live_clickhouse(ch):
         except Exception as exc:  # noqa: BLE001 — collecting every failure
             failures.append(f"{label}: {exc}")
     assert not failures, "specs failed against live ClickHouse:\n" + "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# Delegation plane (rpc_log_indexer) — gated on the DB being reachable,
+# since it lives in a separate database that may not be granted everywhere.
+# ---------------------------------------------------------------------------
+
+DELEGATE_DB = "rpc_log_indexer"
+DELEGATE_VIEW = "v_delegate_events_gnosis"
+DELEGATE_KEY_COLUMNS = {
+    "environment", "chain_id", "action", "delegator", "id", "delegate",
+    "block_timestamp", "block_number", "log_index", "tx_hash",
+}
+
+
+def _delegate_db_reachable(ch) -> bool:
+    try:
+        ch.run_query(
+            f"SELECT 1 FROM {DELEGATE_DB}.{DELEGATE_VIEW} LIMIT 1",
+            GOV_DB, requested_max_rows=1, audience="internal", fetch_mode="auto",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def test_delegate_view_exists_with_key_columns(ch):
+    if not _delegate_db_reachable(ch):
+        pytest.skip(f"{DELEGATE_DB}.{DELEGATE_VIEW} not reachable (grants/DB absent)")
+    result = ch.run_query(
+        f"SELECT * FROM {DELEGATE_DB}.{DELEGATE_VIEW} LIMIT 0",
+        GOV_DB, requested_max_rows=1, audience="internal", fetch_mode="auto",
+    )
+    columns = {str(name) for name in result.columns}
+    missing = DELEGATE_KEY_COLUMNS - columns
+    assert not missing, f"{DELEGATE_VIEW} missing columns: {sorted(missing)}"
+
+
+def test_delegation_specs_execute_against_live_clickhouse(ch):
+    """Every delegation spec (default + sorted variants, all ranges) against
+    the real delegate registry view + the cross join into snapshot_votes."""
+    from cerebro_mcp.tools.visualization import governance_explorer as gov
+
+    if not _delegate_db_reachable(ch):
+        pytest.skip(f"{gov.DELEGATE_DB}.{gov.DELEGATE_VIEW} not reachable")
+
+    range_variants = [
+        gov._range_state("", ""),
+        gov._range_state("90d", ""),
+        gov._range_state("2024-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+    ]
+    filter_variants = [
+        gov._default_filters(),
+        {**gov._default_filters(), "sort_by": "recently_active"},
+    ]
+    failures: list[str] = []
+    seen: set = set()
+    for filters in filter_variants:
+        for range_state in range_variants:
+            for spec in gov._delegations_specs(range_state, filters):
+                fingerprint = (spec.sql, tuple(sorted((spec.parameters or {}).items())))
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                try:
+                    ch.run_query(
+                        spec.sql, GOV_DB, requested_max_rows=100,
+                        audience="internal", fetch_mode="auto",
+                        parameters=spec.parameters or None,
+                    )
+                except Exception as exc:  # noqa: BLE001 — collecting every failure
+                    failures.append(f"delegations:{spec.key}: {exc}")
+    assert not failures, "delegation specs failed:\n" + "\n".join(failures)

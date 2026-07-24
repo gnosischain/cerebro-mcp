@@ -7,7 +7,11 @@ import type { ActivityRow, ConcentrationRow } from "../types";
 
 export const insideZoom = [{ type: "inside" as const, start: 0, end: 100 }];
 
-const MONO = '"JetBrains Mono", ui-monospace, monospace';
+// Chart labels use the body font (Inter), NOT JetBrains Mono: 10px mono on the
+// near-black mini surface halates into a "bold labels" smear in dark mode. This
+// matches the axis/legend font the mini ECharts themes already enforce
+// (themes/echarts-dark-mini.ts) — the per-spec font here must not fight it.
+const LABEL_FONT = "Inter, system-ui, -apple-system, sans-serif";
 
 export interface ActivitySeriesDef {
   field: string;
@@ -35,7 +39,7 @@ export function activityComboOption(
       type: "category",
       data: buckets,
       name: `per ${unit}`,
-      nameTextStyle: { fontFamily: MONO, fontSize: 10 },
+      nameTextStyle: { fontFamily: LABEL_FONT, fontSize: 10 },
     },
     yAxis: hasSecond
       ? [{ type: "value" }, { type: "value", name: secondAxisName, splitLine: { show: false } }]
@@ -55,12 +59,12 @@ export function activityComboOption(
 export function donutOption(pairs: Array<{ name: string; value: number }>): EChartsOption {
   return {
     tooltip: { trigger: "item" },
-    legend: { bottom: 0, textStyle: { fontFamily: MONO, fontSize: 11 } },
+    legend: { bottom: 0, textStyle: { fontFamily: LABEL_FONT, fontSize: 11 } },
     series: [{
       type: "pie",
       radius: ["44%", "70%"],
       center: ["50%", "44%"],
-      label: { fontFamily: MONO, fontSize: 11 },
+      label: { fontFamily: LABEL_FONT, fontSize: 11 },
       data: pairs,
     }],
   } as EChartsOption;
@@ -77,7 +81,7 @@ export function categoryCountOption(
     xAxis: {
       type: "category",
       data: rows.map((row) => row.name),
-      axisLabel: { fontFamily: MONO, fontSize: 11 },
+      axisLabel: { fontFamily: LABEL_FONT, fontSize: 11 },
     },
     yAxis: { type: "value" },
     series: [{ name: valueLabel, type: "bar", barMaxWidth: 44, data: rows.map((row) => row.value) }],
@@ -99,7 +103,7 @@ export function horizontalBarOption(
     yAxis: {
       type: "category",
       data: sorted.map((row) => row.name),
-      axisLabel: { fontFamily: MONO, fontSize: 10, width: 150, overflow: "truncate" },
+      axisLabel: { fontFamily: LABEL_FONT, fontSize: 10, width: 150, overflow: "truncate" },
     },
     series: [{ name: valueLabel, type: "bar", barMaxWidth: 16, data: sorted.map((row) => row.value) }],
   } as EChartsOption;
@@ -120,7 +124,7 @@ export function concentrationOption(
     xAxis: {
       type: "category",
       data: sorted.map((row) => `Top ${row.tier}`),
-      axisLabel: { fontFamily: MONO, fontSize: 11 },
+      axisLabel: { fontFamily: LABEL_FONT, fontSize: 11 },
     },
     yAxis: {
       type: "value",
@@ -135,7 +139,7 @@ export function concentrationOption(
       label: {
         show: true,
         position: "top",
-        fontFamily: MONO,
+        fontFamily: LABEL_FONT,
         fontSize: 10,
         formatter: (params: unknown) =>
           `${(Number((params as { value?: number }).value ?? 0) * 100).toFixed(1)}%`,

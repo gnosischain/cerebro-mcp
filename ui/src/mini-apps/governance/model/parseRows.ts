@@ -23,7 +23,7 @@ export function parseSpaceSummary(dataset?: RowDataset): SpaceSummaryRow | null 
   };
 }
 
-const BUCKET_UNITS = new Set(["day", "week", "month"]);
+const BUCKET_UNITS = new Set(["hour", "day", "week", "month"]);
 
 /** Pivot LONG-format activity rows ({bucket, metric, metric_value, …}) into
  * one wide row per bucket (first-seen bucket order preserved). Buckets with a

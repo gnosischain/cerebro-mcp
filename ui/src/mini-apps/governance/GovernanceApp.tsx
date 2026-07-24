@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { MiniAppChrome } from "../shared/MiniAppChrome";
 import { TabBar } from "../shared/TabBar";
 import { ToastStack } from "../shared/ToastStack";
-import { WarningBanner } from "../shared/WarningBanner";
 import { MaSearchInput } from "../shared/MaSearchInput";
 import { useGroupLoader } from "../shared/useGroupLoader";
 import { useHydratedDatasets } from "../shared/useHydratedDatasets";
@@ -16,6 +15,7 @@ import { VoterDetail } from "./detail/VoterDetail";
 import { MOCK_PAYLOAD } from "./devFixture";
 import { buildModelContextLines, type GovAggregates } from "./model/contextPrompt";
 import { parseSpaceSummary } from "./model/parseRows";
+import { DelegationsSection } from "./sections/DelegationsSection";
 import { ForumSection } from "./sections/ForumSection";
 import { OverviewSection } from "./sections/OverviewSection";
 import { ProposalsSection } from "./sections/ProposalsSection";
@@ -40,6 +40,7 @@ const SECTIONS: Array<{ id: GovSectionId; label: string }> = [
   { id: "proposals", label: "Proposals" },
   { id: "voters", label: "Voters" },
   { id: "forum", label: "Forum" },
+  { id: "delegations", label: "Delegations" },
 ];
 
 /** Large paginated datasets render via PaginatedTable / local paging — they
@@ -53,21 +54,27 @@ const LARGE_DATASETS = new Set([
   "topic_posts",
   "contributor_posts",
   "contributor_leaderboard",
+  "top_delegates",
 ]);
 
 /** Frozen warning-code vocabulary → user copy. Unknown strings (human
  * messages with spaces) pass through unchanged. */
 const WARNING_COPY: Record<string, string> = {
-  query_failed: "One dataset failed to load; other successful datasets remain available.",
-  no_data: "No matching rows were found for the selected filters.",
-  stale_scope: "A background load arrived for a superseded view and was ignored.",
-  result_truncated: "A result is capped at the newest exact 10,000 rows; narrow filters for the full set.",
-  source_stale: "The latest ingestion for at least one source is older than 24 hours.",
-  unsupported_choice_shape: "Some votes carry an unsupported choice shape; they are flagged, never interpreted.",
+  query_failed: "A dataset failed to load; others remain available.",
+  result_truncated: "Result capped at the newest 10,000 rows — narrow filters for the full set.",
 };
+
+/** Routine, non-actionable notices are surfaced quietly per-panel (empty
+ * states) or via the FreshnessStrip STALE chip — never as a top banner. Only
+ * genuine problems (a failed query, a truncated result, or a free-text error)
+ * reach the compact warning strip. */
+const QUIET_WARNINGS = new Set([
+  "source_stale", "no_data", "stale_scope", "unsupported_choice_shape",
+]);
 
 function resolveWarnings(state: GovernanceViewState): string[] {
   return [...new Set([...(state.coverage_warnings ?? []), ...(state.warnings ?? [])])]
+    .filter((warning) => !QUIET_WARNINGS.has(warning))
     .map((warning) => WARNING_COPY[warning] ?? warning);
 }
 
@@ -344,7 +351,13 @@ export default function GovernanceApp() {
           })}
         </div>
       )}
-      <WarningBanner warnings={persistentWarnings} />
+      {persistentWarnings.length > 0 && (
+        <div className="gov-warn-strip" role="status">
+          {persistentWarnings.map((warning, index) => (
+            <span key={`${index}-${warning.slice(0, 24)}`} className="gov-warn-chip">{warning}</span>
+          ))}
+        </div>
+      )}
       <main className="gov-content">
         {state.section === "entity" ? (
           entityView()
@@ -354,8 +367,10 @@ export default function GovernanceApp() {
           <ProposalsSection ctx={ctx} />
         ) : state.section === "voters" ? (
           <VotersSection ctx={ctx} />
-        ) : (
+        ) : state.section === "forum" ? (
           <ForumSection ctx={ctx} />
+        ) : (
+          <DelegationsSection ctx={ctx} />
         )}
       </main>
       <ToastStack warnings={loader.error ? [loader.error] : []} autoDismissMs={0} />

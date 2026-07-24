@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+import { ChartCard } from "../../../components/ChartCard";
 import { MaIdentity } from "../../shared/MiniAppChrome";
 import { PaginatedTable } from "../../shared/PaginatedTable";
 import { AskCerebroButton } from "../components/AskCerebroButton";
@@ -9,12 +11,13 @@ import { MarkdownBody } from "../components/MarkdownBody";
 import { QuorumBadge } from "../components/QuorumBadge";
 import { SignalingNote } from "../components/SignalingNote";
 import { VoteChoiceCell } from "../components/VoteChoiceCell";
+import { activityComboOption } from "../model/chartOptions";
 import { pairChoices, type ChoiceEntry } from "../model/choices";
 import { COLUMN_LABELS, hiddenColumnsFor } from "../model/columns";
 import { rowsToObjects } from "../../shared/rowDataset";
-import { parseLinks } from "../model/parseRows";
+import { parseActivity, parseLinks } from "../model/parseRows";
 import { shortAddr } from "../../../utils/format";
-import { dataset, firstRow, fmtNum, pickNumber, pickString, type GovViewContext } from "../sections/common";
+import { dataset, firstRow, fmtNum, pickNumber, pickString, useDataset, type GovViewContext } from "../sections/common";
 
 const SNAPSHOT_SPACE_URL = "https://snapshot.org/#/gnosis.eth/proposal/";
 
@@ -52,6 +55,12 @@ export function ProposalDetail({ ctx }: { ctx: GovViewContext }) {
     pickString(detail, ["link", "snapshot_link", "snapshot_url"])
     || (identifier ? `${SNAPSHOT_SPACE_URL}${identifier}` : "");
   const links = parseLinks(dataset(ctx, "proposal_forum_links"));
+
+  const voteTrendDs = useDataset(ctx, "proposal_vote_trend");
+  const voteTrendSpec = useMemo(() => activityComboOption(parseActivity(voteTrendDs), [
+    { field: "votes", label: "Votes", type: "bar" },
+    { field: "cumulative_vp", label: "Cumulative VP", type: "line", yAxisIndex: 1 },
+  ], "cumulative VP"), [voteTrendDs]);
 
   return (
     <div className="gov-entity">
@@ -113,6 +122,23 @@ export function ProposalDetail({ ctx }: { ctx: GovViewContext }) {
           rankedNote={proposalType === "ranked-choice"
             ? "Ranked-choice proposal: scores reflect Snapshot's ranked tabulation; each vote lists ordered preferences."
             : undefined}
+        />
+      </DatasetPanel>
+
+      <DatasetPanel
+        title="Vote trend"
+        descriptor={ctx.descriptors.proposal_vote_trend}
+        groupLoaded
+        hydrationPhase={ctx.hydrated.proposal_vote_trend?.phase}
+        hydrationError={ctx.hydrated.proposal_vote_trend?.error}
+        emptyLabel="No votes recorded for this proposal."
+      >
+        <ChartCard
+          chartId="gov-proposal-vote-trend"
+          hideId
+          sql={ctx.descriptors.proposal_vote_trend?.sql}
+          sourceModel="governance_db"
+          spec={voteTrendSpec}
         />
       </DatasetPanel>
 

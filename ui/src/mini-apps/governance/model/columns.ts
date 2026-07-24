@@ -54,6 +54,13 @@ export const COLUMN_LABELS: Record<string, string> = {
   topic_title: "Topic",
   excerpt: "Excerpt",
   link_source: "Link tier",
+  delegate: "Delegate",
+  delegator_count: "Delegators",
+  first_delegation_at: "First delegation",
+  last_delegation_at: "Latest delegation",
+  delegated_vp_total: "Delegated VP",
+  delegated_vp_mainnet: "Delegated VP (mainnet)",
+  delegated_vp_gnosischain: "Delegated VP (Gnosis Chain)",
 };
 
 /** Columns kept in the row payload (for click-through identifiers and cell

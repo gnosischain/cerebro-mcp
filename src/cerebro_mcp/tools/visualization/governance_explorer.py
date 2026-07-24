@@ -61,6 +61,19 @@ GOV_APP_ID = "governance"
 GOV_TITLE = "Governance Explorer"
 GOV_URI = "ui://cerebro/governance"
 GOV_DB = "governance_db"
+#: On-chain Snapshot DelegateRegistry plane (rpc-log-indexer output). The
+#: ``v_delegate_events_gnosis`` view is already reorg-safe / checkpoint-bounded
+#: (built on ``decoded_events_canonical``), so it is queried WITHOUT ``FINAL``.
+#: Columns: environment, chain_id, action ('SetDelegate'|'ClearDelegate'),
+#: delegator, id, delegate, block_timestamp, block_number, log_index, tx_hash.
+#: The view now carries BOTH Ethereum mainnet (chain_id 1) and Gnosis Chain
+#: (chain_id 100) events — the gnosis.eth space delegates on both. Delegation
+#: is last-write-wins PER (chain_id, delegator): the same address can delegate
+#: independently on each chain (Snapshot has one delegation strategy per net).
+DELEGATE_DB = "rpc_log_indexer"
+DELEGATE_VIEW = "v_delegate_events_gnosis"
+#: bytes32 of "gnosis.eth" (right-padded ASCII) — the Snapshot space id.
+GNOSIS_SPACE_ID = "0x676e6f7369732e65746800000000000000000000000000000000000000000000"
 GOV_APP_META = {
     "ui": {"resourceUri": GOV_URI},
     "ui/resourceUri": GOV_URI,
@@ -69,7 +82,7 @@ ROW_CAP = 10_000
 #: 4 sections + the ``entity`` pseudo-section: an entity drill-down never
 #: evicts a section scope. Datasets are small; memory cost is negligible.
 MAX_RETAINED_SECTIONS = 5
-VALID_SECTIONS = {"overview", "proposals", "voters", "forum"}
+VALID_SECTIONS = {"overview", "proposals", "voters", "forum", "delegations"}
 ENTITY_TYPES = {"proposal", "voter", "forum_topic", "forum_user"}
 
 PROPOSAL_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")
@@ -122,13 +135,22 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
         "core": ("forum_summary", "forum_categories", "forum_topics"),
         "insights": ("forum_activity", "contributor_leaderboard"),
     },
+    "delegations": {
+        "core": ("delegation_summary", "top_delegates"),
+        "insights": (
+            "delegation_activity",
+            "delegation_power",
+            "delegation_concentration",
+            "delegation_churn",
+        ),
+    },
 }
 #: Entity drill-down bundles (FROZEN) — loaded by ``_apply_entity_load``
 #: under the ``"entity"`` pseudo-section, never part of SECTION_GROUPS.
 ENTITY_BUNDLES: dict[str, tuple[str, ...]] = {
     "proposal": (
-        "proposal_detail", "proposal_choices", "proposal_votes",
-        "proposal_forum_links",
+        "proposal_detail", "proposal_choices", "proposal_vote_trend",
+        "proposal_votes", "proposal_forum_links",
     ),
     "voter": ("voter_profile", "voter_votes", "voter_participation"),
     "forum_topic": ("topic_detail", "topic_posts", "topic_proposal_links"),
@@ -143,6 +165,7 @@ SOURCE_LABELS = {
     "snapshot": "Snapshot off-chain signaling",
     "forum": "Forum activity",
     "cross": "Snapshot signaling + forum activity",
+    "delegation": "Snapshot delegate registry (on-chain: mainnet + Gnosis Chain)",
 }
 
 PROPOSAL_STATES = {"", "active", "pending", "closed"}
@@ -190,11 +213,18 @@ FORUM_SORTS = {
     "most_views": "views DESC, id",
     "most_likes": "like_count DESC, id",
 }
+DELEGATE_SORTS = {
+    "": "delegator_count DESC, delegate",
+    "delegator_count": "delegator_count DESC, delegate",
+    "recently_active": "last_delegation_at DESC, delegate",
+    "first_seen": "first_delegation_at ASC, delegate",
+}
 SECTION_SORTS: dict[str, dict[str, str]] = {
     "overview": {"": ""},
     "proposals": PROPOSAL_SORTS,
     "voters": VOTER_SORTS,
     "forum": FORUM_SORTS,
+    "delegations": DELEGATE_SORTS,
 }
 
 
@@ -206,7 +236,7 @@ class QuerySpec:
     parameters: dict[str, Any]
     basis: str
     #: Which data plane the dataset reads — feeds the provenance label.
-    source: Literal["snapshot", "forum", "cross"]
+    source: Literal["snapshot", "forum", "cross", "delegation"]
     cache_ttl_seconds: int = 1800
     exact_count: bool = True
 
@@ -901,6 +931,187 @@ ORDER BY bucket"""
     ]
 
 
+def _delegations_specs(
+    range_state: dict[str, Any], filters: dict[str, Any]
+) -> list[QuerySpec]:
+    """Snapshot delegate-registry analytics over the on-chain
+    ``rpc_log_indexer.v_delegate_events_gnosis`` view (Ethereum mainnet AND
+    Gnosis Chain).
+
+    The view is reorg-safe / checkpoint-bounded (built on
+    ``decoded_events_canonical``) so it is queried WITHOUT ``FINAL``.
+    Delegation is last-write-wins PER ``(chain_id, delegator)``: the same
+    address can delegate independently on each chain, so every reduction groups
+    by ``(chain_id, delegator)`` and delegator counts are ``uniqExact`` over
+    addresses (a person active on both chains counts once per delegate).
+    "Active" specs read all history (state as of now); the activity/churn time
+    series honour the range.
+    """
+    src = f"{DELEGATE_DB}.{DELEGATE_VIEW}"
+    time_params = _time_params(range_state)
+    time_pred = _point_predicate("block_timestamp", range_state)
+    days = _range_days(range_state)
+    bucket_sql, unit = _bucket("block_timestamp", days)
+    sort_fragment = DELEGATE_SORTS.get(filters.get("sort_by", ""), DELEGATE_SORTS[""])
+
+    delegation_summary = f"""
+WITH active AS (
+  SELECT chain_id, delegator,
+         argMax(action, (block_number, log_index)) AS last_action,
+         argMax(delegate, (block_number, log_index)) AS current_delegate
+  FROM {src}
+  GROUP BY chain_id, delegator
+)
+SELECT
+  uniqExactIf(delegator, last_action = 'SetDelegate') AS active_delegators,
+  uniqExactIf(current_delegate, last_action = 'SetDelegate') AS active_delegates,
+  (SELECT count() FROM {src}) AS total_events,
+  (SELECT countIf(action = 'SetDelegate') FROM {src}) AS set_events,
+  (SELECT countIf(action = 'ClearDelegate') FROM {src}) AS clear_events,
+  (SELECT countIf(action = 'SetDelegate') - uniqExactIf((chain_id, delegator), action = 'SetDelegate')
+     FROM {src}) AS re_delegations,
+  (SELECT countIf(action = 'ClearDelegate') / nullIf(countIf(action = 'SetDelegate'), 0)
+     FROM {src}) AS clear_rate
+FROM active
+ORDER BY active_delegators"""
+
+    top_delegates = f"""
+SELECT current_delegate AS delegate,
+       uniqExact(delegator) AS delegator_count,
+       min(set_at) AS first_delegation_at,
+       max(set_at) AS last_delegation_at
+FROM (
+  SELECT chain_id, delegator,
+         argMax(delegate, (block_number, log_index)) AS current_delegate,
+         argMax(action, (block_number, log_index)) AS last_action,
+         argMax(block_timestamp, (block_number, log_index)) AS set_at
+  FROM {src}
+  GROUP BY chain_id, delegator
+)
+WHERE last_action = 'SetDelegate'
+GROUP BY current_delegate
+ORDER BY {sort_fragment}"""
+
+    delegation_activity = f"""
+SELECT bucket, set_events, clear_events, net_change, cumulative_net,
+       '{unit}' AS bucket_unit
+FROM (
+  SELECT bucket, set_events, clear_events,
+         (set_events - clear_events) AS net_change,
+         sum(set_events - clear_events) OVER (ORDER BY bucket) AS cumulative_net
+  FROM (
+    SELECT {bucket_sql} AS bucket,
+           countIf(action = 'SetDelegate') AS set_events,
+           countIf(action = 'ClearDelegate') AS clear_events
+    FROM {src}
+    WHERE {time_pred}
+    GROUP BY bucket
+  )
+)
+ORDER BY bucket"""
+
+    delegation_power = f"""
+WITH active AS (
+  SELECT chain_id, delegator,
+         argMax(action, (block_number, log_index)) AS last_action,
+         argMax(delegate, (block_number, log_index)) AS current_delegate
+  FROM {src}
+  GROUP BY chain_id, delegator
+),
+delegates AS (
+  SELECT current_delegate AS delegate, uniqExact(delegator) AS delegator_count
+  FROM active
+  WHERE last_action = 'SetDelegate'
+  GROUP BY current_delegate
+),
+latest_vote AS (
+  SELECT lower(voter) AS voter_key,
+         argMax(JSONExtract(raw_json, 'vp_by_strategy', 'Array(Float64)'), created_at) AS vps,
+         max(created_at) AS last_vote_at
+  FROM governance_db.snapshot_votes FINAL
+  WHERE vp_state = 'final'
+  GROUP BY voter_key
+)
+SELECT d.delegate AS delegate,
+       d.delegator_count AS delegator_count,
+       lv.last_vote_at AS last_vote_at,
+       if(length(lv.vps) = 5, lv.vps[4], 0) AS delegated_vp_gnosischain,
+       if(length(lv.vps) = 5, lv.vps[5], 0) AS delegated_vp_mainnet,
+       if(length(lv.vps) = 5, lv.vps[4] + lv.vps[5], 0) AS delegated_vp_total
+FROM delegates AS d
+LEFT JOIN latest_vote AS lv ON lv.voter_key = lower(d.delegate)
+ORDER BY delegated_vp_total DESC, delegate
+LIMIT 50"""
+
+    delegation_concentration = f"""
+WITH per_delegate AS (
+  SELECT current_delegate AS delegate, uniqExact(delegator) AS delegator_count
+  FROM (
+    SELECT chain_id, delegator,
+           argMax(delegate, (block_number, log_index)) AS current_delegate,
+           argMax(action, (block_number, log_index)) AS last_action
+    FROM {src}
+    GROUP BY chain_id, delegator
+  )
+  WHERE last_action = 'SetDelegate'
+  GROUP BY current_delegate
+),
+sorted AS (
+  SELECT groupArray(toFloat64(delegator_count)) AS values,
+         sum(toFloat64(delegator_count)) AS total_value
+  FROM (SELECT delegator_count FROM per_delegate ORDER BY delegator_count DESC)
+)
+SELECT tier,
+       arraySum(arraySlice(values, 1, tier)) AS tier_value,
+       total_value,
+       arraySum(arraySlice(values, 1, tier)) / nullIf(total_value, 0) AS share
+FROM sorted
+ARRAY JOIN [toUInt32(5), toUInt32(10), toUInt32(20)] AS tier
+ORDER BY tier"""
+
+    delegation_churn = f"""
+SELECT bucket,
+       countIf(kind = 'new') AS new_delegators,
+       countIf(kind = 'repointed') AS repointed,
+       countIf(kind = 'cleared') AS cleared,
+       '{unit}' AS bucket_unit
+FROM (
+  SELECT {bucket_sql} AS bucket,
+         multiIf(action = 'ClearDelegate', 'cleared',
+                 rn = 1, 'new',
+                 'repointed') AS kind
+  FROM (
+    SELECT action, block_timestamp, block_number, log_index,
+           row_number() OVER (PARTITION BY chain_id, delegator ORDER BY block_number, log_index) AS rn
+    FROM {src}
+  )
+  WHERE {time_pred}
+)
+GROUP BY bucket
+ORDER BY bucket"""
+
+    return [
+        QuerySpec("delegation_summary", "Delegation summary", delegation_summary, {},
+                  "current active delegations (last-write-wins per chain) + all-time events; "
+                  "mainnet + Gnosis Chain", "delegation", 900),
+        QuerySpec("top_delegates", "Top delegates", top_delegates, {},
+                  "distinct active delegators per delegate; mainnet + Gnosis Chain", "delegation"),
+        QuerySpec("delegation_activity", "Delegation activity", delegation_activity,
+                  dict(time_params),
+                  "Set/Clear per period + cumulative net within window; block_timestamp",
+                  "delegation"),
+        QuerySpec("delegation_power", "Delegated voting power", delegation_power, {},
+                  "realized vp_by_strategy delegation share at each delegate's latest final "
+                  "vote; voted delegates only, snapshot-time", "cross"),
+        QuerySpec("delegation_concentration", "Delegation concentration",
+                  delegation_concentration, {},
+                  "top-N delegate share of active delegators (headcount)", "delegation"),
+        QuerySpec("delegation_churn", "Delegation churn", delegation_churn,
+                  dict(time_params), "new/re-pointed/cleared delegators per period; block_timestamp",
+                  "delegation"),
+    ]
+
+
 def _forum_specs(
     range_state: dict[str, Any], filters: dict[str, Any]
 ) -> list[QuerySpec]:
@@ -1037,6 +1248,22 @@ FROM (
 ARRAY JOIN choices AS choice, arrayEnumerate(choices) AS choice_index
 ORDER BY choice_index"""
 
+    # Vote trend: how votes + voting power accumulated over the proposal's
+    # voting window (cgov-style turnout curve). Hourly buckets; the frontend
+    # draws per-bucket votes as bars and cumulative VP as a line.
+    proposal_vote_trend = """
+SELECT bucket, votes, round(vp) AS vp,
+       round(sum(votes) OVER (ORDER BY bucket)) AS cumulative_votes,
+       round(sum(vp) OVER (ORDER BY bucket)) AS cumulative_vp,
+       'hour' AS bucket_unit
+FROM (
+  SELECT toStartOfHour(created_at) AS bucket, count() AS votes, sum(vp) AS vp
+  FROM governance_db.snapshot_votes FINAL
+  WHERE proposal_id = {proposal_id:String}
+  GROUP BY bucket
+)
+ORDER BY bucket"""
+
     proposal_votes = """
 SELECT id AS vote_id, lower(voter) AS voter_key, voter, created_at, vp,
        vp_state,
@@ -1095,6 +1322,9 @@ ORDER BY link_source, linked_type, linked_id"""
                   dict(params), "all history", "snapshot"),
         QuerySpec("proposal_choices", "Proposal choices", proposal_choices,
                   dict(params), "all history; NULL score while pending",
+                  "snapshot"),
+        QuerySpec("proposal_vote_trend", "Vote trend", proposal_vote_trend,
+                  dict(params), "cumulative votes + VP over the voting window (hourly)",
                   "snapshot"),
         QuerySpec("proposal_votes", "Proposal votes", proposal_votes,
                   dict(params), "all history", "snapshot"),
@@ -1293,6 +1523,8 @@ def _section_specs(
         return _voters_specs(range_state, filters)
     if section == "forum":
         return _forum_specs(range_state, filters)
+    if section == "delegations":
+        return _delegations_specs(range_state, filters)
     raise ValueError(f"Unsupported section: {section}")
 
 

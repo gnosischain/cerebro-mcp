@@ -23,10 +23,14 @@ const FROZEN_SECTION_GROUPS: Record<string, Record<string, string[]>> = {
     core: ["forum_summary", "forum_categories", "forum_topics"],
     insights: ["forum_activity", "contributor_leaderboard"],
   },
+  delegations: {
+    core: ["delegation_summary", "top_delegates"],
+    insights: ["delegation_activity", "delegation_power", "delegation_concentration", "delegation_churn"],
+  },
 };
 
 const FROZEN_ENTITY_DATASETS: Record<string, string[]> = {
-  proposal: ["proposal_detail", "proposal_choices", "proposal_votes", "proposal_forum_links"],
+  proposal: ["proposal_detail", "proposal_choices", "proposal_vote_trend", "proposal_votes", "proposal_forum_links"],
   voter: ["voter_profile", "voter_votes", "voter_participation"],
   forum_topic: ["topic_detail", "topic_posts", "topic_proposal_links"],
   forum_user: ["contributor_profile", "contributor_posts", "contributor_activity"],

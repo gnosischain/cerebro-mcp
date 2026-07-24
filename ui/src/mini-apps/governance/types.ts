@@ -3,7 +3,7 @@
 // Wire types (MiniAppPayload / DatasetDescriptor) live in
 // ../shared/miniAppTypes.ts — never redefined here.
 
-export type GovSection = "overview" | "proposals" | "voters" | "forum" | "entity";
+export type GovSection = "overview" | "proposals" | "voters" | "forum" | "delegations" | "entity";
 
 export type GovEntityType = "proposal" | "voter" | "forum_topic" | "forum_user";
 
@@ -71,7 +71,7 @@ export interface GovCoverage {
   truncated?: boolean;
   mode?: string;
   error?: string;
-  source_kind?: "snapshot" | "forum" | "cross";
+  source_kind?: "snapshot" | "forum" | "cross" | "delegation";
   source_label?: string;
   warning_codes?: string[];
 }
@@ -116,7 +116,7 @@ export interface SpaceSummaryRow {
 
 export interface ActivityRow {
   bucket: string;
-  bucket_unit: "day" | "week" | "month";
+  bucket_unit: "hour" | "day" | "week" | "month";
   proposals_created?: number;
   votes_cast?: number;
   topics_created?: number;
@@ -215,6 +215,38 @@ export interface PostRow {
   raw_markdown?: string;
   cooked_html?: string;
   plain_text?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Delegation plane (Snapshot DelegateRegistry, rpc_log_indexer). Edge
+// counts come from the registry view; "delegated voting power" is Snapshot's
+// realized vp_by_strategy delegation share (voted delegates only).
+// ---------------------------------------------------------------------------
+
+export interface DelegationSummaryRow {
+  active_delegators: number;
+  active_delegates: number;
+  total_events: number;
+  set_events: number;
+  clear_events: number;
+  re_delegations: number;
+  clear_rate: number | null;
+}
+
+export interface TopDelegateRow {
+  delegate: string;
+  delegator_count: number;
+  first_delegation_at?: string;
+  last_delegation_at?: string;
+}
+
+export interface DelegationPowerRow {
+  delegate: string;
+  delegator_count: number;
+  last_vote_at?: string;
+  delegated_vp_gnosischain: number | null;
+  delegated_vp_mainnet: number | null;
+  delegated_vp_total: number | null;
 }
 
 /** One cross-link row. `proposal_forum_links` rows carry `linked_type`,

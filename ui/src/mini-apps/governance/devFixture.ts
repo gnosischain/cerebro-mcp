@@ -129,6 +129,83 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         ["proposal", P5, "GIP-149: Temperature check (earlier signal)", "gip", 12, "2026-04-15T10:00:00Z"],
       ],
     ),
+    // Delegation plane (Snapshot DelegateRegistry, mainnet). Registry edges
+    // are counts; delegation_power carries realized vp_by_strategy (voted
+    // delegates only). delegation_activity / _churn are WIDE (parseActivity).
+    delegation_summary: descriptor(
+      "delegation_summary",
+      ["active_delegators", "active_delegates", "total_events", "set_events", "clear_events", "re_delegations", "clear_rate"],
+      [[1820, 143, 5210, 3990, 1220, 210, 0.3058]],
+    ),
+    top_delegates: descriptor(
+      "top_delegates",
+      ["delegate", "delegator_count", "first_delegation_at", "last_delegation_at"],
+      [
+        ["0x0da0c3e52c977ed3cbc641ff02dd271c3ed55afe", 214, "2021-11-16T11:49:47Z", "2026-06-02T08:14:00Z"],
+        ["0x4fde2196d2d4fcb7a23cf333be20849ce498db2c", 156, "2022-03-30T05:46:30Z", "2026-05-20T19:03:00Z"],
+        ["0x6d9aba400a2a487a5fb76c6d56518835553cd284", 98, "2021-11-17T15:14:53Z", "2026-02-02T02:06:47Z"],
+        ["0xa333100ca865cd8b504e99faf0a578b199ec49fe", 42, "2022-08-12T03:48:16Z", "2025-12-11T10:20:00Z"],
+      ],
+    ),
+    delegation_activity: descriptor(
+      "delegation_activity",
+      ["bucket", "set_events", "clear_events", "net_change", "cumulative_net", "bucket_unit"],
+      [
+        ["2026-05", 120, 30, 90, 1600, "month"],
+        ["2026-06", 90, 45, 45, 1645, "month"],
+        ["2026-07", 60, 20, 40, 1685, "month"],
+      ],
+    ),
+    delegation_power: descriptor(
+      "delegation_power",
+      ["delegate", "delegator_count", "last_vote_at", "delegated_vp_gnosischain", "delegated_vp_mainnet", "delegated_vp_total"],
+      [
+        ["0x0da0c3e52c977ed3cbc641ff02dd271c3ed55afe", 214, "2026-06-25T12:00:00Z", 12000, 8000, 20000],
+        ["0x4fde2196d2d4fcb7a23cf333be20849ce498db2c", 156, "2026-06-20T09:00:00Z", 9000, 3000, 12000],
+        ["0x6d9aba400a2a487a5fb76c6d56518835553cd284", 98, "2026-02-02T02:06:47Z", 0, 5400, 5400],
+        ["0xa333100ca865cd8b504e99faf0a578b199ec49fe", 42, "2025-12-11T10:20:00Z", 2100, 0, 2100],
+      ],
+    ),
+    delegation_concentration: descriptor(
+      "delegation_concentration",
+      ["tier", "tier_value", "total_value", "share"],
+      [
+        [5, 620, 1820, 0.3407],
+        [10, 940, 1820, 0.5165],
+        [20, 1300, 1820, 0.7143],
+      ],
+    ),
+    delegation_churn: descriptor(
+      "delegation_churn",
+      ["bucket", "new_delegators", "repointed", "cleared", "bucket_unit"],
+      [
+        ["2026-05", 80, 40, 30, "month"],
+        ["2026-06", 55, 35, 45, "month"],
+        ["2026-07", 40, 20, 20, "month"],
+      ],
+    ),
+    // Proposal entity datasets (for dev-rendering ProposalDetail incl. the
+    // vote-trend chart). proposal_votes / proposal_forum_links are above.
+    proposal_detail: descriptor(
+      "proposal_detail",
+      ["id", "space_id", "title", "state", "type", "author", "discussion", "created_at", "start_at", "end_at", "snapshot_block", "scores_total", "quorum", "votes_count", "scores_state", "quorum_ratio", "quorum_status", "gip_number", "discussion_topic_id", "body_markdown", "choices_json", "scores_json", "snapshot_url"],
+      [[P1, "gnosis.eth", "GIP-149: Should GnosisDAO fund the thing?", "closed", "basic", `0x${"11".repeat(20)}`,
+        "https://forum.gnosis.io/t/gip-149-should-gnosisdao-fund-the-thing/12131",
+        "2026-05-01T09:00:00Z", "2026-05-02T09:00:00Z", "2026-05-09T09:00:00Z", 34567890, 120000, 75000, 412, "final",
+        1.6, "met", 149, 12131, "## Summary\nThis proposal funds the thing. See GIP-149 for context.",
+        "[\"For\",\"Against\"]", "[100000,20000]", `https://snapshot.org/#/gnosis.eth/proposal/${P1}`]],
+    ),
+    proposal_vote_trend: descriptor(
+      "proposal_vote_trend",
+      ["bucket", "votes", "vp", "cumulative_votes", "cumulative_vp", "bucket_unit"],
+      [
+        ["2026-05-02T10:00:00", 40, 22000, 40, 22000, "hour"],
+        ["2026-05-02T14:00:00", 60, 31000, 100, 53000, "hour"],
+        ["2026-05-03T09:00:00", 55, 18000, 155, 71000, "hour"],
+        ["2026-05-05T12:00:00", 120, 30000, 275, 101000, "hour"],
+        ["2026-05-08T20:00:00", 137, 19000, 412, 120000, "hour"],
+      ],
+    ),
   },
   view_state: {
     section: "overview",
@@ -153,6 +230,7 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
       "proposals.core": false, "proposals.charts": false,
       "voters.core": false, "voters.insights": false,
       "forum.core": false, "forum.insights": false,
+      "delegations.core": false, "delegations.insights": false,
     },
     section_fingerprints: { overview: "dev" },
     section_datasets: { overview: ["space_summary", "source_freshness", "governance_activity"] },

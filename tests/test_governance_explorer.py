@@ -204,6 +204,9 @@ def _all_specs() -> list[governance_explorer.QuerySpec]:
         **defaults, "query": SENTINEL_TEXT, "category_id": 424242,
         "forum_status": "archived", "sort_by": "most_posts",
     })
+    specs += governance_explorer._delegations_specs(range_state, {
+        **defaults, "sort_by": "recently_active",
+    })
     for kind, identifier in (
         ("proposal", PROPOSAL_ID), ("voter", VOTER),
         ("forum_topic", "987654"), ("forum_user", "987654"),
@@ -491,11 +494,18 @@ def test_stale_request_id_ignored():
 
 
 def test_every_spec_targets_governance_db_with_final_order_by_and_binds():
+    delegate_ref = f"{governance_explorer.DELEGATE_DB}.{governance_explorer.DELEGATE_VIEW}"
     specs = _all_specs()
     assert specs
     for spec in specs:
         sql = spec.sql
-        assert "governance_db." in sql, spec.key
+        # Delegation-plane specs read the reorg-safe canonical delegate view
+        # (rpc_log_indexer) — no governance_db / FINAL requirement for it.
+        # Any governance_db.<table> still present (e.g. the cross power spec's
+        # snapshot_votes) MUST still carry FINAL.
+        reads_delegate_view = delegate_ref in sql
+        if not reads_delegate_view:
+            assert "governance_db." in sql, spec.key
         # Every governance_db.<table> reference is followed by FINAL
         # (optionally through an alias) — no carve-outs.
         for match in re.finditer(r"governance_db\.[a-z_]+", sql):
@@ -642,6 +652,11 @@ def test_sort_by_whitelist_per_section_maps_to_fixed_order_by():
         spec = {s.key: s for s in governance_explorer._forum_specs(
             range_state, {**defaults, "sort_by": sort_by}
         )}["forum_topics"]
+        assert spec.sql.rstrip().endswith(f"ORDER BY {fragment}"), sort_by
+    for sort_by, fragment in governance_explorer.DELEGATE_SORTS.items():
+        spec = {s.key: s for s in governance_explorer._delegations_specs(
+            range_state, {**defaults, "sort_by": sort_by}
+        )}["top_delegates"]
         assert spec.sql.rstrip().endswith(f"ORDER BY {fragment}"), sort_by
     # A cross-section sort name is rejected at validation time.
     server, ch = _server()
