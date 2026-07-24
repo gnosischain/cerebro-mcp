@@ -2030,6 +2030,44 @@ class TestReportDownloadUrl:
         assert url == "http://reports.example.com:9000/reports/abcd1234?token=tok"
 
 
+class TestRewrapReportHtml:
+    """Saved reports are re-hosted in the CURRENT UI shell when served, so
+    presentation improvements reach previously generated reports."""
+
+    def test_rewrap_swaps_shell_and_keeps_data_tag(self, monkeypatch):
+        data_tag = (
+            '<script id="report-data" type="application/json">'
+            '{"title":"T","timestamp":"x","charts":{},"sections_html":""}'
+            "</script>"
+        )
+        old_html = f"<html><body>OLD-SHELL{data_tag}</body></html>"
+        monkeypatch.setattr(
+            viz, "_get_report_html", lambda: "<html><body>NEW-SHELL</body></html>"
+        )
+        out = viz._rewrap_report_html(old_html)
+        assert "NEW-SHELL" in out
+        assert "OLD-SHELL" not in out
+        assert data_tag in out
+
+    def test_html_without_data_tag_is_untouched(self, monkeypatch):
+        monkeypatch.setattr(
+            viz, "_get_report_html", lambda: "<html><body>NEW-SHELL</body></html>"
+        )
+        legacy = "<html><body>hand-written legacy report</body></html>"
+        assert viz._rewrap_report_html(legacy) == legacy
+
+    def test_shell_failure_falls_back_to_stored_html(self, monkeypatch):
+        def _boom():
+            raise FileNotFoundError("static/report.html missing")
+
+        monkeypatch.setattr(viz, "_get_report_html", _boom)
+        stored = (
+            '<html><body>OLD<script id="report-data" '
+            'type="application/json">{}</script></body></html>'
+        )
+        assert viz._rewrap_report_html(stored) == stored
+
+
 class TestChartGateAggregationAndTiering:
     """B1 (one combined message) + B2 (tier-scaled lineage depth)."""
 
@@ -2075,6 +2113,51 @@ class TestChartGateAggregationAndTiering:
         state.record_get_model_details("api_consensus_validators_active_monthly")
         passed, reason = state.check_chart_preconditions(raw_path=True)
         assert passed, reason
+
+
+class TestCuratedRawDatabaseGate:
+    """describe_table on curated raw DBs (cow_db / governance_db / scratch)
+    counts as discovery + lineage — they have no dbt models to look up."""
+
+    def _enable(self, monkeypatch):
+        monkeypatch.setattr(session_state_mod.settings, "SEMANTIC_ENABLED", True)
+        monkeypatch.setattr(
+            session_state_mod.settings, "ENFORCE_CHART_PRECONDITIONS", True
+        )
+
+    def test_describe_on_curated_db_counts_as_discovery_and_lineage(self):
+        state.record_describe_table("trades", database="cow_db")
+        assert "cow_db.trades" in state.explored_models
+        assert state.search_models_count >= 1
+        assert "trades" in state.explored_tables
+
+    def test_find_plus_one_describe_opens_chart_gate(self, monkeypatch):
+        self._enable(monkeypatch)
+        state.record_semantic_find(route="semantic_coverage_gap", mode="chart")
+        state.record_describe_table("competition_solutions", database="cow_db")
+
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert passed, reason
+
+    def test_report_tier_needs_three_curated_describes(self, monkeypatch):
+        self._enable(monkeypatch)
+        state.record_semantic_preflight(route="semantic_coverage_gap", mode="report")
+        state.record_describe_table("snapshot_proposals", database="governance_db")
+
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert not passed
+        assert "Lineage:" in reason
+
+        state.record_describe_table("snapshot_votes", database="governance_db")
+        state.record_describe_table("forum_topics", database="governance_db")
+        passed, reason = state.check_chart_preconditions(raw_path=True)
+        assert passed, reason
+
+    def test_describe_on_dbt_database_unchanged(self):
+        state.record_describe_table("fct_some_model", database="dbt")
+        assert state.explored_models == set()
+        assert state.search_models_count == 0
+        assert "fct_some_model" in state.explored_tables
 
 
 class TestReportModeGate:

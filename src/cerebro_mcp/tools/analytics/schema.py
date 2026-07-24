@@ -132,7 +132,7 @@ def build_table_schema(
     if record_state:
         from cerebro_mcp.tools.governance.session_state import state
 
-        state.record_describe_table(table)
+        state.record_describe_table(table, database=database)
 
     return TableSchema(
         database=database,

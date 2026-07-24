@@ -230,9 +230,17 @@ class SessionState:
         table: str,
         *,
         source: str = "raw",
+        database: str = "",
     ) -> None:
         with self.lock:
             self.explored_tables.add(table)
+            # Curated raw databases (cow_db, governance_db, the RPC-scan
+            # scratch DB) have no dbt models or semantic coverage, so
+            # describe_table IS the authoritative discovery-and-lineage
+            # surface for them.
+            if database and database in settings.CURATED_RAW_DATABASES:
+                self.explored_models.add(f"{database}.{table}")
+                self.search_models_count = max(self.search_models_count, 1)
             if source == "raw":
                 self._record_path_unlocked("raw")
 

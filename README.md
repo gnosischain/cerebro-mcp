@@ -16,9 +16,10 @@ This README is intentionally implementation-oriented. It describes what the serv
 
 ## What Cerebro MCP Actually Is
 
-Cerebro MCP is a FastMCP server with:
+Cerebro MCP is a FastMCP server exposing **192 static tools** (plus **7 dynamically registered SQL tools** from `custom_tools.yaml`), with:
 
 - ClickHouse access for read-only SQL
+- `stdio`, Streamable HTTP (`--http`, endpoint `/mcp`), and legacy SSE transports — see [Running Cerebro MCP](#running-cerebro-mcp)
 - dbt manifest search and lineage lookup
 - interactive chart and report generation
 - reasoning/tracing utilities
@@ -28,7 +29,7 @@ Cerebro MCP is a FastMCP server with:
 - number verification tool that checks arithmetic and cross-references before reporting
 - MCP prompts and resources that guide clients, but do not run automatically on their own
 - security audit layer with tool risk classification, suspicious-call detection, and append-only JSONL logging
-- React + ECharts **mini-apps** (Report, Metric Lab, Portfolio, Graph Explorer, Contract Explorer, CoW Data Explorer, Governance Explorer, and more) served via `ui://cerebro/<app>` resources — see [`docs/MINI_APPS.md`](docs/MINI_APPS.md) for the full tour
+- React + ECharts **mini-apps** — ten interactive surfaces (Report Renderer, Portfolio, Graph Explorer, Metric Lab, Contract Explorer, Model Lineage, Data Catalog, CoW Explorer, Governance Explorer, Report Studio) served via `ui://cerebro/<app>` resources and as standalone web apps at `GET /app/{app_id}` — see [`docs/MINI_APPS.md`](docs/MINI_APPS.md) for the full tour
 - direct JSON-RPC reads against EVM contracts (`contract_explore`, `contract_call_function`, `contract_decode_transaction_input`, `contract_decode_receipt_logs`) — backs the Contract Explorer mini-app and is the preferred path for *single-address current state* (vs. dbt for sweeps / historical / USD)
 - bulk RPC scans for on-chain forensics (`rpc_scan_logs`, `rpc_batch_call`, `rpc_read_storage`, `rpc_get_code`, `rpc_scan_traces`, `rpc_trace_transaction`, `rpc_find_block` — opt-in via `RPC_SCAN_ENABLED`): adaptive-chunked log sweeps, Multicall3 view-function sweeps across thousands of addresses at a pinned block, storage/bytecode classification, and native-value traces, all streaming into ClickHouse `scratch.rpc_*` tables for SQL analysis with resumable jobs — see [`docs/rpc/rpc_scan_overview.md`](docs/rpc/rpc_scan_overview.md)
 
@@ -45,7 +46,7 @@ If a client wants to use personas or peer review, it must explicitly call the pr
 
 ## Agent Fleet
 
-Cerebro ships with **27 agent personas** loadable via `get_agent_persona(role)`. They are prompt-layer guidance — the LLM adopts a persona's rules for the duration of a task, then can switch. Personas organize into three tiers:
+Cerebro ships with **35 agent personas** loadable via `get_agent_persona(role)`. They are prompt-layer guidance — the LLM adopts a persona's rules for the duration of a task, then can switch. Personas organize into three tiers:
 
 ### Tier 1 — Top-level orchestrator
 
@@ -68,6 +69,7 @@ Cerebro ships with **27 agent personas** loadable via `get_agent_persona(role)`.
 | `mta_analyst` | Multi-Touch Attribution — discovery-first journey attribution, funnel + path diagnostics, rule-based + Markov / sampled-Shapley credit. |
 | `unified_causal_reviewer` | Reconciliation gate between MMM and MTA: incrementality bound, coverage haircut, leakage, identity grain, selection bias. |
 | `unified_allocator` | Bounded micro / tactical allocation using MMM-estimated lift and calibrated MTA shares (±30%/period cap). |
+| `forensic_reviewer` | Accuracy gate for forensic outputs — invoked after `chain_forensics` / `pattern_forensics` / `transaction_forensics`, before findings reach a human investigator. |
 
 ### Tier 3 — Domain specialists (consulted as needed)
 
@@ -82,6 +84,13 @@ Cerebro ships with **27 agent personas** loadable via `get_agent_persona(role)`.
 | `marketing_analyst` | external-audience framing, investor updates, grant narratives |
 | `esg_analyst` | validator energy, carbon intensity, GHG Scope 2, efficiency trends |
 | `statistical_reviewer` | methodology challenge, sample-size review, p-hacking / multiple-testing correction, CI construction |
+| `chain_forensics` | on-chain incident investigation, exploit attribution, RPC-backed evidence trails |
+| `pattern_forensics` | population-level pattern hunting across addresses / transactions over a window |
+| `transaction_forensics` | single-transaction / single-address deep decode with evidence panels |
+| `chain_state_analyst` | point-in-time chain state reads — current balances, supply, owner/paused/allowance flags via RPC |
+| `cow_analyst` | CoW Protocol internals — solver competitions, batch auctions, order lifecycle, settlements |
+| `dao_governance_analyst` | GnosisDAO Snapshot proposals, votes, voters, forum activity, GIP cross-links |
+| `grafana_architect` | KPI-first Grafana dashboard composition (row roles, panel viz / data-shape contracts) |
 | `storyteller_context`, `storyteller_narrative`, `storyteller_visual_designer`, `storyteller_writer`, `storyteller_critic`, `storyteller_accessibility` | Sub-phases of the storyteller pipeline — invoked by `storyteller_orchestrator` |
 
 **Gating:** when the dispatcher emits a manifest listing required specialists, the session treats it as a binding execution contract. The MMM flow hard-blocks `generate_report` until `mmm_causal_reviewer` returns `VERDICT: PASS`. The storyteller flow hard-blocks final handoff until every clarity check passes. See [docs/cerebro-docs — MCP / Agents](https://docs.analytics.gnosis.io/mcp/agents/) for the full agent catalog, gate semantics, and routing table.
@@ -92,7 +101,7 @@ Cerebro ships with **27 agent personas** loadable via `get_agent_persona(role)`.
 
 At runtime the system looks like this:
 
-1. Your MCP host connects over `stdio` or `SSE`
+1. Your MCP host connects over `stdio`, Streamable HTTP (`/mcp`), or legacy SSE
 2. The host asks the model to solve a task
 3. The model chooses tools, prompts, and resources from this server
 4. The server executes ClickHouse/dbt/report/research logic and returns structured data
@@ -1003,7 +1012,7 @@ Prompts available today:
 - `conduct_research_peer_review(packet_json)`
 - `orchestrator(user_request)`, `data_engineer(task)`, `data_scientist(task)`, `frontend_agent(task)` — per-task decomposition scaffolds
 
-See the **Agent Fleet** section above for the full 23-persona catalog loadable via `get_agent_persona(role)`. Personas are guidance, not automation; each is adopted for a specific phase of work and produces specific artifacts.
+See the **Agent Fleet** section above for the full 35-persona catalog loadable via `get_agent_persona(role)`. Personas are guidance, not automation; each is adopted for a specific phase of work and produces specific artifacts.
 
 The seven storyteller personas are split by design — each is adopted for exactly one phase of an artifact-handoff pipeline. The three MMM personas split orchestration, DAG review, and simulation along the same lines. See the Storyteller Workflow and MMM Workflow sections for the gate semantics.
 

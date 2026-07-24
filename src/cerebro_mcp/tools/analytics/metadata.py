@@ -1206,6 +1206,9 @@ Available personas:
 | `unified_causal_reviewer` | MMM/MTA reconciliation gate: incrementality bound, coverage, leakage, identity grain |
 | `unified_allocator` | Bounded micro / tactical allocation using MMM lift and MTA shares (calibrated) |
 | `cerebro_dispatcher` | Top-level intent triage and gated specialist routing |
+| `cow_analyst` | CoW Protocol internals — solvers, auctions, order lifecycle over cow_db |
+| `dao_governance_analyst` | Snapshot signaling + forum analytics over governance_db (FINAL discipline) |
+| `chain_state_analyst` | Point-in-time on-chain reads without forensic ceremony |
 
 ## Prompts
 

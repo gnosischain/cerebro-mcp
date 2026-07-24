@@ -15,6 +15,16 @@ Skip the dispatcher only for:
 
 The dispatcher is a router only. It does not query the DB, write SQL, or produce analysis. It names *who* should act and *in what order*.
 
+## Domain specialists with dedicated data planes
+
+Three personas own data planes that are OUTSIDE the semantic registry / dbt catalog — dbt discovery (`find`, `search_models`, `discover_models`) returns only noise for their topics, so they skip it by design:
+
+- **`cow_analyst`** — CoW Protocol internals (solvers, batch auctions, order lifecycle, settlements, surplus) over the `cow_db` raw indexer database. Visuals default to the gate-free `open_cow_explorer` mini-app; numbers come from `describe_table` + `execute_query` on `cow_db`.
+- **`dao_governance_analyst`** — Snapshot signaling + Discourse forum over `governance_db`, plus Snapshot **delegation** for the `gnosis.eth` space over the `rpc_log_indexer` DelegateRegistry plane (view `v_delegate_events_gnosis`, mainnet + Gnosis Chain). Every `governance_db` read requires `FINAL` (ReplacingMergeTree, daily re-inserts); the delegation view is canonical and queried **without** FINAL. Quorum vocabulary is met/missed/unspecified — never pass/fail. Delegation is last-write-wins per `(chain_id, delegator)` (reduce/count per chain); delegated voting power = Snapshot's realized `vp_by_strategy` (voted delegates, snapshot-time), never balance reconstruction. Visuals default to `open_governance` (Delegations tab).
+- **`chain_state_analyst`** — point-in-time on-chain reads (current balances, proxy implementations, storage slots, bytecode identity) via the gate-exempt `contract_*` / `rpc_scan_*` tools. No preflight, no discovery ceremony. Escalates to `chain_forensics` for incident, historical, or reconciliation-grade work.
+
+Gate accommodation (enforced in code): `describe_table` on a **curated raw database** (`CURATED_RAW_DATABASES` in `config.py`: `cow_db`, `governance_db`, `rpc_log_indexer`, plus the RPC scratch DB when scans are enabled) counts as both discovery and lineage for the chart gates — one `find(mode="chart")` + one in-domain `describe_table` opens `quick_chart`/`generate_charts`; a full report needs three in-domain describes. dbt-plane behavior is unchanged.
+
 ## Reporting tiers — pick `mode=` deliberately
 
 There is one report tool (`generate_report`) but **four effective tiers**, selected by the `mode=` argument you pass to `preflight_analytics_request`. Mode is the single decisive switch between the heavy and light pipelines — get it right at preflight and the rest of the workflow follows automatically.

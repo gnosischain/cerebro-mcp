@@ -363,6 +363,18 @@ class Settings(BaseSettings):
         "dbt",
         "cow_db",
         "governance_db",
+        "rpc_log_indexer",
+    ]
+
+    # Non-dbt databases with authoritative curated schemas. describe_table on
+    # these counts as both discovery and lineage for the chart gates — they
+    # have no dbt models or semantic coverage to look up, so the schema IS
+    # the discovery surface. The RPC-scan scratch DB joins this list when
+    # RPC_SCAN_ENABLED (see _allow_scratch_database).
+    CURATED_RAW_DATABASES: list[str] = [
+        "cow_db",
+        "governance_db",
+        "rpc_log_indexer",
     ]
 
     @model_validator(mode="after")
@@ -382,6 +394,11 @@ class Settings(BaseSettings):
             if self.RPC_SCAN_SCRATCH_DATABASE not in self.ALLOWED_DATABASES:
                 self.ALLOWED_DATABASES = [
                     *self.ALLOWED_DATABASES,
+                    self.RPC_SCAN_SCRATCH_DATABASE,
+                ]
+            if self.RPC_SCAN_SCRATCH_DATABASE not in self.CURATED_RAW_DATABASES:
+                self.CURATED_RAW_DATABASES = [
+                    *self.CURATED_RAW_DATABASES,
                     self.RPC_SCAN_SCRATCH_DATABASE,
                 ]
         return self

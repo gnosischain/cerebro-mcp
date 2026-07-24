@@ -464,12 +464,43 @@ def _report_kind_from_path(path: Path) -> str:
     return "report"
 
 
+def _rewrap_report_html(html: str) -> str:
+    """Re-host a saved report's data payload in the CURRENT UI shell.
+
+    Saved report files embed the React bundle that existed when they were
+    generated, so presentation improvements (themes, chart polish, layout)
+    would never reach previously generated reports. The data payload is a
+    self-contained ``<script id="report-data">`` JSON tag — extract it and
+    re-inject into today's ``static/report.html`` so every served report
+    always renders with the latest presentation layer. Falls back to the
+    stored HTML verbatim if the tag or the current shell is unavailable.
+    """
+    marker = '<script id="report-data"'
+    start = html.find(marker)
+    if start == -1:
+        return html
+    end = html.find("</script>", start)
+    if end == -1:
+        return html
+    data_tag = html[start : end + len("</script>")]
+    try:
+        shell = _get_report_html()
+    except Exception:
+        return html
+    insert_pos = shell.rfind("</body>")
+    if insert_pos == -1:
+        return shell + data_tag
+    return shell[:insert_pos] + data_tag + "\n" + shell[insert_pos:]
+
+
 def _resolve_report(
     report_ref: str,
 ) -> tuple[str | None, str | None, Path | None]:
     """Resolve a report reference to (html, report_id, disk_path).
 
     Lookup order: in-memory cache (exact) -> cache (prefix) -> disk.
+    Disk reads are re-wrapped in the current UI shell (see
+    ``_rewrap_report_html``) so old reports pick up presentation fixes.
     Returns (None, None, None) if not found.
     Raises ValueError on ambiguous prefix.
     """
@@ -499,7 +530,7 @@ def _resolve_report(
         # Disk fallback
         disk_path = _find_report_on_disk(report_ref)
         if disk_path:
-            html = disk_path.read_text(encoding="utf-8")
+            html = _rewrap_report_html(disk_path.read_text(encoding="utf-8"))
             rid = _extract_report_id_from_path(disk_path)
             return html, rid, disk_path
 
@@ -527,7 +558,7 @@ def _resolve_report(
             reverse=True,
         )
         if files:
-            html = files[0].read_text(encoding="utf-8")
+            html = _rewrap_report_html(files[0].read_text(encoding="utf-8"))
             rid = _extract_report_id_from_path(files[0])
             return html, rid, files[0]
 
@@ -652,6 +683,7 @@ def create_report_artifact(
     subtitle: str | None = None,
     summary_numbers: list[dict] | None = None,
     explain_context: bool = False,
+    source_composition: dict | None = None,
 ) -> dict:
     from cerebro_mcp.tools.governance.session_state import state
 
@@ -782,6 +814,11 @@ def create_report_artifact(
         structured["research_metadata"] = research_metadata
     if case_study_metadata:
         structured["case_study_metadata"] = case_study_metadata
+    # Round-trip source for Report Studio "Duplicate to composer": the raw
+    # composer inputs (kind, title, sections, kind-specific metadata) that
+    # produced this report. Absent on agent-generated reports.
+    if source_composition:
+        structured["source_composition"] = source_composition
 
     html = _build_standalone_html(
         title,
@@ -793,6 +830,7 @@ def create_report_artifact(
         research_metadata=research_metadata,
         case_study_metadata=case_study_metadata,
         subtitle=subtitle,
+        source_composition=source_composition,
     )
 
     report_id = str(uuid.uuid4())
@@ -1049,6 +1087,7 @@ def create_research_report_artifact(
     footnotes: list[dict] | None = None,
     enforce_quality_gate: bool = True,
     reset_session_state: bool = True,
+    source_composition: dict | None = None,
 ) -> dict:
     """Build a long-form research-essay report (Anthropic-style layout).
 
@@ -1103,6 +1142,7 @@ def create_research_report_artifact(
         reset_session_state=reset_session_state,
         presentation_mode="research",
         research_metadata=research_metadata,
+        source_composition=source_composition,
     )
 
 
@@ -1120,6 +1160,7 @@ def create_case_study_artifact(
     key_points: list[str] | None = None,
     enforce_quality_gate: bool = True,
     reset_session_state: bool = True,
+    source_composition: dict | None = None,
 ) -> dict:
     """Build a scrollytelling case-study report (Anthropic customer-story style).
 
@@ -1172,6 +1213,7 @@ def create_case_study_artifact(
         reset_session_state=reset_session_state,
         presentation_mode="scrollytelling",
         case_study_metadata=case_study_metadata,
+        source_composition=source_composition,
     )
 
 
@@ -1255,6 +1297,24 @@ def _first_non_null_value(rows: list, index: int):
 
 def _is_numeric_value(value) -> bool:
     return isinstance(value, Number) and not isinstance(value, bool)
+
+
+_USD_FIELD_RE = re.compile(r"(^|_)usd(_|$)", re.IGNORECASE)
+
+
+def _value_unit_hint(*fields: str) -> str | None:
+    """Infer the value unit for a chart from its y-field name(s).
+
+    Returns "usd" when every contributing value field is USD-denominated by
+    name (``*_usd``, ``usd_*``). The UI presentation layer uses this hint to
+    `$`-prefix compact axis labels and tooltip values; when absent it falls
+    back to a conservative client-side heuristic, so emitting None is always
+    safe.
+    """
+    names = [f.strip() for f in fields if f and f.strip()]
+    if names and all(_USD_FIELD_RE.search(f) for f in names):
+        return "usd"
+    return None
 
 
 def _numeric_value_columns(
@@ -1499,7 +1559,7 @@ def _build_line_chart(
             if area:
                 s["areaStyle"] = {"opacity": 0.3}
             series_list.append(s)
-        return {
+        option = {
             "title": {},
             "tooltip": {"trigger": "axis"},
             "legend": {"data": y_fields, "top": 0, "type": "scroll"},
@@ -1508,6 +1568,10 @@ def _build_line_chart(
             "yAxis": [{"type": "value"}, {"type": "value"}],
             "series": series_list,
         }
+        unit = _value_unit_hint(*y_fields)
+        if unit:
+            option["_cerebro_value_unit"] = unit
+        return option
 
     y_idx = col_index[y_field]
 
@@ -1559,7 +1623,7 @@ def _build_line_chart(
         series_list = [s]
         legend_data = [y_field]
 
-    return {
+    option = {
         "title": {},
         "tooltip": {"trigger": "axis"},
         "legend": {"data": legend_data, "top": 0, "type": "scroll"},
@@ -1568,6 +1632,10 @@ def _build_line_chart(
         "yAxis": {"type": "value"},
         "series": series_list,
     }
+    unit = _value_unit_hint(y_field)
+    if unit:
+        option["_cerebro_value_unit"] = unit
+    return option
 
 
 def _build_bar_chart(
@@ -1592,7 +1660,7 @@ def _build_bar_chart(
             if i > 0:
                 s["yAxisIndex"] = 1
             series_list.append(s)
-        return {
+        option = {
             "title": {},
             "tooltip": {"trigger": "axis"},
             "legend": {"data": y_fields, "top": 0, "type": "scroll"},
@@ -1601,6 +1669,10 @@ def _build_bar_chart(
             "yAxis": [{"type": "value"}, {"type": "value"}],
             "series": series_list,
         }
+        unit = _value_unit_hint(*y_fields)
+        if unit:
+            option["_cerebro_value_unit"] = unit
+        return option
 
     y_idx = col_index[y_field]
 
@@ -1634,7 +1706,7 @@ def _build_bar_chart(
         series_list = [{"name": y_field, "type": "bar", "data": y_values}]
         legend_data = [y_field]
 
-    return {
+    option = {
         "title": {},
         "tooltip": {"trigger": "axis"},
         "legend": {"data": legend_data, "top": 0, "type": "scroll"},
@@ -1643,6 +1715,10 @@ def _build_bar_chart(
         "yAxis": {"type": "value"},
         "series": series_list,
     }
+    unit = _value_unit_hint(y_field)
+    if unit:
+        option["_cerebro_value_unit"] = unit
+    return option
 
 
 def _build_pie_chart(
@@ -1745,7 +1821,7 @@ def _build_scatter_chart(
         series_list = [{"name": y_field, "type": "scatter", "data": data, "symbolSize": 6}]
         legend_data = [y_field]
 
-    return {
+    option = {
         "title": {},
         "tooltip": {"trigger": "item"},
         "legend": {"data": legend_data, "top": 0, "type": "scroll"},
@@ -1754,6 +1830,10 @@ def _build_scatter_chart(
         "yAxis": {"type": "value", "name": y_field},
         "series": series_list,
     }
+    unit = _value_unit_hint(x_field, y_field)
+    if unit:
+        option["_cerebro_value_unit"] = unit
+    return option
 
 
 def _build_heatmap_chart(
@@ -2767,6 +2847,7 @@ def _build_standalone_html(
     research_metadata: dict | None = None,
     case_study_metadata: dict | None = None,
     subtitle: str | None = None,
+    source_composition: dict | None = None,
 ) -> str:
     """Build self-contained HTML with embedded data for disk saves / direct file access.
 
@@ -2789,6 +2870,8 @@ def _build_standalone_html(
         data_dict["case_study_metadata"] = case_study_metadata
     if subtitle:
         data_dict["subtitle"] = subtitle
+    if source_composition:
+        data_dict["source_composition"] = source_composition
     data = _serialize_report_data(data_dict)
 
     html = _get_report_html()
@@ -4062,19 +4145,40 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
         and enforcement gates — call `generate_charts` (batch) first.
 
         The layout adds: display title + deck (sub-headline), authors, date,
-        reading time, key-takeaways callout, floating TOC from `##` headings,
-        full-bleed figures with captions, pull-quotes, sidebars, and footnotes.
+        reading time, key-takeaways callout, floating TOC from `##` headings
+        (auto-numbered 01, 02, …), full-bleed figures with captions,
+        pull-quotes, sidebars, and footnotes.
 
-        Extra markdown directives (only parsed in this tool):
-            {{figure:chart_id caption="..." source="..."}}
+        STRUCTURE — a professional sector/research report follows this shape:
+            1. `## Executive summary` — the thesis in 2–3 paragraphs, leading
+               with the headline numbers.
+            2. 3–6 numbered analytical sections (`##` each), every one built
+               around at least one figure. Narrative first, chart as evidence.
+            3. A `## Trends & outlook` (or scenarios) section — clearly framed
+               as analytical judgment, not forecast.
+            4. A closing `## Methodology & caveats` section: peg/segment
+               definitions, exclusions, known data-quality flags, sources.
+
+        FIGURES — always place charts with the figure directive, never bare:
+            {{figure:chart_id caption="One-sentence takeaway the reader should
+            see in the chart." source="dbt model or query source"}}
+        Every figure needs a caption that states the *finding*, and a source.
+        Use `{{callout kind=warning}}` for data-integrity flags and
+        `{{callout kind=key_takeaway}}` for headline numbers. Use tables
+        (markdown) for per-entity comparisons — numeric columns are
+        auto-right-aligned.
+
+        Other directives (only parsed in this tool):
             {{pullquote}} ... {{/pullquote}}
-            {{callout kind=key_takeaway}} ... {{/callout}}
             {{sidebar title="..."}} ... {{/sidebar}}
             [^fnid] inline reference, then at end of doc:
             [^fnid]: footnote text
 
         Standard `{{chart:CHART_ID}}` and `{{grid:N}}` still work for inline
         dashboard-style chart groupings inside the essay.
+
+        After success, ALWAYS include the returned `[Open Report](...)` link
+        in your reply — the user must never have to ask for it.
 
         Args:
             title: Report title (display serif).
