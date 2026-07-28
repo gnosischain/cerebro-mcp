@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "MCP server for Gnosis Chain data platform - query ClickHouse with dbt context"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.2.0",
+    # Upper bound is REQUIRED, not cosmetic. The whole server is built on
+    # `mcp.server.fastmcp`, which mcp 2.0.0 removed — an unpinned `>=1.2.0`
+    # let CI resolve 2.0.0 and every container died at import with
+    # `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`
+    # (CrashLoopBackOff, 2026-07-28). Moving to 2.x is a port, not an upgrade.
+    "mcp[cli]>=1.26,<2",
     "clickhouse-connect>=0.7.0,<1.0",
     "igraph>=0.11,<1.0",
     "pyarrow>=13.0",
