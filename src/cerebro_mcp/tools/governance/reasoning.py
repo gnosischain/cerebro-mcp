@@ -78,6 +78,7 @@ _current_session: SessionTrace | None = None
 _thinking_always_on: bool = settings.THINKING_ALWAYS_ON
 _thinking_enabled: bool = settings.THINKING_MODE_ENABLED or _thinking_always_on
 _retention_days: int = max(0, settings.THINKING_LOG_RETENTION_DAYS)
+_max_steps_per_session: int = max(0, settings.THINKING_MAX_STEPS_PER_SESSION)
 _lock = threading.Lock()
 _log_dir = Path(settings.THINKING_LOG_DIR)
 _last_prune_check_ts: float = 0.0
@@ -265,6 +266,24 @@ def _persist_session(session: SessionTrace) -> None:
     _save_session(snap)
 
 
+def _finalize_session_async(session: SessionTrace) -> None:
+    """Writer-thread finalize for a rotated session.
+
+    Mirrors :func:`_finalize_session`, but that helper assumes the caller holds
+    ``_lock`` (it calls ``_maybe_prune_old_sessions_unlocked``) whereas the
+    writer thread does not — so acquire it the same way :func:`_persist_session`
+    does.
+    """
+    _persist_session(session)
+    with _lock:
+        _maybe_prune_old_sessions_unlocked(force=True)
+    tool_call_count = sum(
+        1 for step in session.steps
+        if getattr(step, "event_kind", "") == "tool_call"
+    )
+    observe_session_tool_calls(tool_call_count)
+
+
 def _writer_loop() -> None:
     """Single-consumer loop: runs security audits promptly and coalesces
     session persists into one summary+save per debounce window."""
@@ -285,6 +304,16 @@ def _writer_loop() -> None:
                 _run_assess(payload)
             elif kind == "persist":
                 pending = payload
+            elif kind == "finalize":
+                # A rotated session is written immediately and never coalesced:
+                # nothing will append to it again, and the next step's persist
+                # would otherwise overwrite it in `pending` and lose it.
+                if pending is payload:
+                    pending = None
+                try:
+                    _finalize_session_async(payload)
+                except Exception:
+                    logger.debug("Background session finalize failed", exc_info=True)
         now = time.monotonic()
         if pending is not None and (stopping or (now - last_save) >= debounce):
             try:
@@ -480,6 +509,54 @@ def _summarize_payload(value: Any, max_chars: int = 240) -> str:
     return text
 
 
+def _slim_tools_list_response(payload: Any) -> Any:
+    """Shrink a retained ``tools/list`` response to just the tool names.
+
+    A full tools/list response is the single largest thing the trace retains
+    (hundreds of KiB), and it is re-recorded on every client reconnect. The only
+    consumer is :func:`_compute_session_summary`'s ``semantic_tools_available``
+    check, which reads nothing but ``tools[].name`` — so keeping the names and
+    dropping the schemas is lossless for every reader while removing the bulk.
+
+    Preserves the ``{"root": {...}}`` envelope when present, because that check
+    unwraps it.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    inner = payload.get("root")
+    wrapped = isinstance(inner, dict)
+    body = inner if wrapped else payload
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return payload
+    slim_body = {
+        **{k: v for k, v in body.items() if k != "tools"},
+        "tools": [
+            {"name": t.get("name")} if isinstance(t, dict) else t
+            for t in tools
+        ],
+    }
+    if wrapped:
+        return {**{k: v for k, v in payload.items() if k != "root"}, "root": slim_body}
+    return slim_body
+
+
+def _bound_entry_payloads(entry: ReasoningStep) -> None:
+    """Shrink the oversized payloads a step would otherwise retain forever.
+
+    Deliberately NOT a blanket truncation: ``tool_args`` must stay a dict for
+    :func:`_collect_models_used`, and ``tool_result`` must stay a string for
+    :func:`_extract_step_text`, so stringifying everything silently corrupts the
+    session summary. Only the known-large, structurally-reducible case is
+    touched here; overall growth is bounded by session rotation instead.
+
+    Applied centrally because :func:`_record_step` is the only place steps are
+    appended, so no producer can bypass it.
+    """
+    if entry.request_method == "tools/list":
+        entry.response_payload = _slim_tools_list_response(entry.response_payload)
+
+
 def _record_step(entry: ReasoningStep) -> int | None:
     """Append a reasoning step and persist session state.
 
@@ -491,8 +568,13 @@ def _record_step(entry: ReasoningStep) -> int | None:
     * Sync (tests / in-process bench / stdio / shutdown): the original
       behavior — recompute the summary and rewrite the file inline — so those
       callers (and every existing test) see byte-identical persistence.
+
+    Both paths bound what the session retains: payloads are capped per field,
+    and the session rotates once it reaches ``THINKING_MAX_STEPS_PER_SESSION``.
     """
     global _current_session
+
+    _bound_entry_payloads(entry)
 
     with _lock:
         if not _ensure_active_session_unlocked():
@@ -501,18 +583,34 @@ def _record_step(entry: ReasoningStep) -> int | None:
         entry.step_number = len(_current_session.steps) + 1
         _current_session.steps.append(entry)
 
+        # Rotate once the cap is reached: detach the full session so the next
+        # step opens a fresh one, and finalize the detached session below. This
+        # is what keeps RSS flat on a server that never restarts.
+        rotated: SessionTrace | None = None
+        if (
+            _max_steps_per_session > 0
+            and len(_current_session.steps) >= _max_steps_per_session
+        ):
+            rotated = _current_session
+            _current_session = None
+
         if not _async_writer_enabled:
-            _current_session.summary = _compute_session_summary(_current_session)
-            # Save after each step for crash safety
-            _maybe_prune_old_sessions_unlocked()
-            _save_session(_current_session)
+            if rotated is not None:
+                _finalize_session(rotated)
+            else:
+                _current_session.summary = _compute_session_summary(_current_session)
+                # Save after each step for crash safety
+                _maybe_prune_old_sessions_unlocked()
+                _save_session(_current_session)
             return entry.step_number
 
-        session = _current_session
+        session = rotated if rotated is not None else _current_session
         step_number = entry.step_number
 
-    # Async path: enqueue the (debounced) persist off the lock and the loop.
-    _writer_queue.put(("persist", session))
+    # Async path: enqueue off the lock and the loop. A rotated session must be
+    # finalized rather than persisted, because the writer COALESCES pending
+    # persists — a plain persist would be dropped by the next step's enqueue.
+    _writer_queue.put(("finalize" if rotated is not None else "persist", session))
     return step_number
 
 

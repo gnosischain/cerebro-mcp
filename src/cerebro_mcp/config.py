@@ -395,6 +395,22 @@ class Settings(BaseSettings):
     THINKING_ASYNC_PERSIST: bool = True
     # Coalescing window for the background writer's materialized session_*.json.
     THINKING_PERSIST_DEBOUNCE_SECONDS: float = 1.0
+    # Bounds the IN-MEMORY trace. A remote server holds one session open for the
+    # whole process lifetime, so without this the step list — and the raw tool
+    # payloads each step retains — grows monotonically until the container hits
+    # its memory limit (measured ~7 MiB/h against a 1 GiB limit).
+    #
+    # Rotate to a fresh session once the current one reaches this many steps.
+    # The completed session is finalized to disk first, so history survives in
+    # session_*.json while RSS stays flat. 0 disables rotation (the unbounded
+    # pre-fix behavior).
+    #
+    # NB: a blanket per-field payload truncation was tried alongside this and
+    # reverted — tool_args must stay a dict and tool_result a string for the
+    # summary readers, so stringifying payloads silently corrupted session
+    # summaries. The one payload that IS reduced is the tools/list response
+    # (names kept, schemas dropped); see _slim_tools_list_response.
+    THINKING_MAX_STEPS_PER_SESSION: int = 1000
 
     # Databases accessible via the MCP server
     ALLOWED_DATABASES: list[str] = [

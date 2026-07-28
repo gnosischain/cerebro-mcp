@@ -119,6 +119,50 @@ def test_health_and_metrics_are_auth_exempt(server):
         assert metrics.status_code == 200
 
 
+def test_livez_is_auth_exempt_and_survives_clickhouse_outage(server, monkeypatch):
+    """Liveness must NOT depend on ClickHouse.
+
+    /health 503s when ClickHouse is unreachable. Pointing livenessProbe at it
+    means a dependency blip longer than periodSeconds*failureThreshold kills the
+    container; /livez exists so liveness reflects the process only.
+    """
+    def _boom(*a, **kw):
+        raise RuntimeError("clickhouse unreachable")
+
+    monkeypatch.setattr(server.ch, "get_server_info", _boom)
+    monkeypatch.setattr(server.runtime_state, "clickhouse_health", None)
+
+    app = _build(server)
+    with TestClient(app) as client:
+        live = client.get("/livez")
+        assert live.status_code == 200
+        assert live.json()["status"] == "ok"
+
+        # Readiness, by contrast, correctly reports the outage.
+        ready = client.get("/health")
+        assert ready.status_code == 503
+        assert ready.json()["clickhouse_connected"] is False
+
+
+def test_health_check_is_cached_across_probes(server, monkeypatch):
+    """Readiness runs forever on a timer — it must not query CH every probe."""
+    calls = []
+
+    def _counting(*a, **kw):
+        calls.append(1)
+        return {"version": "24.1"}
+
+    monkeypatch.setattr(server.ch, "get_server_info", _counting)
+    monkeypatch.setattr(server.runtime_state, "clickhouse_health", None)
+
+    app = _build(server)
+    with TestClient(app) as client:
+        for _ in range(5):
+            assert client.get("/health").status_code == 200
+
+    assert len(calls) == 1, f"expected 1 cached ClickHouse probe, got {len(calls)}"
+
+
 def test_query_token_only_applies_to_mcp(server):
     """A ?token= on a non-/mcp authenticated path must NOT bypass auth."""
     app = _build(server)

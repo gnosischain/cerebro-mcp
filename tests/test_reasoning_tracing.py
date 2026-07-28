@@ -665,3 +665,111 @@ def test_async_writer_persists_every_step_and_matches_sync_summary(tmp_path, mon
         steps=[reasoning.ReasoningStep(**s) for s in data["steps"]],
     )
     assert data["summary"] == reasoning._compute_session_summary(snap)
+
+
+# --- In-memory trace bounds (memory-leak fix) ----------------------------
+
+
+def _mkstep_for_rotation(n: int) -> reasoning.ReasoningStep:
+    from datetime import datetime, timezone
+
+    return reasoning.ReasoningStep(
+        step_number=0,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        step="auto_tool_call",
+        content=f"step-{n}",
+        action="execute_query",
+        duration_ms=1,
+        success=True,
+        event_kind="tool_call",
+        tool_name="execute_query",
+    )
+
+
+def test_session_rotates_at_step_cap_and_bounds_memory(tmp_path, monkeypatch):
+    """The live session must not grow without limit on a long-lived server."""
+    monkeypatch.setattr(reasoning, "_max_steps_per_session", 10)
+
+    for i in range(35):
+        reasoning._record_step(_mkstep_for_rotation(i))
+
+    # The in-memory session is bounded by the cap, not by total steps recorded.
+    assert len(reasoning._current_session.steps) < 10
+
+    # Every step survives on disk across rotated files — nothing is lost.
+    files = _session_files(tmp_path / ".cerebro" / "logs")
+    assert len(files) >= 3
+    persisted = sum(len(json.loads(f.read_text())["steps"]) for f in files)
+    assert persisted >= 30
+
+    # Each rotated session carries a summary computed over its own steps.
+    # Session ids embed a random suffix, so filename order is not chronological
+    # — assert on the shape of the set instead: three full sessions of exactly
+    # the cap, plus the still-live remainder.
+    sessions = [json.loads(f.read_text()) for f in files]
+    full = [s for s in sessions if s["summary"]["total_steps"] == 10]
+    assert len(full) == 3
+    assert all(s["summary"]["actions"].get("execute_query") == 10 for s in full)
+
+
+def test_rotation_disabled_when_cap_is_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(reasoning, "_max_steps_per_session", 0)
+
+    for i in range(25):
+        reasoning._record_step(_mkstep_for_rotation(i))
+
+    assert len(reasoning._current_session.steps) == 25
+    assert len(_session_files(tmp_path / ".cerebro" / "logs")) == 1
+
+
+def test_rotation_under_async_writer_loses_no_steps(tmp_path, monkeypatch):
+    """A rotated session must be finalized, not coalesced away by the writer."""
+    monkeypatch.setattr(reasoning, "_max_steps_per_session", 10)
+
+    reasoning.start_async_writer()
+    try:
+        for i in range(30):
+            reasoning._record_step(_mkstep_for_rotation(i))
+    finally:
+        reasoning.stop_async_writer()
+
+    files = _session_files(tmp_path / ".cerebro" / "logs")
+    persisted = sum(len(json.loads(f.read_text())["steps"]) for f in files)
+    assert persisted == 30, "rotated session dropped by the coalescing writer"
+
+
+def test_tools_list_response_is_slimmed_but_stays_readable(tmp_path):
+    """Schemas are dropped; the names semantic_tools_available reads survive."""
+    big_schema = {"type": "object", "properties": {f"p{i}": {"type": "string"} for i in range(200)}}
+    step = _mkstep_for_rotation(0)
+    step.event_kind = "mcp_request"
+    step.request_method = "tools/list"
+    step.response_payload = {
+        "tools": [
+            {"name": "query_metrics", "description": "d" * 5000, "inputSchema": big_schema},
+            {"name": "execute_query", "description": "d" * 5000, "inputSchema": big_schema},
+        ]
+    }
+    before = len(json.dumps(step.response_payload))
+
+    reasoning._record_step(step)
+
+    stored = reasoning._current_session.steps[-1].response_payload
+    assert len(json.dumps(stored)) < before / 10, "tools/list payload was not slimmed"
+    assert [t["name"] for t in stored["tools"]] == ["query_metrics", "execute_query"]
+    # The summary flag that reads this payload still resolves.
+    assert reasoning._compute_session_summary(reasoning._current_session)[
+        "semantic_tools_available"
+    ] is True
+
+
+def test_slimming_preserves_root_envelope(tmp_path):
+    payload = {"root": {"tools": [{"name": "query_metrics", "inputSchema": {"x": "y" * 5000}}]}}
+    slim = reasoning._slim_tools_list_response(payload)
+    assert slim["root"]["tools"] == [{"name": "query_metrics"}]
+
+
+def test_slimming_ignores_non_tools_payloads():
+    assert reasoning._slim_tools_list_response({"other": 1}) == {"other": 1}
+    assert reasoning._slim_tools_list_response("a string") == "a string"
+    assert reasoning._slim_tools_list_response(None) is None

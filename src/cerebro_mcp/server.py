@@ -1,7 +1,9 @@
 import logging
 import os
+import time
 from pathlib import Path
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
@@ -327,6 +329,10 @@ mcp = FastMCP(
 ch = ClickHouseManager()
 research_store = ResearchStore(str(RESEARCH_DIR))
 
+# How long a ClickHouse readiness result stays valid. Well under the probe's
+# failureThreshold window so a genuine outage is still detected promptly.
+_HEALTH_CACHE_TTL_SECONDS = 5.0
+
 # Register all tools
 register_query_tools(mcp, ch, research_store)
 register_schema_tools(mcp, ch)
@@ -401,29 +407,68 @@ register_load_tools_tool(mcp)
 install_auto_tool_tracing(mcp)
 
 
-@mcp.custom_route("/health", methods=["GET"])
-async def health_check(request: Request) -> JSONResponse:
+@mcp.custom_route("/livez", methods=["GET"])
+async def liveness_check(request: Request) -> JSONResponse:
+    """Process liveness ONLY — deliberately does no external I/O.
+
+    This is what the Kubernetes ``livenessProbe`` must point at. ``/health``
+    checks ClickHouse and 503s when it is unreachable; wiring liveness to that
+    means a ClickHouse blip lasting longer than
+    ``periodSeconds * failureThreshold`` gets the container killed, taking the
+    MCP server down for a dependency outage it could otherwise ride out. If this
+    handler answers at all, the event loop is alive and the process should live.
+    """
+    return JSONResponse({"status": "ok"}, status_code=200)
+
+
+def _clickhouse_health() -> tuple[bool, str]:
+    """Probe ClickHouse for the readiness check, with a short TTL cache.
+
+    Cached because readiness runs every ``periodSeconds`` forever; without it
+    the probe issues a query every few seconds for the life of the pod.
+    """
+    now = time.monotonic()
+    cached = runtime_state.clickhouse_health
+    if cached is not None and (now - cached[0]) < _HEALTH_CACHE_TTL_SECONDS:
+        return cached[1], cached[2]
     try:
         info = ch.get_server_info("dbt")
+        result = (True, info["version"])
+    except Exception as exc:
+        result = (False, str(exc))
+    runtime_state.clickhouse_health = (now, result[0], result[1])
+    return result
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request) -> JSONResponse:
+    """Readiness: reports whether this pod can actually serve queries.
+
+    ``ch.get_server_info`` is a BLOCKING ClickHouse round-trip, so it runs on a
+    worker thread rather than inline — an inline call stalls the single event
+    loop on every probe, which at a 10s readiness period is a permanent
+    low-grade tax and a hard stall whenever ClickHouse is slow.
+    """
+    connected, detail = await anyio.to_thread.run_sync(_clickhouse_health)
+    if connected:
         return JSONResponse(
             {
                 "status": "ok",
                 "clickhouse_connected": True,
-                "clickhouse_version": info["version"],
+                "clickhouse_version": detail,
                 "ssl_trust_injected": runtime_state.ssl_trust_injected,
             },
             status_code=200,
         )
-    except Exception as exc:
-        return JSONResponse(
-            {
-                "status": "error",
-                "clickhouse_connected": False,
-                "error": str(exc),
-                "ssl_trust_injected": runtime_state.ssl_trust_injected,
-            },
-            status_code=503,
-        )
+    return JSONResponse(
+        {
+            "status": "error",
+            "clickhouse_connected": False,
+            "error": detail,
+            "ssl_trust_injected": runtime_state.ssl_trust_injected,
+        },
+        status_code=503,
+    )
 
 
 @mcp.custom_route("/metrics", methods=["GET"])
@@ -601,6 +646,7 @@ class BearerAuthMiddleware:
         path = scope.get("path", "") or ""
         if (
             path == "/health"
+            or path == "/livez"
             or path == "/metrics"
             or path == "/favicon.ico"
             or path == "/"
