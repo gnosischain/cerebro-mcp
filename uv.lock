@@ -339,7 +339,7 @@ requires-dist = [
     { name = "clickhouse-connect", specifier = ">=0.7.0,<1.0" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "igraph", specifier = ">=0.11,<1.0" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.2.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.26,<2" },
     { name = "networkx", specifier = ">=3.2" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pyarrow", specifier = ">=13.0" },

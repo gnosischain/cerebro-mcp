@@ -27,6 +27,10 @@ const FROZEN_SECTION_GROUPS: Record<string, Record<string, string[]>> = {
     core: ["delegation_summary", "top_delegates"],
     insights: ["delegation_activity", "delegation_power", "delegation_concentration", "delegation_churn"],
   },
+  treasury: {
+    core: ["treasury_summary", "treasury_holdings", "treasury_by_wallet"],
+    insights: ["treasury_coverage"],
+  },
 };
 
 const FROZEN_ENTITY_DATASETS: Record<string, string[]> = {

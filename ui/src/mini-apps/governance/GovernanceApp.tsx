@@ -16,6 +16,7 @@ import { MOCK_PAYLOAD } from "./devFixture";
 import { buildModelContextLines, type GovAggregates } from "./model/contextPrompt";
 import { parseSpaceSummary } from "./model/parseRows";
 import { DelegationsSection } from "./sections/DelegationsSection";
+import { TreasurySection } from "./sections/TreasurySection";
 import { ForumSection } from "./sections/ForumSection";
 import { OverviewSection } from "./sections/OverviewSection";
 import { ProposalsSection } from "./sections/ProposalsSection";
@@ -41,6 +42,7 @@ const SECTIONS: Array<{ id: GovSectionId; label: string }> = [
   { id: "voters", label: "Voters" },
   { id: "forum", label: "Forum" },
   { id: "delegations", label: "Delegations" },
+  { id: "treasury", label: "Treasury" },
 ];
 
 /** Large paginated datasets render via PaginatedTable / local paging — they
@@ -55,6 +57,7 @@ const LARGE_DATASETS = new Set([
   "contributor_posts",
   "contributor_leaderboard",
   "top_delegates",
+  "treasury_holdings",
 ]);
 
 /** Frozen warning-code vocabulary → user copy. Unknown strings (human
@@ -95,6 +98,11 @@ function draftFromState(state: GovernanceViewState): GovFilterDraft {
     category_id: state.filters.category_id,
     forum_status: state.filters.forum_status,
     sort_by: state.filters.sort_by,
+    // Treasury-only; optional on the wire, defaulted here so the draft is
+    // always complete.
+    chain_id: state.filters.chain_id ?? 0,
+    asset: state.filters.asset ?? "",
+    exclude_ltd: state.filters.exclude_ltd ?? false,
   };
 }
 
@@ -369,6 +377,8 @@ export default function GovernanceApp() {
           <VotersSection ctx={ctx} />
         ) : state.section === "forum" ? (
           <ForumSection ctx={ctx} />
+        ) : state.section === "treasury" ? (
+          <TreasurySection ctx={ctx} />
         ) : (
           <DelegationsSection ctx={ctx} />
         )}

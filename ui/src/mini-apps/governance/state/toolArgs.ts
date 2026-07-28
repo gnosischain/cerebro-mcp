@@ -23,6 +23,10 @@ export interface GovFilterDraft {
   category_id: number;
   forum_status: string;
   sort_by: string;
+  /** Treasury-only: chain filter (0 = all), single-token focus, Ltd exclusion. */
+  chain_id: number;
+  asset: string;
+  exclude_ltd: boolean;
 }
 
 export const EMPTY_DRAFT: GovFilterDraft = {
@@ -36,6 +40,9 @@ export const EMPTY_DRAFT: GovFilterDraft = {
   category_id: 0,
   forum_status: "",
   sort_by: "",
+  chain_id: 0,
+  asset: "",
+  exclude_ltd: false,
 };
 
 function encodeRange(draft: GovFilterDraft): { start_at: string; end_at: string } {
@@ -67,6 +74,14 @@ export function buildSectionToolArgs(
     forum_status: draft.forum_status,
     sort_by: draft.sort_by,
   };
+  // Treasury-only filters. Emitted only for that section: the backend rejects
+  // them elsewhere by design ("a filter that cannot apply is an error, never a
+  // silent no-op"), so sending defaults from another tab would be a hard error.
+  if (section === "treasury") {
+    args.chain_id = draft.chain_id;
+    args.asset = draft.asset;
+    args.exclude_ltd = draft.exclude_ltd;
+  }
   if (forceRefresh !== undefined) args.force_refresh = forceRefresh;
   return args;
 }

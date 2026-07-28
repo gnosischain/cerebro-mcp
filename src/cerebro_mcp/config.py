@@ -424,6 +424,7 @@ class Settings(BaseSettings):
         "cow_db",
         "governance_db",
         "rpc_log_indexer",
+        "rpc_state_indexer",
     ]
 
     # Non-dbt databases with authoritative curated schemas. describe_table on
@@ -435,6 +436,7 @@ class Settings(BaseSettings):
         "cow_db",
         "governance_db",
         "rpc_log_indexer",
+        "rpc_state_indexer",
     ]
 
     @model_validator(mode="after")

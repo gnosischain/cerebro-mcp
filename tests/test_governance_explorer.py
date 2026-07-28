@@ -21,6 +21,7 @@ from cerebro_mcp.tools.visualization import governance_explorer, mini_apps, web_
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 PROPOSAL_ID = "0x" + "ab" * 32
 VOTER = "0x" + "cd" * 20
+ASSET = "0x" + "ef" * 20
 SENTINEL_TEXT = "zz_sentinel_zz"
 GOV_TOOLS = (
     "open_governance", "load_governance_section", "load_governance_datasets",
@@ -206,6 +207,10 @@ def _all_specs() -> list[governance_explorer.QuerySpec]:
     })
     specs += governance_explorer._delegations_specs(range_state, {
         **defaults, "sort_by": "recently_active",
+    })
+    specs += governance_explorer._treasury_specs(range_state, {
+        **defaults, "chain_id": 100, "asset": ASSET, "exclude_ltd": True,
+        "sort_by": "supply_share",
     })
     for kind, identifier in (
         ("proposal", PROPOSAL_ID), ("voter", VOTER),
@@ -494,17 +499,23 @@ def test_stale_request_id_ignored():
 
 
 def test_every_spec_targets_governance_db_with_final_order_by_and_binds():
-    delegate_ref = f"{governance_explorer.DELEGATE_DB}.{governance_explorer.DELEGATE_VIEW}"
+    # External planes whose views resolve dedup internally: reading them is
+    # allowed without governance_db and without FINAL. Fully qualified on
+    # purpose — a bare "db." prefix would let any spec that merely mentions the
+    # string (even in a comment) skip the governance_db existence check.
+    external_plane_refs = (
+        f"{governance_explorer.DELEGATE_DB}.{governance_explorer.DELEGATE_VIEW}",
+        f"{governance_explorer.TREASURY_DB}.{governance_explorer.TREASURY_VIEW}",
+        f"{governance_explorer.TREASURY_DB}.{governance_explorer.TREASURY_SCALARS_VIEW}",
+    )
     specs = _all_specs()
     assert specs
     for spec in specs:
         sql = spec.sql
-        # Delegation-plane specs read the reorg-safe canonical delegate view
-        # (rpc_log_indexer) — no governance_db / FINAL requirement for it.
         # Any governance_db.<table> still present (e.g. the cross power spec's
-        # snapshot_votes) MUST still carry FINAL.
-        reads_delegate_view = delegate_ref in sql
-        if not reads_delegate_view:
+        # snapshot_votes) MUST still carry FINAL, external plane or not.
+        reads_external_plane = any(ref in sql for ref in external_plane_refs)
+        if not reads_external_plane:
             assert "governance_db." in sql, spec.key
         # Every governance_db.<table> reference is followed by FINAL
         # (optionally through an alias) — no carve-outs.
@@ -522,6 +533,7 @@ def test_every_spec_targets_governance_db_with_final_order_by_and_binds():
         assert "987654" not in sql, spec.key
         assert PROPOSAL_ID not in sql, spec.key
         assert VOTER not in sql, spec.key
+        assert ASSET not in sql, spec.key
         assert "2025-01-01" not in sql, spec.key
         for value in (spec.parameters or {}).values():
             assert str(value) not in ("", None)
@@ -1195,3 +1207,92 @@ def test_governance_web_routes_health_asset_and_dispatch():
     )))
     assert denied.status_code == 404
     assert "not available" in json.loads(denied.body.decode())["error"]
+
+
+# ---------------------------------------------------------------------------
+# Treasury plane
+# ---------------------------------------------------------------------------
+
+
+def test_treasury_specs_always_pin_the_job_and_never_use_final():
+    """The upstream view is NOT job-scoped: it spans every census job, including
+    the full_holders jobs (185M+ rows) whose universes contain the treasury
+    wallets. An unpinned read exhausts server memory and double-counts any token
+    measured by two jobs, so the pin is the load-bearing guard on this plane."""
+
+    specs = governance_explorer._treasury_specs(
+        governance_explorer._range_state("", ""),
+        governance_explorer._default_filters(),
+    )
+    assert specs
+    job_pin = f"job_name = '{governance_explorer.TREASURY_JOB}'"
+    for spec in specs:
+        assert job_pin in spec.sql, spec.key
+        # v_treasury_balances resolves ReplacingMergeTree dedup internally.
+        assert "FINAL" not in spec.sql.upper(), spec.key
+        # As-of is resolved per chain; a global max would blend one chain's
+        # current snapshot with another's stale one.
+        assert "GROUP BY chain_id" in spec.sql, spec.key
+
+
+def test_treasury_usd_stays_a_typed_null_until_the_price_plane_is_wired():
+    """NULL, never 0. A fabricated zero valuation is worse than no valuation."""
+
+    specs = {
+        spec.key: spec
+        for spec in governance_explorer._treasury_specs(
+            governance_explorer._range_state("", ""),
+            governance_explorer._default_filters(),
+        )
+    }
+    for key in ("treasury_summary", "treasury_holdings", "treasury_by_wallet"):
+        assert "CAST(NULL AS Nullable(Float64))" in specs[key].sql, key
+    # Coverage encodes price absence as a dimension row, not a column.
+    assert "'usd_price'" in specs["treasury_coverage"].sql
+
+
+def test_treasury_filters_are_section_scoped_and_reach_the_fingerprint():
+    for kwargs in ({"chain_id": 1}, {"asset": ASSET}, {"exclude_ltd": True}):
+        with pytest.raises(ValueError, match="only to the treasury section"):
+            governance_explorer._validate_filters(
+                "proposals", "", "", "", "", 0, "", "", **kwargs
+            )
+    with pytest.raises(ValueError, match="chain_id must be one of"):
+        governance_explorer._validate_filters("treasury", "", "", "", "", 0, "", "", 42)
+    with pytest.raises(ValueError, match="asset must be"):
+        governance_explorer._validate_filters(
+            "treasury", "", "", "", "", 0, "", "", 0, "not-an-address"
+        )
+
+    # Each filter must change the scope fingerprint, or a cached scope is served
+    # for the wrong toggle state.
+    range_state = governance_explorer._range_state("", "")
+    base = governance_explorer._validate_filters("treasury", "", "", "", "", 0, "", "")
+    seen = {governance_explorer._section_fingerprint("treasury", range_state, base)}
+    for kwargs in ({"chain_id": 1}, {"asset": ASSET}, {"exclude_ltd": True}):
+        variant = governance_explorer._validate_filters(
+            "treasury", "", "", "", "", 0, "", "", **kwargs
+        )
+        fingerprint = governance_explorer._section_fingerprint(
+            "treasury", range_state, variant
+        )
+        assert fingerprint not in seen, kwargs
+        seen.add(fingerprint)
+
+
+def test_treasury_ltd_exclusion_is_explicit_in_sql_and_disclosed_in_basis():
+    """The Ltd wallet is ~46% of GNO holdings — the toggle roughly halves the
+    headline, so it must be visible in both the SQL and the coverage basis."""
+
+    defaults = governance_explorer._default_filters()
+    off = governance_explorer._treasury_specs(
+        governance_explorer._range_state("", ""), defaults
+    )[0]
+    on = governance_explorer._treasury_specs(
+        governance_explorer._range_state("", ""), {**defaults, "exclude_ltd": True}
+    )[0]
+    ltd = governance_explorer.LTD_WALLETS[0]
+    assert "NOT IN" not in off.sql.replace(f"NOT IN ('{ltd}')", "", 1)
+    assert f"NOT IN ('{ltd}')" in on.sql
+    assert "all treasury wallets" in off.basis
+    assert "Ltd wallets excluded" in on.basis

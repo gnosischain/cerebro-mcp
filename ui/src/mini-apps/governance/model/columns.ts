@@ -54,6 +54,25 @@ export const COLUMN_LABELS: Record<string, string> = {
   topic_title: "Topic",
   excerpt: "Excerpt",
   link_source: "Link tier",
+  token_address: "Token",
+  symbol: "Symbol",
+  decimals: "Decimals",
+  metadata_status: "Metadata",
+  wallets_holding: "Wallets",
+  balance_units: "Balance",
+  balance_total_raw: "Balance (raw)",
+  supply_share: "Share of supply",
+  value_usd: "USD value",
+  wallet_address: "Wallet",
+  tokens_held: "Tokens",
+  unnamed_positions: "Unnamed",
+  gno_units: "GNO",
+  is_ltd: "Gnosis Ltd.",
+  chain_id: "Chain",
+  dimension: "Field",
+  known: "Known",
+  unknown: "Unknown",
+  pct_known: "Coverage",
   delegate: "Delegate",
   delegator_count: "Delegators",
   first_delegation_at: "First delegation",
@@ -75,6 +94,11 @@ export const HIDDEN_COLUMNS: Record<string, string[]> = {
   forum_topics: ["id", "category_id", "created_at", "slug", "bumped_at", "closed", "archived", "pinned"],
   contributor_leaderboard: ["id", "user_id"],
   contributor_posts: ["id", "topic_id", "user_id", "post_id"],
+  // balance_total_raw stays VISIBLE: it is the authoritative exact integer, and
+  // it is the only balance shown at all for a token whose decimals were never
+  // observed. metadata_known is a sort key, not a column.
+  treasury_holdings: ["metadata_known", "decimals"],
+  treasury_by_wallet: ["is_ltd"],
 };
 
 export function hiddenColumnsFor(datasetKey: string): string[] {

@@ -72,6 +72,40 @@ GOV_DB = "governance_db"
 #: independently on each chain (Snapshot has one delegation strategy per net).
 DELEGATE_DB = "rpc_log_indexer"
 DELEGATE_VIEW = "v_delegate_events_gnosis"
+#: Treasury plane (rpc-state-indexer output): verified ERC-20 balances for the
+#: GnosisDAO wallet set, each pinned to an immutable finalized block. Every
+#: figure carries ``anchor_block``/``anchor_hash`` — that attributability is the
+#: whole point of this plane over a portfolio API.
+#:
+#: ``v_treasury_balances`` resolves ReplacingMergeTree dedup internally, so it is
+#: queried WITHOUT ``FINAL`` (same as the delegate view).
+#:
+#: CRITICAL: the view is NOT job-scoped upstream — it spans every census job,
+#: including the ``full_holders`` jobs whose universes contain the treasury
+#: wallets (hundreds of thousands of rows per date, 185M+ overall). Every spec
+#: here MUST pin ``job_name = TREASURY_JOB``; an unpinned read exhausts server
+#: memory and double-counts any token measured by two jobs.
+TREASURY_DB = "rpc_state_indexer"
+TREASURY_VIEW = "v_treasury_balances"
+TREASURY_SCALARS_VIEW = "v_token_scalars_published"
+TREASURY_JOB = "daily_treasury"
+#: Chains the treasury job publishes on. Labels only — the chain set actually
+#: shown is derived from the data, never assumed.
+TREASURY_CHAINS = {1: "Ethereum", 100: "Gnosis Chain"}
+#: GNO per chain — the one holding with an unambiguous governance meaning.
+#: Sourced from rpc-state-indexer's own catalog (config/ethereum/tokens.yaml,
+#: config/gnosis/jobs.yaml), not from a symbol lookup: symbols are attacker
+#: controlled, addresses are not.
+GNO_TOKENS = {
+    1: "0x6810e776880c02933d47db1b9fc05908e5386b96",
+    100: "0x9c58bacc331c9aa871afd802db6379a98e80cedb",
+}
+#: Gnosis Ltd. — excluded from the DAO-scoped NAV convention. Identified in
+#: rpc-state-indexer's .agents/memory/treasury-sweep-pipeline.md and present as
+#: the last row of both chains' treasury_addresses.csv. Deliberately the ONLY
+#: labelled wallet: no other name is verifiable from either repo, and inventing
+#: labels for the remaining 22 would be fabricated provenance.
+LTD_WALLETS = ("0x604e4557e9020841f4e8eb98148de3d3cdea350c",)
 #: bytes32 of "gnosis.eth" (right-padded ASCII) — the Snapshot space id.
 GNOSIS_SPACE_ID = "0x676e6f7369732e65746800000000000000000000000000000000000000000000"
 GOV_APP_META = {
@@ -82,7 +116,9 @@ ROW_CAP = 10_000
 #: 4 sections + the ``entity`` pseudo-section: an entity drill-down never
 #: evicts a section scope. Datasets are small; memory cost is negligible.
 MAX_RETAINED_SECTIONS = 5
-VALID_SECTIONS = {"overview", "proposals", "voters", "forum", "delegations"}
+VALID_SECTIONS = {
+    "overview", "proposals", "voters", "forum", "delegations", "treasury",
+}
 ENTITY_TYPES = {"proposal", "voter", "forum_topic", "forum_user"}
 
 PROPOSAL_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")
@@ -144,6 +180,10 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
             "delegation_churn",
         ),
     },
+    "treasury": {
+        "core": ("treasury_summary", "treasury_holdings", "treasury_by_wallet"),
+        "insights": ("treasury_coverage",),
+    },
 }
 #: Entity drill-down bundles (FROZEN) — loaded by ``_apply_entity_load``
 #: under the ``"entity"`` pseudo-section, never part of SECTION_GROUPS.
@@ -166,6 +206,7 @@ SOURCE_LABELS = {
     "forum": "Forum activity",
     "cross": "Snapshot signaling + forum activity",
     "delegation": "Snapshot delegate registry (on-chain: mainnet + Gnosis Chain)",
+    "treasury": "Verified treasury balances at pinned finalized blocks",
 }
 
 PROPOSAL_STATES = {"", "active", "pending", "closed"}
@@ -219,12 +260,26 @@ DELEGATE_SORTS = {
     "recently_active": "last_delegation_at DESC, delegate",
     "first_seen": "first_delegation_at ASC, delegate",
 }
+#: Treasury holdings ordering. The default is deliberate: without a price feed
+#: there is NO value ranking, and the two obvious proxies both mislead — wallet
+#: count ranks airdrop spam first (spam hits every wallet by construction), and
+#: raw balance compares incomparable units. So the default surfaces what can be
+#: displayed truthfully (resolved metadata) and ranks it by share of the token's
+#: own supply, which is at least dimensionless. It is a display order, not a
+#: claim about treasury importance — the UI says so.
+TREASURY_SORTS = {
+    "": "metadata_known DESC, supply_share DESC NULLS LAST, token_address",
+    "supply_share": "supply_share DESC NULLS LAST, token_address",
+    "wallets_holding": "wallets_holding DESC, token_address",
+    "symbol": "symbol ASC NULLS LAST, token_address",
+}
 SECTION_SORTS: dict[str, dict[str, str]] = {
     "overview": {"": ""},
     "proposals": PROPOSAL_SORTS,
     "voters": VOTER_SORTS,
     "forum": FORUM_SORTS,
     "delegations": DELEGATE_SORTS,
+    "treasury": TREASURY_SORTS,
 }
 
 
@@ -236,7 +291,7 @@ class QuerySpec:
     parameters: dict[str, Any]
     basis: str
     #: Which data plane the dataset reads — feeds the provenance label.
-    source: Literal["snapshot", "forum", "cross", "delegation"]
+    source: Literal["snapshot", "forum", "cross", "delegation", "treasury"]
     cache_ttl_seconds: int = 1800
     exact_count: bool = True
 
@@ -385,6 +440,9 @@ def _default_filters() -> dict[str, Any]:
         "category_id": 0,
         "forum_status": "",
         "sort_by": "",
+        "chain_id": 0,
+        "asset": "",
+        "exclude_ltd": False,
     }
 
 
@@ -397,6 +455,9 @@ def _validate_filters(
     category_id: int,
     forum_status: str,
     sort_by: str,
+    chain_id: int = 0,
+    asset: str = "",
+    exclude_ltd: bool = False,
 ) -> dict[str, Any]:
     """Validate every filter and its per-section applicability. Raises before
     any SQL — a filter that cannot apply to the section is an error, never a
@@ -428,6 +489,17 @@ def _validate_filters(
         raise ValueError("category_id/forum_status apply only to the forum section")
     if text and section not in {"proposals", "forum"}:
         raise ValueError("query applies only to the proposals and forum sections")
+    chain = int(chain_id or 0)
+    token = asset.strip().lower()
+    ltd = bool(exclude_ltd)
+    if section != "treasury" and (chain or token or ltd):
+        raise ValueError(
+            "chain_id/asset/exclude_ltd apply only to the treasury section"
+        )
+    if chain and chain not in TREASURY_CHAINS:
+        raise ValueError(f"chain_id must be one of {sorted(TREASURY_CHAINS)}")
+    if token and not ADDRESS_RE.match(token):
+        raise ValueError("asset must be a lowercase 0x-prefixed 20-byte address")
     sort = sort_by.strip().lower()
     sorts = SECTION_SORTS[section]
     if sort not in sorts:
@@ -443,6 +515,9 @@ def _validate_filters(
         "category_id": cid,
         "forum_status": fstatus,
         "sort_by": sort,
+        "chain_id": chain,
+        "asset": token,
+        "exclude_ltd": ltd,
     }
 
 
@@ -1112,6 +1187,202 @@ ORDER BY bucket"""
     ]
 
 
+def _treasury_predicates(filters: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    """Chain / asset predicates for the treasury plane, plus their binds.
+
+    The job pin is NOT optional and is applied by every caller: the upstream
+    view spans all census jobs (see TREASURY_DB notes).
+    """
+    params: dict[str, Any] = {}
+    chain_sql = "1"
+    if filters.get("chain_id"):
+        chain_sql = "t.chain_id = {chain_id:UInt64}"
+        params["chain_id"] = int(filters["chain_id"])
+    asset_sql = "1"
+    if filters.get("asset"):
+        asset_sql = "t.token_address = {asset:String}"
+        params["asset"] = str(filters["asset"])
+    return chain_sql, asset_sql, params
+
+
+def _ltd_predicate(filters: dict[str, Any]) -> str:
+    """Ltd-wallet exclusion. LTD_WALLETS is a module constant, never user input.
+
+    Returns ``1`` when the toggle is off so the exclusion is always visible in
+    the SQL the UI shows, rather than being applied invisibly elsewhere.
+    """
+    if not filters.get("exclude_ltd") or not LTD_WALLETS:
+        return "1"
+    listed = ", ".join(f"'{address}'" for address in LTD_WALLETS)
+    return f"t.wallet_address NOT IN ({listed})"
+
+
+def _treasury_specs(
+    range_state: dict[str, Any], filters: dict[str, Any]
+) -> list[QuerySpec]:
+    """Verified treasury balances from the rpc-state-indexer plane.
+
+    Three invariants hold in every spec here:
+
+    * ``job_name = TREASURY_JOB`` is pinned. The upstream view is not
+      job-scoped; without this a read spans the full_holders jobs (185M+ rows),
+      exhausts memory, and double-counts any token measured by two jobs.
+    * The as-of date is resolved PER CHAIN. Chains publish independently and
+      are months apart, so a global ``max(snapshot_date)`` would blend one
+      chain's current snapshot with another's stale one.
+    * ``decimals`` is Nullable and NULL means "not observed" — never 0. A
+      balance whose decimals are unknown is emitted raw with its status, and is
+      never scaled into a plausible-looking wrong number.
+
+    The date-range control does not apply: these are stock measures read at a
+    point in time, not flows over a window.
+    """
+    src = f"{TREASURY_DB}.{TREASURY_VIEW}"
+    scalars = f"{TREASURY_DB}.{TREASURY_SCALARS_VIEW}"
+    chain_sql, asset_sql, params = _treasury_predicates(filters)
+    ltd_sql = _ltd_predicate(filters)
+    sort_fragment = TREASURY_SORTS.get(filters.get("sort_by", ""), TREASURY_SORTS[""])
+    gno_sql = "multiIf(" + ", ".join(
+        f"t.chain_id = {chain}, '{address}'" for chain, address in sorted(GNO_TOKENS.items())
+    ) + ", '')"
+    ltd_list = ", ".join(f"'{address}'" for address in LTD_WALLETS) or "''"
+    # Per-chain as-of. Repeated per spec rather than materialized: the frozen
+    # QuerySpec contract is one self-contained statement per dataset.
+    asof_cte = f"""WITH asof AS (
+  SELECT chain_id, max(snapshot_date) AS as_of
+  FROM {src}
+  WHERE job_name = '{TREASURY_JOB}'
+  GROUP BY chain_id
+)"""
+
+    treasury_summary = f"""{asof_cte}
+SELECT
+  t.chain_id AS chain_id,
+  a.as_of AS as_of,
+  anyHeavy(t.anchor_block) AS anchor_block,
+  anyHeavy(t.anchor_hash) AS anchor_hash,
+  uniqExactIf(t.token_address, t.balance_raw != 0) AS tokens_held,
+  uniqExact(t.wallet_address) AS wallets_tracked,
+  countIf(t.balance_raw != 0) AS positions,
+  uniqExactIf(t.token_address, t.balance_raw != 0 AND t.metadata_status = 'resolved')
+    AS tokens_named,
+  sumIf(t.balance_units, t.token_address = {gno_sql}) AS gno_units,
+  sumIf(t.balance_units, t.token_address = {gno_sql}
+        AND t.wallet_address NOT IN ({ltd_list})) AS gno_units_ex_ltd,
+  uniqExactIf(t.token_address, t.balance_raw != 0 AND t.metadata_status = 'resolved')
+    / nullIf(uniqExactIf(t.token_address, t.balance_raw != 0), 0) AS metadata_known_share,
+  CAST(NULL AS Nullable(Float64)) AS nav_usd
+FROM {src} AS t
+INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
+WHERE t.job_name = '{TREASURY_JOB}' AND {chain_sql} AND {ltd_sql}
+GROUP BY t.chain_id, a.as_of
+ORDER BY as_of DESC, chain_id"""
+
+    treasury_holdings = f"""{asof_cte},
+supply AS (
+  SELECT s.chain_id AS supply_chain_id,
+         s.token_address AS supply_token,
+         argMax(s.scalar_raw, s.snapshot_date) AS total_supply_raw
+  FROM {scalars} AS s
+  WHERE s.job_name = '{TREASURY_JOB}' AND s.scalar_name = 'totalSupply'
+  GROUP BY s.chain_id, s.token_address
+)
+SELECT
+  t.chain_id AS chain_id,
+  t.token_address AS token_address,
+  anyHeavy(t.symbol) AS symbol,
+  anyHeavy(t.decimals) AS decimals,
+  anyHeavy(t.metadata_status) AS metadata_status,
+  anyHeavy(t.metadata_status) = 'resolved' AS metadata_known,
+  uniqExact(t.wallet_address) AS wallets_holding,
+  toString(sum(t.balance_raw)) AS balance_total_raw,
+  if(anyHeavy(t.decimals) IS NULL, NULL, sum(t.balance_units)) AS balance_units,
+  if(anyHeavy(sp.total_supply_raw) = 0, NULL,
+     toFloat64(sum(t.balance_raw)) / toFloat64(anyHeavy(sp.total_supply_raw)))
+    AS supply_share,
+  CAST(NULL AS Nullable(Float64)) AS value_usd
+FROM {src} AS t
+INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
+LEFT JOIN supply AS sp
+       ON sp.supply_chain_id = t.chain_id AND sp.supply_token = t.token_address
+WHERE t.job_name = '{TREASURY_JOB}' AND {chain_sql} AND {asset_sql} AND {ltd_sql}
+  AND t.balance_raw != 0
+GROUP BY t.chain_id, t.token_address
+ORDER BY {sort_fragment}"""
+
+    treasury_by_wallet = f"""{asof_cte}
+SELECT
+  t.chain_id AS chain_id,
+  t.wallet_address AS wallet_address,
+  t.wallet_address IN ({ltd_list}) AS is_ltd,
+  uniqExactIf(t.token_address, t.balance_raw != 0) AS tokens_held,
+  countIf(t.balance_raw != 0 AND t.metadata_status != 'resolved') AS unnamed_positions,
+  sumIf(t.balance_units, t.token_address = {gno_sql}) AS gno_units,
+  CAST(NULL AS Nullable(Float64)) AS value_usd
+FROM {src} AS t
+INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
+WHERE t.job_name = '{TREASURY_JOB}' AND {chain_sql} AND {ltd_sql}
+GROUP BY t.chain_id, t.wallet_address
+ORDER BY gno_units DESC, tokens_held DESC, wallet_address"""
+
+    # The trust panel. Every dimension the tab cannot yet display is counted
+    # here rather than silently rendered as absent.
+    treasury_coverage = f"""{asof_cte},
+held AS (
+  SELECT t.chain_id AS chain_id,
+         t.token_address AS token_address,
+         anyHeavy(t.symbol) AS symbol,
+         anyHeavy(t.decimals) AS decimals,
+         anyHeavy(t.metadata_status) AS metadata_status
+  FROM {src} AS t
+  INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
+  WHERE t.job_name = '{TREASURY_JOB}' AND {chain_sql} AND {ltd_sql}
+    AND t.balance_raw != 0
+  GROUP BY t.chain_id, t.token_address
+)
+SELECT dimension, known, unknown,
+       known / nullIf(known + unknown, 0) AS pct_known
+FROM (
+  SELECT 'symbol' AS dimension,
+         countIf(symbol IS NOT NULL) AS known,
+         countIf(symbol IS NULL) AS unknown
+  FROM held
+  UNION ALL
+  SELECT 'decimals', countIf(decimals IS NOT NULL), countIf(decimals IS NULL) FROM held
+  UNION ALL
+  SELECT 'metadata', countIf(metadata_status = 'resolved'),
+         countIf(metadata_status != 'resolved') FROM held
+  UNION ALL
+  SELECT 'usd_price', toUInt64(0), count() FROM held
+)
+ORDER BY dimension"""
+
+    scope = "; Ltd wallets excluded" if filters.get("exclude_ltd") else "; all treasury wallets"
+    return [
+        QuerySpec(
+            "treasury_summary", "Treasury summary", treasury_summary, dict(params),
+            f"latest published snapshot per chain, pinned to its finalized anchor{scope}",
+            "treasury", 900,
+        ),
+        QuerySpec(
+            "treasury_holdings", "Holdings by token", treasury_holdings, dict(params),
+            "non-zero balances at each chain's latest snapshot; share of the token's own "
+            f"total supply. NOT a value ranking — no price feed{scope}",
+            "treasury",
+        ),
+        QuerySpec(
+            "treasury_by_wallet", "Holdings by wallet", treasury_by_wallet, dict(params),
+            f"per-wallet token counts and GNO at each chain's latest snapshot{scope}",
+            "treasury",
+        ),
+        QuerySpec(
+            "treasury_coverage", "Data coverage", treasury_coverage, dict(params),
+            "what the plane can and cannot display for the held token set",
+            "treasury", 900,
+        ),
+    ]
+
+
 def _forum_specs(
     range_state: dict[str, Any], filters: dict[str, Any]
 ) -> list[QuerySpec]:
@@ -1525,6 +1796,8 @@ def _section_specs(
         return _forum_specs(range_state, filters)
     if section == "delegations":
         return _delegations_specs(range_state, filters)
+    if section == "treasury":
+        return _treasury_specs(range_state, filters)
     raise ValueError(f"Unsupported section: {section}")
 
 
@@ -1721,6 +1994,9 @@ def _section_fingerprint(
         str(filters.get("category_id", 0)),
         str(filters.get("forum_status", "")),
         str(filters.get("sort_by", "")),
+        str(filters.get("chain_id", 0)),
+        str(filters.get("asset", "")),
+        str(filters.get("exclude_ltd", False)),
     ])
 
 
@@ -1839,6 +2115,9 @@ def _apply_section_load(
     forum_status: str,
     sort_by: str,
     force_refresh: bool,
+    chain_id: int = 0,
+    asset: str = "",
+    exclude_ltd: bool = False,
 ) -> tuple[MiniAppPayload, str]:
     """Apply a section scope: validate, evict stale data, load the CORE group.
 
@@ -1859,7 +2138,7 @@ def _apply_section_load(
     range_state = _range_state(start_at, end_at)
     filters = _validate_filters(
         section_key, query, proposal_state, proposal_type, quorum_status,
-        category_id, forum_status, sort_by,
+        category_id, forum_status, sort_by, chain_id, asset, exclude_ltd,
     )
     fingerprint = _section_fingerprint(section_key, range_state, filters)
     stored_fingerprints = dict(current.get("section_fingerprints") or {})
@@ -2406,13 +2685,17 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
         forum_status: str = "",
         sort_by: str = "",
         force_refresh: bool = False,
+        chain_id: int = 0,
+        asset: str = "",
+        exclude_ltd: bool = False,
     ) -> CallToolResult:
         """[App-only] Atomically load one Governance Explorer section."""
         try:
             payload, summary = _apply_section_load(
                 ch, view_id, request_id, section, query, start_at, end_at,
                 proposal_state, proposal_type, quorum_status, category_id,
-                forum_status, sort_by, force_refresh,
+                forum_status, sort_by, force_refresh, chain_id, asset,
+                exclude_ltd,
             )
             return mini_apps.payload_to_call_tool_result(payload, summary)
         except Exception as exc:

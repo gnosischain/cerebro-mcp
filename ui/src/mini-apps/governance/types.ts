@@ -3,7 +3,14 @@
 // Wire types (MiniAppPayload / DatasetDescriptor) live in
 // ../shared/miniAppTypes.ts — never redefined here.
 
-export type GovSection = "overview" | "proposals" | "voters" | "forum" | "delegations" | "entity";
+export type GovSection =
+  | "overview"
+  | "proposals"
+  | "voters"
+  | "forum"
+  | "delegations"
+  | "treasury"
+  | "entity";
 
 export type GovEntityType = "proposal" | "voter" | "forum_topic" | "forum_user";
 
@@ -27,6 +34,11 @@ export interface GovFilters {
   category_id: number;
   forum_status: string;
   sort_by: string;
+  /** Treasury-only. Optional so existing filter literals stay valid; the
+   * backend always returns them and defaults them to 0/""/false. */
+  chain_id?: number;
+  asset?: string;
+  exclude_ltd?: boolean;
 }
 
 export interface GovSourceFreshness {
@@ -71,7 +83,7 @@ export interface GovCoverage {
   truncated?: boolean;
   mode?: string;
   error?: string;
-  source_kind?: "snapshot" | "forum" | "cross" | "delegation";
+  source_kind?: "snapshot" | "forum" | "cross" | "delegation" | "treasury";
   source_label?: string;
   warning_codes?: string[];
 }

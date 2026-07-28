@@ -184,6 +184,48 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         ["2026-07", 40, 20, 20, "month"],
       ],
     ),
+    // Treasury: verified balances at a pinned finalized block. Rows exercise
+    // the states that matter — a fully resolved token (GNO), a 6-decimal one
+    // (USDC), an unresolved token whose decimals were never observed (must
+    // render "not scalable" + the exact integer, never a scaled guess), and a
+    // legitimate 0-decimals token (must NOT be confused with unknown).
+    treasury_summary: descriptor(
+      "treasury_summary",
+      ["chain_id", "as_of", "anchor_block", "anchor_hash", "tokens_held", "wallets_tracked", "positions", "tokens_named", "gno_units", "gno_units_ex_ltd", "metadata_known_share", "nav_usd"],
+      [[1, "2026-07-27", 25627590, `0x${"13".repeat(32)}`, 231, 23, 2485, 27, 784931.82, 424520.82, 0.1169, null]],
+    ),
+    treasury_holdings: descriptor(
+      "treasury_holdings",
+      ["chain_id", "token_address", "symbol", "decimals", "metadata_status", "metadata_known", "wallets_holding", "balance_total_raw", "balance_units", "supply_share", "value_usd"],
+      [
+        [1, "0x1a5f9352af8af974bfc03399e3767df6370d82e4", "OWL", 18, "resolved", 1, 2, "1087933347759016548062892", 1087933.35, 0.2486, null],
+        [1, "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 1, 5, "784931822290089813540215", 784931.82, 0.0785, null],
+        [1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC", 6, "resolved", 1, 3, "621494537595", 621494.54, 0.0000124, null],
+        [1, "0x2ec109a0cefec70661a242a8b54cae8f45630397", null, null, "failed", 0, 23, "10000000000000000000", null, null, null],
+        [1, "0x78a25f62c52973abdb2f467116df97a1f57fe211", "PTS", 0, "resolved", 1, 23, "5700", 5700, null, null],
+      ],
+    ),
+    treasury_by_wallet: descriptor(
+      "treasury_by_wallet",
+      ["chain_id", "wallet_address", "is_ltd", "tokens_held", "unnamed_positions", "gno_units", "value_usd"],
+      [
+        [1, "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 102, 101, 414931.58, null],
+        [1, "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 100, 99, 360411, null],
+        [1, "0x689d4bd36bc1938af5ca2673c3c753235e3b4d2b", 0, 98, 97, 5000, null],
+        [1, "0x4971dd016127f390a3ef6b956ff944d0e2e1e462", 0, 152, 131, 3738.19, null],
+        [1, "0x7eea4286e9e82ba332f49400d037609bb1cf00da", 0, 100, 98, 851.05, null],
+      ],
+    ),
+    treasury_coverage: descriptor(
+      "treasury_coverage",
+      ["dimension", "known", "unknown", "pct_known"],
+      [
+        ["decimals", 27, 204, 0.1169],
+        ["metadata", 27, 204, 0.1169],
+        ["symbol", 27, 204, 0.1169],
+        ["usd_price", 0, 231, 0],
+      ],
+    ),
     // Proposal entity datasets (for dev-rendering ProposalDetail incl. the
     // vote-trend chart). proposal_votes / proposal_forum_links are above.
     proposal_detail: descriptor(
@@ -231,6 +273,7 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
       "voters.core": false, "voters.insights": false,
       "forum.core": false, "forum.insights": false,
       "delegations.core": false, "delegations.insights": false,
+      "treasury.core": false, "treasury.insights": false,
     },
     section_fingerprints: { overview: "dev" },
     section_datasets: { overview: ["space_summary", "source_freshness", "governance_activity"] },

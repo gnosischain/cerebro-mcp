@@ -36,6 +36,10 @@ export const SECTION_GROUPS: Record<string, Record<string, readonly string[]>> =
       "delegation_churn",
     ],
   },
+  treasury: {
+    core: ["treasury_summary", "treasury_holdings", "treasury_by_wallet"],
+    insights: ["treasury_coverage"],
+  },
 };
 
 /** Entity drill-down bundles — loaded under the `"entity"` pseudo-section by
