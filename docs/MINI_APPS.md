@@ -377,7 +377,11 @@ each section's `core` group loads on section apply and the rest streams via
 are retained per view (four sections + one entity), so tab returns with an
 unchanged scope fingerprint are query-free. All eight `governance_db` tables
 are `ReplacingMergeTree(ingested_at)` re-inserted by the daily ingestors, so
-every table read carries `FINAL`. Freshness is tracked as two independent
+every `governance_db` read carries `FINAL`. The two external planes are the
+exception: `rpc_log_indexer.v_delegate_events_gnosis` (delegations) and
+`rpc_state_indexer.v_treasury_balances` (treasury) resolve dedup internally
+and are queried WITHOUT `FINAL`. Treasury reads additionally MUST pin
+`job_name = 'daily_treasury'` — that view spans every census job. Freshness is tracked as two independent
 clocks per source (ingestion vs latest activity; `source_stale` after 24h).
 
 Cross-source linking is two-tier and never fuzzy: the author-declared

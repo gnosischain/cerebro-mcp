@@ -2,9 +2,11 @@
 
 Read-only analyst surface over the ``governance_db`` ClickHouse database:
 GnosisDAO Snapshot proposals/votes/followers plus the Discourse forum
-(topics/posts/users/categories). Everything shown is **Snapshot off-chain
-signaling and forum activity — never binding execution**; there is no
-treasury, execution, or delegation data in v1.
+(topics/posts/users/categories), the ``rpc_log_indexer`` DelegateRegistry
+plane, and the ``rpc_state_indexer`` treasury plane. Snapshot content is
+**off-chain signaling — never binding execution**, and there is still no
+execution or spend-attribution data here: treasury coverage is token
+*balances* at pinned finalized blocks, with no USD valuation.
 
 Frozen contract (mirrored byte-for-byte by the frontend, test-enforced on
 both sides):
@@ -267,9 +269,15 @@ DELEGATE_SORTS = {
 #: displayed truthfully (resolved metadata) and ranks it by share of the token's
 #: own supply, which is at least dimensionless. It is a display order, not a
 #: claim about treasury importance — the UI says so.
+#: ``supply_share > 1`` is arithmetically impossible for an honest token: the
+#: holding cannot exceed the token's own supply. The classic spoofed-token shape
+#: returns a constant balance to every caller, so N wallets each "hold" 100% and
+#: the total lands near N x supply. Those are demoted rather than allowed to top
+#: the list on a fabricated number.
+_PLAUSIBLE_SHARE = "ifNull(supply_share <= 1, 1) DESC"
 TREASURY_SORTS = {
-    "": "metadata_known DESC, supply_share DESC NULLS LAST, token_address",
-    "supply_share": "supply_share DESC NULLS LAST, token_address",
+    "": f"metadata_known DESC, {_PLAUSIBLE_SHARE}, supply_share DESC NULLS LAST, token_address",
+    "supply_share": f"{_PLAUSIBLE_SHARE}, supply_share DESC NULLS LAST, token_address",
     "wallets_holding": "wallets_holding DESC, token_address",
     "symbol": "symbol ASC NULLS LAST, token_address",
 }

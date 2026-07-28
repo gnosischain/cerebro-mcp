@@ -6,7 +6,7 @@ import { finite, rowsToObjects } from "../../shared/rowDataset";
 import { DatasetPanel, GroupBanner } from "../components/DatasetPanel";
 import { donutOption, horizontalBarOption } from "../model/chartOptions";
 import { COLUMN_LABELS, hiddenColumnsFor } from "../model/columns";
-import { fmtNum, fmtPct, firstRow, GroupGate, KpiRow, pickNumber, useDataset, type GovViewContext } from "./common";
+import { fmtNum, fmtPct, GroupGate, KpiRow, useDataset, type GovViewContext } from "./common";
 
 // Treasury: verified ERC-20 balances for the GnosisDAO wallet set, read from
 // the rpc-state-indexer plane. Every figure is pinned to an immutable finalized
@@ -37,9 +37,19 @@ function chainName(value: unknown): string {
   return CHAIN_NAMES[key] ?? (key ? `Chain ${key}` : "—");
 }
 
+/** fmtNum(null) is "0" because Number(null) === 0 — which would render an
+ * unwired USD figure as a real $0. Anything nullable goes through this. */
+function fmtOrDash(value: number | null): string {
+  return value === null ? "—" : fmtNum(value);
+}
+
 export function TreasurySection({ ctx }: { ctx: GovViewContext }) {
   const groups = ctx.state.loaded_groups ?? {};
-  const summary = firstRow(ctx, "treasury_summary");
+  // One row per chain: chains publish independently and their latest snapshots
+  // are months apart, so a single blended KPI row would silently mix a current
+  // snapshot with a stale one. Each chain states its own as-of and anchor.
+  const summaryDs = useDataset(ctx, "treasury_summary");
+  const summaryRows = useMemo(() => rowsToObjects(summaryDs), [summaryDs]);
   const holdings = ctx.descriptors.treasury_holdings;
   const retryInsights = () => ctx.retryGroup("treasury", "insights");
 
@@ -69,13 +79,13 @@ export function TreasurySection({ ctx }: { ctx: GovViewContext }) {
     "Tokens held",
   ), [walletRows]);
 
-  const positions = pickNumber(summary, ["positions"]);
-  const asOf = String(summary?.as_of ?? "").slice(0, 10);
-  const anchor = pickNumber(summary, ["anchor_block"]);
+  const totalPositions = summaryRows.reduce(
+    (sum, row) => sum + (finite(row.positions) ?? 0), 0,
+  );
 
   // The commonest day-one state, and the one most likely to be misread as
   // "the treasury is empty". Say why instead of rendering empty chrome.
-  if (summary && positions === 0) {
+  if (summaryRows.length > 0 && totalPositions === 0) {
     return (
       <GroupGate ctx={ctx} section="treasury" group="core">
         <p className="gov-caption">
@@ -91,26 +101,39 @@ export function TreasurySection({ ctx }: { ctx: GovViewContext }) {
   return (
     <>
       <GroupGate ctx={ctx} section="treasury" group="core">
-        {summary && (
-          <KpiRow
-            items={[
-              { label: "Chain", value: chainName(summary.chain_id) },
-              { label: "Tokens held", value: fmtNum(pickNumber(summary, ["tokens_held"])) },
-              { label: "Wallets", value: fmtNum(pickNumber(summary, ["wallets_tracked"])) },
-              { label: "GNO", value: fmtNum(pickNumber(summary, ["gno_units"])) },
-              { label: "GNO ex-Ltd.", value: fmtNum(pickNumber(summary, ["gno_units_ex_ltd"])) },
-              // NULL until a price feed exists. fmtNum renders an em-dash.
-              { label: "NAV (USD)", value: fmtNum(pickNumber(summary, ["nav_usd"])) },
-            ]}
-            meta={
-              asOf ? (
-                <span className="gov-caption">
-                  As of {asOf}
-                  {anchor ? <> · block <span className="gov-mono">{fmtNum(anchor)}</span></> : null}
-                </span>
-              ) : null
-            }
-          />
+        {summaryRows.map((row) => {
+          const asOf = String(row.as_of ?? "").slice(0, 10);
+          const anchor = finite(row.anchor_block);
+          return (
+            <KpiRow
+              key={String(row.chain_id)}
+              items={[
+                { label: "Chain", value: chainName(row.chain_id) },
+                { label: "Tokens held", value: fmtOrDash(finite(row.tokens_held)) },
+                { label: "Named", value: fmtOrDash(finite(row.tokens_named)) },
+                { label: "Wallets", value: fmtOrDash(finite(row.wallets_tracked)) },
+                { label: "GNO", value: fmtOrDash(finite(row.gno_units)) },
+                { label: "GNO ex-Ltd.", value: fmtOrDash(finite(row.gno_units_ex_ltd)) },
+                // NULL until a price feed exists — an em-dash, never 0.
+                { label: "NAV (USD)", value: fmtOrDash(finite(row.nav_usd)) },
+              ]}
+              meta={
+                asOf ? (
+                  <span className="gov-caption">
+                    As of {asOf}
+                    {anchor !== null ? <> · block <span className="gov-mono">{fmtNum(anchor)}</span></> : null}
+                  </span>
+                ) : null
+              }
+            />
+          );
+        })}
+        {summaryRows.length > 1 && (
+          <p className="gov-caption">
+            Each chain is indexed independently and states its own as-of date and anchor
+            block. Figures are not summed across chains: the snapshots are not
+            contemporaneous, so a combined total would not describe any single moment.
+          </p>
         )}
 
         <div className="gov-grid-2">
@@ -195,7 +218,23 @@ export function TreasurySection({ ctx }: { ctx: GovViewContext }) {
               }
               if (column === "supply_share") {
                 const share = finite(value);
-                return <span className="gov-mono">{share === null ? "—" : fmtPct(share)}</span>;
+                if (share === null) return <span className="gov-caption">—</span>;
+                // A holding cannot exceed the token's own supply. When it does,
+                // balanceOf is lying — the classic spoofed-token shape is a
+                // constant balance returned to every caller, so N wallets each
+                // "hold" 100% and the total lands near N x supply. Printing
+                // "2300%" as if it were a real share would dress that up as data.
+                if (share > 1) {
+                  return (
+                    <span
+                      className="gov-caption"
+                      title="Reported balance exceeds the token's own total supply — the contract's balanceOf is not trustworthy"
+                    >
+                      &gt; supply
+                    </span>
+                  );
+                }
+                return <span className="gov-mono">{fmtPct(share)}</span>;
               }
               if (column === "value_usd") return <span className="gov-caption">—</span>;
               return undefined;
