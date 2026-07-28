@@ -15,7 +15,6 @@ import {
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode,
 } from "react";
 import { shortAddr } from "../../../utils/format";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
@@ -66,7 +65,6 @@ interface Props {
     edge: FlowEdgeRow,
     appliedWindow: { t0: string; t1: string; rangeDays: number },
   ) => void;
-  modeSwitch?: ReactNode;
 }
 
 const RANGE_OPTIONS = [7, 30, 90, 180, 365];
@@ -113,7 +111,6 @@ export function FlowsView({
   onClearSelection,
   onBrowseInvestigate,
   onOpenTransactions,
-  modeSwitch,
 }: Props) {
   const flows = server.flows;
   const seeds = flows?.seeds ?? [];
@@ -583,7 +580,6 @@ export function FlowsView({
           >
             ⓘ
           </button>
-          {modeSwitch}
         </div>
       </header>
 
@@ -824,6 +820,19 @@ export function FlowsView({
               hoveredEdgeId={hoveredEdgeId}
               singleTokenMode={(flows?.tokens ?? []).length === 1}
               maxCounterpartiesPerHop={40}
+              stateKey="money:sankey"
+              // The camera resets only when the QUESTION changes. Deliberately
+              // NOT scope_id: expanding one node with Trace mints a new scope
+              // while the map is substantially the same — and that is exactly
+              // when the view must hold still so the analyst can see what the
+              // expansion added.
+              universeKey={[
+                seeds.join(","),
+                flows?.direction ?? "",
+                String(flows?.range_days ?? ""),
+                String(flows?.min_usd ?? ""),
+                (flows?.tokens ?? []).join(","),
+              ].join("|")}
               onSelectNode={selectFlowNode}
               onSelectEdge={selectFlowEdge}
               onHoverEdge={setHoveredEdgeId}

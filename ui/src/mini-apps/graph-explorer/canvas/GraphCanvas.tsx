@@ -61,7 +61,10 @@ interface Props {
    * Supplying it lets the non-WebGL table preserve the same visual selection. */
   selectedEdgeId?: string;
   seedNodeId?: string;
-  emptyHint: string;
+  /** Rendered centre-stage when the model is empty. A ReactNode, not a string,
+   * so a mode can offer a recovery ACTION (widen the window, clear a filter)
+   * rather than only describing the emptiness. */
+  emptyHint: ReactNode;
   onSelectNode: (id: string) => void;
   onSelectEdge: (id: string) => void;
   /** Explicit expand (double-click). Depth is the caller's stepper value. */
@@ -444,68 +447,72 @@ export function GraphCanvas({
 
   return (
     <section className={`ge-graph-frame${children ? " ge-has-scrubber" : ""}`}>
-      {model.n > 0 ? (
-        <>
-          <header className="ge-graph-chrome">
-            <CanvasToolbar
-              search={search}
-              searchMiss={searchMiss}
-              onSearchChange={(v) => {
-                setSearch(v);
-                if (searchMiss) setSearchMiss(false);
-              }}
-              onRunSearch={runSearch}
-              onFitView={() => {
-                const g = graphRef.current;
-                if (!g) return;
-                runRendererAction("fit view failed", () => {
-                  g.setZoomLevel?.(1);
-                  g.fitView(500);
-                });
-              }}
-              focusMode={focusMode}
-              onToggleFocus={() => setFocusMode((v) => !v)}
-              simRunning={!userPaused}
-              onToggleSim={toggleSim}
-              simControlLabel={simLabel}
-              showSimControls={showSimControls && !staticLayout}
-              showForcesPanel={!staticLayout}
-              simParams={simParams}
-              onSimParamsChange={onSimParamsChange}
-              labelMode={labelMode}
-              onLabelModeChange={setLabelMode}
-            />
-            <div className="ge-graph-chrome__end">
-              {stats ? (
-                <CanvasStats
-                  stats={stats}
-                  open={statsOpen}
-                  onToggleOpen={() => setStatsOpen((v) => !v)}
-                />
-              ) : null}
-              <button
-                type="button"
-                className={`ge-graph-btn ${legendOpen ? "active" : ""}`}
-                aria-expanded={legendOpen}
-                onClick={() => setLegendOpen((value) => !value)}
-              >
-                Legend {legendOpen ? "▾" : "▸"}
-              </button>
-            </div>
-          </header>
-          {legendOpen ? (
-            <Legend
-              model={model}
-              hiddenKinds={hiddenKinds}
-              onToggleKind={toggleKind}
-              hiddenProfiles={hiddenProfiles}
-              onToggleProfile={toggleProfile}
-              open
-              onToggleOpen={() => setLegendOpen(false)}
-              showToggle={false}
+      {/* The chrome is UNCONDITIONAL. It used to be gated on `model.n > 0`,
+          which meant an empty graph removed the search box, Fit view, the
+          force controls, the stats chip and the legend — i.e. every control
+          that could explain or undo the emptiness disappeared at exactly the
+          moment the user needed it. Controls that cannot act are disabled,
+          not unmounted. */}
+      <header className="ge-graph-chrome">
+        <CanvasToolbar
+          disabled={model.n === 0}
+          search={search}
+          searchMiss={searchMiss}
+          onSearchChange={(v) => {
+            setSearch(v);
+            if (searchMiss) setSearchMiss(false);
+          }}
+          onRunSearch={runSearch}
+          onFitView={() => {
+            const g = graphRef.current;
+            if (!g) return;
+            runRendererAction("fit view failed", () => {
+              g.setZoomLevel?.(1);
+              g.fitView(500);
+            });
+          }}
+          focusMode={focusMode}
+          onToggleFocus={() => setFocusMode((v) => !v)}
+          simRunning={!userPaused}
+          onToggleSim={toggleSim}
+          simControlLabel={simLabel}
+          showSimControls={showSimControls && !staticLayout}
+          showForcesPanel={!staticLayout}
+          simParams={simParams}
+          onSimParamsChange={onSimParamsChange}
+          labelMode={labelMode}
+          onLabelModeChange={setLabelMode}
+        />
+        <div className="ge-graph-chrome__end">
+          {stats ? (
+            <CanvasStats
+              stats={stats}
+              open={statsOpen}
+              onToggleOpen={() => setStatsOpen((v) => !v)}
             />
           ) : null}
-        </>
+          <button
+            type="button"
+            className={`ge-graph-btn ${legendOpen ? "active" : ""}`}
+            aria-expanded={legendOpen}
+            disabled={model.n === 0}
+            onClick={() => setLegendOpen((value) => !value)}
+          >
+            Legend {legendOpen ? "▾" : "▸"}
+          </button>
+        </div>
+      </header>
+      {legendOpen && model.n > 0 ? (
+        <Legend
+          model={model}
+          hiddenKinds={hiddenKinds}
+          onToggleKind={toggleKind}
+          hiddenProfiles={hiddenProfiles}
+          onToggleProfile={toggleProfile}
+          open
+          onToggleOpen={() => setLegendOpen(false)}
+          showToggle={false}
+        />
       ) : null}
       <div className="ge-graph-stage">
       {activeRendererFailure ? fallback(activeRendererFailure) : (

@@ -33,15 +33,24 @@ def block_timestamp(rpc: RpcRouter, client: RawRpcClient, block: int) -> int:
         "eth_getBlockByNumber", [hex(block), False]
     ))
     if not header:
-        raise ValueError(f"Block {block} not found")
+        raise ValueError(
+            f"Block {block} is not served by this endpoint (pruned, or below "
+            f"a chain migration boundary)"
+        )
     return int(header["timestamp"], 16)
 
 
 def block_at_timestamp(rpc: RpcRouter, ts: int, lo: int = 1,
                        hi: int | None = None) -> int:
-    """First block whose timestamp is >= ts (clamped to [lo, hi])."""
+    """First block whose timestamp is >= ts (clamped to [lo, hi]).
+
+    ``lo`` is raised to the endpoint's lowest served block when it sits below
+    it — chains are not always a contiguous range from block 1 (see
+    ``RpcRouter.lowest_available_block``).
+    """
     client = rpc.standard
     hi = hi if hi is not None else rpc.latest_block()
+    lo = max(lo, rpc.lowest_available_block(hi))
     if block_timestamp(rpc, client, lo) >= ts:
         return lo
     if block_timestamp(rpc, client, hi) < ts:

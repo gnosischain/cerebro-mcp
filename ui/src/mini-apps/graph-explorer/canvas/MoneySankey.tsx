@@ -1,4 +1,4 @@
-import { useMemo, type KeyboardEvent } from "react";
+import { useMemo, useState, type KeyboardEvent } from "react";
 
 import { shortAddr } from "../../../utils/format";
 import type { FlowEdgeRow, FlowNodeRow } from "../model/flowLayout";
@@ -7,6 +7,13 @@ import {
   type MoneyEventKind,
   type MoneyRibbon,
 } from "../model/moneySankeyLayout";
+import { SvgViewport } from "./SvgViewport";
+import type { Camera } from "./svgCamera";
+
+/** Pane width the layout is asked for. Measured by SvgViewport; the layout may
+ * exceed it when there are many hops (then the viewport scrolls). */
+const LAYOUT_PADDING = 20;
+
 
 interface Props {
   nodes: FlowNodeRow[];
@@ -17,6 +24,9 @@ interface Props {
   hoveredEdgeId?: string;
   singleTokenMode?: boolean;
   maxCounterpartiesPerHop?: number;
+  /** Session camera identity. Changes only when the QUESTION changes. */
+  stateKey?: string;
+  universeKey?: string;
   onSelectNode: (nodeId: string) => void;
   onSelectEdge: (edgeId: string) => void;
   onHoverEdge?: (edgeId: string) => void;
@@ -74,18 +84,25 @@ export function MoneySankey({
   hoveredEdgeId = "",
   singleTokenMode = false,
   maxCounterpartiesPerHop = 40,
+  stateKey = "money:sankey",
+  universeKey = "",
   onSelectNode,
   onSelectEdge,
   onHoverEdge,
   onClearSelection,
 }: Props) {
+  // Measured pane width, fed back into the layout. This is the whole point of
+  // the change: the layout used to be pinned at 1040 user-units regardless of
+  // the pane, so a wide short pane letterboxed a tall map into illegibility.
+  const [paneWidth, setPaneWidth] = useState(0);
   const layout = useMemo(
     () =>
       buildMoneySankeyLayout(nodes, edges, seeds, {
         singleTokenMode,
         maxCounterpartiesPerHop,
+        width: paneWidth > 0 ? paneWidth - LAYOUT_PADDING * 2 : undefined,
       }),
-    [edges, maxCounterpartiesPerHop, nodes, seeds, singleTokenMode],
+    [edges, maxCounterpartiesPerHop, nodes, seeds, singleTokenMode, paneWidth],
   );
   const activeEdgeId = selectedEdgeId || hoveredEdgeId;
   const hasMeasured = layout.ribbons.some((ribbon) => ribbon.widthBasis === "known_usd");
@@ -115,31 +132,44 @@ export function MoneySankey({
 
   return (
     <section className="ge-money-sankey" aria-label="Money Trail Sankey-style hop map">
+      {/* One line of framing plus a legend. The three paragraphs that used to
+          sit here (including the connector caveat) moved into "How to read
+          this" — the caveats are load-bearing but they are reference, not
+          something to re-read on every glance. */}
       <header className="ge-money-sankey__header">
         <div>
-          <strong>Sankey-style hop map</strong>
+          <strong>Hop map</strong>
           <span>Aggregated transfer adjacency — not transaction-matched custody.</span>
-          <small>
-            Dotted connectors mean “analyst expanded this address,” not “the same funds continued.”
-          </small>
         </div>
         <div className="ge-money-sankey__legend" aria-label="Ribbon width legend">
-          {hasMeasured ? <span>Solid width · known USD</span> : null}
-          {hasTokenAmount ? <span>Solid width · normalized token amount</span> : null}
-          {hasCategorical ? <span>Dashed · unpriced/categorical</span> : null}
+          {hasMeasured ? <span>Width · known USD</span> : null}
+          {hasTokenAmount ? <span>Width · normalized token amount</span> : null}
+          {hasCategorical ? <span>Dashed · unpriced</span> : null}
+          <details className="ge-money-sankey__howto">
+            <summary>How to read this</summary>
+            <div>
+              <p>
+                Columns are investigative hops out from (and back to) the seed —
+                the labels above the map name each one. Ribbon thickness is the
+                aggregated value on that adjacency, not a single transfer.
+              </p>
+              <p>
+                Every intermediary appears twice, as a <em>received</em> and a{" "}
+                <em>sent</em> instance, joined by a dotted connector. That
+                connector means “an analyst expanded this address,” not “the same
+                funds continued.” This view cannot establish custody continuity
+                and does not claim to.
+              </p>
+              <p>
+                A dashed ribbon is unpriced: its value is unknown, not zero.
+                Counts above each column say how many counterparties are drawn
+                versus how many were loaded.
+              </p>
+              <p>Scroll or pinch to zoom, drag to pan, or use Fit width / Fit all.</p>
+            </div>
+          </details>
         </div>
       </header>
-      <div className="ge-money-sankey__coverage" aria-label="Visible graph cap by hop">
-        {layout.hopCoverage.map((coverage) => (
-          <span key={`${coverage.direction}:${coverage.hop}`}>
-            {coverage.direction === "in" ? "Incoming" : "Outgoing"} hop {coverage.hop} ·{" "}
-            {coverage.shownCounterparties}/{coverage.loadedCounterparties} loaded counterparties
-            {coverage.omittedCounterparties
-              ? ` · ${coverage.omittedCounterparties} omitted from map`
-              : ""}
-          </span>
-        ))}
-      </div>
       {selectedRibbon ? (
         <div className="ge-money-sankey__selection" role="status">
           <strong>
@@ -158,20 +188,22 @@ export function MoneySankey({
           </span>
         </div>
       ) : null}
-      <svg
-        className="ge-money-sankey__svg"
-        viewBox={`0 0 ${layout.width} ${layout.height}`}
-        role="group"
-        aria-labelledby="ge-money-sankey-title ge-money-sankey-desc"
-        onClick={(event) => {
-          if (event.target === event.currentTarget) onClearSelection();
-        }}
+      <SvgViewport
+        className="ge-money-sankey__viewport"
+        contentBox={{ x: 0, y: 0, width: layout.width, height: layout.height }}
+        stateKey={stateKey}
+        universeKey={universeKey}
+        fitMode="width"
+        padding={LAYOUT_PADDING}
+        ariaLabel="Observed aggregate transfer adjacency by investigative hop. Intermediaries have separate received and sent instances; dotted connectors record an analyst expansion and carry no value."
+        onBackgroundClick={onClearSelection}
+        onMeasure={(size) => setPaneWidth(size.width)}
+        chrome={(camera) => (
+          <ColumnHeaders layout={layout} camera={camera} />
+        )}
       >
-        <title id="ge-money-sankey-title">Observed aggregate transfer adjacency by investigative hop</title>
-        <desc id="ge-money-sankey-desc">
-          Intermediaries have separate received and sent instances. Dotted connectors record an
-          analyst expansion and carry no value.
-        </desc>
+      {() => (
+      <>
         <g className="ge-money-sankey__ribbons">
           {layout.ribbons.map((ribbon) => {
             const selected = ribbon.edgeIds.includes(selectedEdgeId);
@@ -196,6 +228,11 @@ export function MoneySankey({
                 <path
                   className="ge-money-ribbon__hit"
                   d={path}
+                  // Non-scaling: the hit band must stay a comfortable ~14 SCREEN
+                  // px at every zoom. Scaled, it would balloon into neighbouring
+                  // ribbons when zoomed in (ROW_GAP is only 34) and shrink below
+                  // clickability at Fit all.
+                  vectorEffect="non-scaling-stroke"
                   strokeWidth={Math.max(14, ribbon.strokeWidth + 10)}
                   role="button"
                   tabIndex={0}
@@ -242,6 +279,7 @@ export function MoneySankey({
               x2={connector.x2}
               y2={connector.y2}
               data-kind={connector.kind}
+              vectorEffect="non-scaling-stroke"
               role="button"
               tabIndex={0}
               aria-label={`Expanded ${connector.address}; no custody continuity asserted`}
@@ -304,7 +342,54 @@ export function MoneySankey({
             );
           })}
         </g>
-      </svg>
+      </>
+      )}
+      </SvgViewport>
     </section>
+  );
+}
+
+/**
+ * Per-column headers, drawn in SCREEN space so they stay legible at any zoom.
+ *
+ * This replaces the stacked `.ge-money-sankey__coverage` strip, which listed
+ * every hop's counts as prose above the map and left the reader to work out
+ * which column each line referred to. Coverage belongs over its own column.
+ */
+function ColumnHeaders({
+  layout,
+  camera,
+}: {
+  layout: ReturnType<typeof buildMoneySankeyLayout>;
+  camera: Camera;
+}) {
+  return (
+    <g className="ge-money-sankey__columns" aria-hidden="true">
+      {layout.columns.map((column) => {
+        const x = column.x * camera.scale + camera.tx;
+        const coverage = column.coverage;
+        return (
+          <g key={`${column.direction}:${column.stage}`} transform={`translate(${x} 0)`}>
+            <text className="ge-money-col__label" y={16} textAnchor="middle">
+              {column.label}
+            </text>
+            {coverage ? (
+              <text
+                className={`ge-money-col__coverage${
+                  coverage.omittedCounterparties ? " is-truncated" : ""
+                }`}
+                y={30}
+                textAnchor="middle"
+              >
+                {coverage.shownCounterparties}/{coverage.loadedCounterparties} shown
+                {coverage.omittedCounterparties
+                  ? ` · ${coverage.omittedCounterparties} not drawn`
+                  : ""}
+              </text>
+            ) : null}
+          </g>
+        );
+      })}
+    </g>
   );
 }

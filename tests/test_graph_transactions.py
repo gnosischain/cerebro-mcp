@@ -6,6 +6,7 @@ import hashlib
 import json
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 from unittest.mock import patch
 
 import pytest
@@ -558,7 +559,7 @@ def test_receipt_decoder_captures_malformed_transfer_data_without_zero_row():
             }
 
     with patch(
-        "cerebro_mcp.tools.semantic.graph_explorer.transactions.RpcRouter.from_settings",
+        "cerebro_mcp.tools.semantic.graph_explorer.transactions._router",
         return_value=SimpleNamespace(standard=ReceiptClient()),
     ):
         raw_receipts: list[list[Any]] = []
@@ -860,11 +861,16 @@ def test_plain_address_ignores_legacy_date_ranges_instead_of_hiding_activity():
         through="2026-07-19 01:00:00",
         limit=25,
     )
-    rpc_discover.assert_called_once_with(SOURCE, after_block=47_000_001)
+    # chain_id is now threaded explicitly; assert it too, so the Gnosis default
+    # is locked rather than merely tolerated.
+    rpc_discover.assert_called_once_with(
+        SOURCE, after_block=47_000_001, chain_id=100
+    )
     direct_discover.assert_called_once_with(
         SOURCE,
         after_block=47_000_001,
         through_block=47_000_001,
+        chain_id=100,
     )
     assert scope["verification"]["status"] == "verified"
     assert result.structuredContent["view_state"]["transactions"]["range_days"] == 0
@@ -1733,7 +1739,7 @@ def test_receipt_operation_preserves_address_list_and_adds_rpc_context():
             raise AssertionError(method)
 
     with patch(
-        "cerebro_mcp.tools.semantic.graph_explorer.transactions.RpcRouter.from_settings",
+        "cerebro_mcp.tools.semantic.graph_explorer.transactions._router",
         return_value=SimpleNamespace(standard=ReceiptRpc()),
     ):
         receipt = load(
@@ -1810,3 +1816,104 @@ def test_discover_operation_keeps_stored_candidates_when_rpc_head_fails():
         source["role"] == "discovery_tail" and source["status"] == "error"
         for source in tx["discovery_scope"]["sources"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Multichain receipts (S5)
+# ---------------------------------------------------------------------------
+
+
+def test_router_is_chain_scoped_and_gnosis_is_unchanged():
+    """`_router` must resolve per chain, and chain 100 must keep the legacy pair."""
+    from cerebro_mcp.chains import GNOSIS_CHAIN_ID
+    from cerebro_mcp.tools.semantic.graph_explorer.transactions import _router
+
+    with mock.patch(
+        "cerebro_mcp.clients.raw_rpc.RpcRouter.for_chain"
+    ) as for_chain:
+        _router(GNOSIS_CHAIN_ID)
+        _router(8453)
+    assert [call.args[0] for call in for_chain.call_args_list] == [100, 8453]
+
+
+def test_address_rpc_cache_is_keyed_by_chain():
+    """The same address holds different history on every chain.
+
+    Keyed by address alone, a Base scan's rows would be served to a Gnosis
+    question (and vice versa) — silently wrong evidence.
+    """
+    from cerebro_mcp.tools.semantic.graph_explorer import transactions as tx
+
+    tx._address_rpc_cache.clear()
+    tx._address_rpc_cache[(100, "0xabc")] = (10, [["gnosis-row"]])
+    tx._address_rpc_cache[(8453, "0xabc")] = (10, [["base-row"]])
+    assert tx._address_rpc_cache[(100, "0xabc")][1] == [["gnosis-row"]]
+    assert tx._address_rpc_cache[(8453, "0xabc")][1] == [["base-row"]]
+    tx._address_rpc_cache.clear()
+
+
+def test_redact_endpoint_strips_urls_that_carry_api_keys():
+    """Scope strings reach the exported case bundle; endpoint URLs embed keys."""
+    from cerebro_mcp.tools.semantic.graph_explorer.transactions import (
+        _redact_endpoint,
+    )
+
+    err = Exception(
+        "503 Server Error: Service Unavailable for url: "
+        "https://rpc.example.com/v1/SECRET_API_KEY"
+    )
+    out = _redact_endpoint(err)
+    assert "SECRET_API_KEY" not in out
+    assert "http" not in out
+    assert "503" in out
+
+
+def test_off_gnosis_enrichment_never_borrows_gnosis_metadata_or_price():
+    """Off Gnosis the warehouse must not be consulted at all.
+
+    The address -> symbol -> price bijection holds only because every symbol
+    comes from the Gnosis whitelist seed. The same address exists on every EVM
+    chain, so joining a Base token against it could hand back a Gnosis token's
+    decimals and price — a silently wrong amount. USD must be unknown, not 0,
+    and no unverified symbol may be presented as the asset's identity.
+    """
+    from cerebro_mcp.tools.semantic.graph_explorer import transactions as tx
+
+    token = "0x" + "ab" * 20
+    # rows: [.., block_timestamp@4, .., token_address@7, .., raw_amount@9, ..]
+    rows = [["id", "src", "tgt", "0xhash", "2026-07-01", 1, 2, token, 0, 10**8, 0, "ok"]]
+
+    with mock.patch.object(
+        tx, "_erc20_decimals_onchain", return_value={token: 8}
+    ) as onchain, mock.patch.object(tx, "validate_source_contract") as contract:
+        out, statuses, warnings, _details = tx._enrich_rpc_legs(
+            None, rows, chain_id=8453
+        )
+
+    contract.assert_not_called()          # no Gnosis relation was probed
+    onchain.assert_called_once()
+    assert statuses["prices"] == "not_applicable"
+    leg = out[0]
+    assert leg[8] == ""                    # no attacker-controlled symbol shown
+    assert leg[9] == 1.0                   # normalized with the contract's decimals
+    assert leg[10] is None                 # USD unknown, NOT zero
+    assert leg[12] == str(10**8)           # raw amount stays authoritative
+    assert any("USD is unavailable" in w for w in warnings)
+
+
+def test_gnosis_enrichment_still_uses_the_warehouse():
+    """The Gnosis path must be untouched by the multichain branch."""
+    from cerebro_mcp.tools.semantic.graph_explorer import transactions as tx
+
+    token = "0x" + "cd" * 20
+    rows = [["id", "src", "tgt", "0xhash", "2026-07-01", 1, 2, token, 0, 10**18, 0, "ok"]]
+
+    with mock.patch.object(tx, "_erc20_decimals_onchain") as onchain, mock.patch.object(
+        tx, "validate_source_contract", return_value={"ok": False, "error": "stub"}
+    ) as contract:
+        _out, _statuses, _warnings, _details = tx._enrich_rpc_legs(
+            None, rows, chain_id=100
+        )
+
+    contract.assert_called()               # warehouse contract WAS probed
+    onchain.assert_not_called()            # and no on-chain fallback was used

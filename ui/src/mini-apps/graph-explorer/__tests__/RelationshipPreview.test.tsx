@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatasetDescriptor } from "../../shared/miniAppTypes";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
 import type { GraphModel } from "../model/parseRows";
-import { AtlasView, relationshipWeightUnit } from "../modes/AtlasView";
+import { relationshipWeightUnit } from "../model/profileMeta";
+import { RelationshipsView } from "../modes/RelationshipsView";
 import { buildInitialState } from "../state/graphReducer";
 import type {
   ForensicScope,
@@ -18,14 +19,15 @@ vi.mock("../canvas/GraphCanvas", () => ({
   GraphCanvas: (props: {
     model: GraphModel;
     stateKey?: string;
-    emptyHint?: string;
+    emptyHint?: ReactNode;
   }) => (
     <div
       data-testid="graph"
       data-edges={props.model.edgeRows.map((edge) => edge.id).join(",")}
       data-state-key={props.stateKey}
-      data-empty-hint={props.emptyHint}
-    />
+    >
+      <div data-testid="graph-empty">{props.emptyHint}</div>
+    </div>
   ),
 }));
 
@@ -186,7 +188,7 @@ const previewEdgeRows = [
   ["preview-edge", "0xc", "0xd", profile.profile, 42, 3, true],
 ];
 
-describe("Atlas catalog preview", () => {
+describe("Relationships catalog preview", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -222,7 +224,7 @@ describe("Atlas catalog preview", () => {
     ) => {
       await act(async () => {
         root.render(
-          <AtlasView
+          <RelationshipsView
             server={server}
             local={local}
             dispatch={dispatch}
@@ -258,6 +260,25 @@ describe("Atlas catalog preview", () => {
                   )
                 : undefined
             }
+            atlasNodeDescriptor={descriptor(
+              "atlas_nodes",
+              "atlas:4",
+              ["id", "kind", "label", "profiles"],
+              appliedNodes.rows,
+            )}
+            atlasEdgeDescriptor={descriptor(
+              "atlas_edges",
+              "atlas:4",
+              ["id", "source", "target", "profile", "weight", "edge_count", "directed"],
+              appliedEdges.rows,
+            )}
+            nodes={undefined}
+            edges={undefined}
+            nodeEvidence={undefined}
+            edgeEvidence={undefined}
+            evidenceExpectation={null}
+            refetchSeed={vi.fn()}
+            expandNode={vi.fn()}
             loadSample={vi.fn()}
             loading={false}
             loadError={null}
@@ -293,7 +314,7 @@ describe("Atlas catalog preview", () => {
     expect(container.querySelector("[data-testid=graph]")?.getAttribute("data-edges"))
       .toBe("preview-edge");
     expect(container.querySelector("[data-testid=graph]")?.getAttribute("data-state-key"))
-      .toBe("relationships:atlas:preview:token_transfers");
+      .toBe("relationships:preview:token_transfers");
     expect(container.textContent).toContain("dbt.int_execution_transfers_whitelisted_daily");
     expect(container.textContent).toContain("tier 1");
     expect(container.textContent).toContain("USD value");
@@ -323,7 +344,7 @@ describe("Atlas catalog preview", () => {
     const render = async (error: string | null) => {
       await act(async () => {
         root.render(
-          <AtlasView
+          <RelationshipsView
             server={server}
             local={local}
             dispatch={vi.fn()}
@@ -343,6 +364,25 @@ describe("Atlas catalog preview", () => {
               ["id", "source", "target", "profile", "weight", "edge_count", "directed"],
               previewEdgeRows,
             )}
+            atlasNodeDescriptor={descriptor(
+              "atlas_nodes",
+              "atlas:4",
+              ["id", "kind", "label", "profiles"],
+              appliedNodes.rows,
+            )}
+            atlasEdgeDescriptor={descriptor(
+              "atlas_edges",
+              "atlas:4",
+              ["id", "source", "target", "profile", "weight", "edge_count", "directed"],
+              appliedEdges.rows,
+            )}
+            nodes={undefined}
+            edges={undefined}
+            nodeEvidence={undefined}
+            edgeEvidence={undefined}
+            evidenceExpectation={null}
+            refetchSeed={vi.fn()}
+            expandNode={vi.fn()}
             loadSample={vi.fn()}
             loading={false}
             loadError={null}

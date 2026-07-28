@@ -12,6 +12,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { shortAddr } from "../../../utils/format";
+import { ChainBadge } from "../../shared/ChainBadge";
+import { GNOSIS_CHAIN_ID, txUrl } from "../model/explorerLinks";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
 import { EvidencePanel, EvidenceTrigger } from "../ForensicScopeDisclosure";
 import { FilterDrawer } from "../FilterDrawer";
@@ -56,6 +58,9 @@ export interface TxSettings {
   /** Candidate page admission; independent from receipt-leg hydration. */
   pageSize: number;
   activityKinds: Array<"direct" | "erc20">;
+  /** EVM chain for this request. Receipts are RPC-sourced and portable; the
+   * server refuses address discovery off Gnosis rather than faking it. */
+  chain: string;
 }
 
 interface Props {
@@ -600,6 +605,18 @@ export function TransactionsView({
   const [subview, setSubview] = useState<TransactionSubview>(
     restoredUi?.subview ?? (appliedInputMode === "address" ? "activity" : "receipt"),
   );
+  // Chain selection is local until a request carries it (see the picker).
+  const [chainChoice, setChainChoice] = useState<number | null>(null);
+  const chainOptions = server.transactions?.chain_options ?? [];
+  const serverChainId =
+    server.transactions?.scope?.chain_id ??
+    server.transactions?.chain_id ??
+    GNOSIS_CHAIN_ID;
+  const activeChainId = chainChoice ?? serverChainId;
+  const activeChain = chainOptions.find((o) => o.chain_id === activeChainId);
+  // Read by issueRequest, which is defined before this value in render order.
+  const activeChainIdRef = useRef(activeChainId);
+  activeChainIdRef.current = activeChainId;
   const [detailsOpen, setDetailsOpen] = useState(restoredUi?.detailsOpen ?? false);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const evidenceTriggerRef = useRef<HTMLButtonElement>(null);
@@ -728,8 +745,11 @@ export function TransactionsView({
   const showingDiscovery = isDiscoveryScope && subview === "activity";
 
   const issueRequest = (settings: Partial<TxSettings>, label: string) => {
-    setPendingIntent({ settings, label });
-    requestTransactions(settings);
+    // Stamp the chain on every request from this view; the server defaults to
+    // Gnosis when it is absent, which would silently ignore the picker.
+    const withChain = { ...settings, chain: String(activeChainIdRef.current) };
+    setPendingIntent({ settings: withChain, label });
+    requestTransactions(withChain);
   };
 
   const stopAutomaticDiscovery = () => {
@@ -1425,6 +1445,59 @@ export function TransactionsView({
         * The switch is app chrome — if a mode places it somewhere else the
         * tab bar jumps as you switch modes. */}
       <div className="ge-topbar ge-tx-bar">
+        {/* Chain picker — Transaction Detail only. Receipts come from RPC and
+          * work on any configured chain; the other modes read the single-chain
+          * Gnosis warehouse, so offering a selector there would be a dead
+          * control. Hidden entirely when only one chain is configured. */}
+        {chainOptions.length > 1 ? (
+          <label className="ge-tx-chain" title="Chain to read receipts from">
+            <span className="ge-tx-chain__label">Chain</span>
+            <ChainBadge chainId={activeChainId} showName={false} />
+            <select
+              value={activeChainId}
+              aria-label="Chain"
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                if (next === activeChainId) return;
+                // The subject belongs to the old chain: a hash or address means
+                // nothing on the new one. Clear it rather than re-running it
+                // somewhere it was never seen.
+                stopAutomaticDiscovery();
+                setInput("");
+                setActiveTxHash("");
+                clearSelection();
+                setDetailsOpen(false);
+                setEvidenceOpen(false);
+                setPendingIntent(null);
+                const option = chainOptions.find((o) => o.chain_id === next);
+                if (option && !option.supports_address_discovery) {
+                  setInputMode("hash");
+                  setSubview("receipt");
+                }
+                setChainChoice(next);
+              }}
+            >
+              {chainOptions.map((option) => (
+                <option key={option.chain_id} value={option.chain_id}>
+                  {option.name}
+                  {option.supports_address_discovery ? "" : " · hash only"}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        {activeChain && !activeChain.supports_address_discovery ? (
+          // Rendered at BAR level, not inside the discovery controls: those
+          // only mount in address mode, so a user who just switched to a
+          // hash-only chain would have seen no explanation at all.
+          <p className="ge-tx-chain-note" role="note">
+            Address search needs the indexed execution tables, which exist for
+            Gnosis only. On {activeChain.name} open a transaction hash — its
+            receipt is read from this chain's RPC. USD is unavailable here and
+            token symbols are not resolved, so amounts show the raw value and
+            the token address.
+          </p>
+        ) : null}
         <div className="ge-tx-query-kind" role="group" aria-label="Transaction search mode">
           <button
             type="button"
@@ -1505,7 +1578,11 @@ export function TransactionsView({
             title="Stored execution transactions and Transfer logs cover history; RPC scans only the uncovered head. Every selected result is decoded from its RPC receipt."
           >
             <span>Default scope</span>
-            <strong>All stored history + RPC head</strong>
+            <strong>
+              {activeChain && !activeChain.supports_address_discovery
+                ? `${activeChain.name} · receipts by hash only`
+                : "All stored history + RPC head"}
+            </strong>
           </div>
 
           <fieldset className="ge-tx-filter-group ge-tx-filter-group--activity">
@@ -2084,7 +2161,7 @@ export function TransactionsView({
                             Copy
                           </button>{" "}
                           <a
-                            href={`https://gnosis.blockscout.com/tx/${leg.txHash}`}
+                            href={txUrl(leg.txHash, activeChainId, chainOptions)}
                             target="_blank"
                             rel="noreferrer"
                             onClick={(event) => event.stopPropagation()}
@@ -2119,6 +2196,8 @@ export function TransactionsView({
         {detailsOpen && hasInspector && (
           <TxInspector
             txHash={activeTxHash}
+            chainId={activeChainId}
+            chainOptions={chainOptions}
             transaction={inspectorGroup}
             receiptStatus={String(
               receiptStatuses[activeTxHash] ??

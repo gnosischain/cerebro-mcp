@@ -79,14 +79,34 @@ describe("ADOPT_SERVER mapping", () => {
     expect(s.expandDepth).toBe(LIMITS.default_expand_depth);
   });
 
-  it("takes the atlas window when mode is atlas", () => {
-    const s = adopted({ mode: "atlas" });
+  // Relationships is one section, so there is no longer an "atlas mode" whose
+  // window competes with investigate's. Atlas's window survives as a FALLBACK:
+  // a payload carrying only a catalog window still seeds the control.
+  it("falls back to the atlas window when investigate declares none", () => {
+    // window_days deliberately absent — that is the case under test.
+    const s = adopted({
+      investigate: {
+        seed: { id: "0xabc", kind: "safe" },
+        active_profiles: [],
+        max_neighbors: 250,
+        hops_used: 3,
+      },
+    } as unknown as Partial<GraphExplorerViewState>);
     expect(s.windowDays).toBe(30);
+  });
+
+  it("prefers the investigate window when both are present", () => {
+    expect(adopted().windowDays).toBe(60);
+  });
+
+  // "atlas" is still a valid wire value, but it is not a reachable UI mode.
+  it("resolves an atlas payload to investigate", () => {
+    expect(adopted({ mode: "atlas" }).mode).toBe("investigate");
   });
 
   it("falls back to server defaults on an empty payload", () => {
     const s = buildInitialState(undefined);
-    expect(s.mode).toBe("atlas");
+    expect(s.mode).toBe("investigate");
     expect(s.selection).toEqual({ nodeId: "", edgeId: "" });
     expect(s.atlasProfiles).toEqual([]);
     expect(s.investigateProfiles).toEqual([]);
@@ -109,9 +129,21 @@ describe("ADOPT_SERVER mapping", () => {
 describe("SET_MODE", () => {
   it("clears the selection on mode switch", () => {
     const s = adopted(); // investigate with a selected node
-    const next = graphReducer(s, { type: "SET_MODE", mode: "atlas" });
-    expect(next.mode).toBe("atlas");
+    const next = graphReducer(s, { type: "SET_MODE", mode: "flows" });
+    expect(next.mode).toBe("flows");
     expect(next.selection).toEqual({ nodeId: "", edgeId: "" });
+  });
+
+  // A legacy deep link, a restored draft or a stale server command can still
+  // name "atlas"; it must resolve to Relationships, not to a dead mode with no
+  // view mounted.
+  it("normalizes an atlas command to investigate", () => {
+    const s = adopted();
+    const next = graphReducer(s, { type: "SET_MODE", mode: "atlas" });
+    expect(next.mode).toBe("investigate");
+    // Already in investigate, so this is a no-op rather than a mode switch —
+    // the selection must survive.
+    expect(next).toBe(s);
   });
 
   it("is a no-op when the mode is unchanged (selection kept)", () => {

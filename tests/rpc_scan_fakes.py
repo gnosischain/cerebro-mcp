@@ -104,11 +104,15 @@ class FakeRawClient:
 class FakeRouter:
     def __init__(self, handler: Callable[[str, list[Any]], Any],
                  latest: int = 1_000_000, archive: bool = True,
-                 supported: dict[str, bool] | None = None):
+                 supported: dict[str, bool] | None = None,
+                 lowest_block: int = 1):
         self.client = FakeRawClient(handler)
         self._latest = latest
         self._archive = archive
         self._supported = supported or {}
+        # Chains are not always contiguous from block 1 (pruned nodes, the
+        # Celo L1->L2 migration). Default 1 keeps existing fixtures unchanged.
+        self._lowest_block = lowest_block
 
     @property
     def standard(self):
@@ -136,6 +140,9 @@ class FakeRouter:
 
     def latest_block(self) -> int:
         return self._latest
+
+    def lowest_available_block(self, hi: int | None = None) -> int:
+        return self._lowest_block
 
 
 class FakeCH:

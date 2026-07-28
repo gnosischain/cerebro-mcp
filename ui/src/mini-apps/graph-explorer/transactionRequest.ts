@@ -115,6 +115,7 @@ export function buildTransactionRequest(
     merge: settings.merge ?? false,
     cursor: settings.cursor ?? "",
     page_size: Math.max(1, Math.min(100, settings.pageSize ?? settings.maxTxs ?? 25)),
+    chain: settings.chain ?? "",
     activity_kinds: settings.activityKinds ?? (
       Array.isArray(appliedQuery.activity_kinds)
         ? appliedQuery.activity_kinds.map(String)

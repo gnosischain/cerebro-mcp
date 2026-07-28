@@ -18,7 +18,7 @@ import type { DatasetDescriptor, PageRowsResponse } from "../../shared/miniAppTy
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
 import { datasetError } from "../../shared/datasetError";
 import { rowsToObjects, type RowDataset } from "../../shared/rowDataset";
-import { depthHeatmapOption, pairDepthOption } from "../model/chartOptions";
+import { depthFootprintOption, pairDepthOption } from "../model/chartOptions";
 import { DATASET_DOCS } from "../model/datasetDocs";
 import {
   buildDepthLadder,
@@ -26,7 +26,9 @@ import {
   flipOrders,
   parsePairDepth,
 } from "../model/depthLadder";
-import { buildDepthHeatmap, parseHeatmapRows } from "../model/depthHeatmap";
+import { buildDepthFootprint, parseHeatmapRows, type PriceAxisMode } from "../model/depthHeatmap";
+import { DepthFootprintLegend } from "./DepthFootprintLegend";
+import { useTheme } from "../../../hooks/useTheme";
 import { parseReferencePrices } from "../model/parseRows";
 import type { ReferencePriceRow } from "../types";
 import type { CowExplorerViewState, EntityType } from "../types";
@@ -44,15 +46,24 @@ export interface DepthHostProps {
   onLoadDepthAt?: (ts: string | "live") => void;
   /** DEPTH-HEATMAP-HOOK: request the deferred `markets.depth_heatmap` group for
    * the given window ("24h"/"7d"/"all"). Loaded on demand when the Heatmap tab
-   * is opened, never on a history-slider tick. */
-  onLoadDepthHeatmap?: (window: HeatmapWindow) => void;
+   * is opened, never on a history-slider tick. `opts.force` forwards
+   * force_refresh so a retry bypasses the server's negative failure cache. */
+  onLoadDepthHeatmap?: (
+    window: HeatmapWindow,
+    opts?: { force?: boolean; bucketSeconds?: number },
+  ) => void;
 }
 
-export type HeatmapWindow = "24h" | "7d" | "all";
+export type HeatmapWindow = "24h" | "7d" | "30d" | "90d" | "all";
 
+// 24h/7d are full-fidelity per-order windows; 30d/90d/all are deep windows the
+// server serves pre-binned (time-weighted depth in ~1% price bins) so results
+// stay bounded over the backfilled multi-year history.
 const HEATMAP_WINDOWS: Array<{ label: string; value: HeatmapWindow }> = [
   { label: "24h", value: "24h" },
   { label: "7d", value: "7d" },
+  { label: "30d", value: "30d" },
+  { label: "90d", value: "90d" },
   { label: "all", value: "all" },
 ];
 
@@ -97,6 +108,55 @@ export function parseOpenIntentPairs(dataset: RowDataset | null | undefined): Op
     });
   }
   return pairs;
+}
+
+/** Windows whose buckets are wide enough that an absolute price axis leaves
+ * the book in one or two rows — these default to the relative axis. */
+const DEEP_WINDOWS = new Set<HeatmapWindow>(["30d", "90d", "all"]);
+
+/** Mirrors the server's `_FOOTPRINT_REL_PCT`: how far from each bucket's market
+ * price the footprint is binned. Anything wider is not in the payload. */
+const FOOTPRINT_REL_PCT = 20;
+
+/** Explicit bucket widths. 0 = auto (the server cuts the window into ~60).
+ * A width is offered only when it yields 8..120 buckets for the current
+ * window; finer than that and the server would coarsen it anyway (the row
+ * budget is buckets x price bins x 2 sides <= 10k). */
+const RESOLUTIONS: Array<{ label: string; seconds: number }> = [
+  { label: "auto", seconds: 0 },
+  { label: "15m", seconds: 900 },
+  { label: "1h", seconds: 3600 },
+  { label: "6h", seconds: 21_600 },
+  { label: "1d", seconds: 86_400 },
+  { label: "1w", seconds: 604_800 },
+];
+
+const WINDOW_SPAN_SECONDS: Record<HeatmapWindow, number> = {
+  "24h": 86_400,
+  "7d": 7 * 86_400,
+  "30d": 30 * 86_400,
+  "90d": 90 * 86_400,
+  // "all" is data-dependent; treat it as very long so only coarse widths show.
+  all: 5 * 365 * 86_400,
+};
+
+/** Which explicit widths make sense for a window (auto always does). */
+export function resolutionsFor(window: HeatmapWindow): Array<{ label: string; seconds: number }> {
+  const span = WINDOW_SPAN_SECONDS[window];
+  return RESOLUTIONS.filter(({ seconds }) => {
+    if (seconds === 0) return true;
+    const buckets = span / seconds;
+    return buckets >= 8 && buckets <= 120;
+  });
+}
+
+/** Human label for a bucket width in seconds. */
+export function formatResolution(seconds: number): string {
+  if (!(seconds > 0)) return "auto";
+  if (seconds % 604_800 === 0) return `${seconds / 604_800}w`;
+  if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  return `${Math.round(seconds / 60)}m`;
 }
 
 const RANGE_PRESETS: Array<{ label: string; pct: number | null }> = [
@@ -206,8 +266,19 @@ export function DepthPanel(props: DepthPanelProps) {
   const depthAt = state.depth_at ?? "";
   const stateWindow = state.heatmap_window;
   const [heatmapWindow, setHeatmapWindow] = useState<HeatmapWindow>(
-    stateWindow === "24h" || stateWindow === "all" ? stateWindow : "7d",
+    HEATMAP_WINDOWS.some((w) => w.value === stateWindow) ? (stateWindow as HeatmapWindow) : "7d",
   );
+  // 0 = auto (the server cuts the window into ~60 buckets). Anything else asks
+  // for a fixed bucket width; the server coarsens rather than blowing the row
+  // budget, and reports back what it actually used.
+  const [bucketSeconds, setBucketSeconds] = useState(0);
+  // Absolute price is literal but leaves long windows almost empty (the book
+  // spans single-digit percent while a multi-year axis spans multiples), so
+  // deep windows default to the relative axis.
+  const [axisModeOverride, setAxisModeOverride] = useState<PriceAxisMode | null>(null);
+  const axisMode: PriceAxisMode = axisModeOverride
+    ?? (DEEP_WINDOWS.has(heatmapWindow) ? "relative" : "absolute");
+  const { isDark } = useTheme();
   // Draft controls for the historical bar (synced from the applied server
   // value; local edits dispatch through the shared 400ms debounce).
   const [draftAt, setDraftAt] = useState("");
@@ -273,8 +344,8 @@ export function DepthPanel(props: DepthPanelProps) {
   // Keep the local window in sync with the server's applied value (resets to
   // "7d" on every section apply, mirroring depth_at).
   useEffect(() => {
-    if (stateWindow === "24h" || stateWindow === "7d" || stateWindow === "all") {
-      setHeatmapWindow(stateWindow);
+    if (HEATMAP_WINDOWS.some((w) => w.value === stateWindow)) {
+      setHeatmapWindow(stateWindow as HeatmapWindow);
     }
   }, [stateWindow]);
 
@@ -284,12 +355,12 @@ export function DepthPanel(props: DepthPanelProps) {
   // trigger — no wasted heavy query when the tab is never viewed.
   const hasPairForHeatmap = Boolean(state.pair.base && state.pair.quote);
   const heatmapReqRef = useRef<string>("");
-  const heatmapReqKey = `${state.scope_id ?? ""}|${pairKey}|${heatmapWindow}`;
+  const heatmapReqKey = `${state.scope_id ?? ""}|${pairKey}|${heatmapWindow}|${bucketSeconds}`;
   useEffect(() => {
     if (tab !== "heatmap" || !hasPairForHeatmap || !props.onLoadDepthHeatmap) return;
     if (heatmapReqRef.current === heatmapReqKey) return;
     heatmapReqRef.current = heatmapReqKey;
-    props.onLoadDepthHeatmap(heatmapWindow);
+    props.onLoadDepthHeatmap(heatmapWindow, { bucketSeconds });
   }, [tab, heatmapReqKey, hasPairForHeatmap]);
 
   const heatmapHydrated = props.hydrated.pair_depth_heatmap;
@@ -298,20 +369,23 @@ export function DepthPanel(props: DepthPanelProps) {
     [heatmapHydrated],
   );
   const heatmapModel = useMemo(
-    () => buildDepthHeatmap({ rows: heatmapRows, flipped, rangePct }),
-    [heatmapRows, flipped, rangePct],
+    () => buildDepthFootprint({ rows: heatmapRows, flipped, rangePct, axisMode }),
+    [heatmapRows, flipped, rangePct, axisMode],
   );
   const heatmapSpec = useMemo(
-    () => depthHeatmapOption({
+    () => depthFootprintOption({
       xLabels: heatmapModel.xLabels,
       yLabels: heatmapModel.yLabels,
       cells: heatmapModel.cells,
       midLine: heatmapModel.midLine,
-      colorBound: heatmapModel.colorBound,
+      profile: heatmapModel.profile,
+      scale: heatmapModel.scale,
+      axisMode: heatmapModel.axisMode,
       baseSymbol,
       quoteSymbol,
+      isDark,
     }),
-    [heatmapModel, baseSymbol, quoteSymbol],
+    [heatmapModel, baseSymbol, quoteSymbol, isDark],
   );
   // Drill-down: click ANYWHERE in a heatmap column -> reconstruct that bucket's
   // full 2D order book and jump to the Depth chart tab. Bound at the zrender
@@ -326,7 +400,19 @@ export function DepthPanel(props: DepthPanelProps) {
         getZr: () => { on: (e: string, cb: (p: { offsetX: number; offsetY: number }) => void) => void };
         convertFromPixel: (finder: unknown, pixel: [number, number]) => number[] | null;
       };
+      // Inside-zoom pans on drag and still emits a zrender click at the end,
+      // which would fire a spurious drill-down. Remember where the press
+      // started and ignore a click that moved more than a few pixels.
+      let downAt: [number, number] | null = null;
+      ec.getZr().on("mousedown", (ev) => {
+        downAt = [ev.offsetX, ev.offsetY];
+      });
       ec.getZr().on("click", (ev) => {
+        const moved = downAt
+          ? Math.abs(ev.offsetX - downAt[0]) + Math.abs(ev.offsetY - downAt[1])
+          : 0;
+        downAt = null;
+        if (moved > 4) return;
         const grid = ec.convertFromPixel({ seriesIndex: 0 }, [ev.offsetX, ev.offsetY]);
         if (!grid) return;
         const xi = Math.round(grid[0]);
@@ -342,12 +428,29 @@ export function DepthPanel(props: DepthPanelProps) {
   );
   const heatmapLoaded = state.loaded_groups?.["markets.depth_heatmap"] === true;
   const heatmapGroupFailed = props.failedGroups?.includes("markets.depth_heatmap") ?? false;
+  // Stub-descriptor contract: a failed heatmap query ships a zero-row dataset
+  // whose provenance carries the real error — surface it, never the empty state.
+  const heatmapError = datasetError(props.descriptors.pair_depth_heatmap);
+  const retryHeatmap = () => {
+    // The load hook dedupes on heatmapReqKey; clear it so the retry re-fires,
+    // and force-refresh so the server bypasses its negative failure cache.
+    heatmapReqRef.current = "";
+    props.onLoadDepthHeatmap?.(heatmapWindow, { force: true, bucketSeconds });
+  };
 
   const horizonRow = rowsToObjects(toDataset(props.hydrated.depth_horizon))[0];
+  // Two floors: earliest_supported_at = full-fidelity capture start
+  // (min(observed_at)); earliest_creation_seen = the backfill-reconstructed
+  // floor (min(creation_date), ~2021-08 on mainnet). The slider reaches the
+  // deep floor; books before the capture floor are reconstructed-tier.
   const horizonEarliest = String(horizonRow?.earliest_supported_at ?? "");
   const horizonEarliestSec = Math.ceil((Date.parse(horizonEarliest) || NaN) / 1000);
+  const horizonDeep = String(horizonRow?.earliest_creation_seen ?? "");
+  const horizonDeepSec = Math.ceil((Date.parse(horizonDeep) || NaN) / 1000);
   const nowSec = Math.floor(Date.now() / 1000);
-  const sliderMin = Number.isFinite(horizonEarliestSec) ? horizonEarliestSec : null;
+  const sliderMin = Number.isFinite(horizonDeepSec)
+    ? horizonDeepSec
+    : Number.isFinite(horizonEarliestSec) ? horizonEarliestSec : null;
   const sliderValue = sliderSec ?? nowSec;
 
   const observedAt = useMemo(() => {
@@ -370,12 +473,18 @@ export function DepthPanel(props: DepthPanelProps) {
   const groupLoading = state.loaded_groups?.["markets.depth"] === false;
   const retry = props.onRetryGroup ? () => props.onRetryGroup?.("markets", "depth") : undefined;
 
+  // The tabs render different datasets, so the (i) must follow the tab —
+  // it previously always showed the 2-D ladder's docs and coverage, which
+  // left the footprint's own caveats unreachable.
+  const docKey = tab === "heatmap" ? "pair_depth_heatmap" : "pair_depth";
   const info = (
     <InfoPopover label="About this data">
       <InfoBlocks
-        what={DATASET_DOCS.pair_depth?.what}
-        method={DATASET_DOCS.pair_depth?.method}
-        coverage={coverageMeta(descriptor)}
+        what={DATASET_DOCS[docKey]?.what}
+        method={DATASET_DOCS[docKey]?.method}
+        coverage={coverageMeta(
+          tab === "heatmap" ? props.descriptors.pair_depth_heatmap : descriptor,
+        )}
       />
     </InfoPopover>
   );
@@ -411,7 +520,7 @@ export function DepthPanel(props: DepthPanelProps) {
 
   const emptyBook = orders.length === 0;
   const emptyLabel = depthAt
-    ? "No reconstructable open intents at this time — the book may pre-date the capture window."
+    ? "No reconstructable open intents at this time — the book may pre-date the reconstructable order history."
     : "No known open intents for this pair right now.";
   // Rescue path for empty books: some chains (e.g. Gnosis) run almost
   // entirely on short-lived market orders and hold ZERO standing intents at
@@ -421,8 +530,9 @@ export function DepthPanel(props: DepthPanelProps) {
     [props.hydrated.open_intent_pairs],
   );
   const chainOpenTotal = openPairs.reduce((sum, p) => sum + p.openOrders, 0);
-  const emptyGuidance = (() => {
-    if (!emptyBook) return null;
+  // Rescue guidance is shared by the 2D empty state AND the heatmap empty
+  // state (both dead-end without a route to a pair that has a book).
+  const rescueGuidance = (() => {
     if (openPairs.length > 0) {
       return (
         <div className="cow-depth-rescue">
@@ -460,17 +570,24 @@ export function DepthPanel(props: DepthPanelProps) {
     }
     return null;
   })();
+  const emptyGuidance = emptyBook ? rescueGuidance : null;
 
   const body = (() => {
     // Heatmap is its own deferred group (markets.depth_heatmap) with data
     // independent of the live/reconstructed snapshot — handle it before the
     // markets.depth group checks below.
     if (tab === "heatmap") {
-      if (heatmapGroupFailed) {
+      // A failed heatmap QUERY does not reject the tool call — the server
+      // stubs the dataset (zero rows + provenance.coverage.error) and marks
+      // the group "partial". Without this check the stub fell through to the
+      // "no resting depth" empty state, hiding real failures (e.g. the shared
+      // instance running out of memory). Retry must clear the request-dedup
+      // ref and force-refresh past the server's negative failure cache.
+      if (heatmapGroupFailed || heatmapError) {
         return (
           <DepthErrorCard
-            error="The depth heatmap failed to load."
-            onRetry={props.onLoadDepthHeatmap ? () => props.onLoadDepthHeatmap?.(heatmapWindow) : undefined}
+            error={heatmapError || "The depth heatmap failed to load."}
+            onRetry={props.onLoadDepthHeatmap ? retryHeatmap : undefined}
           />
         );
       }
@@ -487,13 +604,24 @@ export function DepthPanel(props: DepthPanelProps) {
           <div className="cow-empty">
             No resting depth reconstructed in this window — CoW books are transient, so most
             orders fill within minutes. Try a wider window.
+            {rescueGuidance}
           </div>
         );
       }
       return (
         <>
-          <ChartCard renderer="svg" chartId="cow-depth-heatmap" hideId spec={heatmapSpec} onChartReady={onHeatmapReady} />
-          <div className="cow-depth-hint">Click a column to reconstruct that moment's full order book.</div>
+          <DepthFootprintLegend scale={heatmapModel.scale} baseSymbol={baseSymbol} isDark={isDark} />
+          <ChartCard renderer="canvas" chartId="cow-depth-heatmap" hideId spec={heatmapSpec} onChartReady={onHeatmapReady} />
+          <div className="cow-depth-hint">
+            Each cell splits bids (left) from asks (right). Scroll to zoom — zooming in
+            reveals the per-side numbers. Click a column to reconstruct that moment's book.
+            {heatmapModel.bucketSeconds > 0
+              ? ` Buckets are ${formatResolution(heatmapModel.bucketSeconds)}${
+                bucketSeconds > 0 && heatmapModel.bucketSeconds !== bucketSeconds
+                  ? " (coarsened to fit the row budget)"
+                  : ""}.`
+              : ""}
+          </div>
         </>
       );
     }
@@ -584,7 +712,7 @@ export function DepthPanel(props: DepthPanelProps) {
             className={tab === "heatmap" ? "is-active" : ""}
             onClick={() => setTab("heatmap")}
           >
-            Heatmap
+            Footprint
           </button>
         </div>
         <button
@@ -601,7 +729,20 @@ export function DepthPanel(props: DepthPanelProps) {
               key={preset.label}
               type="button"
               className={rangePct === preset.pct ? "is-active" : ""}
-              disabled={preset.pct !== null && ladder.mid === null}
+              // On the relative footprint axis the server already clamps to
+              // ±FOOTPRINT_REL_PCT, so a wider preset would promise range that
+              // does not exist. Offer only the ones that actually bite.
+              title={
+                tab === "heatmap" && axisMode === "relative"
+                  && (preset.pct === null || preset.pct > FOOTPRINT_REL_PCT)
+                  ? `The footprint is binned within ±${FOOTPRINT_REL_PCT}% of each bucket's market price`
+                  : undefined
+              }
+              disabled={
+                tab === "heatmap" && axisMode === "relative"
+                  ? preset.pct === null || preset.pct > FOOTPRINT_REL_PCT
+                  : preset.pct !== null && ladder.mid === null
+              }
               onClick={() => setRangePct(preset.pct)}
             >
               {preset.label}
@@ -610,18 +751,58 @@ export function DepthPanel(props: DepthPanelProps) {
         </div>
       </div>
       {tab === "heatmap" && (
-        <div className="cow-depth-window" role="group" aria-label="Heatmap time window">
+        <div className="cow-depth-window">
           <span className="cow-depth-window__label">Window</span>
-          {HEATMAP_WINDOWS.map((option) => (
+          <div role="group" aria-label="Footprint time window">
+            {HEATMAP_WINDOWS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={heatmapWindow === option.value ? "is-active" : ""}
+                onClick={() => {
+                  setHeatmapWindow(option.value);
+                  // A width valid for the old window may not be for the new one.
+                  if (!resolutionsFor(option.value).some((r) => r.seconds === bucketSeconds)) {
+                    setBucketSeconds(0);
+                  }
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <span className="cow-depth-window__label">Buckets</span>
+          <div role="group" aria-label="Footprint time resolution">
+            {resolutionsFor(heatmapWindow).map((option) => (
+              <button
+                key={option.label}
+                type="button"
+                className={bucketSeconds === option.seconds ? "is-active" : ""}
+                onClick={() => setBucketSeconds(option.seconds)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <span className="cow-depth-window__label">Price</span>
+          <div role="group" aria-label="Footprint price axis">
             <button
-              key={option.value}
               type="button"
-              className={heatmapWindow === option.value ? "is-active" : ""}
-              onClick={() => setHeatmapWindow(option.value)}
+              className={axisMode === "absolute" ? "is-active" : ""}
+              onClick={() => setAxisModeOverride("absolute")}
+              title="Literal quote-per-base price"
             >
-              {option.label}
+              price
             </button>
-          ))}
+            <button
+              type="button"
+              className={axisMode === "relative" ? "is-active" : ""}
+              onClick={() => setAxisModeOverride("relative")}
+              title="Distance from each bucket's own market price — keeps the book in view when the price trends"
+            >
+              % from market
+            </button>
+          </div>
         </div>
       )}
       {tab !== "heatmap" && (
@@ -688,8 +869,8 @@ export function DepthPanel(props: DepthPanelProps) {
       {horizonEarliest && (
         <div className="cow-depth-note">
           {tab === "heatmap"
-            ? `Depth-over-time reconstructed from captured orders, fills, and cancellations (since ${formatTime(horizonEarliest)}); order size is not decayed within a resting span.`
-            : `Historical reconstruction limited to the order-capture window (since ${formatTime(horizonEarliest)}).`}
+            ? `Resting depth reconstructed from captured orders, fills, and cancellations. Full fidelity since ${formatTime(horizonEarliest)}${horizonDeep ? `; longer windows reach backfill-reconstructed history back to ${formatTime(horizonDeep)}` : ""}. Depth is time-weighted — an order resting a third of a bucket counts a third — and the profile on the right sums that over the window, so it measures how long liquidity sat at a level, not how much traded there. Cancelled orders without an observed cancel time are excluded, and only intents resting within ±${FOOTPRINT_REL_PCT}% of each bucket's market price are charted.`
+            : `Historical reconstruction reaches back to ${formatTime(horizonDeep || horizonEarliest)}. Books before ${formatTime(horizonEarliest)} are backfill-reconstructed: cancelled orders without an observed cancel time are excluded.`}
         </div>
       )}
       {body}

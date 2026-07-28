@@ -1944,3 +1944,10 @@ button.data-card:hover { border-color: var(--border-hover); transform: translate
 .sfl__label{fill:var(--text-primary);font:11px var(--font-mono)}
 .sfl__value{fill:var(--text-muted);font:9.5px var(--font-mono)}
 .sfl__title{fill:var(--text-secondary);font:600 11px var(--font-body);letter-spacing:.04em;text-transform:uppercase}
+
+/* Chain badge (shared/ChainBadge.tsx) — 16px icon + short name, monogram
+   fallback for chains with no asset image. */
+.ma-chain{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.ma-chain img,.ma-chain__fallback{width:16px;height:16px;flex:none;border-radius:50%;border:1px solid var(--border);object-fit:cover}
+.ma-chain__fallback{display:grid;place-items:center;color:#fff;font:700 8px var(--font-mono)}
+.ma-chain__name{font-size:12px}

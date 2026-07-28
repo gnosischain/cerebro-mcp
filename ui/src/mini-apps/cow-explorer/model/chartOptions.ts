@@ -2,6 +2,12 @@ import type { EChartsOption } from "echarts";
 import type { CandleRow, DepthRow, ExecutionGraphModel, FlowLink, ReferencePriceRow } from "../types";
 import { rowsToObjects, type RowDataset } from "../../shared/rowDataset";
 import type { LadderPoint } from "./depthLadder";
+import type { FootprintCell } from "./depthHeatmap";
+import {
+  CELL_GUTTER_MIN_W, NUMBER_MIN_CELL_H, NUMBER_MIN_CELL_W,
+  compactDepth, footprintInk, isImbalanced, rampFor,
+  type DepthScale,
+} from "./depthFootprintScale";
 
 const insideZoom = [{ type: "inside" as const, start: 0, end: 100 }];
 
@@ -171,114 +177,242 @@ export function pairDepthOption(args: PairDepthOptionArgs): EChartsOption {
   } as EChartsOption;
 }
 
-export interface DepthHeatmapOptionArgs {
+export interface DepthFootprintOptionArgs {
   xLabels: string[];
   yLabels: string[];
-  /** [xIndex, yIndex, signedTotal, askDepth, bidDepth]: magnitude = total depth,
-   * sign = dominant side (ask ≥ bid → +/red, else −/green). */
-  cells: Array<[number, number, number, number, number]>;
-  /** [xIndex, yIndexFractional]: mid-price trajectory across the time axis. */
+  /** [xIndex, yIndex, bidDepth, askDepth, orders]. */
+  cells: FootprintCell[];
+  /** [xIndex, fractional yIndex] of the market price across time. */
   midLine: Array<[number, number]>;
-  /** Symmetric color-scale bound — a percentile (not the max) of cell depths so
-   * the skewed bulk of cells reaches strong color; busiest cells clip. */
-  colorBound: number;
+  /** Per price level totals for the companion profile, indexed like yLabels. */
+  profile: Array<{ bid: number; ask: number }>;
+  scale: DepthScale;
+  axisMode: "absolute" | "relative";
   baseSymbol: string;
   quoteSymbol: string;
+  isDark: boolean;
 }
 
-/** Depth-over-time heatmap: x = time bucket, y = price level. Color intensity =
- * TOTAL resting depth (ask+bid, base-normalized); hue = the dominant side (red
- * ask-heavy / green bid-heavy). CoW intents rest on both sides at the market
- * price, so a net (ask−bid) scale would blank the busiest levels — total depth
- * with a dominant-side sign keeps them bright. Per-bucket median price overlaid
- * as a dashed line. */
-export function depthHeatmapOption(args: DepthHeatmapOptionArgs): EChartsOption {
-  const bound = args.colorBound > 0 ? args.colorBound : 1;
+/**
+ * Depth-over-time FOOTPRINT: x = time bucket, y = price level, and inside each
+ * cell the BID half sits left of the ASK half. Side is carried by POSITION and
+ * magnitude by lightness on a per-side sequential ramp — the two never share a
+ * channel, which is what the previous hue-for-side / intensity-for-magnitude
+ * encoding got wrong (a 51/49 cell shouted as loudly as 100/0).
+ *
+ * A second grid on the right carries the window-aggregate bid x ask profile,
+ * sharing the price axis row-for-row. It is the one part of the panel with a
+ * real labelled magnitude axis, so it anchors what the cell colours mean.
+ *
+ * There is deliberately NO visualMap: it colours a single ramp, and this chart
+ * has two plus an imbalance key. The legend is HTML (DepthFootprintLegend).
+ */
+export function depthFootprintOption(args: DepthFootprintOptionArgs): EChartsOption {
+  const { scale, isDark } = args;
+  const ink = footprintInk(isDark);
+  const askRamp = rampFor("ask", isDark);
+  const bidRamp = rampFor("bid", isDark);
+  const unit = args.axisMode === "relative"
+    ? `% from market · ${args.quoteSymbol} per ${args.baseSymbol}`
+    : `${args.quoteSymbol} per ${args.baseSymbol}`;
+  const profileMax = args.profile.reduce((m, p) => Math.max(m, p.bid, p.ask), 0) || 1;
+  const cellAt = new Map<number, FootprintCell>();
+  for (const cell of args.cells) cellAt.set(cell[0] * args.yLabels.length + cell[1], cell);
+
   return {
-    _cerebro_height: "440px",
+    _cerebro_height: "520px",
+    animation: false,
     tooltip: {
-      position: "top",
+      confine: true,
       formatter: (params: unknown) => {
-        const value = (params as { value?: [number, number, number, number, number] }).value;
+        const value = (params as { value?: FootprintCell }).value;
         if (!value) return "";
-        const [xi, yi, , ask, bid] = value;
-        const total = (ask ?? 0) + (bid ?? 0);
+        const [xi, yi, bid, ask, orders] = value;
+        const total = (bid ?? 0) + (ask ?? 0);
+        const askShare = total > 0 ? Math.round((ask / total) * 100) : 0;
         return `${escapeHtml(args.xLabels[xi] ?? "")}<br/>`
-          + `${escapeHtml(args.yLabels[yi] ?? "")} ${escapeHtml(args.quoteSymbol)}/${escapeHtml(args.baseSymbol)}<br/>`
-          + `Asks ${escapeHtml(formatLadderNumber(ask ?? 0))} · Bids ${escapeHtml(formatLadderNumber(bid ?? 0))} ${escapeHtml(args.baseSymbol)}<br/>`
-          + `Total ${escapeHtml(formatLadderNumber(total))} ${escapeHtml(args.baseSymbol)}`;
+          + `${escapeHtml(args.yLabels[yi] ?? "")} ${escapeHtml(unit)}<br/>`
+          + `Bids ${escapeHtml(formatLadderNumber(bid ?? 0))} · `
+          + `Asks ${escapeHtml(formatLadderNumber(ask ?? 0))} ${escapeHtml(args.baseSymbol)}<br/>`
+          + `Total ${escapeHtml(formatLadderNumber(total))} ${escapeHtml(args.baseSymbol)}`
+          + ` — ${escapeHtml(String(askShare))}% ask<br/>`
+          + `${escapeHtml(formatLadderNumber(orders ?? 0))} resting orders`;
       },
     },
-    grid: { left: 82, right: 26, top: 22, bottom: 66 },
-    xAxis: {
-      type: "category",
-      data: args.xLabels,
-      name: "time (UTC)",
-      nameLocation: "middle",
-      nameGap: 50,
-      axisLabel: {
-        rotate: 40,
-        hideOverlap: true,
-        // Trim the ISO stamp to "MM-DD HH:MM".
-        formatter: (value: string) => (value.length >= 16 ? value.slice(5, 16).replace("T", " ") : value),
+    // top >= 48: the y-axis NAME renders above the axis end and clips below it.
+    // The right grid is the profile; its width is reserved out of grid[0].
+    grid: [
+      { left: 82, right: 152, top: 48, bottom: 66 },
+      { right: 26, width: 118, top: 48, bottom: 66 },
+    ],
+    xAxis: [
+      {
+        type: "category",
+        gridIndex: 0,
+        data: args.xLabels,
+        name: "time (UTC)",
+        nameLocation: "middle",
+        nameGap: 50,
+        axisLabel: {
+          rotate: 40,
+          hideOverlap: true,
+          // Keep the YEAR when the window spans more than one — a MM-DD stamp
+          // on a multi-year footprint is unreadable.
+          formatter: (value: string) => {
+            if (value.length < 16) return value;
+            const multiYear = args.xLabels.length > 1
+              && args.xLabels[0].slice(0, 4) !== args.xLabels[args.xLabels.length - 1].slice(0, 4);
+            return multiYear
+              ? value.slice(0, 10)
+              : value.slice(5, 16).replace("T", " ");
+          },
+        },
       },
-    },
-    yAxis: {
-      type: "category",
-      data: args.yLabels,
-      name: `${args.quoteSymbol} per ${args.baseSymbol}`,
-      nameGap: 14,
-      axisLabel: { hideOverlap: true },
-    },
-    visualMap: {
-      type: "continuous",
-      // Restrict coloring to the heatmap; the mid line keeps its own style.
-      seriesIndex: 0,
-      min: -bound,
-      max: bound,
-      calculable: true,
-      orient: "vertical",
-      right: 2,
-      top: "center",
-      itemHeight: 150,
-      // Diverging ramp bids(green) -> neutral(0) -> asks(red). Saturated,
-      // brighter endpoints + a VISIBLE cool-gray neutral (was 0.12 opacity =
-      // invisible on the near-black card) with fast-rising mid stops, so even
-      // low-depth cells read against the dark background. Combined with the
-      // p90 colorBound, the grid goes from mostly-black to legible.
-      inRange: {
-        color: [
-          "#12d67e",
-          "rgba(52,211,153,0.60)",
-          "rgba(148,163,184,0.32)",
-          "rgba(248,113,113,0.65)",
-          "#ff3b47",
-        ],
+      {
+        type: "value",
+        gridIndex: 1,
+        min: -profileMax,
+        max: profileMax,
+        name: `resting ${args.baseSymbol}`,
+        nameLocation: "middle",
+        nameGap: 34,
+        axisLabel: { formatter: (v: number) => compactDepth(Math.abs(v)), hideOverlap: true },
+        splitLine: { show: false },
       },
-      text: ["Asks", "Bids"],
-      textGap: 6,
-      // Base-unit magnitudes are meaningless as axis ticks — label by side only.
-      formatter: () => "",
-    },
+    ],
+    yAxis: [
+      {
+        type: "category",
+        gridIndex: 0,
+        data: args.yLabels,
+        name: unit,
+        nameGap: 14,
+        axisLabel: { hideOverlap: true },
+      },
+      // Same categories, hidden: guarantees the profile lines up row-for-row.
+      { type: "category", gridIndex: 1, data: args.yLabels, show: false },
+    ],
+    dataZoom: [
+      // Inside-only (wheel/pinch), never a slider — frozen repo convention.
+      // Zooming in is also what reveals the in-cell numbers.
+      { type: "inside", xAxisIndex: [0], filterMode: "weakFilter" },
+      { type: "inside", yAxisIndex: [0, 1], filterMode: "weakFilter" },
+    ],
     series: [
       {
-        type: "heatmap",
-        name: "depth",
+        type: "custom",
+        name: "footprint",
+        xAxisIndex: 0,
+        yAxisIndex: 0,
         data: args.cells,
-        label: { show: false },
+        clip: true,
+        animation: false,
+        progressive: 0,
         cursor: "pointer",
-        itemStyle: { borderWidth: 0 },
-        emphasis: { itemStyle: { shadowBlur: 8, borderColor: "#e2e8f0", borderWidth: 1 } },
+        encode: { x: 0, y: 1, tooltip: [2, 3, 4] },
+        renderItem: (_params: unknown, api: {
+          value: (i: number) => number;
+          coord: (v: number[]) => number[];
+          size?: (v: number[]) => number[];
+        }) => {
+          const xi = api.value(0);
+          const yi = api.value(1);
+          const bid = api.value(2);
+          const ask = api.value(3);
+          const [cx, cy] = api.coord([xi, yi]);
+          const [w, h] = api.size ? api.size([1, 1]) : [6, 10];
+          const pad = w >= CELL_GUTTER_MIN_W ? 1 : 0;
+          const cw = Math.max(1, w - pad);
+          const ch = Math.max(1, h - pad);
+          const x0 = cx - cw / 2;
+          const y0 = cy - ch / 2;
+          const half = cw / 2;
+          const showNumbers = cw >= NUMBER_MIN_CELL_W && ch >= NUMBER_MIN_CELL_H;
+          const children: unknown[] = [];
+          const halves: Array<["bid" | "ask", number, number]> = [
+            ["bid", bid, x0],
+            ["ask", ask, x0 + half],
+          ];
+          for (const [side, depth, hx] of halves) {
+            // An empty half is NOT step 0 — it is not drawn at all, so "no book
+            // here" reads as the card surface showing through.
+            if (!(depth > 0)) continue;
+            const step = (side === "ask" ? askRamp : bidRamp)[scale.stepIndex(depth)];
+            children.push({
+              type: "rect",
+              silent: true,
+              shape: { x: hx, y: y0, width: half, height: ch },
+              style: { fill: step.fill },
+            });
+            if (showNumbers) {
+              children.push({
+                type: "text",
+                silent: true,
+                style: {
+                  x: side === "bid" ? x0 + half - 3 : x0 + half + 3,
+                  y: cy,
+                  text: compactDepth(depth),
+                  textAlign: side === "bid" ? "right" : "left",
+                  textVerticalAlign: "middle",
+                  fontSize: 9,
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  fill: step.ink,
+                },
+              });
+            }
+          }
+          // Imbalance rides SHAPE, never fill, so it cannot be mistaken for
+          // more depth.
+          const dominant = isImbalanced(ask, bid, scale.imbalanceFloor);
+          if (dominant) {
+            children.push({
+              type: "rect",
+              silent: true,
+              shape: {
+                x: dominant === "ask" ? x0 + half : x0,
+                y: y0, width: half, height: ch, r: 1,
+              },
+              style: { fill: "none", stroke: ink.imbalance, lineWidth: 1 },
+            });
+          }
+          return { type: "group", children };
+        },
       },
       {
         type: "line",
-        name: "mid",
+        name: "market",
+        xAxisIndex: 0,
+        yAxisIndex: 0,
         data: args.midLine,
         symbol: "none",
         smooth: false,
         z: 3,
-        lineStyle: { color: "#e2e8f0", width: 1, type: "dashed", opacity: 0.65 },
+        silent: true,
+        lineStyle: { color: ink.midLine, width: 1, type: "dashed", opacity: 0.65 },
         tooltip: { show: false },
+      },
+      {
+        type: "bar",
+        name: "profile bids",
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        // Negated so the two sides mirror around the centre, matching the
+        // bid|ask reading order of the footprint cells.
+        data: args.profile.map((p) => -p.bid),
+        itemStyle: { color: bidRamp[3].fill },
+        barCategoryGap: "12%",
+        silent: true,
+      },
+      {
+        type: "bar",
+        name: "profile asks",
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: args.profile.map((p) => p.ask),
+        itemStyle: { color: askRamp[3].fill },
+        barCategoryGap: "12%",
+        barGap: "-100%",
+        silent: true,
       },
     ],
   } as EChartsOption;

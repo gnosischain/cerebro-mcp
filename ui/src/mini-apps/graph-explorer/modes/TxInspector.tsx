@@ -1,9 +1,15 @@
+import { addressUrl, txUrl } from "../model/explorerLinks";
+import type { ChainOption } from "../types";
 import type { ReactNode } from "react";
 import type { TxGroup, TxLegRow, TxNodeRow } from "../model/txLayout";
 import type { TxContextRow } from "../model/txContext";
 
 interface Props {
   txHash: string;
+  /** Explorer links must follow the chain the receipt was read from; a Gnosis
+   * link for a Base hash is a dead end, or worse a different transaction. */
+  chainId: number;
+  chainOptions: ChainOption[];
   transaction: TxGroup | undefined;
   receiptStatus: string;
   context?: TxContextRow;
@@ -49,6 +55,8 @@ function Kv({ label, children }: { label: string; children: ReactNode }) {
  */
 export function TxInspector({
   txHash,
+  chainId,
+  chainOptions,
   transaction,
   receiptStatus,
   context,
@@ -101,7 +109,7 @@ export function TxInspector({
         <div className="ge-tx-inspector__actions">
           <button type="button" className="ge-btn" onClick={() => copy(txHash)}>Copy hash</button>
           {txHash ? (
-            <a className="ge-btn" href={`https://gnosis.blockscout.com/tx/${txHash}`} target="_blank" rel="noreferrer">
+            <a className="ge-btn" href={txUrl(txHash, chainId, chainOptions)} target="_blank" rel="noreferrer">
               Explorer
             </a>
           ) : null}
@@ -161,7 +169,7 @@ export function TxInspector({
             <button type="button" className="ge-btn" onClick={() => copy(selectedNode.id)}>Copy</button>
             <a
               className="ge-btn"
-              href={`https://gnosis.blockscout.com/address/${selectedNode.id}`}
+              href={addressUrl(selectedNode.id, chainId, chainOptions)}
               target="_blank"
               rel="noreferrer"
             >

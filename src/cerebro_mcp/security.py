@@ -132,6 +132,7 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "open_governance": _RO,
     "load_contract_explorer_address": _RO,
     "contract_explorer_call_function": _RO,
+    "contract_explorer_read_history": _RO,
     "open_graph_explorer": _RO,
     "load_graph_explorer_seed": _RO,
     "expand_graph_explorer_node": _RO,
@@ -230,8 +231,10 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "rename_report_archive_entry": _AO_SW,
 
     # ── web3 / contract explorer (read-only RPC) ─────────────────────
+    "list_chains": _RO,
     "contract_explore": _RO,
     "contract_call_function": _RO,
+    "contract_read_history": _RO,
     "contract_decode_transaction_input": _RO,
     "contract_decode_receipt_logs": _RO,
 

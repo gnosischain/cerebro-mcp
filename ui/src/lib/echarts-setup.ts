@@ -11,6 +11,9 @@ import {
   GraphChart,
   FunnelChart,
   CandlestickChart,
+  // Split bid|ask cells on the CoW depth footprint — one rect per side inside
+  // a grid cell is not expressible with any built-in series type.
+  CustomChart,
 } from "echarts/charts";
 import {
   TitleComponent,
@@ -44,6 +47,7 @@ echarts.use([
   GraphChart,
   FunnelChart,
   CandlestickChart,
+  CustomChart,
   TitleComponent,
   TooltipComponent,
   LegendComponent,

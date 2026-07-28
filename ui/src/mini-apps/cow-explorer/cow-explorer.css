@@ -95,7 +95,8 @@ button.cow-live-chip:hover{border-color:var(--border-hover)}
 .cow-info-blocks p{margin:2px 0 0}
 .cow-info-blocks__coverage{font:10.5px var(--font-mono);color:var(--text-muted)}
 .cow-range-popover{position:relative}.cow-range-popover summary{cursor:pointer;list-style:none;color:var(--primary);font-size:12px;padding:6px 9px}.cow-range-popover summary::-webkit-details-marker{display:none}.cow-range-popover__panel{position:absolute;left:0;top:calc(100% + 6px);z-index:25;display:grid;gap:10px;min-width:290px;padding:12px;border:1px solid var(--border-hover);border-radius:8px;background:var(--surface-2);box-shadow:0 14px 35px rgba(0,0,0,.35)}.cow-range-popover__panel label{justify-content:space-between}.cow-timebar input[type=number]{width:76px}
-.cow-chain{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}.cow-chain img,.cow-chain__fallback{width:16px;height:16px;flex:none;border-radius:50%;border:1px solid var(--border);object-fit:cover}.cow-chain__fallback{display:grid;place-items:center;color:#fff;font:700 8px var(--font-mono)}.cow-chain__name{font-size:12px}
+/* Chain badge moved to `.ma-chain*` in shared/mini-apps.css (imported by
+   cow-explorer-main.tsx) when the registry was shared with Contract Explorer. */
 .cow-token{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}.cow-token img,.cow-token__fallback{width:20px;height:20px;flex:none;border-radius:50%;background:var(--surface-3);border:1px solid var(--border);object-fit:cover}.cow-token__fallback{display:grid;place-items:center;color:var(--text-secondary);font:700 8px var(--font-mono)}
 .cow-candidates{margin:12px 16px;padding:12px;border:1px solid var(--accent-border);border-radius:10px;background:var(--surface);display:grid;gap:7px}.cow-candidates>strong{font-size:13px;color:var(--accent-text)}
 .cow-candidates button{display:grid;grid-template-columns:140px 150px minmax(220px,1fr) 110px;gap:10px;text-align:left;border:1px solid var(--border);background:var(--surface-2);color:var(--text-secondary);border-radius:7px;padding:8px;cursor:pointer}.cow-candidates code{overflow:hidden;text-overflow:ellipsis;color:var(--text-primary)}
@@ -166,6 +167,22 @@ button.cow-live-chip:hover{border-color:var(--border-hover)}
 .cow-depth-window__label{color:var(--text-secondary);font-size:12px}
 .cow-depth-window button{border:1px solid var(--border);background:var(--surface-2);color:var(--text-secondary);border-radius:7px;padding:4px 12px;font:11px var(--font-mono);cursor:pointer}
 .cow-depth-window button.is-active{color:var(--accent-text);background:var(--accent-bg);border-color:var(--accent-border)}
+/* The window bar now holds three chip groups (span, resolution, price axis);
+   keep each group's buttons together and let the row wrap between groups. */
+.cow-depth-window > div[role=group]{display:flex;gap:6px;margin-right:10px}
+/* Footprint colour key: a 2 sides x N classes swatch matrix. Rendered as
+   HTML (not an ECharts visualMap) because the key has to show BOTH ramps
+   and say which half of a cell is which side. */
+.cow-fp-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:2px 0 8px;color:var(--text-secondary)}
+.cow-fp-legend table{border-collapse:collapse}
+.cow-fp-legend th,.cow-fp-legend td{padding:1px 6px;font:400 10px var(--font-mono);text-align:center;color:var(--text-muted);white-space:nowrap}
+.cow-fp-legend tbody th{text-align:right;color:var(--text-secondary)}
+.cow-fp-legend tbody th small{margin-left:5px;color:var(--text-muted);font-size:9px}
+.cow-fp-legend__unit{text-align:right !important;color:var(--text-secondary) !important}
+.cow-fp-legend i{display:block;width:30px;height:11px;border-radius:2px}
+.cow-fp-legend__note{display:flex;align-items:center;gap:6px;font:400 10px var(--font-mono);color:var(--text-muted)}
+.cow-fp-legend__outline{display:inline-block;width:14px;height:11px;border:1px solid var(--text-secondary);border-radius:2px;background:none}
+.cow-fp-legend__dash{display:inline-block;width:16px;height:0;margin-left:8px;border-top:1px dashed var(--text-secondary)}
 .cow-depth-note{padding-bottom:8px;color:var(--text-muted);font:10.5px var(--font-mono)}
 @media(max-width:900px){.cow-depth-history__slider{min-width:120px}}
 

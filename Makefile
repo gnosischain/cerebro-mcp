@@ -55,7 +55,11 @@ build-ui-graph-explorer:
 	cd ui && CEREBRO_UI_ENTRY=graphExplorer CEREBRO_UI_OUT_DIR=dist-graph-explorer-inline npm run build
 	cp ui/dist-graph-explorer-inline/graph-explorer.html src/cerebro_mcp/static/graph_explorer.html
 	cd ui && CEREBRO_UI_ENTRY=graphExplorerWeb CEREBRO_UI_OUT_DIR=dist-graph-explorer-web npm run build
-	! rg -q '0xv1c|ge_force_flows' ui/dist-graph-explorer-inline ui/dist-graph-explorer-web
+        # Dev-fixture leak gate. Uses grep, not rg: make runs recipes under
+        # /bin/sh, where rg is frequently absent — and `! rg …` turns rg's
+        # "command not found" (127) into a PASS, so the gate silently stopped
+        # guarding anything. grep -E is POSIX and always present.
+	! grep -rqE '0xv1c|ge_force_flows|ge_force_timeline' ui/dist-graph-explorer-inline ui/dist-graph-explorer-web
 	cp ui/dist-graph-explorer-web/graph-explorer.html src/cerebro_mcp/static/graph_explorer_web.html
 	rm -rf src/cerebro_mcp/static/assets/graph_explorer
 	mkdir -p src/cerebro_mcp/static/assets/graph_explorer

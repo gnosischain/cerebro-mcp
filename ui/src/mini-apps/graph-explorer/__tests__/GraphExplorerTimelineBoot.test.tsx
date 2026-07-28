@@ -33,7 +33,7 @@ vi.mock("../../shared/HelpDialog", () => ({ MaHelpButton: () => null }));
 vi.mock("../../shared/ToastStack", () => ({ ToastStack: () => null }));
 vi.mock("../devFixture", () => ({ buildMockPayload: () => ({}) }));
 
-vi.mock("../TaskSwitch", () => ({
+vi.mock("../GraphNav", () => ({
   TASK_OF_MODE: {
     atlas: "relationships",
     investigate: "relationships",
@@ -41,21 +41,20 @@ vi.mock("../TaskSwitch", () => ({
     timeline: "money",
     transactions: "tx",
   },
-  TaskSwitch: () => null,
+  GraphNav: () => null,
 }));
 
-vi.mock("../modes/AtlasView", () => ({
-  AtlasView: () => (
-    <output data-testid="atlas-view">
-      <details data-testid="atlas-catalog" open>
-        <summary>Relationship filters</summary>
-      </details>
+// Atlas and Investigate merged into one section, so there is a single mock.
+// The picker rail is part of it and is ALWAYS mounted — which is what makes
+// the old "an async seed displaces the explicitly-routed catalog" failure
+// structurally impossible rather than merely guarded against.
+vi.mock("../modes/FlowsView", () => ({ FlowsView: () => <div /> }));
+vi.mock("../modes/RelationshipsView", () => ({
+  RelationshipsView: () => (
+    <output data-testid="relationships-view">
+      <aside data-testid="relationship-rail" />
     </output>
   ),
-}));
-vi.mock("../modes/FlowsView", () => ({ FlowsView: () => <div /> }));
-vi.mock("../modes/InvestigateView", () => ({
-  InvestigateView: () => <output data-testid="investigate-view" />,
 }));
 vi.mock("../modes/TransactionsView", () => ({ TransactionsView: () => <div /> }));
 vi.mock("../modes/TimelineView", () => ({
@@ -224,7 +223,7 @@ describe("Timeline legacy deep-link boot", () => {
     expect(new URL(window.location.href).searchParams.get("mode")).toBe("timeline");
   });
 
-  it("keeps an explicit Atlas route authoritative over persisted Investigate state", async () => {
+  it("syncs an explicit relationships route exactly once and cleans the URL", async () => {
     const persisted = initialView();
     persisted.view_state.mode = "investigate";
     persisted.view_state.mode_revision = 4;
@@ -244,14 +243,16 @@ describe("Timeline legacy deep-link boot", () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector("[data-testid='atlas-view']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='relationships-view']")).not.toBeNull();
     const focusCalls = harness.callTool.mock.calls.filter(
       ([name]) => name === "update_graph_explorer_focus",
     );
     expect(focusCalls).toHaveLength(1);
+    // A legacy ?mode=atlas link resolves to the one Relationships section, so
+    // that is the mode the server is told about.
     expect(focusCalls[0]?.[1]).toMatchObject({
       view_id: "timeline-deep-link",
-      mode: "atlas",
+      mode: "investigate",
       selected_node_id: "",
       selected_edge_id: "",
       request_id: 1,
@@ -262,7 +263,7 @@ describe("Timeline legacy deep-link boot", () => {
     expect(url.searchParams.get("token")).toBe("dev");
   });
 
-  it("does not enter Investigate when an Atlas URL seed is absent from the first payload", async () => {
+  it("loads a deep-linked seed without ever unmounting the picker rail", async () => {
     const beforeSeedSync = initialView();
     beforeSeedSync.view_state.investigate.seed.id = "";
     beforeSeedSync.view_state.mode = "atlas";
@@ -278,20 +279,18 @@ describe("Timeline legacy deep-link boot", () => {
       root.render(<GraphExplorerApp />);
       await Promise.resolve();
     });
-    // The serialized relationship loader resolves asynchronously. This was
-    // the failing server-sync boundary: it used to dispatch Investigate after
-    // the explicit Atlas route had already rendered.
+    // The serialized relationship loader resolves asynchronously. This used to
+    // be the failing boundary: an Investigate dispatch landing after the
+    // explicit Atlas route had rendered would swap the whole view out from
+    // under the analyst. With one section the rail is never unmounted, so the
+    // assertion is now about the rail surviving, not about which view won.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
 
-    expect(container.querySelector("[data-testid='atlas-view']")).not.toBeNull();
-    expect(container.querySelector("[data-testid='investigate-view']")).toBeNull();
-    expect(
-      container.querySelector<HTMLDetailsElement>("[data-testid='atlas-catalog']")
-        ?.open,
-    ).toBe(true);
+    expect(container.querySelector("[data-testid='relationships-view']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='relationship-rail']")).not.toBeNull();
 
     const seedLoads = harness.callTool.mock.calls.filter(
       ([name]) => name === "load_graph_explorer_seed",
@@ -303,7 +302,8 @@ describe("Timeline legacy deep-link boot", () => {
     });
 
     const url = new URL(window.location.href);
-    expect(url.searchParams.get("mode")).not.toBe("investigate");
+    // investigate is the default section and is never serialized.
+    expect(url.searchParams.get("mode")).toBeNull();
     expect(url.searchParams.get("token")).toBe("dev");
   });
 });

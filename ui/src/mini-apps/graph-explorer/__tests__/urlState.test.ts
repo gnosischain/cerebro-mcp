@@ -2,7 +2,7 @@
 // URL round-trip + unmanaged-param preservation for the graph deep links.
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { TASK_OF_MODE } from "../TaskSwitch";
+import { TASK_OF_MODE } from "../GraphNav";
 import { readUrl, writeUrl, type GraphUrlState } from "../urlState";
 
 function setSearch(qs: string) {
@@ -10,7 +10,7 @@ function setSearch(qs: string) {
 }
 
 const BASE: GraphUrlState = {
-  mode: "atlas",
+  mode: "investigate",
   seed: "",
   profiles: [],
   window: 0,
@@ -45,7 +45,7 @@ describe("graph urlState", () => {
   it("round-trips a full state", () => {
     writeUrl({
       ...BASE,
-      mode: "investigate",
+      mode: "flows",
       seed: "0xabc",
       profiles: ["circles_trust", "safe_ownership"],
       window: 30,
@@ -56,7 +56,7 @@ describe("graph urlState", () => {
       depth: 3,
     });
     const u = readUrl();
-    expect(u.mode).toBe("investigate");
+    expect(u.mode).toBe("flows");
     expect(u.seed).toBe("0xabc");
     expect(u.profiles).toEqual(["circles_trust", "safe_ownership"]);
     expect(u.window).toBe(30);
@@ -114,6 +114,23 @@ describe("graph urlState", () => {
   it("omits defaults entirely (clean URLs)", () => {
     writeUrl(BASE);
     expect(window.location.search).toBe("");
+  });
+
+  // Relationships is the default section, so ?mode=investigate is never
+  // written; an absent mode reads back as "" — "the URL did not ask" — which
+  // is what the boot precedence needs in order to distinguish an explicit
+  // route from a defaulted one.
+  it("omits the default mode and reads an absent mode as unspecified", () => {
+    writeUrl({ ...BASE, mode: "investigate" });
+    expect(window.location.search).toBe("");
+    expect(readUrl().mode).toBe("");
+  });
+
+  // A legacy ?mode=atlas link must still parse; the reducer maps it onto
+  // Relationships rather than a dead mode.
+  it("still parses a legacy atlas deep link", () => {
+    setSearch("?mode=atlas");
+    expect(readUrl().mode).toBe("atlas");
   });
 
   it("preserves unmanaged params like ?token=", () => {

@@ -52,6 +52,10 @@ interface Props {
   onSimParamsChange: (next: SimParams) => void;
   labelMode: LabelMode;
   onLabelModeChange: (mode: LabelMode) => void;
+  /** Empty graph: the toolbar stays MOUNTED but its actions are inert. The
+   * user keeps the shape of the workspace (and the Advanced panel) instead of
+   * watching every control disappear along with the data. */
+  disabled?: boolean;
 }
 
 export function CanvasToolbar({
@@ -71,21 +75,28 @@ export function CanvasToolbar({
   onSimParamsChange,
   labelMode,
   onLabelModeChange,
+  disabled = false,
 }: Props) {
   const [simPanelOpen, setSimPanelOpen] = useState(false);
   return (
-    <div className="ge-graph-controls">
+    <div className={`ge-graph-controls${disabled ? " is-disabled" : ""}`}>
       <div className={`ge-graph-search ${searchMiss ? "miss" : ""}`}>
         <input
           type="text"
           placeholder={searchMiss ? "No match" : "Find node by address/label…"}
           value={search}
+          disabled={disabled}
           onChange={(e) => onSearchChange(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") onRunSearch();
           }}
         />
-        <button type="button" onClick={onRunSearch} title="Find & zoom">
+        <button
+          type="button"
+          onClick={onRunSearch}
+          disabled={disabled}
+          title="Find & zoom"
+        >
           ⌕
         </button>
       </div>
@@ -93,6 +104,7 @@ export function CanvasToolbar({
         type="button"
         className="ge-graph-btn"
         onClick={onFitView}
+        disabled={disabled}
         title="Fit the complete graph in the viewport"
       >
         Fit view
@@ -101,6 +113,7 @@ export function CanvasToolbar({
         type="button"
         className={`ge-graph-btn ${focusMode ? "active" : ""}`}
         onClick={onToggleFocus}
+        disabled={disabled}
         title="Focus mode — isolate the selected node and its neighbors"
         aria-pressed={focusMode}
       >

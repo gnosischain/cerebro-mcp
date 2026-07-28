@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 import requests
 from mcp.types import CallToolResult
 
+from cerebro_mcp.chains import CHAINS, NATIVE_ICON_URLS, ChainInfo, ExplorerInfo
 from cerebro_mcp.clients.clickhouse import (
     INTERACTIVE_QUERY_BUDGET,
     ClickHouseManager,
@@ -196,18 +197,9 @@ COINGECKO_PLATFORM_IDS = {
     59144: "linea",
 }
 COINGECKO_TOKEN_LIST_URL = "https://tokens.coingecko.com/{platform}/all.json"
-COINGECKO_NATIVE_ICON_URLS = {
-    1: "https://coin-images.coingecko.com/asset_platforms/images/279/thumb/ethereum.png?1706606803",
-    56: "https://coin-images.coingecko.com/asset_platforms/images/1/thumb/bnb_smart_chain.png?1706606721",
-    100: "https://coin-images.coingecko.com/asset_platforms/images/11062/thumb/Aatar_green_white.png?1706606458",
-    137: "https://coin-images.coingecko.com/asset_platforms/images/15/thumb/polygon_pos.png?1706606645",
-    8453: "https://coin-images.coingecko.com/asset_platforms/images/131/thumb/base.png?1759905869",
-    9745: "https://coin-images.coingecko.com/asset_platforms/images/32256/thumb/plasma.jpg?1758000963",
-    42161: "https://coin-images.coingecko.com/asset_platforms/images/33/thumb/AO_logomark.png?1706606717",
-    43114: "https://coin-images.coingecko.com/asset_platforms/images/12/thumb/avalanche.png?1706606775",
-    57073: "https://coin-images.coingecko.com/asset_platforms/images/22194/thumb/ink.jpg?1737600222",
-    59144: "https://coin-images.coingecko.com/asset_platforms/images/135/thumb/linea.jpeg?1706606705",
-}
+#: Alias of the shared registry map — kept under the original name because it
+#: is referenced throughout this module and mirrored client-side.
+COINGECKO_NATIVE_ICON_URLS = NATIVE_ICON_URLS
 COINGECKO_ICON_CACHE_TTL_SECONDS = 30 * 60
 _COINGECKO_IMAGE_HOSTS = {"assets.coingecko.com", "coin-images.coingecko.com"}
 _COINGECKO_ICON_CACHE: dict[int, tuple[float, dict[str, str]]] = {}
@@ -219,58 +211,18 @@ ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
 INTEGER_RE = re.compile(r"^[0-9]+$")
 
 
-@dataclass(frozen=True)
-class ExplorerInfo:
-    provider: Literal["blockscout", "bscscan", "avalanche", "plasmascan"]
-    brand: str
-    base_url: str
-    transaction_url_template: str
-    address_url_template: str
-    token_url_template: str
+#: Chains CoW Protocol is deployed on, in deliberate priority order — NOT
+#: numeric. The order is observable: it drives the mini-app's chain dropdown
+#: and the `chain_id IN (...)` literals built by `_scope_predicate` /
+#: `_search_scope`, so reordering churns generated SQL (and the ClickHouse
+#: query cache). Membership is asserted by tests/test_cow_explorer.py.
+#: Chains present in the shared registry but NOT here (e.g. Celo) are
+#: deliberately excluded — CoW does not settle there.
+COW_CHAIN_IDS: tuple[int, ...] = (
+    1, 100, 42161, 8453, 56, 137, 43114, 59144, 57073, 9745, 11155111,
+)
 
-
-@dataclass(frozen=True)
-class ChainInfo:
-    chain_id: int
-    name: str
-    native_symbol: str
-    environment: Literal["production", "testnet"]
-    explorer: ExplorerInfo
-
-
-def _explorer(
-    provider: Literal["blockscout", "bscscan", "avalanche", "plasmascan"],
-    brand: str,
-    base: str,
-    *,
-    token_as_address: bool = False,
-) -> ExplorerInfo:
-    base = base.rstrip("/")
-    return ExplorerInfo(
-        provider=provider,
-        brand=brand,
-        base_url=base,
-        transaction_url_template=f"{base}/tx/{{hash}}",
-        address_url_template=f"{base}/address/{{address}}",
-        token_url_template=(
-            f"{base}/address/{{address}}" if token_as_address else f"{base}/token/{{address}}"
-        ),
-    )
-
-
-COW_CHAINS: dict[int, ChainInfo] = {
-    1: ChainInfo(1, "Ethereum", "ETH", "production", _explorer("blockscout", "Blockscout", "https://eth.blockscout.com")),
-    100: ChainInfo(100, "Gnosis", "xDAI", "production", _explorer("blockscout", "Blockscout", "https://gnosis.blockscout.com")),
-    42161: ChainInfo(42161, "Arbitrum One", "ETH", "production", _explorer("blockscout", "Blockscout", "https://arbitrum.blockscout.com")),
-    8453: ChainInfo(8453, "Base", "ETH", "production", _explorer("blockscout", "Blockscout", "https://base.blockscout.com")),
-    56: ChainInfo(56, "BNB Smart Chain", "BNB", "production", _explorer("bscscan", "BscScan", "https://bscscan.com")),
-    137: ChainInfo(137, "Polygon PoS", "POL", "production", _explorer("blockscout", "Blockscout", "https://polygon.blockscout.com")),
-    43114: ChainInfo(43114, "Avalanche C-Chain", "AVAX", "production", _explorer("avalanche", "Avalanche Explorer", "https://subnets.avax.network/c-chain", token_as_address=True)),
-    59144: ChainInfo(59144, "Linea", "ETH", "production", _explorer("blockscout", "Blockscout", "https://explorer.linea.build")),
-    57073: ChainInfo(57073, "Ink", "ETH", "production", _explorer("blockscout", "Blockscout", "https://explorer.inkonchain.com")),
-    9745: ChainInfo(9745, "Plasma", "XPL", "production", _explorer("plasmascan", "Plasmascan", "https://plasmascan.to")),
-    11155111: ChainInfo(11155111, "Ethereum Sepolia", "ETH", "testnet", _explorer("blockscout", "Blockscout", "https://eth-sepolia.blockscout.com")),
-}
+COW_CHAINS: dict[int, ChainInfo] = {cid: CHAINS[cid] for cid in COW_CHAIN_IDS}
 
 
 @dataclass(frozen=True)
@@ -1261,6 +1213,7 @@ def _market_specs(
     range_state: dict[str, Any],
     depth_at: str = "",
     heatmap_window: str = "7d",
+    bucket_seconds: int = 0,
 ) -> list[QuerySpec]:
     base, quote = pair
     # Pair picker options: the 50 busiest pairs of the last 30 days with
@@ -1481,7 +1434,7 @@ ORDER BY blocks.auction_timestamp"""
         QuerySpec("auction_reference_prices", "Auction reference prices", auction_reference, params, "auction_block_timestamp", "observed_series"),
         QuerySpec("native_reference_prices", "Native-price API observations", native_reference, params, "observed_at", "observed_series", 60),
         *_pair_depth_specs(chain, pair, depth_at),
-        *_pair_depth_heatmap_specs(chain, pair, heatmap_window),
+        *_pair_depth_heatmap_specs(chain, pair, heatmap_window, bucket_seconds),
     ]
 
 
@@ -1526,13 +1479,19 @@ def _pair_depth_specs(
     set is tiny) and terminal events before T (order_events; API-observed
     cancel times carry minutes of jitter — disclosed). status:fulfilled is
     the fallback terminal for BNB fills whose trade rows lack timestamps.
+    Post-backfill this reaches ~2021-08 (creation_date floor, surfaced by
+    depth_horizon.earliest_creation_seen); cancelled orders WITHOUT any
+    timestamped cancel event (the backfill cancel-time gap) are excluded at
+    every T — their resting span is unknowable (see term_any).
     Live-verified 2026-07-23 (0.09s at T-1d on the busiest BNB pair; the cand
     CTE must NOT self-alias argMax to filtered column names — code 184).
     """
+    # uniq, not uniqExact: an exact hash set over millions of backfilled
+    # 56-byte uids is a memory risk; the count is display-only (HLL ~0.8%).
     horizon = """
 SELECT min(observed_at) AS earliest_supported_at,
        max(observed_at) AS latest_observed_at,
-       uniqExact(order_uid) AS captured_orders,
+       uniq(order_uid) AS captured_orders,
        min(creation_date) AS earliest_creation_seen,
        max(observed_at) AS source_observed_at
 FROM cow_db.orders
@@ -1541,9 +1500,12 @@ ORDER BY earliest_supported_at"""
     # Pairs that HAVE a standing book right now (chain-scoped, pair-agnostic).
     # Some chains (Gnosis) run almost entirely on short-lived market orders and
     # hold ZERO open intents at any given moment — without this list the depth
-    # panel dead-ends on an empty book with no path to data. Orders table is
-    # tiny; argMax-dedup subquery, projected-column WHERE (no alias-in-WHERE
-    # shadowing: the status/valid_to filters sit a level ABOVE the argMax).
+    # panel dead-ends on an empty book with no path to data. The backfilled
+    # orders table is ~millions of rows per chain, so the unexpired-validity
+    # prefilter (valid_to is IMMUTABLE per order_uid) bounds the argMax hash to
+    # the small live set; valid_to joins the GROUP BY key rather than being
+    # argMax'd so the same-level WHERE binds the raw column (alias-in-WHERE
+    # trap, code 184). The mutable status filter sits a level ABOVE the argMax.
     open_pairs = f"""
 WITH {_token_metadata_cte()}
 SELECT p.token0 AS token0,p.token1 AS token1,
@@ -1556,17 +1518,17 @@ FROM (
          greatest(sell_token,buy_token) AS token1,
          count() AS open_orders,max(obs_at) AS obs
   FROM (
-    SELECT order_uid,
+    SELECT order_uid,valid_to,
            argMax(sell_token,observed_at) AS sell_token,
            argMax(buy_token,observed_at) AS buy_token,
            argMax(status,observed_at) AS status,
-           argMax(valid_to,observed_at) AS valid_to,
            max(observed_at) AS obs_at
     FROM cow_db.orders
     WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    GROUP BY order_uid
+      AND valid_to>toUnixTimestamp(now())
+    GROUP BY order_uid,valid_to
   )
-  WHERE status='open' AND valid_to>toUnixTimestamp(now())
+  WHERE status='open'
   GROUP BY token0,token1
 ) AS p
 LEFT JOIN tm AS m0 ON m0.token=p.token0
@@ -1622,12 +1584,29 @@ WITH {token_cte}, open_orders AS (
       toFloat64(residual_buy_raw),
       toFloat64(o.buy_amount)*toFloat64(residual_sell_raw)
         /nullIf(toFloat64(o.sell_amount),0)) AS remaining_buy_float
- FROM cow_db.orders AS o FINAL
- WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}}
-   AND o.status='open'
-   AND o.valid_to>toUnixTimestamp(parseDateTime64BestEffort({{server_as_of:String}}))
-   AND ((o.sell_token={{base:String}} AND o.buy_token={{quote:String}})
-        OR (o.sell_token={{quote:String}} AND o.buy_token={{base:String}}))
+ FROM (
+   -- argMax dedup replaces FINAL (whole-chain k-way merge of the ~millions-row
+   -- backfilled table). Pair + unexpired-validity prefilters are IMMUTABLE per
+   -- order_uid, so the hash holds only this pair's live-validity orders; the
+   -- immutable columns ride the GROUP BY key (explicit list — a qualified
+   -- asterisk through aggregation loses names, code 47). Mutable status is
+   -- filtered via HAVING; max(observed_at) must NOT self-alias to observed_at
+   -- beside sibling argMax(x,observed_at) (code 184) — downstream reads obs_at.
+   SELECT order_uid,owner,kind,class,partially_fillable,creation_date,valid_to,
+          sell_token,buy_token,sell_amount,buy_amount,
+          argMax(status,observed_at) AS st,
+          argMax(executed_sell_amount,observed_at) AS executed_sell_amount,
+          argMax(executed_buy_amount,observed_at) AS executed_buy_amount,
+          max(observed_at) AS obs_at
+   FROM cow_db.orders
+   WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+     AND valid_to>toUnixTimestamp(parseDateTime64BestEffort({{server_as_of:String}}))
+     AND ((sell_token={{base:String}} AND buy_token={{quote:String}})
+          OR (sell_token={{quote:String}} AND buy_token={{base:String}}))
+   GROUP BY order_uid,owner,kind,class,partially_fillable,creation_date,valid_to,
+            sell_token,buy_token,sell_amount,buy_amount
+   HAVING st='open'
+ ) AS o
 ), enriched AS (
  SELECT o.*,
    if(s.token='','',s.symbol) AS sell_symbol,
@@ -1649,7 +1628,7 @@ WITH {token_cte}, open_orders AS (
    if(side='ask',remaining_buy,remaining_sell) AS amount_quote,
    toString(sell_amount) AS sell_amount_raw,
    toString(buy_amount) AS buy_amount_raw,
-   observed_at AS source_observed_at
+   obs_at AS source_observed_at
  FROM enriched
  WHERE sell_decimals IS NOT NULL AND buy_decimals IS NOT NULL
 )
@@ -1669,6 +1648,7 @@ WITH {token_cte}, open_orders AS (
     hist_sql = f"""
 WITH {token_cte}, cand AS (
   SELECT order_uid,
+         argMax(status,observed_at) AS status_l,
          argMax(owner,observed_at) AS owner_l,
          argMax(kind,observed_at) AS kind_l,
          argMax(class,observed_at) AS class_l,
@@ -1684,9 +1664,9 @@ WITH {token_cte}, cand AS (
   WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
     AND ((sell_token={{base:String}} AND buy_token={{quote:String}})
          OR (sell_token={{quote:String}} AND buy_token={{base:String}}))
+    AND creation_date<=parseDateTime64BestEffort({{at_ts:String}})
+    AND toDateTime(valid_to)>parseDateTime64BestEffort({{at_ts:String}})
   GROUP BY order_uid
-  HAVING created<=parseDateTime64BestEffort({{at_ts:String}})
-     AND toDateTime(vt)>parseDateTime64BestEffort({{at_ts:String}})
 ), fills AS (
   SELECT order_uid,sum(fsa) AS filled_sell,sum(fba) AS filled_buy
   FROM (
@@ -1709,6 +1689,18 @@ WITH {token_cte}, cand AS (
     AND event_timestamp IS NOT NULL
     AND event_timestamp<=parseDateTime64BestEffort({{at_ts:String}})
   GROUP BY order_uid
+), term_any AS (
+  -- Unbounded existence check (no at_ts cap): does ANY timestamped terminal
+  -- event exist for the order, ever? Backfilled cancelled orders have none —
+  -- their cancel TIME is unknowable, so they are excluded from reconstruction
+  -- at every T instead of phantom-resting until valid_to. An order cancelled
+  -- AFTER T stays in the book at T because it IS here (and not in term).
+  SELECT DISTINCT order_uid
+  FROM cow_db.order_events
+  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
+    AND order_uid IN (SELECT order_uid FROM cand)
+    AND event_type IN ('OrderInvalidated','OrderInvalidation','status:cancelled','status:fulfilled')
+    AND event_timestamp IS NOT NULL
 ), book AS (
   -- Explicit column list: a qualified asterisk (c.*) through this joined CTE
   -- does NOT preserve plain column names on the server (code 47 downstream).
@@ -1727,6 +1719,7 @@ WITH {token_cte}, cand AS (
   LEFT JOIN fills AS f ON f.order_uid=c.order_uid
   LEFT JOIN term AS x ON x.order_uid=c.order_uid
   WHERE x.order_uid=''
+    AND (c.status_l!='cancelled' OR c.order_uid IN (SELECT order_uid FROM term_any))
 ), enriched AS (
   SELECT bk.*,
     if(s.token='','',s.symbol) AS sell_symbol,
@@ -1762,61 +1755,137 @@ WITH {token_cte}, cand AS (
     return specs
 
 
-#: Time spans the depth heatmap can grid over. "all" spans the whole
-#: order-capture horizon (min(observed_at)); 24h/7d are clamped to it.
-_HEATMAP_WINDOWS = ("24h", "7d", "all")
+#: Time spans the depth footprint can grid over. "all" spans the whole
+#: reconstructable history (min(creation_date), reaching the backfill).
+_HEATMAP_WINDOWS = ("24h", "7d", "30d", "90d", "all")
+
+#: Footprint price binning: rows carry price RELATIVE to the bucket's own
+#: median (percent), binned to `_FOOTPRINT_REL_STEP` and clamped to
+#: +-`_FOOTPRINT_REL_PCT`. A relative reference is what makes long windows
+#: usable: the underlying price trends by multiples over years while a book
+#: spans single-digit percent of it, so an absolute grid leaves the liquidity
+#: in 1-2 rows of the plot.
+#:
+#: It is also a correctness fix. Retention measured over all 254,525 mainnet
+#: USDC/WETH orders, worst case ("all", ~32-day buckets):
+#:     +-30% of the WINDOW median (the old clamp)  53.3%
+#:     +-10% of the BUCKET median                  78.3%
+#:     +-20% of the BUCKET median  (chosen)        92.5%
+#:     +-30% of the BUCKET median                  95.8%
+#: Short windows are unaffected either way — 7d buckets are 2.8h wide, so the
+#: whole book lands inside +-9% (live-probed).
+#:
+#: Width and step are chosen together against the row budget: 41 bins leaves
+#: room for the full 120 time buckets (41 x 2 x 120 = 9,840 < 10k), and a 1.0
+#: point bin over +-20% is EXACTLY the client's 40 display levels — the server
+#: grid and the client grid coincide, so nothing is re-binned or aliased.
+_FOOTPRINT_REL_PCT = 20.0
+_FOOTPRINT_REL_STEP = 1.0
+_FOOTPRINT_MAX_BUCKETS = 120
+#: Finest bucket the grid will cut, and the coarsest a caller may request.
+_FOOTPRINT_MIN_STEP_S = 300
+_FOOTPRINT_MAX_STEP_S = 2_592_000
 
 
 def _validate_heatmap_window(value: str) -> str:
-    """Normalize the depth-heatmap window to one of ``_HEATMAP_WINDOWS``."""
+    """Normalize the depth-footprint window to one of ``_HEATMAP_WINDOWS``."""
     window = (value or "").strip().lower()
     if window not in _HEATMAP_WINDOWS:
         raise ValueError(f"heatmap_window must be one of {list(_HEATMAP_WINDOWS)}")
     return window
 
 
+def _validate_bucket_seconds(value: int | str) -> int:
+    """Normalize the requested footprint resolution to whole seconds.
+
+    0 means "auto" (the server picks span/60). Anything else is clamped by
+    the SQL itself to >= ``_FOOTPRINT_MIN_STEP_S`` and coarsened further when
+    the span would otherwise exceed ``_FOOTPRINT_MAX_BUCKETS`` columns — the
+    row budget is a hard cap, so a too-fine request is honored as far as it
+    fits rather than rejected. The response echoes the effective resolution
+    in ``bucket_seconds`` so the UI can disclose the coarsening.
+    """
+    try:
+        seconds = int(value or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("bucket_seconds must be an integer number of seconds") from exc
+    if seconds == 0:
+        return 0
+    if seconds < _FOOTPRINT_MIN_STEP_S or seconds > _FOOTPRINT_MAX_STEP_S:
+        raise ValueError(
+            f"bucket_seconds must be 0 (auto) or between {_FOOTPRINT_MIN_STEP_S} "
+            f"and {_FOOTPRINT_MAX_STEP_S} seconds"
+        )
+    return seconds
+
+
 def _pair_depth_heatmap_specs(
     chain: ChainInfo,
     pair: tuple[str, str],
     window: str = "7d",
+    bucket_seconds: int = 0,
 ) -> list[QuerySpec]:
-    """Depth-over-time heatmap source for one pair.
+    """Depth-over-time FOOTPRINT source for one pair (one binned tier).
 
-    Reconstructs the *shape* of the book across a grid of ~60 timestamps in ONE
+    Reconstructs the *shape* of the book across a grid of time buckets in ONE
     query — the ``depth`` group's ``hist_sql`` returns a single instant, this
-    returns many. Per (time bucket, order) it emits the order's resting price,
-    side, and base-normalized size while the order is alive at that bucket:
-    ``created <= t < valid_to`` and no terminal event (fill / cancel) has landed
-    by ``t``. This is a deliberate lower-fidelity model than the 2-D ladder: an
-    order rests at its FULL captured size until a terminal event removes it, so
-    intra-window partial fills are not decremented gradually (disclosed via the
-    ``depth_heatmap_reconstructed`` warning). Terminal events — the dominant
-    effect, since a filled order leaves the book entirely — ARE honored. The
-    client bins price into levels and sums ``depth_base`` per (bucket, level,
-    side); ``amount_base`` is used for BOTH sides so one magnitude scale works.
+    returns many. An order rests in a bucket when its span
+    [created, alive_until) overlaps the bucket, where ``alive_until`` is the
+    earliest of expiry, a timestamped terminal event, and its completing fill.
 
-    Row count is bounded by (<=60 buckets) x (open orders for the pair, tens),
-    so the result stays small and memory-safe per the depth-panel budget.
+    Shape (one tier for EVERY window — the client bins to price levels either
+    way, so per-order rows were only ever wasted bandwidth):
+
+    - One row per (bucket, relative-price bin, side). ``depth_base`` is
+      TIME-WEIGHTED — an order resting a third of a bucket contributes a third
+      of its size — so a transient intent never reads like a standing one.
+    - Price is carried RELATIVE to the bucket's own median (``rel_pct``,
+      0.5-point bins, clamped to +-10%) with the reference itself emitted as
+      ``bucket_mid``, so the client can render either axis mode from one
+      payload (``abs_price = bucket_mid * (1 + rel_pct / 100)``). A per-bucket
+      reference is both a readability fix (a book spans ~1.6% of price while a
+      multi-year window spans multiples of it) and a correctness one: the old
+      +-30%-of-WINDOW-median clamp dropped 44.3% of mainnet USDC/WETH orders.
+    - Rows are bounded at ``_FOOTPRINT_MAX_BUCKETS`` x 41 bins x 2 sides.
+    - ``orders`` counts the resting orders behind each cell (tooltip honesty:
+      a cell can be two orders or two thousand).
+
+    Resolution is caller-chosen: ``bucket_seconds`` 0 means auto (span/60),
+    anything else is floored at ``_FOOTPRINT_MIN_STEP_S`` and coarsened until
+    the grid fits the bucket cap. The effective value comes back as the
+    ``bucket_seconds`` column so the UI can disclose a coarsening.
+
+    Cancelled orders WITHOUT a timestamped cancel event (the backfilled
+    cancel-time gap — the API only reports current status) are EXCLUDED: their
+    resting span is unknowable and including them until valid_to painted
+    phantom depth (median 7d, p95 ~1y validity). Live-captured cancels carry
+    order_events timestamps and are unaffected.
     """
     base, quote = pair
     if not base or not quote:
         return []
     win = _validate_heatmap_window(window)
+    step_request = _validate_bucket_seconds(bucket_seconds)
     token_cte = _token_metadata_cte()
     params = {
         **_scope_parameters(chain.environment, chain),
         "base": base,
         "quote": quote,
         "window": win,
+        "bucket_seconds": step_request,
     }
     # Grid derivation is split across CTEs so each expression references only a
     # PRIOR CTE alias (ClickHouse same-SELECT sibling-alias refs are fragile).
     heatmap_sql = f"""
 WITH {token_cte},
 bounds AS (
+  -- Reconstruction floor: min(creation_date), NOT min(observed_at) — the
+  -- backfill recovers orders back to ~2021-08, and fills/expiry give their
+  -- removal times. Only "all" (and clamping in the first capture days)
+  -- actually reaches this floor.
   SELECT now() AS t_now,
          ifNull(
-           (SELECT min(observed_at) FROM cow_db.orders
+           (SELECT min(creation_date) FROM cow_db.orders
               WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}),
            now() - INTERVAL 30 DAY) AS cap_start
 ),
@@ -1825,6 +1894,8 @@ win AS (
          greatest(cap_start,
            multiIf({{window:String}}='24h', t_now - INTERVAL 24 HOUR,
                    {{window:String}}='7d',  t_now - INTERVAL 7 DAY,
+                   {{window:String}}='30d', t_now - INTERVAL 30 DAY,
+                   {{window:String}}='90d', t_now - INTERVAL 90 DAY,
                    cap_start)) AS w_start
   FROM bounds
 ),
@@ -1834,10 +1905,21 @@ grid AS (
   FROM win
 ),
 grid_step AS (
-  SELECT w_start, span_s, greatest(300, intDiv(span_s, 60)) AS step_s FROM grid
+  -- Caller resolution when given, else span/60. Floored at {_FOOTPRINT_MIN_STEP_S}s and
+  -- coarsened so the grid never exceeds {_FOOTPRINT_MAX_BUCKETS} columns — the row budget
+  -- is a hard cap, so a too-fine request is honored as far as it fits.
+  SELECT w_start, span_s,
+         greatest(
+           greatest(toUInt32({_FOOTPRINT_MIN_STEP_S}),
+                    if({{bucket_seconds:UInt32}} > 0,
+                       {{bucket_seconds:UInt32}}, toUInt32(intDiv(span_s, 60)))),
+           toUInt32(ceil(span_s / {float(_FOOTPRINT_MAX_BUCKETS)}))
+         ) AS step_s
+  FROM grid
 ),
 grid_n AS (
-  SELECT w_start, step_s, least(72, toUInt32(intDiv(span_s, step_s)) + 1) AS n_buckets
+  SELECT w_start, step_s,
+         least({_FOOTPRINT_MAX_BUCKETS}, toUInt32(intDiv(span_s, step_s)) + 1) AS n_buckets
   FROM grid_step
 ),
 buckets AS (
@@ -1850,7 +1932,12 @@ dims AS (
          (SELECT anyOrNull(decimals) FROM tm WHERE token={{quote:String}}) AS quote_dec
 ),
 cand AS (
+  -- valid_to is IMMUTABLE per order_uid and alive_until <= toDateTime(valid_to),
+  -- so this prefilter is lossless for the bucket-overlap test while bounding the
+  -- argMax hash to orders whose validity reaches the window (the backfilled
+  -- orders table holds ~200K rows for a busy pair; ~99% expired long ago).
   SELECT order_uid,
+         argMax(status,observed_at) AS status_l,
          argMax(sell_token,observed_at) AS st,
          argMax(sell_amount,observed_at) AS sa,
          argMax(buy_amount,observed_at) AS ba,
@@ -1860,6 +1947,7 @@ cand AS (
   WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
     AND ((sell_token={{base:String}} AND buy_token={{quote:String}})
          OR (sell_token={{quote:String}} AND buy_token={{base:String}}))
+    AND toDateTime(valid_to) > (SELECT w_start FROM win)
   GROUP BY order_uid
 ),
 term AS (
@@ -1875,10 +1963,7 @@ fill AS (
   -- Order_events does NOT reliably carry a terminal row for every filled order
   -- (most fills are trades, not status events), so without this an order that
   -- was filled but never got a status:fulfilled event would rest forever and
-  -- the cross-join explodes. Use the LAST fill as the completion proxy: a
-  -- fully-filled order leaves the book at its (only) fill; a partially-fillable
-  -- order keeps resting until its final slice. Intra-fill size decay is not
-  -- modeled (disclosed via depth_heatmap_reconstructed).
+  -- the cross-join explodes. Use the LAST fill as the completion proxy.
   SELECT order_uid, max(block_timestamp) AS filled_out_ts
   FROM cow_db.trades
   WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
@@ -1907,24 +1992,87 @@ priced AS (
   LEFT JOIN term AS t ON t.order_uid=c.order_uid
   LEFT JOIN fill AS f ON f.order_uid=c.order_uid
   WHERE d.base_dec IS NOT NULL AND d.quote_dec IS NOT NULL
+    -- Cancelled orders without a timestamped cancel event (and no fill to
+    -- bound removal) have an unknowable resting span — excluding them beats
+    -- painting phantom depth until valid_to (backfilled cancel-time gap).
+    AND (c.status_l!='cancelled' OR t.terminated_at IS NOT NULL
+         OR f.filled_out_ts IS NOT NULL)
+),
+bmed AS (
+  -- Per-bucket reference price, keyed by GRID INDEX (buckets start at w_start,
+  -- so an epoch-aligned key would be off by a partial step).
+  --
+  -- Reads RAW orders, deliberately NOT `priced`: CTEs are inlined, so every
+  -- extra reference re-runs the whole cand/argMax + term + fill chain. That
+  -- chain measured ~5.6s per materialization, and a second one pushed this
+  -- past the 20s interactive budget (live TIMEOUT_EXCEEDED). Skipping the
+  -- dedup is exact here, not a shortcut: sell_token/sell_amount/buy_amount/
+  -- creation_date/valid_to are all IMMUTABLE per order_uid, so duplicate
+  -- versions carry identical prices and cannot move a median. Removal logic
+  -- (fills, cancels) is irrelevant to "what was this pair worth then".
+  SELECT greatest(toInt64(0),
+           intDiv(toInt64(dateDiff('second', (SELECT w_start FROM grid_n), o.creation_date)),
+                  toInt64((SELECT step_s FROM grid_n)))) AS b_idx,
+         quantile(0.5)(if(o.sell_token={{base:String}},
+           toFloat64(o.buy_amount)/pow(10,toFloat64(d.quote_dec))
+             /nullIf(toFloat64(o.sell_amount)/pow(10,toFloat64(d.base_dec)),0),
+           toFloat64(o.sell_amount)/pow(10,toFloat64(d.quote_dec))
+             /nullIf(toFloat64(o.buy_amount)/pow(10,toFloat64(d.base_dec)),0))) AS b_med
+  FROM cow_db.orders AS o
+  CROSS JOIN dims AS d
+  WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}}
+    AND ((o.sell_token={{base:String}} AND o.buy_token={{quote:String}})
+         OR (o.sell_token={{quote:String}} AND o.buy_token={{base:String}}))
+    AND toDateTime(o.valid_to) > (SELECT w_start FROM grid_n)
+  GROUP BY b_idx
+),
+pmed AS (
+  -- Fallback reference for quiet buckets, taken from `bmed` (<=120 rows) and
+  -- NOT from `priced`: CTEs are inlined, so a third `priced` reference would
+  -- re-run the cand/term/fill chain a third time (live-measured 14.7s vs 5s).
+  SELECT quantile(0.5)(b_med) AS p_med FROM bmed
 )
-SELECT
-  formatDateTime(b.bucket_ts, '%Y-%m-%dT%H:%i:%SZ') AS bucket,
-  p.quote_amt / nullIf(p.base_amt, 0) AS price,
-  p.side AS side,
-  p.base_amt AS depth_base,
-  b.bucket_ts AS indexed_from,
-  b.bucket_ts AS indexed_to
-FROM buckets AS b
-CROSS JOIN priced AS p
--- Interval overlap, not point-in-time: an order lights a bucket if its resting
--- span [created, alive_until) touches the bucket interval [bucket_ts, +step).
--- CoW books are transient (orders often rest minutes, buckets are ~an hour), so
--- a boundary snapshot would miss most orders and leave the heatmap near-empty.
-WHERE p.created < (b.bucket_ts + b.step_s)
-  AND p.alive_until > b.bucket_ts
-  AND isFinite(price) AND price > 0 AND p.base_amt > 0
-ORDER BY b.bucket_ts, p.side, price"""
+SELECT bucket, bucket_mid, rel_pct, side,
+       sum(w) AS depth_base, count() AS orders,
+       any(bucket_seconds) AS bucket_seconds,
+       any(bucket_ts) AS indexed_from, any(bucket_ts) AS indexed_to
+FROM (
+  SELECT bucket, bucket_ts, bucket_seconds, bucket_mid, side, w,
+         round((price / bucket_mid - 1) * {100.0 / _FOOTPRINT_REL_STEP})
+           / {1.0 / _FOOTPRINT_REL_STEP} AS rel_pct
+  FROM (
+    SELECT formatDateTime(b.bucket_ts, '%Y-%m-%dT%H:%i:%SZ') AS bucket,
+           b.bucket_ts AS bucket_ts,
+           b.step_s AS bucket_seconds,
+           -- Quiet buckets (no order created in them) fall back to the window
+           -- median; they are low-depth by definition, and the client also
+           -- forward-fills bucket_mid for the axis labels.
+           coalesce(m.b_med, (SELECT p_med FROM pmed)) AS bucket_mid,
+           p.quote_amt / nullIf(p.base_amt, 0) AS price,
+           p.side AS side,
+           -- Time-weighted: size x the fraction of the bucket the order rested.
+           p.base_amt * dateDiff('second',
+             greatest(toDateTime(p.created), toDateTime(b.bucket_ts)),
+             least(toDateTime(p.alive_until), toDateTime(b.bucket_ts) + b.step_s))
+             / b.step_s AS w
+    FROM buckets AS b
+    CROSS JOIN priced AS p
+    LEFT JOIN bmed AS m
+      ON m.b_idx = intDiv(
+           toInt64(dateDiff('second', (SELECT w_start FROM grid_n), b.bucket_ts)),
+           toInt64(b.step_s))
+    -- Interval overlap, not point-in-time: CoW books are transient (orders
+    -- often rest minutes), so a boundary snapshot would miss most of them.
+    WHERE p.created < (b.bucket_ts + b.step_s)
+      AND p.alive_until > b.bucket_ts
+      AND p.base_amt > 0
+  )
+  WHERE bucket_mid > 0 AND isFinite(price) AND price > 0
+    AND abs(price / bucket_mid - 1) <= {_FOOTPRINT_REL_PCT / 100.0}
+)
+WHERE w > 0
+GROUP BY bucket, bucket_mid, rel_pct, side
+ORDER BY bucket, side, rel_pct"""
     return [
         QuerySpec(
             "pair_depth_heatmap", "Order-book depth over time", heatmap_sql,
@@ -2402,11 +2550,12 @@ def _order_type_specs(
 ) -> list[QuerySpec]:
     """Order-type analytics (dual-mode: single-chain or all-networks).
 
-    Everything here runs on the SMALL orders (~100K rows) and order_events
-    (~1M rows) tables — argMax-dedup grouped scans with tiny hashes. Coverage
-    caveat baked into the docs: the orderbook sync is a PARTIAL subset (~78K
-    orders, limit-heavy and recent), so class mixes describe the observed
-    subset, never all CoW orders.
+    The historical backfill grew `orders` to ~12M rows (order_events grew
+    similarly), so every dedup below bounds its argMax hash by the WINDOW
+    (immutable creation_date pushed into the raw scan) or groups the raw scan
+    directly — never a whole-table dedup. Coverage caveat baked into the docs:
+    the orderbook capture recovers EXECUTED and owner-enumerated orders, so
+    class mixes describe the observed subset, never all CoW orders.
     """
     ids = ",".join(str(c.chain_id) for c in chains)
     params = {**_scope_parameters(scope, None), **_time_params(range_state)}
@@ -3481,35 +3630,69 @@ FROM (
 LEFT JOIN fills ON fills.chain_id=u.chain_id AND fills.tx_hash=u.tx_hash
 ORDER BY u.block_ts DESC,u.log_index DESC
 LIMIT 30"""
+    # The backfill grew `orders` to ~12M rows, so FINAL's whole-table k-way
+    # merge blew the memory budget at all-networks scope (code 241). valid_to
+    # is IMMUTABLE per order_uid, so prefiltering the raw scan to unexpired
+    # validity bounds the argMax hash to the small live set (the ogopen
+    # pattern in _overview_specs); only mutable columns (status,
+    # executed_sell_amount) need latest-version dedup. creation_date/valid_to
+    # join the GROUP BY key instead of being argMax'd — an aggregate alias on
+    # valid_to beside the same-level WHERE is the alias-in-WHERE trap
+    # (code 184). Token-metadata joins on the selected 100 rows only.
     open_orders = f"""
 WITH {tmx_cte}
-SELECT o.order_uid,o.chain_id AS chain_id,o.owner,o.kind,o.status,o.creation_date,o.valid_to,
-       o.partially_fillable,
-       o.sell_token,if(s.token='','',s.symbol) AS sell_symbol,
+SELECT u.order_uid,u.chain_id AS chain_id,u.owner,u.kind,u.st AS status,u.creation_date,u.valid_to,
+       u.partially_fillable,
+       u.sell_token,if(s.token='','',s.symbol) AS sell_symbol,
        if(s.token='',NULL,s.decimals) AS sell_decimals,
-       toString(o.sell_amount) AS sell_amount_raw,
-       if(s.token='',NULL,toFloat64(o.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       o.buy_token,if(b.token='','',b.symbol) AS buy_symbol,
+       toString(u.sell_amount) AS sell_amount_raw,
+       if(s.token='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
+       u.buy_token,if(b.token='','',b.symbol) AS buy_symbol,
        if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(o.buy_amount) AS buy_amount_raw,
-       if(b.token='',NULL,toFloat64(o.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       if(o.sell_amount>0,
-          least(1,toFloat64(o.executed_sell_amount)/toFloat64(o.sell_amount)),0) AS fill_ratio,
-       o.observed_at AS source_observed_at
-FROM cow_db.orders AS o FINAL
-LEFT JOIN tmx AS s ON s.chain_id=o.chain_id AND s.token=o.sell_token
-LEFT JOIN tmx AS b ON b.chain_id=o.chain_id AND b.token=o.buy_token
-WHERE {_scope_predicate(chain, 'o', scope)}
-  AND o.status='open' AND o.valid_to>toUnixTimestamp(now())
-ORDER BY o.creation_date DESC,o.order_uid DESC
+       toString(u.buy_amount) AS buy_amount_raw,
+       if(b.token='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
+       if(u.sell_amount>0,
+          least(1,toFloat64(u.exec_sell)/toFloat64(u.sell_amount)),0) AS fill_ratio,
+       u.obs_at AS source_observed_at
+FROM (
+  SELECT chain_id,order_uid,creation_date,valid_to,
+         argMax(status,observed_at) AS st,
+         argMax(owner,observed_at) AS owner,
+         argMax(kind,observed_at) AS kind,
+         argMax(partially_fillable,observed_at) AS partially_fillable,
+         argMax(sell_token,observed_at) AS sell_token,
+         argMax(buy_token,observed_at) AS buy_token,
+         argMax(sell_amount,observed_at) AS sell_amount,
+         argMax(buy_amount,observed_at) AS buy_amount,
+         argMax(executed_sell_amount,observed_at) AS exec_sell,
+         max(observed_at) AS obs_at
+  FROM cow_db.orders
+  WHERE {feed_pred}
+    AND valid_to>toUnixTimestamp(now())
+  GROUP BY chain_id,order_uid,creation_date,valid_to
+  HAVING st='open'
+  ORDER BY creation_date DESC,order_uid DESC
+  LIMIT 100
+) AS u
+LEFT JOIN tmx AS s ON s.chain_id=u.chain_id AND s.token=u.sell_token
+LEFT JOIN tmx AS b ON b.chain_id=u.chain_id AND b.token=u.buy_token
+ORDER BY u.creation_date DESC,u.order_uid DESC
 LIMIT 100"""
+    # order_events likewise outgrew FINAL; the 1h observed_at bound keeps the
+    # argMax hash to an hour of rows, and event_id is the unique event key.
     events = f"""
-SELECT event_type,chain_id,order_uid,owner,block_number,transaction_hash,event_timestamp,
-       observed_at AS source_observed_at
-FROM cow_db.order_events FINAL
+SELECT argMax(event_type,observed_at) AS event_type,chain_id,
+       argMax(order_uid,observed_at) AS order_uid,
+       argMax(owner,observed_at) AS owner,
+       argMax(block_number,observed_at) AS block_number,
+       argMax(transaction_hash,observed_at) AS transaction_hash,
+       argMax(event_timestamp,observed_at) AS event_timestamp,
+       max(observed_at) AS source_observed_at
+FROM cow_db.order_events
 WHERE {feed_pred}
   AND observed_at >= now() - INTERVAL 1 HOUR
-ORDER BY observed_at DESC,event_id DESC
+GROUP BY chain_id,event_id
+ORDER BY source_observed_at DESC,event_id DESC
 LIMIT 50"""
     # Minute-bucketed heartbeat for the live band chart: 1h bound keeps the
     # (minute x chain) hash at <= 60 x 10 entries regardless of load.
@@ -4180,6 +4363,7 @@ def _section_specs(
     filters: dict[str, str],
     depth_at: str = "",
     heatmap_window: str = "7d",
+    bucket_seconds: int = 0,
 ) -> list[QuerySpec]:
     if section == "overview":
         return _overview_specs(scope, range_state, chain)
@@ -4197,7 +4381,9 @@ def _section_specs(
         return _live_specs(scope, chain)
     assert chain is not None
     if section == "markets":
-        return _market_specs(chain, pair, interval, range_state, depth_at, heatmap_window)
+        return _market_specs(
+            chain, pair, interval, range_state, depth_at, heatmap_window, bucket_seconds,
+        )
     if section == "patterns":
         return _patterns_specs(scope, chain, range_state)
     raise ValueError(f"Unsupported section: {section}")
@@ -4824,6 +5010,7 @@ def _apply_section_load(
         "depth_at": "",
         # Depth-heatmap window resets to the default on every section apply.
         "heatmap_window": "7d",
+        "bucket_seconds": 0,
         "scope_id": scope_id,
         "coverage": {**(current.get("coverage") or {}), **coverage},
         "coverage_warnings": [w for w in warnings if " " not in w],
@@ -4970,6 +5157,7 @@ def _apply_group_load(
     force_refresh: bool,
     depth_at: str = "",
     heatmap_window: str = "",
+    bucket_seconds: int = -1,
 ) -> tuple[MiniAppPayload, str]:
     """Load ONE deferred dataset group additively and return a PATCH payload.
 
@@ -5029,9 +5217,15 @@ def _apply_group_load(
         effective_heatmap_window = str(state.get("heatmap_window") or "7d")
     else:
         effective_heatmap_window = _validate_heatmap_window(heatmap_window)
+    # bucket_seconds contract mirrors heatmap_window: -1 reuses the view's
+    # current resolution, 0 is an explicit "auto", anything else is validated.
+    if bucket_seconds < 0:
+        effective_bucket_seconds = int(state.get("bucket_seconds") or 0)
+    else:
+        effective_bucket_seconds = _validate_bucket_seconds(bucket_seconds)
     specs = _section_specs(
         section_key, scope, chain, pair, interval, range_state, filters,
-        effective_depth_at, effective_heatmap_window,
+        effective_depth_at, effective_heatmap_window, effective_bucket_seconds,
     )
     group_specs = [spec for spec in specs if spec.key in group_keys]
     datasets, coverage, load_warnings = _load_specs_safe(
@@ -5062,6 +5256,7 @@ def _apply_group_load(
         "loaded_groups": {f"{section_key}.{group_key}": "partial" if group_failed else True},
         "depth_at": effective_depth_at,
         "heatmap_window": effective_heatmap_window,
+        "bucket_seconds": effective_bucket_seconds,
         "coverage": coverage,
         "dataset_revisions": {
             key: updated.dataset_revisions.get(key, 0) for key in datasets
@@ -5300,6 +5495,7 @@ def register_cow_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         force_refresh: bool = False,
         depth_at: str = "",
         heatmap_window: str = "",
+        bucket_seconds: int = -1,
     ) -> CallToolResult:
         """[App-only] Load one deferred CoW dataset group (additive).
 
@@ -5307,14 +5503,20 @@ def register_cow_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         returns the markets depth panel to the live book, and an ISO-8601
         timestamp reconstructs the pair's open book at that moment.
 
-        ``heatmap_window``: "" keeps the view's current depth-heatmap window
-        (default "7d"); "24h"/"7d"/"all" pick the span the markets.depth_heatmap
-        group grids over.
+        ``heatmap_window``: "" keeps the view's current depth-footprint
+        window (default "7d"); "24h"/"7d"/"30d"/"90d"/"all" pick the span the
+        markets.depth_heatmap group grids over.
+
+        ``bucket_seconds``: -1 keeps the view's current footprint resolution,
+        0 is auto (span/60), and any value in seconds picks the bucket width.
+        Too-fine requests are coarsened to fit the row budget rather than
+        rejected; the effective width comes back in the dataset's
+        ``bucket_seconds`` column.
         """
         try:
             payload, summary = _apply_group_load(
                 ch, view_id, section, group, scope_id, force_refresh, depth_at,
-                heatmap_window,
+                heatmap_window, bucket_seconds,
             )
             return mini_apps.payload_to_call_tool_result(payload, summary)
         except Exception as exc:

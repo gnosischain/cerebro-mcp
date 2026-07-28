@@ -4,7 +4,11 @@ import { ToastStack } from "../shared/ToastStack";
 import { MiniAppChrome, MaIdentity, MaSection } from "../shared/MiniAppChrome";
 import { MaHelpButton } from "../shared/HelpDialog";
 import { CONTRACT_EXPLORER_HELP } from "../shared/helpContent";
+import { ChainBadge } from "../shared/ChainBadge";
+import { AsyncButton } from "../shared/AsyncButton";
 import { shortAddr } from "../../utils/format";
+import { HistoryChart } from "./HistoryChart";
+import type { HistorySeries } from "./historyChartOption";
 
 // ---------------------------------------------------------------------------
 // Wire types — mirror src/cerebro_mcp/tools/contract_explorer.py
@@ -42,8 +46,31 @@ interface CallEntry {
   elapsed_seconds: number;
 }
 
+interface ExplorerInfo {
+  provider: string;
+  brand: string;
+  base_url: string;
+  transaction_url_template: string;
+  address_url_template: string;
+  token_url_template: string;
+  api_base_url: string;
+}
+
+interface ChainOption {
+  chain_id: number;
+  name: string;
+  native_symbol: string;
+  environment: string;
+  explorer: ExplorerInfo;
+  icon_url?: string;
+}
+
 interface ContractExplorerState {
   address: string;
+  chain_id: number;
+  chain_name: string;
+  chain_options: ChainOption[];
+  explorer: ExplorerInfo | null;
   contract_name: string;
   abi_source: string;
   implementation_address: string;
@@ -52,10 +79,20 @@ interface ContractExplorerState {
   write_functions: AbiFunction[];
   events: AbiEvent[];
   call_history: CallEntry[];
+  history: HistorySeries[];
   warnings: string[];
 }
 
 const APP_ID = "contract_explorer";
+
+/** Preset sweep windows. Values are what the backend's `since` accepts. */
+const RANGE_PRESETS: ReadonlyArray<readonly [label: string, since: string]> = [
+  ["24h", "24h"],
+  ["7d", "7d"],
+  ["30d", "30d"],
+  ["90d", "90d"],
+  ["1y", "365d"],
+] as const;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -85,8 +122,32 @@ function renderResult(value: unknown): string {
 // Mock payload (Vite dev mode)
 // ---------------------------------------------------------------------------
 
+const MOCK_EXPLORER: ExplorerInfo = {
+  provider: "blockscout",
+  brand: "Blockscout",
+  base_url: "https://gnosis.blockscout.com",
+  transaction_url_template: "https://gnosis.blockscout.com/tx/{hash}",
+  address_url_template: "https://gnosis.blockscout.com/address/{address}",
+  token_url_template: "https://gnosis.blockscout.com/token/{address}",
+  api_base_url: "https://gnosis.blockscout.com/api/v2",
+};
+
 const MOCK_STATE: ContractExplorerState = {
   address: "0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430",
+  chain_id: 100,
+  chain_name: "Gnosis",
+  chain_options: [
+    {
+      chain_id: 100, name: "Gnosis", native_symbol: "xDAI",
+      environment: "production", explorer: MOCK_EXPLORER,
+    },
+    {
+      chain_id: 1, name: "Ethereum", native_symbol: "ETH",
+      environment: "production",
+      explorer: { ...MOCK_EXPLORER, base_url: "https://eth.blockscout.com" },
+    },
+  ],
+  explorer: MOCK_EXPLORER,
   contract_name: "GnosisControllerToken",
   abi_source: "blockscout",
   implementation_address: "0x60cb9FdD0fcFd9BB3b2B721864Db5E7C07F4635D",
@@ -135,6 +196,7 @@ const MOCK_STATE: ContractExplorerState = {
   ],
   events: [],
   call_history: [],
+  history: [],
   warnings: [],
 };
 
@@ -168,6 +230,7 @@ export default function ContractExplorerApp() {
   const [pendingTarget, setPendingTarget] = useState<
     "auto" | "implementation" | "proxy"
   >("auto");
+  const [pendingChain, setPendingChain] = useState<number | null>(null);
   const [defaultBlock, setDefaultBlock] = useState<string>("latest");
   const [subTab, setSubTab] = useState<"read" | "write" | "events">("read");
 
@@ -178,6 +241,16 @@ export default function ContractExplorerApp() {
     [state?.call_history],
   );
 
+  const historyBySignature = useMemo(() => {
+    const map = new Map<string, HistorySeries>();
+    for (const series of state?.history ?? []) map.set(series.signature, series);
+    return map;
+  }, [state?.history]);
+
+  // Null means "untouched" — follow the view's chain until the user picks one.
+  const chainId = pendingChain ?? state?.chain_id ?? 100;
+  const chainOptions = state?.chain_options ?? [];
+
   if (!view) {
     return (
       <MiniAppChrome activeTabId="contract" rightSlot={<MaHelpButton content={CONTRACT_EXPLORER_HELP} />}>
@@ -186,18 +259,24 @@ export default function ContractExplorerApp() {
     );
   }
 
-  async function loadAddress(addr: string, target: typeof pendingTarget) {
+  async function loadAddress(
+    addr: string,
+    target: typeof pendingTarget,
+    chain: number,
+  ) {
     if (!addr.trim()) return;
     if (view?.view_id) {
       await callTool("load_contract_explorer_address", {
         view_id: view.view_id,
         address: addr.trim(),
         target,
+        chain: String(chain),
       });
     } else {
       await callTool("open_contract_explorer", {
         address: addr.trim(),
         target,
+        chain: String(chain),
       });
     }
   }
@@ -219,18 +298,32 @@ export default function ContractExplorerApp() {
           style={{ marginBottom: 14 }}
           onSubmit={(e) => {
             e.preventDefault();
-            void loadAddress(pendingAddress, pendingTarget);
+            void loadAddress(pendingAddress, pendingTarget, chainId);
           }}
         >
           <input
             type="text"
-            placeholder="0x… paste a Gnosis Chain contract address"
+            placeholder="0x… paste a contract address"
             value={pendingAddress}
             onChange={(e) => setPendingAddress(e.target.value)}
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
           />
+          {chainOptions.length > 0 ? (
+            <select
+              value={chainId}
+              onChange={(e) => setPendingChain(Number(e.target.value))}
+              title="Chain to resolve and call against"
+              className="ce-select"
+            >
+              {chainOptions.map((opt) => (
+                <option key={opt.chain_id} value={opt.chain_id}>
+                  {opt.name}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <select
             value={pendingTarget}
             onChange={(e) =>
@@ -238,15 +331,7 @@ export default function ContractExplorerApp() {
                 e.target.value as "auto" | "implementation" | "proxy",
               )
             }
-            style={{
-              padding: "6px 10px",
-              fontFamily: "var(--font-mono)",
-              fontSize: 12,
-              background: "var(--surface)",
-              color: "var(--text-primary)",
-              border: "1px solid var(--border)",
-              borderRadius: 3,
-            }}
+            className="ce-select"
           >
             <option value="auto">auto (impl ABI on proxies)</option>
             <option value="implementation">implementation only</option>
@@ -276,27 +361,43 @@ export default function ContractExplorerApp() {
             value={state.address}
             onCopy={() => navigator.clipboard?.writeText(state.address)}
             rightSlot={
-              state.implementation_address ? (
-                <span
-                  style={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 11,
-                    color: "var(--success)",
-                    padding: "2px 8px",
-                    border: "1px solid var(--success)",
-                    borderRadius: 3,
-                  }}
-                  title={state.implementation_address}
-                >
-                  proxy → {shortAddr(state.implementation_address)}
-                </span>
-              ) : null
+              <span className="ce-identity-tags">
+                <ChainBadge
+                  chainId={state.chain_id}
+                  iconUrl={
+                    chainOptions.find((c) => c.chain_id === state.chain_id)
+                      ?.icon_url
+                  }
+                />
+                {state.explorer?.address_url_template ? (
+                  <a
+                    className="ce-explorer-link"
+                    href={state.explorer.address_url_template.replace(
+                      "{address}",
+                      state.address,
+                    )}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                  >
+                    {state.explorer.brand} ↗
+                  </a>
+                ) : null}
+                {state.implementation_address ? (
+                  <span
+                    className="ce-proxy-tag"
+                    title={state.implementation_address}
+                  >
+                    proxy → {shortAddr(state.implementation_address)}
+                  </span>
+                ) : null}
+              </span>
             }
           />
         ) : (
           <div className="ma-empty">
             Paste a contract address above to inspect its ABI and call any
-            view/pure function. Proxies are followed automatically.
+            view/pure function on any configured chain. Proxies are followed
+            automatically.
           </div>
         )}
 
@@ -352,6 +453,7 @@ export default function ContractExplorerApp() {
               lastResult={lastResults.get(fn.signature)}
               defaultBlock={defaultBlock}
               isWrite={subTab === "write"}
+              series={historyBySignature.get(fn.signature)}
             />
           </MaSection>
         ))}
@@ -396,6 +498,13 @@ interface FunctionCardProps {
   lastResult?: CallEntry;
   defaultBlock: string;
   isWrite?: boolean;
+  series?: HistorySeries;
+}
+
+/** Only numeric returns can be plotted over time. */
+function isPlottable(fn: AbiFunction): boolean {
+  const t = fn.outputs[0]?.type ?? "";
+  return /^u?int\d*$/.test(t) || t === "bool";
 }
 
 function FunctionCard({
@@ -405,12 +514,18 @@ function FunctionCard({
   lastResult,
   defaultBlock,
   isWrite,
+  series,
 }: FunctionCardProps) {
   const [args, setArgs] = useState<string[]>(() =>
     fn.inputs.map(() => ""),
   );
   const [pending, setPending] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [range, setRange] = useState("30d");
+  const [points, setPoints] = useState("60");
+  const [decimals, setDecimals] = useState("");
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   function setArg(idx: number, value: string) {
     setArgs((prev) => {
@@ -445,6 +560,32 @@ function FunctionCard({
       setCallError(err instanceof Error ? err.message : String(err));
     } finally {
       setPending(false);
+    }
+  }
+
+  function coercedArgs() {
+    return args.map((v, i) => {
+      const t = fn.inputs[i].type;
+      if (t.startsWith("uint") || t.startsWith("int")) return v.trim();
+      if (t === "bool") return v.trim().toLowerCase() === "true";
+      return v;
+    });
+  }
+
+  async function sweepHistory() {
+    setHistoryError(null);
+    try {
+      await callTool("contract_explorer_read_history", {
+        view_id: viewId,
+        function_name: fn.name,
+        function_signature: fn.signature,
+        args: coercedArgs(),
+        since: range,
+        points: Number(points) || 60,
+        decimals: Number(decimals) || 0,
+      });
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -498,6 +639,16 @@ function FunctionCard({
         >
           {pending ? "Calling…" : isWrite ? "Disabled" : "Call"}
         </button>
+        {!isWrite && isPlottable(fn) ? (
+          <button
+            className="ma-call-btn ce-history-toggle"
+            type="button"
+            onClick={() => setShowHistory((v) => !v)}
+            title="Plot this value across a block range"
+          >
+            {showHistory ? "Hide history" : "History"}
+          </button>
+        ) : null}
       </div>
 
       {/* Result line */}
@@ -530,6 +681,68 @@ function FunctionCard({
             @ {String(lastResult.block ?? "latest")} ·{" "}
             {lastResult.elapsed_seconds}s
           </span>
+        </div>
+      ) : null}
+
+      {/* History sweep — reads this function across a block range */}
+      {showHistory ? (
+        <div className="ce-history-panel">
+          <div className="ma-call-row">
+            <div className="ce-range-presets">
+              {RANGE_PRESETS.map(([label, value]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`ce-range-btn ${range === value ? "is-active" : ""}`}
+                  onClick={() => setRange(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <input
+              type="text"
+              value={points}
+              onChange={(e) => setPoints(e.target.value)}
+              placeholder="points"
+              title="Samples across the range (max 200)"
+              style={{ flex: "0 1 90px" }}
+            />
+            <input
+              type="text"
+              value={decimals}
+              onChange={(e) => setDecimals(e.target.value)}
+              placeholder="decimals"
+              title="Scale the plotted value by 10^n (e.g. 18 for a token amount)"
+              style={{ flex: "0 1 100px" }}
+            />
+            <AsyncButton
+              onClick={sweepHistory}
+              loadingLabel="Sweeping"
+              variant="primary"
+            >
+              Sweep
+            </AsyncButton>
+          </div>
+
+          {historyError ? (
+            <div className="ma-result-line">
+              <span className="ma-result-arrow">↳</span>
+              <span className="ma-result-label">error:</span>
+              <span className="ma-result-value ma-result-value--err">
+                {historyError}
+              </span>
+            </div>
+          ) : null}
+
+          {series ? (
+            <HistoryChart series={series} />
+          ) : (
+            <div className="ma-empty">
+              Pick a range and sweep — each sample is a live archive read, so a
+              60-point sweep takes a few seconds.
+            </div>
+          )}
         </div>
       ) : null}
     </>

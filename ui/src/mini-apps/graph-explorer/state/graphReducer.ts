@@ -241,13 +241,16 @@ export function adoptServerState(
   const adoptMode =
     previous === undefined ||
     serverModeRevision > Number(previous.modeRevision ?? -1);
+  // "atlas" is still a valid WIRE value — the server keeps publishing it and
+  // ?mode=atlas deep links keep working — but it is no longer a reachable UI
+  // mode. Relationships is one section now, so an atlas payload resolves to
+  // investigate rather than to a catalog-only view with no graph.
   const validServerMode: GraphMode =
-    server?.mode === "investigate" ||
     server?.mode === "timeline" ||
     server?.mode === "flows" ||
     server?.mode === "transactions"
       ? server.mode
-      : "atlas";
+      : "investigate";
   const mode: GraphMode = adoptMode ? validServerMode : previous.mode;
   const selection: GraphSelection = adoptMode
     ? {
@@ -260,8 +263,10 @@ export function adoptServerState(
   );
   const atlas = server?.atlas;
   const investigate = server?.investigate;
+  // `mode` can no longer be "atlas", so the old mode ternary always took the
+  // investigate branch. Atlas's window survives as the fallback: a payload
+  // that only carried atlas.window_days still seeds the window.
   const windowDays =
-    (mode === "atlas" ? atlas?.window_days : investigate?.window_days) ||
     investigate?.window_days ||
     atlas?.window_days ||
     limits.ui_default_window_days;
@@ -356,9 +361,12 @@ export function graphReducer(
     case "RESTORE_DRAFT":
       return action.state;
     case "SET_MODE": {
-      if (action.mode === state.mode) return state;
+      // Normalize here as well as in adoptServerState: a deep link, a restored
+      // draft or a stale server command can still name "atlas".
+      const mode: GraphMode = action.mode === "atlas" ? "investigate" : action.mode;
+      if (mode === state.mode) return state;
       // Mode switch clears selection (matches the server contract).
-      return { ...state, mode: action.mode, selection: { nodeId: "", edgeId: "" } };
+      return { ...state, mode, selection: { nodeId: "", edgeId: "" } };
     }
     case "SELECT_NODE":
       return { ...state, selection: { nodeId: action.id, edgeId: "" } };

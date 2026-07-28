@@ -4,7 +4,7 @@ import { act, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { InvestigateView } from "../modes/InvestigateView";
+import { RelationshipsView } from "../modes/RelationshipsView";
 import { buildInitialState, graphReducer } from "../state/graphReducer";
 import type { GraphExplorerViewState } from "../types";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
@@ -56,11 +56,39 @@ function hydrated(rows: unknown[][]): HydratedDataset {
   };
 }
 
-function Harness() {
-  const [local, dispatch] = useReducer(graphReducer, buildInitialState(server));
+// Same fixture, but p2 is a *candidate* profile and the view opens with the
+// "approved" status filter — so p2 is an ACTIVE profile that the filter hides
+// from the canvas. The user must be told, or the graph silently under-reports.
+const trimmingServer = {
+  ...server,
+  semantic_status_filter: "approved",
+  catalog: [
+    {
+      profile: "p1",
+      semantic_status: "approved",
+      question_synonyms: [],
+      source_kind: "address",
+      target_kind: "address",
+    },
+    {
+      profile: "p2",
+      semantic_status: "candidate",
+      question_synonyms: [],
+      source_kind: "address",
+      target_kind: "address",
+    },
+  ],
+} as unknown as GraphExplorerViewState;
+
+function Harness({
+  view = server,
+}: {
+  view?: GraphExplorerViewState;
+}) {
+  const [local, dispatch] = useReducer(graphReducer, buildInitialState(view));
   return (
-    <InvestigateView
-      server={server}
+    <RelationshipsView
+      server={view}
       local={local}
       dispatch={dispatch}
       nodes={hydrated([
@@ -75,6 +103,15 @@ function Harness() {
       nodeEvidence={undefined}
       edgeEvidence={undefined}
       evidenceExpectation={null}
+      atlasNodes={undefined}
+      atlasEdges={undefined}
+      atlasPreviewNodes={undefined}
+      atlasPreviewEdges={undefined}
+      loadSample={vi.fn()}
+      loadPreview={vi.fn()}
+      previewLoading={false}
+      previewError={null}
+      desiredPreviewRequestId={0}
       refetchSeed={vi.fn()}
       seedInvestigate={vi.fn()}
       expandNode={vi.fn()}
@@ -83,12 +120,11 @@ function Harness() {
       onSelectNode={vi.fn()}
       onSelectEdge={vi.fn()}
       onClearSelection={vi.fn()}
-      onBrowseAtlas={vi.fn()}
     />
   );
 }
 
-describe("Investigate controlled relationship visibility", () => {
+describe("Relationships controlled relationship visibility", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -128,5 +164,18 @@ describe("Investigate controlled relationship visibility", () => {
       .not.toContain("p2");
     expect(container.querySelector(".ge-ranked-table__rows")?.textContent)
       .toContain("p1");
+  });
+
+  it("discloses active profiles the status filter hides from the canvas", async () => {
+    await act(async () => root.render(<Harness view={trimmingServer} />));
+
+    // p2 is active but filtered out: the canvas must not silently show less
+    // than the applied selection.
+    expect(container.querySelector("[data-testid=graph]")?.getAttribute("data-visible"))
+      .toBe("p1");
+    const note = container.querySelector(".ge-scope-strip__filter");
+    expect(note).not.toBeNull();
+    expect(note?.textContent).toContain("1");
+    expect(note?.textContent).toContain("approved");
   });
 });

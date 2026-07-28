@@ -128,8 +128,10 @@ TOOL_META: dict[str, Meta] = {
         "tags": ["governance", "snapshot", "gnosisdao", "proposals", "votes", "forum", "gip", "quorum"],
     },
     # ── web3 / rpc (advanced) ────────────────────────────────────────
+    "list_chains": {"domain": "web3", "tier": "basic", "tags": ["chain", "rpc", "multichain"]},
     "contract_explore": {"domain": "web3", "tier": "advanced", "tags": ["contract", "abi", "address"]},
     "contract_call_function": {"domain": "web3", "tier": "advanced", "tags": ["contract", "call", "read"]},
+    "contract_read_history": {"domain": "web3", "tier": "advanced", "tags": ["contract", "history", "historical", "timeseries", "archive"]},
     "resolve_address": {"domain": "web3", "tier": "advanced", "tags": ["address", "ens", "resolve"]},
 }
 

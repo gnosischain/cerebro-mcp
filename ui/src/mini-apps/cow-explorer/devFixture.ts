@@ -107,30 +107,37 @@ const pairDepthRows: unknown[][] = [
   depthOrder("e5", "bid", 93, 1.2903, false, 110_000),
 ];
 
-// pair_depth_heatmap: depth-over-time for GNO/WXDAI. Eight ~6h buckets with a
-// slowly drifting mid. Like a real CoW book, asks and bids OVERLAP around the
-// market price (~100) rather than sitting on opposite sides of a spread — so
-// the dev view exercises the total-depth / dominant-side encoding + median line.
-const heatmapColumns = ["bucket", "price", "side", "depth_base", "indexed_from", "indexed_to"];
+// pair_depth_heatmap: the FOOTPRINT source for GNO/WXDAI, mirroring the server
+// projection — price arrives as a percent offset from each bucket's own median
+// (`rel_pct`, 1.0-point bins) with that median alongside, so the client can
+// render either axis mode. Like a real CoW book, asks and bids OVERLAP around
+// the market rather than sitting either side of a spread, and the mid DRIFTS,
+// so the dev view exercises both the split-cell encoding and the relative axis.
+// Depths span three decades so the colour ladder is actually exercised.
+const heatmapColumns = [
+  "bucket", "bucket_mid", "rel_pct", "side", "depth_base", "orders",
+  "bucket_seconds", "indexed_from", "indexed_to",
+];
 const heatmapRows: unknown[][] = (() => {
   const rows: unknown[][] = [];
+  const stepSeconds = 6 * 3600;
   for (let b = 8; b >= 1; b -= 1) {
-    const bucket = iso(b * 6 * 3600);
-    const drift = (8 - b) * 0.4; // mid drifts up over the window
-    const asks: Array<[number, number]> = [
-      [99.5 + drift, 1.2 + (b % 3) * 0.4], // below mid — overlaps bids
-      [100.5 + drift, 2.6 + (b % 2) * 0.6], // busy level, both sides
-      [102 + drift, 3.1 - (b % 4) * 0.3],
-      [104 + drift, 1.4 + (b % 5) * 0.2],
-    ];
-    const bids: Array<[number, number]> = [
-      [100.5 + drift, 2.2 + (b % 2) * 0.5], // same level as an ask — overlap
-      [99.5 + drift, 2.4 + (b % 3) * 0.4],
-      [97.5 + drift, 3.0 + (b % 4) * 0.5],
-      [95 + drift, 1.3 + (b % 5) * 0.3],
-    ];
-    for (const [price, depth] of asks) rows.push([bucket, price, "ask", depth, bucket, bucket]);
-    for (const [price, depth] of bids) rows.push([bucket, price, "bid", depth, bucket, bucket]);
+    const bucket = iso(b * stepSeconds);
+    // The market itself moves across the window — on an absolute axis this is
+    // what smears the book; on the relative axis every bucket lines up.
+    const mid = 100 * (1 + (8 - b) * 0.05);
+    const push = (rel: number, side: "ask" | "bid", depth: number, orders: number) =>
+      rows.push([bucket, mid, rel, side, depth, orders, stepSeconds, bucket, bucket]);
+    // Offsets are on the server's 1.0-point grid.
+    push(-1, "ask", 0.12 + (b % 3) * 0.05, 2);
+    push(0, "ask", 26 + (b % 2) * 9, 31);
+    push(2, "ask", 3.1 + (b % 4) * 0.9, 7);
+    push(4, "ask", 0.9 + (b % 5) * 0.2, 3);
+    push(9, "ask", 140 + (b % 3) * 40, 58); // a whale level, far from market
+    push(0, "bid", 22 + (b % 2) * 7, 27); // same level as an ask — overlap
+    push(-1, "bid", 4.4 + (b % 3) * 1.1, 9);
+    push(-3, "bid", 1.2 + (b % 4) * 0.4, 4);
+    push(-6, "bid", 0.05 + (b % 5) * 0.02, 1);
   }
   return rows;
 })();

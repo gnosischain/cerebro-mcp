@@ -13,7 +13,7 @@ import {
   filterRowsByChain,
   heartbeatOption,
 } from "../sections/LiveSection";
-import { CHAIN_SERIES_COLORS } from "../model/chainIcons";
+import { CHAIN_SERIES_COLORS } from "../../shared/chainIcons";
 
 type Row = Record<string, unknown>;
 

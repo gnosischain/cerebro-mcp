@@ -19,8 +19,8 @@ import { CollapsibleSection } from "../../shared/CollapsibleSection";
 import { rowsToObjects } from "../../shared/rowDataset";
 import { shortAddr } from "../../../utils/format";
 import { activityOption, pieOption, stackedSeriesOption, treemapOption } from "../model/chartOptions";
-import { CHAIN_SERIES_COLORS, CHAIN_SHORT_NAMES, chainSeriesColor } from "../model/chainIcons";
-import { ChainBadge } from "../components/ChainBadge";
+import { CHAIN_SERIES_COLORS, CHAIN_SHORT_NAMES, chainSeriesColor } from "../../shared/chainIcons";
+import { ChainBadge } from "../../shared/ChainBadge";
 import { KpiTile } from "../components/KpiTile";
 import {
   ChartSection,

@@ -5,6 +5,11 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from cerebro_mcp.chains import (
+    GNOSIS_CHAIN_ID,
+    NATIVE_ICON_URLS,
+    configured_chains,
+)
 from cerebro_mcp.models.mini_app import DatasetStats, MiniAppPayload
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset
 from cerebro_mcp.semantic.graph_profiles import GraphProfile, discover_profiles
@@ -313,6 +318,25 @@ def empty_state(title: str) -> dict[str, Any]:
             "min_usd": 0.0,
             "tx_count": 0,
             "leg_count": 0,
+            # Receipts are RPC-sourced and therefore portable. The picker is
+            # built from the chains that actually have an endpoint configured,
+            # so it never offers one that cannot answer. Transaction Detail is
+            # the only mode with a chain selector: the other modes read the
+            # single-chain Gnosis warehouse.
+            "chain_id": GNOSIS_CHAIN_ID,
+            "chain_options": [
+                {
+                    "chain_id": chain.chain_id,
+                    "name": chain.name,
+                    "native_symbol": chain.native_symbol,
+                    "explorer": chain.explorer.base_url,
+                    "icon_url": NATIVE_ICON_URLS.get(chain.chain_id, ""),
+                    # Address discovery needs the indexed execution tables,
+                    # which exist for Gnosis only.
+                    "supports_address_discovery": chain.chain_id == GNOSIS_CHAIN_ID,
+                }
+                for chain in configured_chains()
+            ],
             # Machine-readable coverage: rows returned vs rows that EXIST, the
             # window actually applied, and the residuals this relation cannot
             # see. `exact` is only ever true when returned == total.

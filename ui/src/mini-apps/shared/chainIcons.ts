@@ -1,7 +1,14 @@
-// Static chain-icon registry (CoinGecko asset-platform images), mirroring the
-// backend `COINGECKO_NATIVE_ICON_URLS` map so the dev fixture and any state
-// missing `chain_options[*].icon_url` still render chain badges. The server
-// payload's icon_url wins when present.
+// Static per-chain presentation registry: icons, short names, series hues.
+//
+// Mirrors the backend `NATIVE_ICON_URLS` / `CHAINS` maps in
+// src/cerebro_mcp/chains.py, which is the source of truth for chain identity.
+// This copy exists so dev fixtures and any payload missing
+// `chain_options[*].icon_url` still render a badge; the server's icon_url wins
+// when present.
+//
+// Shared across mini-apps (CoW Explorer, Contract Explorer) — one file owns
+// everything visual about a chain, so a new chain is added in exactly two
+// places (here and chains.py) rather than drifting across per-app copies.
 
 export const CHAIN_ICON_URLS: Record<number, string> = {
   1: "https://coin-images.coingecko.com/asset_platforms/images/279/thumb/ethereum.png?1706606803",
@@ -24,17 +31,28 @@ export const CHAIN_SHORT_NAMES: Record<number, string> = {
   8453: "Base",
   9745: "Plasma",
   42161: "Arbitrum",
+  42220: "Celo",
   43114: "Avalanche",
   57073: "Ink",
   59144: "Linea",
   11155111: "Sepolia",
 };
 
+/** Short name for a chain id; the bare id is the fallback for unknown chains. */
+export function chainShortName(chainId: number): string {
+  return CHAIN_SHORT_NAMES[chainId] ?? String(chainId);
+}
+
 /** Stable per-chain series hues so chain-keyed charts match everywhere
  * (share trend, live heartbeat, pies, treemaps). Mid-lightness picks chosen
  * to stay distinguishable on BOTH the dark (#12161c) and light (white) card
  * surfaces — no pair differs only in lightness. Sepolia is deliberately a
- * neutral grey (testnet). */
+ * neutral grey (testnet).
+ *
+ * Celo (42220) has no entry: it is reachable in the Contract Explorer but is
+ * not charted by chain anywhere yet, and picking a hue that clears the
+ * both-surfaces bar needs a visual check rather than a guess. It falls back to
+ * the neutral below until someone charts it. */
 export const CHAIN_SERIES_COLORS: Record<number, string> = {
   1: "#7B9CE1", // Ethereum — periwinkle blue
   56: "#F5B14C", // BNB — amber

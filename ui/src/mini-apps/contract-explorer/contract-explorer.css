@@ -475,3 +475,22 @@
   color: var(--text-muted, #9ca3af);
   font-size: 0.7rem;
 }
+
+/* --- chain selector + identity tags --- */
+.ce-select{padding:6px 10px;font-family:var(--font-mono);font-size:12px;background:var(--surface);color:var(--text-primary);border:1px solid var(--border);border-radius:3px}
+.ce-identity-tags{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ce-explorer-link{font-family:var(--font-mono);font-size:11px;color:var(--text-secondary);text-decoration:none;border-bottom:1px dotted var(--border)}
+.ce-explorer-link:hover{color:var(--text-primary)}
+.ce-proxy-tag{font-family:var(--font-mono);font-size:11px;color:var(--success);padding:2px 8px;border:1px solid var(--success);border-radius:3px}
+
+/* --- history sweep panel --- */
+.ce-history-toggle{margin-left:6px}
+.ce-history-panel{margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)}
+.ce-range-presets{display:inline-flex;gap:4px}
+.ce-range-btn{padding:5px 9px;font-family:var(--font-mono);font-size:11px;background:var(--surface);color:var(--text-secondary);border:1px solid var(--border);border-radius:3px;cursor:pointer}
+.ce-range-btn:hover{color:var(--text-primary)}
+.ce-range-btn.is-active{background:var(--primary);color:var(--surface);border-color:var(--primary)}
+.ce-history{margin-top:10px}
+.ce-history__meta{font-family:var(--font-mono);font-size:11px;color:var(--text-muted);margin-bottom:6px}
+.ce-history__warning{font-family:var(--font-mono);font-size:11px;color:var(--warning,#d97706);margin-bottom:4px}
+.ce-history__canvas{width:100%;height:220px}

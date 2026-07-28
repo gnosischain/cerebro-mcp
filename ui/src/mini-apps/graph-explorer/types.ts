@@ -204,7 +204,22 @@ export interface ForensicScope {
 /** Server-owned transactions namespace. tx_hashes/seed/counts/scope are
  * server-owned; `scope` in particular must never be client-writable, or the
  * app could be made to claim a coverage it does not have. */
+/** A chain the server can actually answer for — built from the RPC endpoints
+ * that are configured, so the picker never offers a dead option. */
+export interface ChainOption {
+  chain_id: number;
+  name: string;
+  native_symbol: string;
+  explorer: string;
+  icon_url: string;
+  /** Address discovery needs the indexed execution tables (Gnosis only);
+   * receipts by hash work on every configured chain. */
+  supports_address_discovery: boolean;
+}
+
 export interface TransactionsState {
+  chain_id?: number;
+  chain_options?: ChainOption[];
   query?: {
     kind: "hash" | "address" | "money_edge" | "follow";
     hashes: string[];

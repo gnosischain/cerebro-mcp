@@ -398,6 +398,9 @@ describe("TransactionsView task persistence", () => {
       operation: "receipt",
       txHashes: [HASH_A],
       seed: "",
+      // Every request now stamps the chain; asserting it explicitly locks the
+      // Gnosis default rather than merely tolerating the new field.
+      chain: "100",
     });
   });
 
@@ -1113,6 +1116,9 @@ describe("TransactionsView task persistence", () => {
       operation: "receipt",
       txHashes: [HASH_A],
       seed: "",
+      // Every request now stamps the chain; asserting it explicitly locks the
+      // Gnosis default rather than merely tolerating the new field.
+      chain: "100",
     });
   });
 });

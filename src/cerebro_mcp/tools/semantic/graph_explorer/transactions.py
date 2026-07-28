@@ -50,6 +50,13 @@ from cerebro_mcp.clients.clickhouse import (
     ClickHouseManager,
     QueryBudget,
 )
+from cerebro_mcp.chains import (
+    GNOSIS_CHAIN_ID,
+    get_chain,
+    has_rpc,
+    resolve_chain,
+    rpc_env_hint,
+)
 from cerebro_mcp.clients.raw_rpc import RpcRouter
 from cerebro_mcp.semantic.tx_queries import (
     BURN_ADDRESSES,
@@ -85,7 +92,9 @@ from .ui_tools import _normalize_node_id
 logger = logging.getLogger(__name__)
 
 
-def _resolve_tx_blocks(hashes: list[str]) -> tuple[dict[str, int], list[str]]:
+def _resolve_tx_blocks(
+    hashes: list[str], *, chain_id: int = GNOSIS_CHAIN_ID
+) -> tuple[dict[str, int], list[str]]:
     """Resolve each transaction hash to its block via RPC.
 
     Required, not an optimisation: ``execution.logs`` and
@@ -103,7 +112,7 @@ def _resolve_tx_blocks(hashes: list[str]) -> tuple[dict[str, int], list[str]]:
     if not hashes:
         return blocks, unresolved
     try:
-        client = RpcRouter.from_settings().standard
+        client = _router(chain_id).standard
     except Exception as exc:  # pragma: no cover - config dependent
         logger.info("tx mode: RPC unavailable: %s", exc)
         return blocks, list(hashes)
@@ -127,8 +136,42 @@ TRANSFER_TOPIC0 = (
 _RPC_WORD_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 _RPC_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _address_rpc_cache_lock = threading.Lock()
-_address_rpc_cache: dict[str, tuple[int, list[list[Any]]]] = {}
+#: Keyed by (chain_id, address). The chain is part of the key because the same
+#: address exists on every EVM chain and holds completely different history on
+#: each; keying on the address alone would serve a Base scan's rows to a Gnosis
+#: question. (This cache is still process-local and, notably, is written
+#: without checking whether the scan COMPLETED — see the note at its write
+#: site. Making it durable requires fixing that first.)
+_address_rpc_cache: dict[tuple[int, str], tuple[int, list[list[Any]]]] = {}
 _GNOSIS_CHAIN_GENESIS_UTC = datetime(2018, 10, 8)
+
+
+def _router(chain_id: int) -> RpcRouter:
+    """The RPC router for a chain.
+
+    Single funnel replacing six ``RpcRouter.from_settings()`` calls, which read
+    only ``GNOSIS_RPC_URL`` and so pinned this whole module to one chain.
+    ``for_chain`` is memoized per chain and resolves through ``chains.py``,
+    where Gnosis still honours the legacy env pair first — so chain 100 keeps
+    byte-identical behaviour.
+    """
+    return RpcRouter.for_chain(int(chain_id))
+
+
+def _redact_endpoint(exc: BaseException) -> str:
+    """An RPC error message with any endpoint URL removed.
+
+    ``requests``' ``raise_for_status`` formats as
+    ``"503 Server Error: ... for url: <full URL>"``, and provider URLs
+    routinely embed API keys (``chains.py`` states the rule: endpoint URLs must
+    never reach tool output or logs). These strings land in the forensic scope,
+    which ``caseExport`` writes verbatim into an exported case bundle — so a
+    leak here would be persisted to disk and shared.
+    """
+    text = str(exc)
+    text = re.sub(r"\s*for url:\s*\S+", "", text)
+    text = re.sub(r"https?://\S+", "<endpoint redacted>", text)
+    return text.strip() or exc.__class__.__name__
 _MAX_RPC_DIRECT_TAIL_BLOCKS = 10_000
 _DISCOVERY_MIN_SLICE = timedelta(hours=1)
 # Real-data timings for the audited address: a seven-day June tile took 7.58s
@@ -461,6 +504,7 @@ def _legs_from_receipts(
     transaction_context_rows: list[list[Any]] | None = None,
     match_address: str = "",
     filter_tokens: list[str] | None = None,
+    chain_id: int = GNOSIS_CHAIN_ID,
 ) -> tuple[
     list[list[Any]],
     list[str],
@@ -494,7 +538,7 @@ def _legs_from_receipts(
     if not hashes:
         return rows, unresolved, statuses, blocks, decode_failures
     try:
-        client = RpcRouter.from_settings().standard
+        client = _router(chain_id).standard
     except Exception as exc:  # pragma: no cover - config dependent
         logger.info("tx mode: RPC unavailable, falling back to SQL: %s", exc)
         return rows, list(hashes), statuses, blocks, decode_failures
@@ -731,6 +775,7 @@ def _discover_address_transactions_rpc(
     tokens: list[str] | None = None,
     counterparty_ids: list[str] | None = None,
     router: RpcRouter | None = None,
+    chain_id: int = GNOSIS_CHAIN_ID,
     chunk_size: int = 500_000,
     min_chunk_size: int = 100_000,
     max_workers: int = 8,
@@ -752,7 +797,7 @@ def _discover_address_transactions_rpc(
     if chunk_size < 1 or min_chunk_size < 1:
         raise ValueError("RPC log chunk sizes must be positive")
 
-    rpc_router = router or RpcRouter.from_settings()
+    rpc_router = router or _router(chain_id)
     client = rpc_router.standard
     head_raw = client.request("eth_blockNumber", [])
     if not isinstance(head_raw, str):
@@ -764,7 +809,7 @@ def _discover_address_transactions_rpc(
     cached_rows: list[list[Any]] = []
     if cacheable:
         with _address_rpc_cache_lock:
-            cached = _address_rpc_cache.get(normalized)
+            cached = _address_rpc_cache.get((int(chain_id), normalized))
             if cached:
                 cached_head, cached_rows = cached[0], [list(row) for row in cached[1]]
     start = max(requested_start, cached_head + 1)
@@ -930,7 +975,14 @@ def _discover_address_transactions_rpc(
         )
     if cacheable:
         with _address_rpc_cache_lock:
-            _address_rpc_cache[normalized] = (
+            # NOTE: this records `head` as the covered watermark without
+            # checking that the scan actually completed. A run cut short by the
+            # wall-clock budget therefore caches a PARTIAL result, and the next
+            # call resumes at head+1 and never revisits the gap. The cache is
+            # process-local, so today the hole dies with the process; moving it
+            # to the scratch DB requires switching this value to covered
+            # ranges first (see the S7 cache task).
+            _address_rpc_cache[(int(chain_id), normalized)] = (
                 head,
                 [list(row) for row in discovered_rows],
             )
@@ -943,6 +995,7 @@ def _discover_address_direct_transactions_rpc(
     after_block: int,
     through_block: int,
     router: RpcRouter | None = None,
+    chain_id: int = GNOSIS_CHAIN_ID,
     max_blocks: int = _MAX_RPC_DIRECT_TAIL_BLOCKS,
     max_workers: int = 8,
 ) -> list[list[Any]]:
@@ -967,7 +1020,7 @@ def _discover_address_direct_transactions_rpc(
             f"{max_blocks}. Refresh the execution ingestion before retrying."
         )
 
-    client = (router or RpcRouter.from_settings()).standard
+    client = (router or _router(chain_id)).standard
 
     def quantity(value: Any, fallback: int = 0) -> int:
         if isinstance(value, int):
@@ -1075,6 +1128,7 @@ def _hydrate_rpc_discovery_timestamps(
     rows: list[list[Any]],
     *,
     router: RpcRouter | None = None,
+    chain_id: int = GNOSIS_CHAIN_ID,
     max_workers: int = 8,
 ) -> list[list[Any]]:
     """Fill candidate timestamps with header-only RPC calls.
@@ -1092,7 +1146,7 @@ def _hydrate_rpc_discovery_timestamps(
     )
     if not pending_blocks:
         return [list(row) for row in rows]
-    client = (router or RpcRouter.from_settings()).standard
+    client = (router or _router(chain_id)).standard
 
     def fetch(block_number: int) -> tuple[int, str]:
         block = client.request("eth_getBlockByNumber", [hex(block_number), False])
@@ -1413,8 +1467,37 @@ def _hex0x(value: str) -> str:
     return v if v.startswith("0x") else f"0x{v}"
 
 
+def _erc20_decimals_onchain(
+    tokens: list[str], *, chain_id: int
+) -> dict[str, int | None]:
+    """``decimals()`` read straight from each token contract.
+
+    Used only OFF Gnosis, where the warehouse has no metadata. Returns None for
+    any token that does not answer, so the leg keeps its authoritative raw
+    amount and reports an unknown normalized amount rather than guessing 18.
+    """
+    out: dict[str, int | None] = {}
+    if not tokens:
+        return out
+    client = _router(chain_id).standard
+    for token in tokens:
+        try:
+            raw = client.request(
+                "eth_call",
+                [{"to": token, "data": "0x313ce567"}, "latest"],  # decimals()
+            )
+            value = int(str(raw), 16) if isinstance(raw, str) and raw not in ("", "0x") else None
+            # A sane ERC-20 reports 0-36; anything else is a non-standard or
+            # hostile contract and must not silently rescale an amount.
+            out[token] = value if value is not None and 0 <= value <= 36 else None
+        except Exception as exc:  # pragma: no cover - enrichment is optional
+            logger.info("tx mode: on-chain decimals failed for %s: %s", token, _redact_endpoint(exc))
+            out[token] = None
+    return out
+
+
 def _enrich_rpc_legs(
-    ch: ClickHouseManager, rows: list[list[Any]]
+    ch: ClickHouseManager, rows: list[list[Any]], *, chain_id: int = GNOSIS_CHAIN_ID
 ) -> tuple[
     list[list[Any]],
     dict[str, str],
@@ -1464,7 +1547,43 @@ def _enrich_rpc_legs(
         },
     }
     warnings: list[str] = []
-    if tokens:
+    if tokens and int(chain_id) != GNOSIS_CHAIN_ID:
+        # OFF GNOSIS: the warehouse relations below describe Gnosis and only
+        # Gnosis. The address -> symbol -> price bijection argued for in this
+        # docstring holds *because* every symbol comes from the Gnosis
+        # tokens_whitelist seed; it says nothing about another chain. The same
+        # address exists on every EVM chain, so joining a Base token against
+        # stg_pools__tokens_meta could hand it a Gnosis token's decimals and a
+        # Gnosis token's price — a silently wrong amount under a confident
+        # verification badge.
+        #
+        # So: no warehouse join at all. Decimals come from the contract, USD
+        # stays unknown, and no symbol is emitted — a symbol read from an
+        # arbitrary contract is attacker-controlled, and this module's UI
+        # renders symbol-first, so a spoof "USDC" would read as USDC in a
+        # fraud investigation. The address is shown instead.
+        onchain = _erc20_decimals_onchain(tokens, chain_id=chain_id)
+        for token, decimals in onchain.items():
+            meta[token] = ("", decimals)
+        chain_name = get_chain(int(chain_id)).name
+        unknown = sorted(t for t, d in onchain.items() if d is None)
+        statuses["metadata"] = "partial" if unknown else "onchain_unverified"
+        statuses["prices"] = "not_applicable"
+        source_details["metadata"]["horizon_basis"] = "erc20_decimals_call"
+        source_details["prices"]["error"] = (
+            f"no USD price plane exists for {chain_name}; USD is unknown, not zero"
+        )
+        warnings.append(
+            f"{chain_name}: token symbols are not resolved and USD is unavailable "
+            "(the price plane covers Gnosis only). Amounts are normalized from the "
+            "contract's own decimals(); raw amounts are authoritative."
+        )
+        if unknown:
+            warnings.append(
+                f"decimals() unavailable for {len(unknown)} token(s); their "
+                "normalized amounts remain unknown and only raw amounts are shown"
+            )
+    elif tokens:
         metadata_contract = validate_source_contract(
             ch,
             TOKENS_META_RELATION,
@@ -1780,6 +1899,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         cursor: str = "",
         page_size: int = 0,
         activity_kinds: list[str] | None = None,
+        chain: str = "",
     ) -> CallToolResult:
         """Open transactions and return every transfer leg (Transactions mode).
 
@@ -1793,12 +1913,34 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         cursor — and ``merge`` unions them with what is already loaded. That is
         the "what did it do next?" step: the chain of custody continues instead
         of the view restarting.
+
+        ``chain`` selects the EVM chain (id, env key or name; default Gnosis).
+        Receipts are RPC-sourced and therefore portable to any configured
+        chain. Address DISCOVERY is not: it reads the Gnosis ``execution.*``
+        warehouse, which has no equivalent elsewhere, so off Gnosis this tool
+        answers explicit transaction hashes and refuses address discovery
+        rather than silently returning an empty, "verified" result.
         """
         record = mini_apps.snapshot_view(view_id)
         if record is None:
             return mini_apps.error_call_tool_result(
                 f"Unknown or expired view_id: {view_id}"
             )
+
+        try:
+            chain_info = resolve_chain(chain or record.view_state.get(
+                "transactions", {}
+            ).get("chain_id") or GNOSIS_CHAIN_ID)
+        except ValueError as exc:
+            return mini_apps.error_call_tool_result(str(exc))
+        chain_id = chain_info.chain_id
+        if not has_rpc(chain_id):
+            # Never echo the endpoint itself — only the env var to set.
+            return mini_apps.error_call_tool_result(
+                f"No RPC endpoint configured for {chain_info.name} "
+                f"(chain {chain_id}). Set {rpc_env_hint(chain_id)}."
+            )
+        is_gnosis = chain_id == GNOSIS_CHAIN_ID
 
         state_tx = dict(record.view_state.get("transactions") or {})
         operation = str(operation or "legacy").strip().lower()
@@ -1916,6 +2058,19 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         if candidate_only and bool(requested_t0) != bool(requested_t1):
             return mini_apps.error_call_tool_result(
                 "Address discovery requires both t0 and t1, or neither."
+            )
+        # Off Gnosis there is no `execution.*` warehouse to discover against.
+        # A bounded eth_getLogs scan is the alternative, but a bounded scan that
+        # finds nothing currently reaches legs_total = 0 and a "verified"
+        # verification status — i.e. it would report a scanned sliver as a
+        # verified absence. Refuse explicitly instead, and say what DOES work.
+        if not is_gnosis and (plain_address_request or rpc_address_request):
+            return mini_apps.error_call_tool_result(
+                f"Address discovery is not available on {chain_info.name} "
+                f"(chain {chain_id}): it relies on the indexed Gnosis "
+                "execution tables, which have no equivalent here. Open an "
+                "explicit transaction hash instead — receipts are read from "
+                "this chain's RPC and are fully supported."
             )
         if (
             not explicit_hash_request
@@ -2179,6 +2334,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             scope_t0 = None if explicit_hash_request or all_history_address_request else t0.strftime("%Y-%m-%d %H:%M:%S")
             scope_t1 = None if explicit_hash_request or all_history_address_request else t1.strftime("%Y-%m-%d %H:%M:%S")
             scope = forensic_scope(
+                chain_id=chain_id,
                 scope_id=scope_id,
                 request_id=request_id,
                 status="failed",
@@ -2194,7 +2350,8 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 edges_returned=0,
                 edges_total=None,
                 residuals=(
-                    "native xDAI value is not represented by ERC-20 Transfer logs",
+                    f"native {chain_info.native_symbol} value is not represented by "
+                    "ERC-20 Transfer logs",
                     "internal-call value requires trace_transaction",
                     "missing metadata or prices do not remove ERC-20 legs",
                 ),
@@ -2533,10 +2690,11 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                                 seed,
                                 after_block=stored_head + 1,
                                 tokens=tokens or [],
+                                chain_id=chain_id,
                             )
                         )
                     else:
-                        rpc_client = RpcRouter.from_settings().standard
+                        rpc_client = _router(chain_id).standard
                         rpc_head = int(rpc_client.request("eth_blockNumber", []), 16)
                         transfer_tail_rows = []
                     direct_tail_rows = (
@@ -2544,6 +2702,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                             seed,
                             after_block=stored_head + 1,
                             through_block=rpc_head,
+                            chain_id=chain_id,
                         )
                         if "direct" in effective_activity_kinds
                         else []
@@ -2552,11 +2711,13 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     transfer_tail_rows, rpc_head = _discover_address_transactions_rpc(
                         seed,
                         after_block=stored_head + 1,
+                        chain_id=chain_id,
                     )
                     direct_tail_rows = _discover_address_direct_transactions_rpc(
                         seed,
                         after_block=stored_head + 1,
                         through_block=rpc_head,
+                        chain_id=chain_id,
                     )
             except Exception as exc:
                 if not candidate_only:
@@ -2656,7 +2817,9 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     if _candidate_precedes(row, row_discovery_before)
                 ]
                 if explicit_discovery_window and rpc_tail_rows:
-                    rpc_tail_rows = _hydrate_rpc_discovery_timestamps(rpc_tail_rows)
+                    rpc_tail_rows = _hydrate_rpc_discovery_timestamps(
+                        rpc_tail_rows, chain_id=chain_id
+                    )
                     rpc_tail_rows = [
                         row
                         for row in rpc_tail_rows
@@ -2846,6 +3009,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     after_index=int(after_index if after_index is not None else -1),
                     tokens=tokens or [],
                     counterparty_ids=cps,
+                    chain_id=chain_id,
                 )
             except Exception as exc:
                 return failed_load(
@@ -3126,6 +3290,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 else "partial"
             )
             scope = forensic_scope(
+                chain_id=chain_id,
                 scope_id=scope_id,
                 request_id=request_id,
                 status=scope_status,
@@ -3331,6 +3496,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 receipt_decode_failures,
             ) = _legs_from_receipts(
                 hashes,
+                chain_id=chain_id,
                 **receipt_kwargs,
             )
             block_of.update(receipt_blocks)
@@ -3366,7 +3532,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
 
         missing = [h for h in hashes if h not in block_of]
         if missing:
-            resolved, unresolved = _resolve_tx_blocks(missing)
+            resolved, unresolved = _resolve_tx_blocks(missing, chain_id=chain_id)
             block_of.update(resolved)
             if unresolved:
                 warnings.append(
@@ -3467,6 +3633,19 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             fallback_hashes = [
                 h for h in hashes if _hex0x(h) not in receipt_statuses
             ]
+            # The SQL fallback reads the GNOSIS execution tables. Off Gnosis it
+            # would attach `execution.logs` as a source record — and, worse,
+            # could return another chain's legs for a same-numbered block. A
+            # receipt that the RPC could not serve stays unresolved instead.
+            if fallback_hashes and not is_gnosis:
+                warnings.append(
+                    f"{chain_info.name}: {len(fallback_hashes)} receipt(s) could "
+                    "not be read from RPC. There is no indexed fallback for this "
+                    "chain, so those transactions are reported unresolved rather "
+                    "than filled from another chain's tables."
+                )
+                fallback_query_failed = True
+                fallback_hashes = []
             if fallback_hashes:
                 checks = [
                     validate_source_contract(
@@ -3555,14 +3734,20 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 enrichment_status,
                 enrichment_warnings,
                 enrichment_sources,
-            ) = _enrich_rpc_legs(ch, raw_leg_rows)
+            ) = _enrich_rpc_legs(ch, raw_leg_rows, chain_id=chain_id)
             enrichment_failed = any(
                 status not in {"ok", "not_needed"}
                 for status in enrichment_status.values()
             )
             warnings.extend(enrichment_warnings)
+            # Only claim the warehouse relations when they were actually
+            # consulted. Off Gnosis `_enrich_rpc_legs` skips them entirely, so
+            # listing them would assert a Gnosis source for another chain's
+            # evidence — and `caseExport` copies sources into the bundle.
             sources.extend(
-                [
+                []
+                if not is_gnosis
+                else [
                     source_record(
                         kind="dbt_aggregate",
                         name=TOKENS_META_RELATION,
@@ -3840,6 +4025,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             )
         )
         scope = forensic_scope(
+            chain_id=chain_id,
             scope_id=scope_id,
             request_id=request_id,
             status=scope_status,
@@ -3855,7 +4041,7 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             nodes_total=len(node_rows) if exact else None,
             edges_returned=legs_returned,
             edges_total=legs_total,
-            known_usd=round(known_usd_total, 6),
+            known_usd=round(known_usd_total, 6) if is_gnosis else None,
             total_usd=total_usd,
             unknown_usd_rows=unknown_usd_rows,
             truncated=truncated,
@@ -3890,7 +4076,8 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 or None
             ),
             residuals=(
-                "native xDAI value is not represented by ERC-20 Transfer logs",
+                f"native {chain_info.native_symbol} value is not represented by "
+                    "ERC-20 Transfer logs",
                 "internal-call value requires trace_transaction",
                 "missing metadata or prices do not remove ERC-20 legs",
             ),
@@ -4009,11 +4196,19 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                     }
                     for row in raw_receipt_rows
                 ],
-                "known_usd_total": round(known_usd_total, 6),
+                # None, not 0.0, where no price plane applies. The nested
+                # coverage.usd already reports unknown; these two flat compat
+                # fields would otherwise say "$0.00 known" and "0% priced" for
+                # the same legs — a verified-looking zero contradicting an
+                # explicit unknown. `None` means unknown; `0` means a verified
+                # zero (forensics.py).
+                "known_usd_total": (
+                    round(known_usd_total, 6) if is_gnosis else None
+                ),
                 "unpriced_leg_count": unknown_usd_rows,
                 "usd_coverage": (
                     None
-                    if not legs_returned
+                    if not legs_returned or not is_gnosis
                     else (legs_returned - unknown_usd_rows) / legs_returned
                 ),
             }
@@ -4094,6 +4289,9 @@ def register_transaction_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
             "min_usd": float(min_usd or 0),
             "tx_count": len(tx_rank),
             "leg_count": legs_returned,
+            # Persist the resolved chain so a follow-up call (and the UI's
+            # picker) stays on it without re-passing `chain` every time.
+            "chain_id": chain_id,
             "scope": scope,
             "receipt_scope": scope if receipt_only else None,
             "last_attempt": None,

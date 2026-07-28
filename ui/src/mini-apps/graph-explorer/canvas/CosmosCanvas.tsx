@@ -4,7 +4,14 @@
 // `overlayRef`), controls in CanvasToolbar, composition in GraphCanvas.
 
 import { Graph } from "@cosmos.gl/graph";
-import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+  type ReactNode,
+} from "react";
 import { SPACE_SIZE, type GraphModel } from "../model/parseRows";
 import { COLOR_BY_KIND, FALLBACK_COLOR, SEED_COLOR, hexToRgba } from "../model/palette";
 
@@ -142,7 +149,7 @@ interface Props {
   overlayRef: MutableRefObject<CanvasOverlayHandle | null>;
   /** Optional: GraphCanvas registers here to reheat the sim (Play / Forces). */
   simControlRef?: MutableRefObject<CanvasSimControl | null>;
-  emptyHint: string;
+  emptyHint: ReactNode;
   onSelectNode: (id: string) => void;
   onSelectEdge: (id: string) => void;
   onExpandNode: (id: string) => void;
@@ -1019,7 +1026,7 @@ export function CosmosCanvas({
       <div ref={containerRef} className="ge-cosmos-canvas" />
       {!model.n ? (
         <div className="ge-placeholder">
-          <span>{emptyHint}</span>
+          <div className="ge-placeholder__body">{emptyHint}</div>
         </div>
       ) : null}
     </>

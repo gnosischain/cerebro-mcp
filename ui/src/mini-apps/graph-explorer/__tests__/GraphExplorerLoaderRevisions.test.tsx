@@ -46,7 +46,7 @@ vi.mock("../../shared/MiniAppChrome", () => ({
 vi.mock("../../shared/HelpDialog", () => ({ MaHelpButton: () => null }));
 vi.mock("../../shared/ToastStack", () => ({ ToastStack: () => null }));
 vi.mock("../devFixture", () => ({ buildMockPayload: () => ({}) }));
-vi.mock("../TaskSwitch", () => ({
+vi.mock("../GraphNav", () => ({
   TASK_OF_MODE: {
     atlas: "relationships",
     investigate: "relationships",
@@ -54,7 +54,7 @@ vi.mock("../TaskSwitch", () => ({
     timeline: "money",
     transactions: "tx",
   },
-  TaskSwitch: () => null,
+  GraphNav: () => null,
 }));
 vi.mock("../modes/AtlasView", () => ({ AtlasView: () => <div /> }));
 vi.mock("../modes/FlowsView", () => ({ FlowsView: () => <div /> }));

@@ -51,7 +51,7 @@ const WARNING_COPY: Record<string, string> = {
   no_indexed_data: "No matching rows were found in the indexed window.",
   all_networks_unsupported: "This section is single-chain; a concrete network was selected for you.",
   depth_reconstructed: "Historical book reconstructed from captured orders, fills, and cancellation events — bounded by the order-capture window.",
-  depth_heatmap_reconstructed: "Depth-over-time heatmap reconstructed from captured orders, fills, and cancellations; an order rests at full size until its completing fill (intra-fill size decay is not modeled).",
+  depth_heatmap_reconstructed: "Depth-over-time footprint reconstructed from captured orders, fills, and cancellations; depth is time-weighted per bucket and intra-fill size decay is not modeled.",
   stale_scope: "A background dataset request arrived for a superseded scope and was ignored.",
 };
 
@@ -419,7 +419,7 @@ export default function CowExplorerApp() {
     // DEPTH-HEATMAP-HOOK: one additive markets.depth_heatmap group load for the
     // chosen window. Excluded from the background auto-sync below, so it only
     // runs when the user opens the Heatmap tab (or changes its window).
-    onLoadDepthHeatmap: (heatmapWindow) => {
+    onLoadDepthHeatmap: (heatmapWindow, opts) => {
       loader.enqueue({
         __tool: "load_cow_explorer_datasets",
         view_id: viewId,
@@ -427,6 +427,10 @@ export default function CowExplorerApp() {
         group: "depth_heatmap",
         scope_id: state.scope_id,
         heatmap_window: heatmapWindow,
+        // 0 = auto (server picks span/60); -1 would mean "keep current".
+        bucket_seconds: opts?.bucketSeconds ?? 0,
+        // Retry-after-failure: bypass the server's negative failure cache.
+        ...(opts?.force ? { force_refresh: true } : {}),
       });
     },
   };

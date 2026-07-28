@@ -19,6 +19,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from cerebro_mcp.chains import GNOSIS_CHAIN_ID
 from cerebro_mcp.clients.clickhouse import (
     CONTRACT_PROBE_QUERY_BUDGET,
     ClickHouseManager,
@@ -139,7 +140,7 @@ def forensic_scope(
     warnings: Iterable[str] = (),
     verification_status: str = "unverified",
     verification_method: str | None = None,
-    chain_id: int = 100,
+    chain_id: int = GNOSIS_CHAIN_ID,
     query_kind: str | None = None,
     evidence_class: str = "derived_dataset",
     subjects: Iterable[str] = (),

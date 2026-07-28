@@ -17,9 +17,17 @@ from cerebro_mcp.clients.abi_resolver import resolve_abi
 
 @pytest.fixture(autouse=True)
 def _clear_abi_cache():
-    abi_resolver._cache.clear()
+    abi_resolver.clear_caches()
     yield
-    abi_resolver._cache.clear()
+    abi_resolver.clear_caches()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_sourcify(monkeypatch):
+    """Sourcify is the last ABI tier — keep it off the network in tests."""
+    monkeypatch.setattr(
+        abi_resolver, "_resolve_from_sourcify", lambda address, chain_id: None
+    )
 
 
 @pytest.fixture
@@ -157,38 +165,85 @@ def test_resolver_proxy_falls_back_to_blockscout_when_no_impl_row(fake_ch):
 # Web3 RPC manager
 # ---------------------------------------------------------------------------
 
-def test_chain_id_validation_rejects_non_gnosis(monkeypatch):
-    from cerebro_mcp.clients.web3 import GnosisRpcManager
+@pytest.mark.parametrize(
+    "chain_id,reported,expect_ok",
+    [
+        (100, 100, True),
+        (1, 1, True),
+        (100, 1, False),   # Gnosis env var pointed at mainnet
+        (1, 100, False),   # mainnet env var pointed at Gnosis
+    ],
+)
+def test_chain_id_mismatch_rejected(monkeypatch, chain_id, reported, expect_ok):
+    """An endpoint pointed at the wrong network returns confidently wrong state."""
+    from cerebro_mcp.clients.web3 import ChainRpcManager
 
-    fake_w3 = SimpleNamespace(eth=SimpleNamespace(chain_id=1))
+    fake_w3 = SimpleNamespace(eth=SimpleNamespace(chain_id=reported))
     fake_web3_cls = MagicMock(return_value=fake_w3)
     fake_web3_cls.HTTPProvider = MagicMock(return_value=None)
 
     monkeypatch.setattr("cerebro_mcp.clients.web3.Web3", fake_web3_cls)
-    mgr = GnosisRpcManager()
-    with pytest.raises(ValueError, match="not Gnosis Chain"):
-        mgr._make("http://example/rpc")
+    mgr = ChainRpcManager()
+    if expect_ok:
+        assert mgr._make("http://example/rpc", chain_id) is fake_w3
+    else:
+        with pytest.raises(ValueError, match=f"reports chain_id {reported}"):
+            mgr._make("http://example/rpc", chain_id)
+
+
+def test_chain_id_error_does_not_leak_the_endpoint_url(monkeypatch):
+    """Endpoint URLs embed API keys — they must never reach tool output."""
+    from cerebro_mcp.clients.web3 import ChainRpcManager
+
+    fake_w3 = SimpleNamespace(eth=SimpleNamespace(chain_id=1))
+    fake_web3_cls = MagicMock(return_value=fake_w3)
+    fake_web3_cls.HTTPProvider = MagicMock(return_value=None)
+    monkeypatch.setattr("cerebro_mcp.clients.web3.Web3", fake_web3_cls)
+
+    secret = "https://rpc.example/v2/SUPERSECRETKEY"
+    with pytest.raises(ValueError) as excinfo:
+        ChainRpcManager()._make(secret, 100)
+    assert "SUPERSECRETKEY" not in str(excinfo.value)
+    assert "RPC_URL_GNOSIS" in str(excinfo.value)
 
 
 def test_for_block_routes_latest_to_standard(monkeypatch):
-    from cerebro_mcp.clients.web3 import GnosisRpcManager
-    mgr = GnosisRpcManager()
-    mgr._standard = "STD"  # type: ignore[assignment]
-    mgr._archive = "ARCH"  # type: ignore[assignment]
+    from cerebro_mcp.clients.web3 import ChainRpcManager
+    mgr = ChainRpcManager()
+    mgr._clients[(100, "standard")] = "STD"  # type: ignore[assignment]
+    mgr._clients[(100, "archive")] = "ARCH"  # type: ignore[assignment]
     assert mgr.for_block("latest") == "STD"
     assert mgr.for_block(None) == "STD"
     assert mgr.for_block(12345) == "ARCH"
+    # Explicit chain routes to that chain's cached clients.
+    mgr._clients[(1, "archive")] = "ETH-ARCH"  # type: ignore[assignment]
+    assert mgr.for_block(12345, 1) == "ETH-ARCH"
 
 
-def test_archive_requires_url(monkeypatch):
-    from cerebro_mcp.clients.web3 import GnosisRpcManager
-    monkeypatch.setattr(
-        "cerebro_mcp.clients.web3.settings.GNOSIS_ARCHIVE_RPC_URL", "",
-        raising=False,
-    )
-    mgr = GnosisRpcManager()
-    with pytest.raises(ValueError, match="GNOSIS_ARCHIVE_RPC_URL"):
-        _ = mgr.archive
+def test_unconfigured_chain_names_the_env_var(monkeypatch):
+    from cerebro_mcp import chains
+    from cerebro_mcp.clients.web3 import ChainRpcManager
+
+    monkeypatch.setattr(chains.settings, "RPC_URL_AVALANCHE", "", raising=False)
+    monkeypatch.setattr(chains.settings, "RPC_URL_AVALANCHE_ARCHIVE", "", raising=False)
+    with pytest.raises(ValueError, match="RPC_URL_AVALANCHE"):
+        ChainRpcManager().archive(43114)
+
+
+def test_gnosis_archive_falls_back_to_the_standard_endpoint(monkeypatch):
+    """Archive nodes serve both roles — a single URL must not raise."""
+    from cerebro_mcp import chains
+    from cerebro_mcp.clients.web3 import ChainRpcManager
+
+    monkeypatch.setattr(chains.settings, "GNOSIS_RPC_URL", "https://gno.example")
+    monkeypatch.setattr(chains.settings, "GNOSIS_ARCHIVE_RPC_URL", "")
+
+    fake_w3 = SimpleNamespace(eth=SimpleNamespace(chain_id=100))
+    fake_web3_cls = MagicMock(return_value=fake_w3)
+    fake_web3_cls.HTTPProvider = MagicMock(return_value=None)
+    monkeypatch.setattr("cerebro_mcp.clients.web3.Web3", fake_web3_cls)
+
+    assert ChainRpcManager().archive(100) is fake_w3
 
 
 def test_module_import_does_not_create_rpc():
@@ -196,8 +251,7 @@ def test_module_import_does_not_create_rpc():
     import importlib
     import cerebro_mcp.clients.web3 as wc
     importlib.reload(wc)
-    assert wc.rpc_manager._standard is None
-    assert wc.rpc_manager._archive is None
+    assert wc.rpc_manager._clients == {}
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +278,10 @@ def _capture_tools():
 def test_tools_register_with_expected_names():
     tools = _capture_tools()
     assert set(tools) == {
+        "list_chains",
         "contract_explore",
         "contract_call_function",
+        "contract_read_history",
         "contract_decode_transaction_input",
         "contract_decode_receipt_logs",
     }
@@ -269,7 +325,7 @@ def test_contract_call_rejects_non_view_function(fake_ch, monkeypatch):
     fake_w3.eth.contract.return_value = fake_contract
     monkeypatch.setattr(
         "cerebro_mcp.tools.web3.rpc.rpc_manager.for_block",
-        lambda _b: fake_w3,
+        lambda _b, _chain_id=100: fake_w3,
     )
 
     out = captured["contract_call_function"](

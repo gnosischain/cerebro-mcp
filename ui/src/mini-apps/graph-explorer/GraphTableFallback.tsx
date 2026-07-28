@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 export interface GraphTableFallbackNode {
   id: string;
@@ -26,7 +26,7 @@ export interface GraphTableFallbackProps {
   model: GraphTableFallbackModel;
   error?: Error | null;
   title?: string;
-  emptyMessage?: string;
+  emptyMessage?: ReactNode;
   selectedNodeId?: string | null;
   selectedEdgeId?: string | null;
   onRetry?: () => void;
@@ -40,14 +40,18 @@ export interface GraphTableFallbackProps {
   style?: CSSProperties;
 }
 
+// Themed via design tokens with the original light-mode values as fallbacks.
+// These were hardcoded literals, which made the renderer-failure fallback —
+// the one surface a user only ever sees when something has already gone wrong
+// — render as a bright white panel inside the dark mini-app theme.
 const panelStyle: CSSProperties = {
   minWidth: 0,
   maxHeight: "100%",
   overflow: "auto",
   padding: 16,
-  background: "#f8fafc",
-  color: "#0f172a",
-  border: "1px solid #cbd5e1",
+  background: "var(--surface-1, #f8fafc)",
+  color: "var(--text-primary, #0f172a)",
+  border: "1px solid var(--border, #cbd5e1)",
   borderRadius: 8,
 };
 
@@ -58,7 +62,7 @@ const tableStyle: CSSProperties = {
 };
 
 const cellStyle: CSSProperties = {
-  borderBottom: "1px solid #e2e8f0",
+  borderBottom: "1px solid var(--border, #e2e8f0)",
   padding: "8px 10px",
   textAlign: "left",
   verticalAlign: "top",
@@ -69,7 +73,7 @@ const actionStyle: CSSProperties = {
   border: 0,
   padding: 0,
   background: "transparent",
-  color: "#1d4ed8",
+  color: "var(--primary, #1d4ed8)",
   cursor: "pointer",
   font: "inherit",
   textAlign: "left",
@@ -131,7 +135,7 @@ export function GraphTableFallback({
       <header style={{ marginBottom: 14 }}>
         <h2 style={{ margin: "0 0 6px", fontSize: 18 }}>{title}</h2>
         {error && (
-          <div role="alert" style={{ color: "#991b1b" }}>
+          <div role="alert" style={{ color: "var(--error, #991b1b)" }}>
             <strong>Visual renderer unavailable.</strong>{" "}
             <span>{error.message}</span>
             {onRetry && (
@@ -172,7 +176,7 @@ export function GraphTableFallback({
                       key={node.id}
                       data-node-id={node.id}
                       aria-selected={selected}
-                      style={{ background: selected ? "#dbeafe" : undefined }}
+                      style={{ background: selected ? "var(--accent-bg, #dbeafe)" : undefined }}
                     >
                       <td style={cellStyle}>
                         {idAction(node.id, node.label || node.id, selected, onSelectNode)}
@@ -220,7 +224,7 @@ export function GraphTableFallback({
                       key={edge.id}
                       data-edge-id={edge.id}
                       aria-selected={selected}
-                      style={{ background: selected ? "#dbeafe" : undefined }}
+                      style={{ background: selected ? "var(--accent-bg, #dbeafe)" : undefined }}
                     >
                       <td style={cellStyle}>
                         {idAction(edge.id, edge.id, selected, onSelectEdge)}

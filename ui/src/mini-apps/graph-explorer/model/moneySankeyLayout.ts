@@ -78,6 +78,18 @@ export interface SankeyHopCoverage {
   omittedCounterparties: number;
 }
 
+/** One hop column: where it sits in world space, and what it is showing.
+ * Published so the viewport can draw per-column headers in SCREEN space —
+ * a header that scaled with the zoom would be unreadable at Fit all. */
+export interface SankeyColumn {
+  stage: number;
+  hop: number;
+  direction: "in" | "out";
+  x: number;
+  coverage: SankeyHopCoverage | null;
+  label: string;
+}
+
 export interface MoneySankeyLayout {
   width: number;
   height: number;
@@ -85,6 +97,7 @@ export interface MoneySankeyLayout {
   ribbons: MoneyRibbon[];
   connectors: ExpansionConnector[];
   hopCoverage: SankeyHopCoverage[];
+  columns: SankeyColumn[];
 }
 
 export interface MoneySankeyOptions {
@@ -100,10 +113,24 @@ export const STRUCTURAL_TERMINALS = new Set([ZERO_ADDRESS, DEAD_ADDRESS]);
 const NODE_WIDTH = 10;
 const NODE_HEIGHT = 18;
 const ROLE_GAP = 18;
-const COLUMN_MARGIN = 74;
+/** Horizontal room reserved OUTSIDE the first and last columns.
+ *
+ * Every node carries an address label anchored away from it — right from
+ * `sent`/`terminal`, left from `received` — so the outermost columns need
+ * label space inside the layout box. At 74 the longest terminal label
+ * ("bridge-attributed transfer") overflowed the pane by ~45px and was clipped.
+ * Reserving it here rather than padding the fitted box keeps a fit at 1:1, so
+ * the labels stay legible instead of being shrunk to ~8px to make room. */
+const COLUMN_MARGIN = 150;
 const ROW_GAP = 34;
 const TOP_MARGIN = 42;
 const BOTTOM_MARGIN = 36;
+/** Fallback when the caller has not measured its pane yet. */
+const DEFAULT_WIDTH = 1040;
+/** A column must have room for a node plus a truncated address label. Below
+ * this, adjacent hop columns collide and the ribbons become unreadable — so a
+ * many-hop trail is allowed to exceed the pane and be scrolled instead. */
+const MIN_COLUMN_SPACING = 190;
 
 function normalizedAddress(value: string): string {
   return value.trim().toLowerCase();
@@ -228,7 +255,6 @@ export function buildMoneySankeyLayout(
   seedAddresses: string[],
   options: MoneySankeyOptions = {},
 ): MoneySankeyLayout {
-  const width = Math.max(640, options.width ?? 1040);
   const maxCounterparties = Math.max(1, options.maxCounterpartiesPerHop ?? 40);
   const nodeById = new Map(flowNodes.map((node) => [node.id, node]));
   const seeds = new Set(seedAddresses.map(normalizedAddress));
@@ -388,6 +414,16 @@ export function buildMoneySankeyLayout(
   }
   const maxRows = Math.max(1, ...[...addressesByStage.values()].map((rows) => rows.length));
   const height = Math.max(320, TOP_MARGIN + BOTTOM_MARGIN + (maxRows - 1) * ROW_GAP);
+  // Width is derived HERE, after the stage count is known, so a trail with two
+  // hops does not get stretched across the same span as one with eight. The
+  // caller's measured width is a request, not a promise: a column needs room
+  // for a node plus its label, so a many-hop trail widens past the pane and
+  // the viewport scrolls it. (Nothing above this point reads `width`.)
+  const width = Math.max(
+    640,
+    options.width ?? DEFAULT_WIDTH,
+    COLUMN_MARGIN * 2 + Math.max(0, stages.length - 1) * MIN_COLUMN_SPACING,
+  );
   const stageX = new Map<number, number>();
   stages.forEach((stage, index) => {
     const x =
@@ -511,6 +547,26 @@ export function buildMoneySankeyLayout(
     });
   }
 
+  const columns: SankeyColumn[] = stages.map((stage) => {
+    const direction: "in" | "out" = stage < 0 ? "in" : "out";
+    const hop = Math.abs(stage);
+    const coverage =
+      hopCoverage.find(
+        (entry) => entry.direction === direction && entry.hop === hop,
+      ) ?? null;
+    return {
+      stage,
+      hop,
+      direction,
+      x: stageX.get(stage) ?? width / 2,
+      coverage,
+      label:
+        hop === 0
+          ? "Seed"
+          : `${direction === "in" ? "Incoming" : "Outgoing"} hop ${hop}`,
+    };
+  });
+
   return {
     width,
     height,
@@ -518,5 +574,6 @@ export function buildMoneySankeyLayout(
     ribbons,
     connectors: connectors.sort((a, b) => a.id.localeCompare(b.id)),
     hopCoverage,
+    columns,
   };
 }

@@ -11,7 +11,7 @@
 
 import { Fragment, useState } from "react";
 import { formatTime } from "./cells";
-import { ChainBadge } from "./ChainBadge";
+import { ChainBadge } from "../../shared/ChainBadge";
 import { shortAddr } from "../../../utils/format";
 import { solverInfo, solverName, type SolverEnv } from "../model/solverRegistry";
 import type { EntityType } from "../types";

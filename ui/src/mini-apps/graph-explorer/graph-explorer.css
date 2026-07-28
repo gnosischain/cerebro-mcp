@@ -356,10 +356,22 @@ body { overflow: hidden; }
   background: var(--bg);
   overflow: hidden;
   min-height: 360px;
+  /* A column, so a fixed-height strip can sit above the graph and the graph
+     takes the rest. This used to be a block whose FIRST DIV was forced to
+     `height: 100%` — a positional rule that silently gave the scope strip the
+     entire canvas and pushed the graph below the fold. */
+  display: flex;
+  flex-direction: column;
 }
-.ge-canvas > div:first-child {
+.ge-canvas > div:first-child:not(.ge-scope-strip) {
   height: 100% !important;
   min-height: 360px;
+}
+.ge-canvas > .ge-scope-strip { flex: 0 0 auto; }
+.ge-canvas > .ge-graph-frame {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
 }
 .ge-cosmos-wrap {
   position: absolute;
@@ -679,6 +691,15 @@ body { overflow: hidden; }
   color: var(--text-muted);
   font-size: 0.85rem;
   gap: 6px;
+  /* The hint covers the whole stage. Without this it also swallowed clicks
+     meant for anything rendered inside it, so an empty state could describe a
+     recovery action but never let you take it. */
+  pointer-events: none;
+}
+.ge-placeholder__body {
+  pointer-events: auto;
+  max-width: min(520px, 90%);
+  text-align: center;
 }
 
 .ge-details {
@@ -991,8 +1012,7 @@ body { overflow: hidden; }
     grid-template-columns: 88px 8px 1fr 14px;
   }
   .ge-catalog-kind { display: none; }
-  .ge-catalog-seed-hint { display: none; }
-}
+  .ge-catalog-seed-hint { display: none; }}
 
 /* ======= Compact seed line (replaces tall seed card + KPI grid) ======= */
 .ge-seedline {
@@ -1076,39 +1096,6 @@ body { overflow: hidden; }
   border-bottom: 1px solid var(--error);
   flex: 0 0 auto;
 }
-
-/* Status-filter trim note (some active profiles hidden from the canvas). */
-.ge-status-filter-note {
-  font-size: 11px;
-  color: var(--text-muted);
-  padding: 2px 12px;
-  background: var(--warning-bg);
-  border-top: 1px solid var(--border);
-  flex: 0 0 auto;
-}
-
-/* ======= Atlas mode: left rail + canvas ======= */
-.ge-atlas-body {
-  display: grid;
-  grid-template-columns: 280px 1fr;
-  flex: 1 1 auto;
-  min-height: 0;
-  position: relative;
-}
-.ge-atlas-body.has-preview {
-  grid-template-columns: minmax(520px, 40%) minmax(0, 1fr);
-}
-.ge-atlas-rail {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 0;
-  padding: 10px;
-  border-right: 1px solid var(--border);
-  background: var(--surface-translucent);
-  overflow: hidden;
-}
-.ge-atlas-rail .ge-catalog-seed { padding: 8px 10px; }
 .ge-atlas-filter {
   display: flex;
   align-items: center;
@@ -1195,10 +1182,6 @@ body { overflow: hidden; }
   white-space: nowrap;
 }
 
-@media (max-width: 700px) {
-  .ge-atlas-body { grid-template-columns: 220px 1fr; }
-}
-
 /* ======= Investigate empty state (no seed) ======= */
 .ge-empty-investigate {
   flex: 1 1 auto;
@@ -1245,16 +1228,6 @@ body { overflow: hidden; }
   outline: none;
 }
 .ge-empty-card input:focus { border-color: var(--primary); }
-.ge-empty-atlas-link {
-  align-self: flex-start;
-  background: transparent;
-  border: none;
-  color: var(--accent-text);
-  font-size: 0.76rem;
-  padding: 0;
-  cursor: pointer;
-  text-decoration: underline;
-}
 
 /* Expand-depth stepper (FilterBar). */
 .ge-stepper { gap: 2px; }
@@ -1925,8 +1898,7 @@ body { overflow: hidden; }
   .ge-tx-rail {
     border-left: 0;
     border-top: 1px solid var(--border);
-  }
-}
+  }}
 
 /* Address cell in a leg row: inspect + follow-forward. */
 .ge-tx-addr-cell {
@@ -2023,10 +1995,9 @@ body { overflow: hidden; }
   border-top-color: transparent;
   animation: ge-tx-spin 0.7s linear infinite;
 }
-@keyframes ge-tx-spin { to { transform: rotate(360deg); } }
+@keyframes ge-tx-spin { to { transform: rotate(360deg); }}
 @media (prefers-reduced-motion: reduce) {
-  .ge-tx-spinner { animation: none; }
-}
+  .ge-tx-spinner { animation: none; }}
 
 /* ======= Three-task shell =================================================
    Task navigation owns its own row. It is never placed inside a mode filter
@@ -2152,8 +2123,7 @@ body { overflow: hidden; }
   .ge-filter-drawer--desktop-collapsible.is-open .ge-filter-drawer__toggle {
     color: var(--accent-text);
     background: var(--accent-bg);
-  }
-}
+  }}
 
 /* Secondary renderer controls stay available without crowding the primary
    search / fit / focus row. */
@@ -2255,47 +2225,7 @@ body { overflow: hidden; }
     overflow: visible;
     border-top: 1px solid var(--border);
   }
-  .ge-topbar-right { margin-left: auto; }
-  .ge-atlas-body {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-  .ge-atlas-drawer {
-    min-width: 0;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .ge-atlas-drawer > summary {
-    width: max-content;
-    margin: 6px 8px;
-    padding: 4px 9px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface-translucent);
-    color: var(--text-secondary);
-    font-size: 0.66rem;
-    cursor: pointer;
-  }
-  .ge-atlas-drawer[open] > summary {
-    color: var(--accent-text);
-    background: var(--accent-bg);
-  }
-  .ge-atlas-drawer > .ge-atlas-rail {
-    width: 100%;
-    max-height: min(56vh, 520px);
-    border-right: 0;
-  }
-  .ge-atlas-body > .ge-canvas {
-    grid-column: 1;
-    grid-row: 2;
-  }
-}
-
-@media (min-width: 900px) {
-  .ge-atlas-drawer { min-width: 0; }
-  .ge-atlas-drawer > summary { display: none; }
-  .ge-atlas-drawer > .ge-atlas-rail { width: 100%; height: 100%; }
-}
+  .ge-topbar-right { margin-left: auto; }}
 
 /* Money Trail makes the ranked movements the primary reading surface and
    keeps the canvas as context. */
@@ -2456,8 +2386,7 @@ body { overflow: hidden; }
   .ge-scope-disclosure__summary { max-width: 24ch !important; }
   .ge-evidence-sheet { top: 52px; width: min(100vw, 440px); }
   .ge-scope-disclosure__meta { grid-template-columns: 1fr; }
-  .ge-scope-disclosure__meta dd { margin-bottom: 4px; }
-}
+  .ge-scope-disclosure__meta dd { margin-bottom: 4px; }}
 .ge-body--money {
   grid-template-columns:
     minmax(360px, calc(var(--ge-money-table-width, 52%) - 4px))
@@ -2644,8 +2573,7 @@ body { overflow: hidden; }
     width: auto;
     border-left: 1px solid var(--border-hover);
     box-shadow: none;
-  }
-}
+  }}
 .ge-money-map.is-stale { opacity: 0.58; }
 .ge-money-sankey {
   min-width: 0;
@@ -2705,13 +2633,10 @@ body { overflow: hidden; }
   font-size: 0.62rem;
 }
 .ge-money-sankey__selection span { color: var(--text-muted); }
-.ge-money-sankey__svg {
-  display: block;
-  width: 100%;
-  min-height: 360px;
-  flex: 1 1 auto;
-  overflow: visible;
-}
+/* The hop map no longer scales itself to fit: it is laid out at the MEASURED
+   pane width and the viewport owns zoom/pan. `overflow: hidden` matters —
+   panned content must be clipped by the pane, not spill over the table. */
+.ge-money-map { overflow: hidden; }
 .ge-money-ribbon { color: var(--accent-text); }
 .ge-money-ribbon.is-mint { color: var(--success); }
 .ge-money-ribbon.is-burn { color: var(--error); }
@@ -2792,8 +2717,7 @@ body { overflow: hidden; }
   }
   .ge-body--money > .ge-money-table { grid-column: 1; grid-row: 1; border-right: 0; border-bottom: 1px solid var(--border); }
   .ge-body--money > .ge-money-resizer { display: none; }
-  .ge-body--money > .ge-money-map { grid-column: 1; grid-row: 2; }
-}
+  .ge-body--money > .ge-money-map { grid-column: 1; grid-row: 2; }}
 @media (max-width: 899px) {
   .ge-body--money,
   .ge-body--money.details-closed {
@@ -2810,14 +2734,12 @@ body { overflow: hidden; }
   .ge-body--money > .ge-money-resizer { display: none; }
   .ge-body--money > .ge-money-map { grid-column: 1; grid-row: 2; }
   .ge-money-sankey__header { flex-direction: column; }
-  .ge-money-sankey__legend { max-width: none; justify-content: flex-start; }
-}
+  .ge-money-sankey__legend { max-width: none; justify-content: flex-start; }}
 
 @media (max-width: 699px) {
   .ge-task-nav__title small { display: none; }
   .ge-task-subviews button { padding-inline: 8px; }
-  .ge-tx-input { min-width: min(220px, 100%); }
-}
+  .ge-tx-input { min-width: min(220px, 100%); }}
 
 /* Relationship catalog is inspect-first: selecting a row previews its data
    contract; the explicit action adds/removes it from the applied graph. */
@@ -2838,7 +2760,10 @@ button.ge-atlas-item {
   letter-spacing: 0.06em;
 }
 .ge-relation-preview {
-  flex: 1 1 auto;
+  /* Sized to its content, NOT stretched to fill the rail. `flex: 1 1 auto`
+     plus a grid row template written for the deleted 40-row sample table left
+     a ~260px hole between "Add to graph" and "Definition and evidence". */
+  flex: 0 0 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -2848,7 +2773,6 @@ button.ge-atlas-item {
   border-radius: 8px;
   background: var(--surface);
   font-size: 0.72rem;
-  overflow-y: auto;
 }
 .ge-relation-preview__head {
   display: flex;
@@ -2890,40 +2814,6 @@ button.ge-atlas-item {
   margin: 0;
   overflow-wrap: anywhere;
 }
-.ge-relation-preview__sample {
-  flex: 1 1 260px;
-  min-height: 180px;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-}
-.ge-relation-preview__sample-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 8px;
-  border-bottom: 1px solid var(--border);
-}
-.ge-relation-preview__sample-head span { color: var(--text-muted); }
-.ge-relation-preview__sample-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
-.ge-relation-preview__sample table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-  font: 0.64rem var(--font-mono, ui-monospace);
-}
-.ge-relation-preview__sample th,
-.ge-relation-preview__sample td {
-  padding: 5px 7px;
-  border-bottom: 1px solid var(--border);
-  text-align: left;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ge-relation-preview__sample th { color: var(--text-muted); }
 .ge-quality {
   flex: 0 0 auto;
   padding: 1px 5px;
@@ -2935,16 +2825,23 @@ button.ge-atlas-item {
 }
 .ge-quality--approved { color: var(--success); border-color: var(--success); }
 .ge-quality--candidate { color: var(--warning); border-color: var(--warning); }
-.ge-atlas-body.has-preview > .ge-canvas {
-  border-left: 1px solid var(--border);
-  background: var(--surface-subtle, var(--bg));
-}
 
 /* Relationships keeps a keyboard-readable ranking beside the spatial view. */
 .ge-body--relationships,
 .ge-body--relationships.details-closed {
   position: relative;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  /* picker rail | canvas | ranked table. The rail is a FIXED 280px in every
+     state — opening a relationship preview must never widen it, which is what
+     the old `.ge-atlas-body.has-preview` rule did (280px -> minmax(520px,40%),
+     and 100% below 1440px), squeezing the graph out of the view. */
+  grid-template-columns: 280px minmax(0, 1fr) 340px;
+}
+/* A relationship PREVIEW shows neither the ranked table nor the details panel
+   (it is an inspect-only sample of one relation). Without this the third track
+   stayed reserved and left a dead 340px band beside the graph. */
+.ge-body--relationships.no-analysis,
+.ge-body--relationships.no-analysis.details-closed {
+  grid-template-columns: 280px minmax(0, 1fr);
 }
 .ge-body--relationships .ge-details { display: none; }
 .ge-body--relationships.details-open .ge-details {
@@ -3036,63 +2933,62 @@ button.ge-atlas-item {
 }
 
 @media (min-width: 900px) and (max-width: 1439px) {
-  .ge-atlas-body.has-preview {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(340px, 48vh) minmax(360px, 1fr);
-    overflow-y: auto;
-  }
-  .ge-atlas-body.has-preview > .ge-atlas-drawer {
-    grid-column: 1;
-    grid-row: 1;
-    min-height: 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .ge-atlas-body.has-preview > .ge-atlas-drawer > .ge-atlas-rail {
-    max-height: 48vh;
-    border-right: 0;
-  }
-  .ge-atlas-body.has-preview > .ge-canvas {
-    grid-column: 1;
-    grid-row: 2;
-    min-height: 360px;
-  }
+  /* Stacked: picker rail, ranked table, canvas. The rail track is DEFINITE
+     (not `auto`): in a definite-height grid the `1fr` canvas row consumes all
+     free space, so an `auto` rail track collapses to its minimum and the rail
+     overflows on top of the table. A fixed track that the rail scrolls inside
+     is deterministic and cannot overlap. */
   .ge-body--relationships,
   .ge-body--relationships.details-closed {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(280px, 42vh) minmax(360px, 1fr);
+    grid-template-rows: 30vh minmax(200px, 28vh) minmax(360px, 1fr);
     overflow-y: auto;
+  }
+  .ge-body--relationships > .ge-rel-rail {
+    grid-column: 1;
+    grid-row: 1;
+    min-height: 0;
+    max-height: 30vh;
+    overflow-y: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
   }
   .ge-body--relationships > .ge-ranked-table {
     grid-column: 1;
-    grid-row: 1;
+    grid-row: 2;
     border-left: 0;
     border-bottom: 1px solid var(--border);
   }
   .ge-body--relationships > .ge-canvas {
     grid-column: 1;
-    grid-row: 2;
-  }
-}
+    grid-row: 3;
+  }}
 @media (max-width: 899px) {
-  .ge-atlas-body.has-preview { grid-template-columns: minmax(0, 1fr); }
   .ge-relation-preview dl { grid-template-columns: minmax(0, 1fr); }
   .ge-body--relationships,
   .ge-body--relationships.details-closed {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(220px, 40vh) minmax(360px, 1fr);
+    grid-template-rows: 28vh minmax(160px, 24vh) minmax(360px, 1fr);
     overflow-y: auto;
   }
-  .ge-body--relationships > .ge-ranked-table {
+  .ge-body--relationships > .ge-rel-rail {
     grid-row: 1;
+    min-height: 0;
+    max-height: 28vh;
+    overflow-y: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .ge-body--relationships > .ge-ranked-table {
+    grid-row: 2;
     border-left: 0;
     border-bottom: 1px solid var(--border);
   }
-  .ge-body--relationships > .ge-canvas { grid-row: 2; }
+  .ge-body--relationships > .ge-canvas { grid-row: 3; }
   .ge-body--relationships.details-open .ge-details,
   .ge-body--money.details-open .ge-details {
     display: block;
-  }
-}
+  }}
 
 /* Transaction Detail: the ordered receipt table is the primary surface. The
    deterministic SVG is an optional overview and the inspector remains an
@@ -3246,8 +3142,7 @@ button.ge-atlas-item {
   flex-wrap: wrap;
   gap: 4px 12px;
 }
-.ge-load-error,
-.ge-applied-scope-chip {
+.ge-load-error {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -3258,7 +3153,6 @@ button.ge-atlas-item {
   font-size: 0.66rem;
 }
 .ge-load-error { background: var(--danger-bg, #fff1f2); color: var(--danger, #9f1239); }
-.ge-applied-scope-chip { background: var(--warning-bg, #fffbeb); color: var(--text-secondary); }
 
 @media (max-width: 899px) {
   .ge-body--tx-detail,
@@ -3275,8 +3169,7 @@ button.ge-atlas-item {
     box-shadow: 0 -12px 40px rgba(15, 23, 42, 0.24);
   }
   .ge-tx-workspace { padding: 7px; }
-  .ge-tx-overview > header { align-items: flex-start; }
-}
+  .ge-tx-overview > header { align-items: flex-start; }}
 
 /* Over time is narrative-first. The legacy graph is deliberately secondary
    and collapsed until the analyst asks for spatial playback. */
@@ -3674,8 +3567,7 @@ button.ge-atlas-item {
     border-left: 1px solid var(--border-hover) !important;
     background: var(--surface) !important;
     box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28) !important;
-  }
-}
+  }}
 
 @media (min-width: 600px) and (max-width: 1199px) {
   .ge-shell:has(.ge-task-accessory-panel),
@@ -3704,8 +3596,7 @@ button.ge-atlas-item {
     border-left: 0 !important;
     background: var(--surface) !important;
     box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.3) !important;
-  }
-}
+  }}
 
 @media (max-width: 599px) {
   .ge-task-accessory-panel {
@@ -3715,8 +3606,7 @@ button.ge-atlas-item {
     height: min(62dvh, 520px);
     border-top: 1px solid var(--border-hover);
     border-left: 0;
-  }
-}
+  }}
 
 .ge-graph-frame {
   width: 100%;
@@ -3837,8 +3727,7 @@ button.ge-atlas-item {
   .ge-graph-chrome { align-items: stretch; }
   .ge-graph-chrome__end { align-self: center; }
   .ge-canvas-stats:not(.collapsed) span:nth-child(n + 3) { display: none; }
-  .ge-legend-body { max-height: 76px; }
-}
+  .ge-legend-body { max-height: 76px; }}
 
 /* Relationship filters expand as a structural strip instead of covering the
    graph with a detached popover. */
@@ -3854,52 +3743,12 @@ button.ge-atlas-item {
   box-shadow: none;
   overflow-y: auto;
 }
-
-.ge-atlas-body.has-preview {
-  grid-template-columns: minmax(520px, 42%) minmax(0, 1fr);
-  overflow: hidden;
-}
-.ge-atlas-body.has-preview > .ge-atlas-drawer {
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-}
-.ge-atlas-body.has-preview > .ge-atlas-drawer > .ge-atlas-rail {
-  height: 100%;
-  min-height: 0;
-}
-.ge-atlas-body.has-preview > .ge-canvas {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg);
-}
-.ge-atlas-body.has-preview > .ge-canvas > .ge-applied-scope-chip {
-  position: static;
-  flex: 0 0 auto;
-  min-height: 36px;
-  padding: 5px 9px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text-secondary);
-}
-.ge-atlas-body.has-preview > .ge-canvas > .ge-graph-frame {
-  flex: 1 1 auto;
-  height: auto;
-}
-.ge-atlas-body.has-preview .ge-catalog-seed {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  padding: 5px 7px;
-}
-.ge-atlas-body.has-preview .ge-catalog-seed-row { min-width: 0; }
+/* The card's children are head / summary / action / details — all intrinsic.
+   The old `grid-template-rows: auto auto minmax(180px, 1fr) auto` existed for
+   a third child that no longer exists (the 40-row sample table), so the third
+   slot landed on the "Add to graph" button and stretched it. */
 .ge-relation-preview {
-  overflow: hidden;
-  display: grid;
-  grid-template-rows: auto auto minmax(180px, 1fr) auto;
+  overflow: visible;
 }
 .ge-relation-preview__head {
   position: sticky;
@@ -3926,32 +3775,6 @@ button.ge-atlas-item {
   gap: 8px;
   padding: 0 9px 9px;
 }
-.ge-relation-preview__sample {
-  min-height: 0;
-  height: 100%;
-}
-.ge-relation-preview__sample-scroll {
-  height: 100%;
-  min-height: 0;
-}
-
-@media (min-width: 1440px) {
-  .ge-atlas-body.has-preview > .ge-atlas-drawer {
-    position: relative;
-  }
-  .ge-atlas-body.has-preview > .ge-atlas-drawer > .ge-atlas-rail {
-    position: absolute;
-    inset: 0;
-    height: auto;
-  }
-}
-
-@media (min-width: 900px) and (max-width: 1439px) {
-  .ge-atlas-body.has-preview {
-    grid-template-columns: minmax(0, 1fr);
-    overflow-y: auto;
-  }
-}
 .ge-timeline-overview__collapsed {
   margin: 0;
   padding: 18px 12px;
@@ -3966,5 +3789,235 @@ button.ge-atlas-item {
   .ge-timeline-scope { margin-inline: 6px; }
   .ge-timeline-scope > header { align-items: flex-start; flex-direction: column; }
   .ge-timeline-scope dl { grid-template-columns: minmax(0, 1fr); }
-  .ge-timeline-scope dd { margin-bottom: 4px; }
+  .ge-timeline-scope dd { margin-bottom: 4px; }}
+/* ==========================================================================
+   Relationships: one section (S1)
+   The picker rail replaces the old Atlas rail + preview panel. It is a fixed
+   280px column that never widens, so the canvas keeps its area whatever the
+   rail is showing.
+   ========================================================================== */
+
+.ge-rel-rail {
+  grid-column: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: var(--surface-subtle, var(--bg));
+}
+.ge-rel-rail > .ge-catalog-seed { padding: 8px 10px; flex: 0 0 auto; }
+/* Column placement belongs to the WIDE layout only. Unscoped, these rules sit
+   later in the file than the compact media queries and so overrode them,
+   forcing implicit grid tracks and collapsing the rail. */
+@media (min-width: 1440px) {
+  .ge-body--relationships > .ge-rel-rail { grid-column: 1; }
+  .ge-body--relationships > .ge-canvas { grid-column: 2; }
+  .ge-body--relationships > .ge-ranked-table { grid-column: 3; }
+}
+
+.ge-atlas-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.ge-atlas-filter input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.ge-atlas-filter input:focus { border-color: var(--primary); }
+
+/* The scope strip: one line, always present, so the canvas never shifts as
+   state changes and the reader always looks in the same place. */
+.ge-scope-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--surface-subtle, var(--bg));
+  border-bottom: 1px solid var(--border);
+}
+.ge-scope-strip__what { font-weight: 600; color: var(--text-primary); }
+.ge-scope-strip.is-preview { background: var(--warning-bg, #fffbeb); }
+.ge-scope-strip__note { font-style: italic; }
+.ge-scope-strip__window,
+.ge-scope-strip__coverage { color: var(--text-muted); }
+.ge-scope-strip__filter {
+  border: 1px solid var(--warning, #b45309);
+  color: var(--warning, #b45309);
+  background: transparent;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ge-scope-strip__chain { margin-left: auto; }
+
+/* Preview card: the four facts that decide "add this or not", above the fold.
+   The 40-row source/target/weight table it replaced now lives on the canvas. */
+.ge-relation-preview__summary {
+  list-style: none;
+  margin: 0;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+}
+.ge-relation-preview__summary li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.ge-relation-preview__summary span { color: var(--text-muted); }
+.ge-relation-preview__summary strong {
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.ge-relation-preview > .ge-btn.primary { margin: 0 10px 8px; }
+
+/* Canvas chrome stays mounted when the model is empty; controls that cannot
+   act read as inert rather than vanishing. */
+.ge-graph-controls.is-disabled { opacity: 0.55; }
+.ge-graph-controls [disabled] { cursor: not-allowed; }
+
+/* ==========================================================================
+   SvgViewport (S2) — measured, zoomable, pannable SVG surface
+   ========================================================================== */
+
+.ge-svgvp {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ge-svgvp__bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.ge-svgvp__controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ge-svgvp__zoom {
+  min-width: 44px;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+.ge-svgvp__svg {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  /* Pointer drag must not be stolen by browser panning/gestures. */
+  touch-action: none;
+  cursor: grab;
+}
+.ge-svgvp.is-panning .ge-svgvp__svg { cursor: grabbing; }
+
+/* Per-column headers live in screen space, so they stay this size at any zoom. */
+.ge-money-sankey__columns { pointer-events: none; }
+.ge-money-col__label {
+  fill: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+.ge-money-col__coverage {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+.ge-money-col__coverage.is-truncated { fill: var(--warning, #b45309); }
+
+.ge-money-sankey__howto > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.ge-money-sankey__howto > div {
+  position: absolute;
+  right: 8px;
+  z-index: 20;
+  max-width: 420px;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-hover);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+.ge-money-sankey__howto p { margin: 0 0 8px; }
+.ge-money-sankey__howto p:last-child { margin-bottom: 0; }
+
+/* Chain picker — Transaction Detail only (S6). Receipts are RPC-sourced and
+   portable; the other modes read the single-chain Gnosis warehouse, so a
+   selector there would be a control that cannot do anything. */
+.ge-tx-chain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 0;
+  margin-right: 4px;
+  border-right: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.ge-tx-chain__label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.ge-tx-chain select {
+  height: 26px;
+  min-width: 0;
+  padding: 0 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.ge-tx-chain select:focus { border-color: var(--primary); }
+/* Says WHY address search is unavailable, rather than silently omitting it. */
+.ge-tx-chain-note {
+  flex: 1 1 100%;
+  margin: 4px 0 0;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  background: var(--warning-bg, #fffbeb);
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }

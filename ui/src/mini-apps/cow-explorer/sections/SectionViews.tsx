@@ -8,7 +8,7 @@ import { activityOption, candleOption, depthOption, rankingOption, referencePric
 import { rowsToObjects } from "../../shared/rowDataset";
 import { buildShareHeatmap, parseCandles, parseDepth, parseExecutionFlow, parseReferencePrices } from "../model/parseRows";
 import type { CowExplorerViewState, EntityType } from "../types";
-import { ChainBadge } from "../components/ChainBadge";
+import { ChainBadge } from "../../shared/ChainBadge";
 import { CuratedTable } from "../components/CuratedTable";
 import { InfoBlocks, InfoPopover } from "../components/InfoPopover";
 import { datasetError } from "../../shared/datasetError";

@@ -105,7 +105,10 @@ export function readUrl(): GraphUrlState {
 export function writeUrl(s: GraphUrlState, push = false): void {
   const p = new URLSearchParams(window.location.search);
   URL_KEYS.forEach((k) => p.delete(k));
-  if (s.mode && s.mode !== "atlas") p.set("mode", s.mode);
+  // "investigate" is the default mode now that Relationships is one section,
+  // so it is the value we omit. A legacy ?mode=atlas link still parses and
+  // resolves to Relationships (graphReducer normalizes it).
+  if (s.mode && s.mode !== "investigate") p.set("mode", s.mode);
   if (s.seed) p.set("seed", s.seed);
   if (s.profiles.length) p.set("profiles", s.profiles.join(","));
   if (s.window) p.set("window", String(s.window));

@@ -20,6 +20,50 @@ class Settings(BaseSettings):
     ABI_CACHE_TTL_SECONDS: int = 3600
     ABI_CACHE_MAX_ENTRIES: int = 512
 
+    # --- Per-chain RPC endpoints (see cerebro_mcp/chains.py) ---
+    # One endpoint per chain; these are expected to be ARCHIVE nodes, so each
+    # serves both current and historical reads. Set RPC_URL_<CHAIN>_ARCHIVE
+    # only when the main endpoint is pruned and a separate archive exists.
+    # A chain with no URL simply does not appear in the chain selector.
+    # Chain 100 also honors the legacy GNOSIS_RPC_URL pair above, which wins.
+    # NOTE: fields must be declared explicitly — Settings uses extra="ignore",
+    # so an undeclared (or misspelled) RPC_URL_* env var is silently dropped.
+    RPC_URL_MAINNET: str = ""
+    RPC_URL_GNOSIS: str = ""
+    RPC_URL_ARBITRUM: str = ""
+    RPC_URL_BASE: str = ""
+    RPC_URL_POLYGON: str = ""
+    RPC_URL_CELO: str = ""
+    RPC_URL_AVALANCHE: str = ""
+    RPC_URL_LINEA: str = ""
+    RPC_URL_INK: str = ""
+    RPC_URL_PLASMA: str = ""
+    RPC_URL_SEPOLIA: str = ""
+    RPC_URL_BNB: str = ""
+    RPC_URL_MAINNET_ARCHIVE: str = ""
+    RPC_URL_GNOSIS_ARCHIVE: str = ""
+    RPC_URL_ARBITRUM_ARCHIVE: str = ""
+    RPC_URL_BASE_ARCHIVE: str = ""
+    RPC_URL_POLYGON_ARCHIVE: str = ""
+    RPC_URL_CELO_ARCHIVE: str = ""
+    RPC_URL_AVALANCHE_ARCHIVE: str = ""
+    RPC_URL_LINEA_ARCHIVE: str = ""
+    RPC_URL_INK_ARCHIVE: str = ""
+    RPC_URL_PLASMA_ARCHIVE: str = ""
+    RPC_URL_SEPOLIA_ARCHIVE: str = ""
+    RPC_URL_BNB_ARCHIVE: str = ""
+
+    # --- Historical contract reads (contract_read_history) ---
+    # Pure-RPC sweeps: ~2 requests per sampled block, no ClickHouse. There is
+    # no rate limiting on the RPC path, so the worker count IS the backpressure
+    # — keep it conservative. The deadline mirrors RPC_SCAN_SYNC_WAIT_MAX_SECONDS:
+    # these tools are synchronous and must not stall the server.
+    CONTRACT_HISTORY_DEFAULT_POINTS: int = 60
+    CONTRACT_HISTORY_MAX_POINTS: int = 200
+    CONTRACT_HISTORY_WORKERS: int = 6
+    CONTRACT_HISTORY_DEADLINE_SECONDS: int = 25
+    CONTRACT_HISTORY_DEFAULT_DAYS: int = 30
+
     # --- RPC scan engine (bulk log/call/storage/code/trace scans) ---
     # Off by default: the scan engine writes results into ClickHouse scratch
     # tables, which needs grants the read-only deployment user may not have:

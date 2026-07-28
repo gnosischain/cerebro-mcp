@@ -9,7 +9,7 @@ import { shortAddr } from "../../../utils/format";
 import { displayAmount } from "../model/identity";
 import { solverName } from "../model/solverRegistry";
 import type { CowExplorerViewState } from "../types";
-import { ChainBadge } from "./ChainBadge";
+import { ChainBadge } from "../../shared/ChainBadge";
 import { TokenIdentity } from "./TokenIdentity";
 
 export interface CellContext {

@@ -498,8 +498,10 @@ def test_sql_contracts_cover_price_depth_fee_and_solver_invariants():
 def test_depth_heatmap_window_validation():
     assert cow_explorer._validate_heatmap_window("24h") == "24h"
     assert cow_explorer._validate_heatmap_window("7d") == "7d"
+    assert cow_explorer._validate_heatmap_window("30d") == "30d"
+    assert cow_explorer._validate_heatmap_window("90d") == "90d"
     assert cow_explorer._validate_heatmap_window(" ALL ") == "all"
-    for bad in ("", "1h", "30d", "week", "foo"):
+    for bad in ("", "1h", "week", "foo"):
         with pytest.raises(ValueError):
             cow_explorer._validate_heatmap_window(bad)
 
@@ -507,7 +509,7 @@ def test_depth_heatmap_window_validation():
 def test_depth_heatmap_spec_contract():
     chain = cow_explorer.COW_CHAINS[1]
     relative = cow_explorer._range_state("markets", 30, "", "")
-    # The heatmap spec is built by _market_specs and belongs to its own group.
+    # The footprint spec is built by _market_specs and owns its group.
     assert cow_explorer.SECTION_GROUPS["markets"]["depth_heatmap"] == ("pair_depth_heatmap",)
     market = {
         s.key: s
@@ -517,6 +519,7 @@ def test_depth_heatmap_spec_contract():
     assert spec.cache_ttl_seconds == 3600
     assert spec.exact_count is False
     assert spec.parameters["window"] == "7d"
+    assert spec.parameters["bucket_seconds"] == 0
     assert spec.parameters["base"] == TOKEN_A and spec.parameters["quote"] == TOKEN_B
     sql = spec.sql
     # Time-grid reconstruction shape.
@@ -530,12 +533,91 @@ def test_depth_heatmap_spec_contract():
     # Interval-overlap predicate, not point-in-time.
     assert "p.created < (b.bucket_ts + b.step_s)" in sql
     assert "p.alive_until > b.bucket_ts" in sql
-    # Base-normalized depth for both sides + one row per (bucket, order).
-    assert "AS depth_base" in sql and "AS side" in sql and "AS bucket" in sql
-    # Standard CoW spec invariants.
-    assert "cow_db." in sql
-    assert "SETTINGS" not in sql.upper()
-    assert len(sql) <= 9_900
+    # Cancelled orders without any timestamped removal evidence are excluded
+    # (the backfill cancel-time gap — else they phantom-rest until valid_to).
+    assert "status_l!='cancelled'" in sql
+
+
+def test_depth_footprint_is_one_binned_tier_on_a_per_bucket_reference():
+    """Every window ships the SAME binned shape, priced RELATIVE to each
+    bucket's own median.
+
+    The relative reference is both a readability fix (an absolute axis leaves a
+    multi-year window's book in one or two rows) and a correctness one: the old
+    +-30%-of-WINDOW-median clamp retained just 53.3% of mainnet USDC/WETH
+    orders, versus 92.5% at +-20% of the bucket median (measured over all
+    254,525 of them).
+    """
+    chain = cow_explorer.COW_CHAINS[1]
+    relative = cow_explorer._range_state("markets", 30, "", "")
+    for window in ("24h", "7d", "30d", "90d", "all"):
+        spec = {
+            s.key: s
+            for s in cow_explorer._market_specs(chain, (TOKEN_A, TOKEN_B), "1h", relative, "", window)
+        }["pair_depth_heatmap"]
+        sql = spec.sql
+        assert spec.parameters["window"] == window
+        # Per-BUCKET reference, keyed by grid index, and the clamp is measured
+        # against it — never against a single window-wide median.
+        assert "bmed AS (" in sql
+        assert "coalesce(m.b_med," in sql
+        assert "abs(price / bucket_mid - 1) <= 0.2" in sql
+        # `priced` (cand argMax + term + fill) costs ~5.6s per materialization
+        # and ClickHouse INLINES CTEs, so every extra reference re-runs the
+        # whole chain — two references timed out the 20s interactive budget
+        # live. It must be consumed EXACTLY ONCE: pmed derives from bmed, and
+        # bmed reads raw orders (exact, since price columns are immutable).
+        assert "SELECT quantile(0.5)(b_med) AS p_med FROM bmed" in sql
+        code = "\n".join(
+            ln for ln in sql.split("\n") if not ln.strip().startswith("--")
+        )
+        assert code.count("priced") == 2, "priced must be defined once and used once"
+        assert "priced AS (" in sql and "CROSS JOIN priced AS p" in sql
+        assert "FROM cow_db.orders AS o\n  CROSS JOIN dims AS d" in sql
+        # Time-weighted resting depth on every window, not just the deep ones.
+        assert "dateDiff('second'" in sql and "/ b.step_s AS w" in sql
+        # Output contract the client parses.
+        for column in ("AS bucket", "AS bucket_mid", "AS rel_pct", "AS side",
+                       "AS depth_base", "AS orders", "AS bucket_seconds"):
+            assert column in sql, (window, column)
+        assert "GROUP BY bucket, bucket_mid, rel_pct, side" in sql
+        # Standard CoW spec invariants.
+        assert "cow_db." in sql
+        assert "SETTINGS" not in sql.upper()
+        assert len(sql) <= 9_900
+    # Deep floor is reconstruction-capable history, not the capture start.
+    assert "min(creation_date)" in sql
+
+
+def test_depth_footprint_resolution_is_caller_chosen_and_row_bounded():
+    """`bucket_seconds` picks the bucket width; the row budget is a hard cap, so
+    a too-fine request is coarsened by the SQL rather than rejected."""
+    chain = cow_explorer.COW_CHAINS[1]
+    spec = cow_explorer._pair_depth_heatmap_specs(chain, (TOKEN_A, TOKEN_B), "7d", 3600)[0]
+    assert spec.parameters["bucket_seconds"] == 3600
+    sql = spec.sql
+    # Requested width wins over the auto span/60...
+    assert "if({bucket_seconds:UInt32} > 0," in sql
+    # ...but is floored, and coarsened so the grid fits the bucket cap.
+    assert f"toUInt32({cow_explorer._FOOTPRINT_MIN_STEP_S})" in sql
+    assert f"ceil(span_s / {float(cow_explorer._FOOTPRINT_MAX_BUCKETS)})" in sql
+    assert f"least({cow_explorer._FOOTPRINT_MAX_BUCKETS}," in sql
+    # 41 bins x 2 sides x 120 buckets = 9,840 rows, under the 10k result cap.
+    bins = int(2 * cow_explorer._FOOTPRINT_REL_PCT / cow_explorer._FOOTPRINT_REL_STEP) + 1
+    assert bins * 2 * cow_explorer._FOOTPRINT_MAX_BUCKETS <= 10_000
+    # 1.0-point bins over +-20% are exactly the client's display levels, so the
+    # two grids coincide and nothing is re-binned.
+    assert bins == 41
+
+
+def test_validate_bucket_seconds():
+    assert cow_explorer._validate_bucket_seconds(0) == 0
+    assert cow_explorer._validate_bucket_seconds("3600") == 3600
+    assert cow_explorer._validate_bucket_seconds(cow_explorer._FOOTPRINT_MIN_STEP_S) \
+        == cow_explorer._FOOTPRINT_MIN_STEP_S
+    for bad in (1, -5, cow_explorer._FOOTPRINT_MAX_STEP_S + 1, "soon"):
+        with pytest.raises(ValueError):
+            cow_explorer._validate_bucket_seconds(bad)
 
 
 def test_depth_heatmap_specs_require_a_pair():
@@ -1069,6 +1151,66 @@ def test_live_all_networks_feeds_stay_hour_bounded_and_deduped():
     assert "chain_id={chain_id:UInt64}" in single["live_trades"].sql
 
 
+def test_live_intents_dedup_without_final():
+    """Post-backfill OOM guard: `orders`/`order_events` are ~12M rows, so the
+    live intents specs must never FINAL-merge them. open_orders bounds its
+    argMax hash with the immutable valid_to prefilter (ogopen pattern) and
+    keeps creation_date/valid_to as GROUP BY keys (an aggregate alias on
+    valid_to beside the same-level WHERE is the code-184 alias-in-WHERE trap);
+    order_events dedups within the 1h observed_at bound on the event_id key."""
+    for chain in (None, cow_explorer.COW_CHAINS[100]):
+        specs = {s.key: s for s in cow_explorer._live_specs("production", chain)}
+        for key in ("live_open_orders", "live_order_events"):
+            assert "FINAL" not in specs[key].sql, key
+        oo = specs["live_open_orders"].sql
+        assert "valid_to>toUnixTimestamp(now())" in oo
+        assert "GROUP BY chain_id,order_uid,creation_date,valid_to" in oo
+        assert "HAVING st='open'" in oo
+        assert "LIMIT 100" in oo
+        assert "argMax(valid_to" not in oo
+        ev = specs["live_order_events"].sql
+        assert "observed_at >= now() - INTERVAL 1 HOUR" in ev
+        assert "GROUP BY chain_id,event_id" in ev
+        assert "LIMIT 50" in ev
+
+
+def test_depth_family_bounds_order_scans_post_backfill():
+    """The depth group's four order-grain shapes must bound their dedup work
+    to validity-filtered candidates instead of the whole backfilled table:
+    open_intent_pairs and live pair_depth prefilter valid_to (immutable) in
+    the raw scan and drop FINAL; the historical cand pushes its at-T bounds
+    from HAVING into WHERE; the heatmap cand carries the window floor; and
+    depth_horizon counts via HLL uniq, not a multi-million-uid uniqExact."""
+    chain = cow_explorer.COW_CHAINS[100]
+    live = {s.key: s for s in cow_explorer._pair_depth_specs(chain, ("0xaaa", "0xbbb"))}
+    pd = live["pair_depth"].sql
+    assert "orders AS o FINAL" not in pd and "orders FINAL" not in pd
+    assert "valid_to>toUnixTimestamp(parseDateTime64BestEffort({server_as_of:String}))" in pd
+    assert "HAVING st='open'" in pd
+    op = live["open_intent_pairs"].sql
+    assert "FINAL" not in op
+    assert "valid_to>toUnixTimestamp(now())" in op
+    assert "GROUP BY order_uid,valid_to" in op
+    horizon = live["depth_horizon"].sql
+    assert "uniqExact" not in horizon
+    assert "uniq(order_uid)" in horizon
+    hist = {
+        s.key: s
+        for s in cow_explorer._pair_depth_specs(chain, ("0xaaa", "0xbbb"), "2026-07-22T12:00:00Z")
+    }["pair_depth"].sql
+    assert "HAVING created<=" not in hist
+    assert "creation_date<=parseDateTime64BestEffort({at_ts:String})" in hist
+    assert "toDateTime(valid_to)>parseDateTime64BestEffort({at_ts:String})" in hist
+    # Cancelled-without-cancel-time exclusion: unbounded terminal-existence
+    # check (term_any has NO at_ts cap — an order cancelled after T must stay
+    # in the book at T) gating only status_l='cancelled' candidates.
+    assert "term_any" in hist
+    assert "status_l!='cancelled'" in hist
+    assert hist.count("event_timestamp<=parseDateTime64BestEffort({at_ts:String})") == 1
+    heatmap = cow_explorer._pair_depth_heatmap_specs(chain, ("0xaaa", "0xbbb"), "7d")[0].sql
+    assert "toDateTime(valid_to) > (SELECT w_start FROM win)" in heatmap
+
+
 def test_orders_all_networks_skips_pair_and_quality_groups():
     multi = {
         s.key
@@ -1172,7 +1314,10 @@ def test_pair_depth_live_and_historical_sql_shapes():
     assert "orders AS o FINAL" not in pairs_sql
     assert "token0_symbol" in pairs_sql
     sql = live["pair_depth"].sql
-    assert "o.status='open'" in sql
+    # Post-backfill shape: argMax dedup over the pair's live-validity orders
+    # replaced the whole-chain FINAL merge; mutable status filters via HAVING.
+    assert "orders AS o FINAL" not in sql and "orders FINAL" not in sql
+    assert "HAVING st='open'" in sql
     assert "server_as_of" in live["pair_depth"].parameters
     assert live["pair_depth"].parameters["server_as_of"].endswith(":00Z")
     assert live["pair_depth"].cache_ttl_seconds == 60
@@ -1191,8 +1336,9 @@ def test_pair_depth_live_and_historical_sql_shapes():
     assert hist["pair_depth"].cache_ttl_seconds == 3600  # point-in-time immutable
     assert hist["pair_depth"].coverage_mode == "reconstructed_point_in_time"
     assert hist["pair_depth"].parameters["at_ts"] == "2026-07-21T12:00:00+00:00Z".replace("+00:00", "")
-    # Bounded joins pruned by the tiny candidate set; no FINAL on trades.
-    assert hsql.count("order_uid IN (SELECT order_uid FROM cand)") == 2
+    # Bounded joins pruned by the tiny candidate set (fills, term, term_any);
+    # no FINAL on trades.
+    assert hsql.count("order_uid IN (SELECT order_uid FROM cand)") == 3
     assert "trades AS t FINAL" not in hsql
     assert "block_timestamp<=parseDateTime64BestEffort({at_ts:String})" in hsql
     assert "event_timestamp<=parseDateTime64BestEffort({at_ts:String})" in hsql

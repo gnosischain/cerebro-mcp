@@ -28,8 +28,13 @@ The frontend at ``ui://cerebro/contract_explorer`` consumes
 
     {
       "address":                "0x420C...3430",   # checksum
+      "chain_id":               100,
+      "chain_name":             "Gnosis",
+      "chain_options":  [{chain_id, name, native_symbol, icon_url,
+                          explorer: {...}}, ...],  # configured chains only
+      "explorer":       {provider, brand, base_url, ...},
       "contract_name":          "GnosisControllerToken",
-      "abi_source":             "clickhouse",      # | "blockscout"
+      "abi_source":             "clickhouse",      # | "blockscout" | "sourcify"
       "implementation_address": "0x60cb...635D",   # "" if not a proxy
       "target":                 "auto",            # auto|implementation|proxy
       "read_functions":  [{name, signature, stateMutability,
@@ -40,24 +45,43 @@ The frontend at ``ui://cerebro/contract_explorer`` consumes
                            inputs: [{name,type,indexed}]}, ...],
       "call_history":    [{function, signature, args, block, called_at,
                            ok, result?, error?, elapsed_seconds}, ...],
+      "history":         [{signature, range_label, from_block, to_block,
+                           decimals, points: [...], warnings}, ...],
       "warnings":        [str, ...],
     }
 
 ``contract_explorer_call_function`` emits a ``PATCH_VIEW_STATE`` whose
 ``patch`` contains the new ``call_history`` slice (capped at
-``MAX_CALL_HISTORY``).
+``MAX_CALL_HISTORY``); ``contract_explorer_read_history`` does the same for
+``history`` (capped at ``MAX_HISTORY_SERIES``).
+
+Both are LISTS, not maps keyed by signature: ``patch_view_state`` deep-merges
+dicts, so a map would accumulate every sweep forever with no way to evict —
+lists are replaced wholesale, which is what a capped ring needs.
 """
 from __future__ import annotations
 
 import importlib.resources
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
 from mcp.types import CallToolResult
 
+from cerebro_mcp.chains import (
+    GNOSIS_CHAIN_ID,
+    NATIVE_ICON_URLS,
+    ChainInfo,
+    configured_chains,
+    get_chain,
+    has_rpc,
+    resolve_chain,
+    rpc_env_hint,
+)
 from cerebro_mcp.clients.abi_resolver import resolve_abi
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.clients.contract_history import read_function_history
 from cerebro_mcp.models.mini_app import MiniAppPayload, SummaryCard
 from cerebro_mcp.tools.visualization import mini_apps, web_apps
 from cerebro_mcp.tools.web3.rpc import call_view_function
@@ -121,6 +145,10 @@ APP_META = {"ui": {"resourceUri": RESOURCE_URI}}
 #: Cap on the call history retained in ``view_state``. Keep small — the whole
 #: history is shipped on every PATCH so big lists bloat the wire payload.
 MAX_CALL_HISTORY = 50
+
+#: Cap on retained history series. Each carries up to CONTRACT_HISTORY_MAX_POINTS
+#: points, so this is the bigger payload risk of the two.
+MAX_HISTORY_SERIES = 5
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +219,31 @@ def _short_address(addr: str) -> str:
     return f"{addr[:6]}…{addr[-4:]}" if len(addr) >= 12 else addr
 
 
-def _empty_view_state() -> dict[str, Any]:
+def _chain_dict(chain: ChainInfo) -> dict[str, Any]:
+    return {
+        "chain_id": chain.chain_id,
+        "name": chain.name,
+        "native_symbol": chain.native_symbol,
+        "environment": chain.environment,
+        "explorer": asdict(chain.explorer),
+        "icon_url": NATIVE_ICON_URLS.get(chain.chain_id, ""),
+    }
+
+
+def _chain_options() -> list[dict[str, Any]]:
+    """Only chains with an RPC configured — the selector must not offer a
+    chain that would fail the moment the user picks it."""
+    return [_chain_dict(c) for c in configured_chains()]
+
+
+def _empty_view_state(chain_id: int = GNOSIS_CHAIN_ID) -> dict[str, Any]:
+    chain = get_chain(chain_id)
     return {
         "address": "",
+        "chain_id": chain.chain_id,
+        "chain_name": chain.name,
+        "chain_options": _chain_options(),
+        "explorer": asdict(chain.explorer),
         "contract_name": "",
         "abi_source": "",
         "implementation_address": "",
@@ -202,6 +252,7 @@ def _empty_view_state() -> dict[str, Any]:
         "write_functions": [],
         "events": [],
         "call_history": [],
+        "history": [],
         "warnings": [],
     }
 
@@ -212,9 +263,15 @@ def _build_view_state(
     record,  # AbiRecord
     target: str,
     projected: dict[str, list[dict[str, Any]]],
+    chain_id: int = GNOSIS_CHAIN_ID,
 ) -> dict[str, Any]:
+    chain = get_chain(chain_id)
     return {
         "address": record_address,
+        "chain_id": chain.chain_id,
+        "chain_name": chain.name,
+        "chain_options": _chain_options(),
+        "explorer": asdict(chain.explorer),
         "contract_name": record.contract_name,
         "abi_source": record.source,
         "implementation_address": record.implementation_address,
@@ -223,6 +280,7 @@ def _build_view_state(
         "write_functions": projected["write_functions"],
         "events": projected["events"],
         "call_history": [],
+        "history": [],
         "warnings": [],
     }
 
@@ -294,7 +352,20 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
             view_state=view_state,
         )
 
-    def _resolve_and_build(address: str, target: str):
+    def _resolve_chain_or_error(chain: str | int):
+        """Resolve a chain and confirm it is usable. Returns (chain, error)."""
+        try:
+            chain_info = resolve_chain(chain)
+        except ValueError as exc:
+            return None, str(exc)
+        if not has_rpc(chain_info.chain_id):
+            return None, (
+                f"{chain_info.name} (chain {chain_info.chain_id}) has no RPC "
+                f"endpoint configured. Set {rpc_env_hint(chain_info.chain_id)}."
+            )
+        return chain_info, None
+
+    def _resolve_and_build(address: str, target: str, chain_id: int):
         """Resolve ABI + project it. Returns ``(view_state, error_message)``."""
         try:
             from web3 import Web3
@@ -302,15 +373,16 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         except Exception as exc:  # noqa: BLE001
             return None, f"Bad address: {exc}"
         try:
-            record = resolve_abi(ch, checksum, target=target)
+            record = resolve_abi(ch, checksum, target=target, chain_id=chain_id)
         except Exception as exc:  # noqa: BLE001
-            return None, f"ABI not found for {checksum}: {exc}"
+            return None, f"{exc}"
         projected = _project_abi(record.abi)
         view_state = _build_view_state(
             record_address=checksum,
             record=record,
             target=target,
             projected=projected,
+            chain_id=chain_id,
         )
         return view_state, None
 
@@ -323,6 +395,7 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         address: str = "",
         target: str = "auto",
         title: str = "",
+        chain: str = "",
     ) -> CallToolResult:
         """Launch the Contract Explorer — an Etherscan-style read-only contract page.
 
@@ -333,11 +406,16 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
           - pastes a bare contract address and asks what it does
           - wants to repeatedly query a single contract through a UI
 
-        The mini-app resolves the ABI from ``dbt.contracts_abi`` first, then
-        Blockscout, automatically following proxies (target="auto" returns
-        the implementation ABI by default — pass target="proxy" only when the
-        user explicitly wants the proxy's own ABI). Lists every view/pure
-        function as a card with input forms; users click "Call" to query.
+        Works across every chain with an ``RPC_URL_*`` configured — pass
+        ``chain`` as a name, key, or id ("mainnet", "base", 42161); defaults to
+        Gnosis. The in-app selector lists the configured chains.
+
+        The mini-app resolves the ABI from ``dbt.contracts_abi`` (Gnosis only),
+        then that chain's Blockscout, then Sourcify, automatically following
+        proxies (target="auto" returns the implementation ABI by default —
+        pass target="proxy" only when the user explicitly wants the proxy's own
+        ABI). Lists every view/pure function as a card with input forms; users
+        click "Call" to read it, or "History" to plot it over a block range.
 
         With an empty ``address``, opens an empty explorer that prompts the
         user to paste a contract address.
@@ -346,16 +424,24 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         """
         title = title.strip() or APP_TITLE
 
+        chain_info, chain_err = _resolve_chain_or_error(chain)
+        if chain_err is not None:
+            payload = MiniAppPayload(
+                type="SHOW_WARNING", view_id="", app_id=APP_ID, title=title,
+                status="error", warnings=[chain_err],
+            )
+            return mini_apps.payload_to_call_tool_result(payload, summary_text=chain_err)
+
         if not address.strip():
             view_id = mini_apps.create_view(APP_ID, title)
-            view_state = _empty_view_state()
+            view_state = _empty_view_state(chain_info.chain_id)
             payload = _initial_load_payload(view_id, title, view_state)
             return mini_apps.payload_to_call_tool_result(
                 payload,
                 summary_text="Contract Explorer ready — paste a contract address.",
             )
 
-        view_state, err = _resolve_and_build(address, target)
+        view_state, err = _resolve_and_build(address, target, chain_info.chain_id)
         if err is not None:
             payload = MiniAppPayload(
                 type="SHOW_WARNING",
@@ -381,7 +467,8 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
             summary_text=(
                 f"Contract Explorer ready for "
                 f"{view_state['contract_name'] or 'unknown'} "
-                f"({_short_address(view_state['address'])}) — "
+                f"({_short_address(view_state['address'])}) on "
+                f"{chain_info.name} — "
                 f"{len(view_state['read_functions'])} read function(s)."
             ),
         )
@@ -391,13 +478,15 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
         view_id: str,
         address: str,
         target: str = "auto",
+        chain: str = "",
     ) -> CallToolResult:
-        """Swap to a different contract inside an open Contract Explorer view.
+        """Swap to a different contract (or chain) inside an open Contract Explorer view.
 
         Use when the user wants to look at a different contract without losing
         the current explorer tab. Reuses the existing ``view_id``; replaces
         ``view_state`` and emits a fresh ``INITIAL_LOAD`` payload so the
-        frontend can do a clean swap.
+        frontend can do a clean swap. Omitting ``chain`` keeps the view's
+        current chain.
         """
         record = mini_apps.get_view(view_id)
         if record is None:
@@ -405,7 +494,14 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
                 f"Unknown or expired view_id: {view_id}"
             )
 
-        view_state, err = _resolve_and_build(address, target)
+        # Empty chain means "keep the current one", not "reset to Gnosis".
+        chain_info, chain_err = _resolve_chain_or_error(
+            chain or record.view_state.get("chain_id") or GNOSIS_CHAIN_ID
+        )
+        if chain_err is not None:
+            return mini_apps.error_call_tool_result(chain_err)
+
+        view_state, err = _resolve_and_build(address, target, chain_info.chain_id)
         if err is not None:
             return mini_apps.error_call_tool_result(err)
 
@@ -419,7 +515,7 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
             summary_text=(
                 f"Contract Explorer swapped to "
                 f"{view_state['contract_name'] or 'unknown'} "
-                f"({_short_address(view_state['address'])})."
+                f"({_short_address(view_state['address'])}) on {chain_info.name}."
             ),
         )
 
@@ -457,6 +553,7 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
                 "Inspector view has no address yet — open with an address first."
             )
         target = record.view_state.get("target") or "auto"
+        chain_id = int(record.view_state.get("chain_id") or GNOSIS_CHAIN_ID)
 
         try:
             outcome = call_view_function(
@@ -468,6 +565,7 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
                 block_identifier=block_identifier,
                 target=target,
                 from_address=from_address,
+                chain_id=chain_id,
             )
         except Exception as exc:  # noqa: BLE001
             outcome = {
@@ -519,6 +617,104 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
             summary = f"Call to {entry['function']} failed: {entry['error']}"
         return mini_apps.payload_to_call_tool_result(payload, summary_text=summary)
 
+    @mcp.tool(meta=APP_META)
+    def contract_explorer_read_history(
+        view_id: str,
+        function_name: str = "",
+        function_signature: str = "",
+        args: list[Any] | None = None,
+        since: str = "30d",
+        until: str = "",
+        from_block: int | str = "",
+        to_block: int | str = "",
+        points: int = 0,
+        output_index: int = 0,
+        decimals: int = 0,
+    ) -> CallToolResult:
+        """Plot one view function's value across a block range in the open explorer.
+
+        Use when the user, looking at a Contract Explorer view, asks how a
+        value changed over time ("chart totalSupply over the last 90 days",
+        "graph this balance", "when did it start dropping"). The resulting
+        series is appended to the view's ``history`` and emitted as a
+        ``PATCH_VIEW_STATE`` so the mini-app draws the line chart inline.
+
+        For a chat-only answer with no open view, use ``contract_read_history``.
+        """
+        record = mini_apps.get_view(view_id)
+        if record is None:
+            return mini_apps.error_call_tool_result(
+                f"Unknown or expired view_id: {view_id}"
+            )
+
+        address = record.view_state.get("address") or ""
+        if not address:
+            return mini_apps.error_call_tool_result(
+                "Explorer view has no address yet — open with an address first."
+            )
+        chain_id = int(record.view_state.get("chain_id") or GNOSIS_CHAIN_ID)
+
+        try:
+            outcome = read_function_history(
+                ch,
+                address,
+                chain_id=chain_id,
+                function_name=function_name,
+                function_signature=function_signature,
+                args=args,
+                from_block=from_block or None,
+                to_block=to_block or None,
+                since=since,
+                until=until,
+                points=points,
+                target=record.view_state.get("target") or "auto",
+                output_index=output_index,
+                decimals=decimals or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return mini_apps.error_call_tool_result(f"History sweep failed: {exc}")
+
+        series = {
+            "signature": outcome["signature"],
+            "range_label": since or f"{outcome['from_block']}–{outcome['to_block']}",
+            "from_block": outcome["from_block"],
+            "to_block": outcome["to_block"],
+            "output_index": outcome["output_index"],
+            "decimals": outcome["decimals"],
+            "output_types": outcome["output_types"],
+            "points": outcome["points"],
+            "ok_count": outcome["ok_count"],
+            "truncated": outcome["truncated"],
+            "warnings": outcome["warnings"],
+            "swept_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Replace any prior sweep of the same signature, then cap — the whole
+        # view_state ships on INITIAL_LOAD and each series carries up to
+        # CONTRACT_HISTORY_MAX_POINTS entries.
+        prior = [
+            s for s in (record.view_state.get("history") or [])
+            if s.get("signature") != series["signature"]
+        ]
+        patch: dict[str, Any] = {"history": [series, *prior][:MAX_HISTORY_SERIES]}
+        mini_apps.patch_view_state(view_id, patch)
+
+        payload = MiniAppPayload(
+            type="PATCH_VIEW_STATE",
+            view_id=view_id,
+            app_id=APP_ID,
+            title=record.title,
+            patch=patch,
+        )
+        return mini_apps.payload_to_call_tool_result(
+            payload,
+            summary_text=(
+                f"Swept {series['signature']} over blocks "
+                f"{series['from_block']:,}–{series['to_block']:,} — "
+                f"{series['ok_count']}/{len(series['points'])} samples ok."
+            ),
+        )
+
     web_apps.register_web_app(
         app_id=APP_ID,
         open_tool="open_contract_explorer",
@@ -532,6 +728,7 @@ def register_contract_explorer_tools(mcp, ch: ClickHouseManager) -> None:
             "open_contract_explorer": open_contract_explorer,
             "load_contract_explorer_address": load_contract_explorer_address,
             "contract_explorer_call_function": contract_explorer_call_function,
+            "contract_explorer_read_history": contract_explorer_read_history,
         },
     )
 
@@ -541,5 +738,6 @@ __all__ = [
     "APP_TITLE",
     "RESOURCE_URI",
     "MAX_CALL_HISTORY",
+    "MAX_HISTORY_SERIES",
     "register_contract_explorer_tools",
 ]

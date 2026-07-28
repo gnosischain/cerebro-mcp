@@ -269,7 +269,7 @@ export const PORTFOLIO_HELP: HelpContent = {
 export const CONTRACT_EXPLORER_HELP: HelpContent = {
   title: "Contract Explorer",
   intro:
-    "Inspect and call any verified contract on Gnosis Chain — browse its ABI, read state, and simulate calls at a chosen block.",
+    "Inspect and call any verified contract on any configured chain — browse its ABI, read state at a chosen block, and plot how a value evolved over a block range.",
   sections: [
     {
       heading: "What you're looking at",

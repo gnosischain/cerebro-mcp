@@ -18,13 +18,12 @@ import { MiniAppChrome } from "../shared/MiniAppChrome";
 import { useHydratedDatasets } from "../shared/useHydratedDatasets";
 import { useMiniApp } from "../shared/useMiniApp";
 import { ToastStack } from "../shared/ToastStack";
-import { TASK_OF_MODE, TaskSwitch, type GraphTask } from "./TaskSwitch";
+import { TASK_OF_MODE, GraphNav, type GraphTask } from "./GraphNav";
 import { downloadCaseExport } from "./caseExport";
 import { buildMockPayload } from "./devFixture";
-import { AtlasView } from "./modes/AtlasView";
 import { FlowsView, type FlowsSettings } from "./modes/FlowsView";
 import { TransactionsView, type TxSettings } from "./modes/TransactionsView";
-import { InvestigateView, type RefetchOverrides } from "./modes/InvestigateView";
+import { RelationshipsView, type RefetchOverrides } from "./modes/RelationshipsView";
 import { TimelineView, type TimelineSettings } from "./modes/TimelineView";
 import { useGraphSync } from "./state/useGraphSync";
 import { useSerializedLoader } from "./state/useSerializedLoader";
@@ -231,7 +230,7 @@ export default function GraphExplorerApp() {
   }, [state.mode, state.selection]);
 
   const onModeChange = (
-    mode: GraphMode,
+    requestedMode: GraphMode,
     options: {
       /** Boot-only, fully resolved URL snapshot. Supplying it prevents the
        * mode switch from reading pre-dispatch reducer defaults. */
@@ -239,6 +238,12 @@ export default function GraphExplorerApp() {
       forceTimelineRequest?: boolean;
     } = {},
   ) => {
+    // Normalize HERE, not only in the reducer: this is the single funnel for
+    // every mode change (nav click, deep link, cross-mode handoff), and the
+    // server sync below must not be told "atlas" while the UI resolves to
+    // Relationships.
+    const mode: GraphMode =
+      requestedMode === "atlas" ? "investigate" : requestedMode;
     const currentTask = TASK_OF_MODE[state.mode];
     const nextTask = TASK_OF_MODE[mode];
     selectionByTask.current[currentTask] = { ...state.selection };
@@ -730,21 +735,21 @@ export default function GraphExplorerApp() {
   ]);
 
   // ---- Model context (what the agent sees about this view) ----
+  // No "atlas" branch: the mode is unreachable now. S1 makes Relationships
+  // source-aware (seed vs catalog sample) and will revisit this pair.
   const activePair =
-    state.mode === "atlas"
-      ? ["atlas_nodes", "atlas_edges"]
-      : state.mode === "timeline"
-        ? ["timeline_nodes", "timeline_edges"]
-        : state.mode === "flows"
-          ? ["flow_nodes", "flow_edges"]
-          : state.mode === "transactions"
-            ? ["tx_nodes", "tx_legs"]
+    state.mode === "timeline"
+      ? ["timeline_nodes", "timeline_edges"]
+      : state.mode === "flows"
+        ? ["flow_nodes", "flow_edges"]
+        : state.mode === "transactions"
+          ? ["tx_nodes", "tx_legs"]
           : ["nodes", "edges"];
   const nodeCount = datasets[activePair[0]]?.rows.length ?? 0;
   const edgeCount = datasets[activePair[1]]?.rows.length ?? 0;
   const activeProfiles = useMemo(
-    () => (state.mode === "atlas" ? state.atlasProfiles : state.investigateProfiles),
-    [state.mode, state.atlasProfiles, state.investigateProfiles],
+    () => state.investigateProfiles,
+    [state.investigateProfiles],
   );
   useEffect(() => {
     if (!view) return;
@@ -815,7 +820,7 @@ export default function GraphExplorerApp() {
             </button>
           </div>
         ) : null}
-        <TaskSwitch
+        <GraphNav
           mode={state.mode}
           onChange={onModeChange}
           onExportCase={() => {
@@ -829,30 +834,7 @@ export default function GraphExplorerApp() {
             });
           }}
         />
-        {state.mode === "atlas" ? (
-          <AtlasView
-            server={server}
-            local={state}
-            dispatch={dispatch}
-            atlasNodes={datasets.atlas_nodes}
-            atlasEdges={datasets.atlas_edges}
-            atlasPreviewNodes={datasets.atlas_preview_nodes}
-            atlasPreviewEdges={datasets.atlas_preview_edges}
-            atlasPreviewNodeDescriptor={view.datasets?.atlas_preview_nodes}
-            atlasPreviewEdgeDescriptor={view.datasets?.atlas_preview_edges}
-            loadSample={loadSample}
-            loading={relationshipLoader.loading}
-            loadError={relationshipLoader.error}
-            loadPreview={loadAtlasPreview}
-            previewLoading={atlasPreviewLoader.loading}
-            previewError={atlasPreviewLoader.error}
-            desiredPreviewRequestId={atlasPreviewLoader.desiredRequestId}
-            seedInvestigate={seedInvestigate}
-            onSelectNode={onSelectNode}
-            onSelectEdge={onSelectEdge}
-            onClearSelection={onClearSelection}
-          />
-        ) : state.mode === "flows" ? (
+        {state.mode === "flows" ? (
           <FlowsView
             server={server}
             local={state}
@@ -923,7 +905,7 @@ export default function GraphExplorerApp() {
             onBrowseMoneyTrail={() => onModeChange("flows")}
           />
         ) : (
-          <InvestigateView
+          <RelationshipsView
             server={server}
             local={state}
             dispatch={dispatch}
@@ -932,6 +914,19 @@ export default function GraphExplorerApp() {
             nodeEvidence={datasets.node_evidence}
             edgeEvidence={datasets.edge_evidence}
             evidenceExpectation={evidenceExpectation}
+            atlasNodes={datasets.atlas_nodes}
+            atlasEdges={datasets.atlas_edges}
+            atlasNodeDescriptor={view.datasets?.atlas_nodes}
+            atlasEdgeDescriptor={view.datasets?.atlas_edges}
+            atlasPreviewNodes={datasets.atlas_preview_nodes}
+            atlasPreviewEdges={datasets.atlas_preview_edges}
+            atlasPreviewNodeDescriptor={view.datasets?.atlas_preview_nodes}
+            atlasPreviewEdgeDescriptor={view.datasets?.atlas_preview_edges}
+            loadSample={loadSample}
+            loadPreview={loadAtlasPreview}
+            previewLoading={atlasPreviewLoader.loading}
+            previewError={atlasPreviewLoader.error}
+            desiredPreviewRequestId={atlasPreviewLoader.desiredRequestId}
             refetchSeed={refetchSeed}
             seedInvestigate={seedInvestigate}
             expandNode={expandNode}
@@ -940,7 +935,6 @@ export default function GraphExplorerApp() {
             onSelectNode={onSelectNode}
             onSelectEdge={onSelectEdge}
             onClearSelection={onClearSelection}
-            onBrowseAtlas={() => onModeChange("atlas")}
           />
         )}
       </div>

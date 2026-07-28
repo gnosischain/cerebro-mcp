@@ -99,6 +99,12 @@ TEACHING_DEBUG_UNSUPPORTED = (
 )
 
 
+#: Per-chain router cache for ``RpcRouter.for_chain``. Routers hold capability
+#: probe results, so they must be reused rather than rebuilt per call.
+_ROUTER_CACHE: dict[int, "RpcRouter"] = {}
+_ROUTER_CACHE_LOCK = threading.Lock()
+
+
 class RpcRouter:
     """Standard vs archive raw endpoints.
 
@@ -115,10 +121,37 @@ class RpcRouter:
         self._archive: RawRpcClient | None = None
         self._lock = threading.Lock()
         self._capabilities: dict[str, bool] = {}
+        self._lowest_block: int | None = None
 
     @classmethod
     def from_settings(cls) -> "RpcRouter":
         return cls(settings.GNOSIS_RPC_URL, settings.GNOSIS_ARCHIVE_RPC_URL)
+
+    @classmethod
+    def for_chain(cls, chain_id: int) -> "RpcRouter":
+        """Router for any chain in the shared registry.
+
+        Memoized per chain: ``_capabilities`` is per-instance, so handing out a
+        fresh router each call would re-fire the ``supports()`` probes.
+        """
+        with _ROUTER_CACHE_LOCK:
+            router = _ROUTER_CACHE.get(int(chain_id))
+            if router is None:
+                # Imported here, not at module scope: chains.py imports config,
+                # and keeping the dependency lazy preserves this module's
+                # I/O-free, cycle-free import.
+                from cerebro_mcp.chains import chain_rpc_urls, get_chain, rpc_env_hint
+
+                chain = get_chain(chain_id)
+                standard_url, archive_url = chain_rpc_urls(chain.chain_id)
+                if not standard_url:
+                    raise ValueError(
+                        f"No RPC endpoint configured for {chain.name} "
+                        f"(chain {chain.chain_id}). Set {rpc_env_hint(chain.chain_id)}."
+                    )
+                router = cls(standard_url, archive_url)
+                _ROUTER_CACHE[chain.chain_id] = router
+            return router
 
     @property
     def standard(self) -> RawRpcClient:
@@ -207,3 +240,58 @@ class RpcRouter:
 
     def latest_block(self) -> int:
         return int(self.standard.request("eth_blockNumber", []), 16)
+
+    def _header_served(self, block: int) -> bool:
+        """True when the endpoint actually returns a header for ``block``."""
+        client = self.archive if self.has_archive() else self.standard
+        try:
+            return client.request("eth_getBlockByNumber", [hex(block), False]) is not None
+        except RpcError:
+            return False
+
+    def lowest_available_block(self, hi: int | None = None) -> int:
+        """Lowest block ≥ 1 this endpoint will actually serve.
+
+        Not every chain is a contiguous range from block 1. Celo's L1→L2
+        migration is the motivating case: the L2 endpoint serves genesis and
+        everything from block 31,056,500 (2025-03-26) onward, but answers
+        ``null`` for the legacy L1 history in between — and ``eth_getCode``
+        there fails outright with "no state found". Ordinary pruned nodes have
+        the same shape. Assuming a floor of 1 turns into a confusing
+        "Block 1 not found" the moment a caller reaches back far enough.
+
+        Block 0 is deliberately excluded from the search: genesis is often
+        served even when the blocks above it are not, which would break the
+        monotonic "served" predicate the bisection relies on.
+
+        Costs nothing on a normal archive node (one probe, block 1 answers);
+        the bisection only runs when it does not, and the result is cached.
+        """
+        if self._lowest_block is not None:
+            return self._lowest_block
+
+        # Probe OUTSIDE the lock. `_header_served` reaches for the `archive` /
+        # `standard` properties, which take `self._lock` themselves, and that
+        # lock is not reentrant — holding it here deadlocks. Racing threads
+        # may each compute the value; they agree, so the duplicate work is
+        # harmless and far cheaper than serialising ~27 network probes.
+        if self._header_served(1):
+            found = 1
+        else:
+            lo = 1
+            top = hi if hi is not None else self.latest_block()
+            if not self._header_served(top):
+                # Nothing is served — let the caller's own read raise a real
+                # error rather than inventing a floor here. Not cached.
+                return 1
+            while top - lo > 1:
+                mid = (lo + top) // 2
+                if self._header_served(mid):
+                    top = mid
+                else:
+                    lo = mid
+            found = top
+
+        with self._lock:
+            self._lowest_block = found
+        return found

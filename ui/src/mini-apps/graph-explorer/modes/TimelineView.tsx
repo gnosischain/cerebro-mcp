@@ -2,7 +2,7 @@
 // surface; the legacy timeline graph remains available as a collapsible
 // spatial overview. Cursor/playing/speed stay client-local.
 
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { shortAddr } from "../../../utils/format";
 import type { HydratedDataset } from "../../shared/useHydratedDatasets";
 import { DetailsPanel } from "../DetailsPanel";
@@ -61,7 +61,6 @@ interface Props {
   onBrowseMoneyTrail?: () => void;
   /** Legacy alias retained until GraphExplorerApp routes the callback to flows. */
   onBrowseInvestigate?: () => void;
-  modeSwitch?: ReactNode;
 }
 
 const WINDOW_OPTIONS = [1, 2, 4, 8, 12];
@@ -619,7 +618,6 @@ export function TimelineView({
   onClearSelection,
   onBrowseMoneyTrail,
   onBrowseInvestigate,
-  modeSwitch,
 }: Props) {
   const timeline = server.timeline;
   const anchorId = timeline?.anchor?.id ?? "";
@@ -841,7 +839,6 @@ export function TimelineView({
           >
             ⓘ
           </button>
-          {modeSwitch}
         </div>
       </header>
 

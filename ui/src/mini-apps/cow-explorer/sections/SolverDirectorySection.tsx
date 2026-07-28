@@ -6,7 +6,7 @@
 
 import { useMemo, useState } from "react";
 import { rowsToObjects } from "../../shared/rowDataset";
-import { ChainBadge } from "../components/ChainBadge";
+import { ChainBadge } from "../../shared/ChainBadge";
 import { KpiTile } from "../components/KpiTile";
 import {
   aggregateDirectory,
