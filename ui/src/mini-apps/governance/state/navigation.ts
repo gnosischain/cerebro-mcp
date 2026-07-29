@@ -23,7 +23,10 @@ export type GovSectionId = Exclude<GovSection, "entity">;
 const SECTION_IDS = new Set<string>([
   "overview", "proposals", "voters", "forum", "delegations", "treasury",
 ]);
-const ENTITY_TYPES = new Set<string>(["proposal", "voter", "forum_topic", "forum_user"]);
+const ENTITY_TYPES = new Set<string>([
+  "proposal", "voter", "forum_topic", "forum_user",
+  "treasury_token", "treasury_wallet",
+]);
 
 export function isGovSectionId(value: string): value is GovSectionId {
   return SECTION_IDS.has(value);

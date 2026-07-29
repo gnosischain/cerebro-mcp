@@ -4,12 +4,13 @@
 // Defaults are omitted to keep shared links clean: section=overview and the
 // all-history date range produce no params.
 
+import { DEFAULT_TREASURY_TAB, isTreasuryTab, type TreasuryTabId } from "./model/treasuryTabs";
 import type { GovernanceViewState, GovSection } from "./types";
 
 const URL_KEYS = [
   "section", "q", "days", "start", "end",
   "pstate", "ptype", "quorum", "cat", "fstatus", "sort",
-  "entity", "id",
+  "entity", "id", "ttab",
 ];
 
 export interface GovUrlState {
@@ -27,13 +28,20 @@ export interface GovUrlState {
   sort: string;
   entity: string;
   id: string;
+  /** Frontend-only treasury sub-tab; "" when absent or unrecognised. A valid
+   * value implies section=treasury (readUrl coerces `section` accordingly). */
+  ttab: TreasuryTabId | "";
 }
 
 export function readUrl(): GovUrlState {
   const p = new URLSearchParams(window.location.search);
   const days = p.get("days");
+  const rawTab = p.get("ttab") || "";
+  const ttab: TreasuryTabId | "" = isTreasuryTab(rawTab) ? rawTab : "";
   return {
-    section: (p.get("section") as GovSection | null) ?? "",
+    // A valid sub-tab implies its host section — ttab is client-only, so a
+    // link like ?ttab=wallets must still land on treasury.
+    section: ttab ? "treasury" : ((p.get("section") as GovSection | null) ?? ""),
     q: p.get("q") || "",
     days: days === null || days === "" || !Number.isFinite(Number(days)) ? null : Number(days),
     start: p.get("start") || "",
@@ -46,10 +54,15 @@ export function readUrl(): GovUrlState {
     sort: p.get("sort") || "",
     entity: p.get("entity") || "",
     id: p.get("id") || "",
+    ttab,
   };
 }
 
-export function writeUrl(state: GovernanceViewState, push = false): void {
+export function writeUrl(
+  state: GovernanceViewState,
+  ttab: TreasuryTabId | null = null,
+  push = false,
+): void {
   const p = new URLSearchParams(window.location.search);
   URL_KEYS.forEach((key) => p.delete(key));
   if (state.section !== "overview" && state.section !== "entity") {
@@ -72,6 +85,11 @@ export function writeUrl(state: GovernanceViewState, push = false): void {
   if (state.selected_entity) {
     p.set("entity", state.selected_entity.entity_type);
     p.set("id", state.selected_entity.identifier);
+  }
+  // Only meaningful on the treasury section, and the default tab is omitted so
+  // an ordinary treasury link stays clean.
+  if (state.section === "treasury" && ttab && ttab !== DEFAULT_TREASURY_TAB) {
+    p.set("ttab", ttab);
   }
   const qs = p.toString();
   const url = window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;

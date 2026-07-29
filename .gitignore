@@ -18,3 +18,4 @@ ui/node_modules/
 ui/dist/
 ui/dist-*/
 src/cerebro_mcp/static/report.html
+.sql-baseline.json

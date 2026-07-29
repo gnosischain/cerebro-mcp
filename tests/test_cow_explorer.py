@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from cerebro_mcp.clients.clickhouse import INTERACTIVE_QUERY_BUDGET, ExecutedQuery
 from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
 from cerebro_mcp.security import RiskClass, TOOL_RISK_REGISTRY
-from cerebro_mcp.tools.visualization import cow_explorer, mini_apps, web_apps
+from cerebro_mcp.tools.visualization import coingecko, cow_explorer, mini_apps, web_apps
 
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
@@ -99,9 +99,10 @@ def reset_state():
         "load_cow_entity", "load_cow_explorer_datasets", "load_cow_icon_overlay",
     ):
         web_apps.MINI_APP_TOOL_REGISTRY.pop(name, None)
-    with cow_explorer._COINGECKO_ICON_LOCK:
-        cow_explorer._COINGECKO_ICON_CACHE.clear()
-        cow_explorer._COINGECKO_PENDING.clear()
+    # The CoinGecko cache moved to the shared visualization.coingecko module
+    # when the governance Treasury tab needed the same lookups; reset it through
+    # its own helper rather than reaching into another module's internals.
+    coingecko.reset_caches_for_tests()
     yield
     reset_cache_for_tests()
     mini_apps.reset_views_for_tests()
@@ -746,7 +747,7 @@ def test_coingecko_icons_use_platform_lists_cache_and_fallback_safely(monkeypatc
         calls.append(url)
         return Response()
 
-    monkeypatch.setattr(cow_explorer.requests, "get", get)
+    monkeypatch.setattr(coingecko.requests, "get", get)
 
     class InlineExecutor:
         """Run the background fetch synchronously so the test is deterministic."""
@@ -754,28 +755,30 @@ def test_coingecko_icons_use_platform_lists_cache_and_fallback_safely(monkeypatc
         def submit(self, fn):
             fn()
 
-    monkeypatch.setattr(cow_explorer, "_COINGECKO_EXECUTOR", InlineExecutor())
+    monkeypatch.setattr(coingecko, "_EXECUTOR", InlineExecutor())
 
     # First call: cache miss → background fetch (inline here) → pending=True
     # and no icons yet. NOTHING blocks.
-    icons, pending = cow_explorer._coingecko_icon_map_nowait(1)
+    icons, pending = coingecko.icon_map_nowait(1)
     assert icons == {} and pending is True
     assert calls == ["https://tokens.coingecko.com/ethereum/all.json"]
     # Second call: cache hit with the fetched map; untrusted hosts filtered.
-    icons, pending = cow_explorer._coingecko_icon_map_nowait(1)
+    icons, pending = coingecko.icon_map_nowait(1)
     assert pending is False
     assert icons[weth] == "https://assets.coingecko.com/coins/images/2518/thumb/weth.png"
     assert TOKEN_A not in icons  # https://example.com is not an allowed host
     assert len(calls) == 1
     # Chains without a CoinGecko platform id resolve to nothing, not a fetch.
-    assert cow_explorer._coingecko_icon_map_nowait(11155111) == ({}, False)
+    assert coingecko.icon_map_nowait(11155111) == ({}, False)
+    # The cow-level alias still resolves to the shared registry.
     assert cow_explorer.COINGECKO_PLATFORM_IDS[57073] == "ink"
+    assert cow_explorer.COINGECKO_PLATFORM_IDS is coingecko.PLATFORM_IDS
 
 
 def test_icon_overlay_maps_dataset_tokens_and_native(monkeypatch):
     weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-    with cow_explorer._COINGECKO_ICON_LOCK:
-        cow_explorer._COINGECKO_ICON_CACHE[1] = (
+    with coingecko._LOCK:
+        coingecko._ICON_CACHE[1] = (
             __import__("time").monotonic(),
             {weth: "https://assets.coingecko.com/coins/images/2518/thumb/weth.png"},
         )

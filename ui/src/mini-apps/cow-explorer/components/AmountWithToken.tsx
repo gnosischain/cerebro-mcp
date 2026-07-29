@@ -7,7 +7,7 @@
 
 import { displayAmount } from "../model/identity";
 import type { CowExplorerViewState } from "../types";
-import { TokenIdentity } from "./TokenIdentity";
+import { TokenIdentity } from "../../shared/TokenIdentity";
 
 export interface AmountWithTokenProps {
   /** View state — only `icon_overlay` and the fallback `chain_id` are read. */

@@ -88,3 +88,40 @@ describe("Governance standalone URL state", () => {
     expect(params.get("token")).toBe("secret");
   });
 });
+
+describe("treasury sub-tab (?ttab=)", () => {
+  beforeEach(() => window.history.replaceState({}, "", "/app/governance?token=secret"));
+
+  it("round-trips a non-default tab and implies section=treasury on read", () => {
+    const state = baseState();
+    state.section = "treasury";
+    writeUrl(state, "wallets");
+    expect(new URLSearchParams(window.location.search).get("ttab")).toBe("wallets");
+    const parsed = readUrl();
+    expect(parsed.ttab).toBe("wallets");
+    // ttab is client-only, so a shared ?ttab= link must still land on treasury.
+    expect(parsed.section).toBe("treasury");
+    expect(new URLSearchParams(window.location.search).get("token")).toBe("secret");
+  });
+
+  it("omits the default tab so an ordinary treasury link stays clean", () => {
+    const state = baseState();
+    state.section = "treasury";
+    writeUrl(state, "portfolio");
+    expect(new URLSearchParams(window.location.search).has("ttab")).toBe(false);
+  });
+
+  it("never emits ttab off the treasury section", () => {
+    const state = baseState();
+    state.section = "proposals";
+    writeUrl(state, "wallets");
+    expect(new URLSearchParams(window.location.search).has("ttab")).toBe(false);
+  });
+
+  it("reads an unrecognised tab as absent rather than rendering an empty view", () => {
+    window.history.replaceState({}, "", "/app/governance?ttab=nope");
+    const parsed = readUrl();
+    expect(parsed.ttab).toBe("");
+    expect(parsed.section).toBe("");
+  });
+});

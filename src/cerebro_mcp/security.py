@@ -212,6 +212,7 @@ TOOL_RISK_REGISTRY: dict[str, frozenset[RiskClass]] = {
     "load_governance_datasets": _AO,
     "search_governance": _AO,
     "load_governance_entity": _AO,
+    "load_governance_overlays": _AO,
     # metric lab (frontend-only helpers)
     "search_metric_catalog": _AO,
     "get_metric_catalog_entry": _AO,

@@ -11,10 +11,13 @@ import { FreshnessStrip } from "./components/FreshnessStrip";
 import { ContributorDetail } from "./detail/ContributorDetail";
 import { ProposalDetail } from "./detail/ProposalDetail";
 import { TopicDetail } from "./detail/TopicDetail";
+import { TreasuryTokenDetail } from "./detail/TreasuryTokenDetail";
+import { TreasuryWalletDetail } from "./detail/TreasuryWalletDetail";
 import { VoterDetail } from "./detail/VoterDetail";
 import { MOCK_PAYLOAD } from "./devFixture";
 import { buildModelContextLines, type GovAggregates } from "./model/contextPrompt";
 import { parseSpaceSummary } from "./model/parseRows";
+import { DEFAULT_TREASURY_TAB, type TreasuryTabId } from "./model/treasuryTabs";
 import { DelegationsSection } from "./sections/DelegationsSection";
 import { TreasurySection } from "./sections/TreasurySection";
 import { ForumSection } from "./sections/ForumSection";
@@ -57,7 +60,10 @@ const LARGE_DATASETS = new Set([
   "contributor_posts",
   "contributor_leaderboard",
   "top_delegates",
-  "treasury_holdings",
+  // treasury_holdings is deliberately NOT here: USD ranking happens client-side
+  // (prices are an overlay, not a SQL column), and sorting a server-paged
+  // preview would rank only the visible page. At ~361 rows against the 10k
+  // hydration cap this costs one extra fetch.
 ]);
 
 /** Frozen warning-code vocabulary → user copy. Unknown strings (human
@@ -144,8 +150,18 @@ export default function GovernanceApp() {
   const groupLoader = useGroupLoader(callTool, "load_governance_datasets");
   const [draft, setDraft] = useState<GovFilterDraft>(EMPTY_DRAFT);
   const [search, setSearch] = useState("");
+  // Treasury sub-tab. Lives HERE, not in TreasurySection: the section unmounts
+  // on an entity drill-down, so component state would silently reset the tab
+  // every time the user came back from a token or wallet page.
+  const [treasuryTab, setTreasuryTab] = useState<TreasuryTabId>(
+    () => (typeof window !== "undefined" ? readUrl().ttab : "") || DEFAULT_TREASURY_TAB,
+  );
   const previousSection = useRef<GovSectionId>("overview");
   const bootScopeRef = useRef("");
+  // De-dup key for the overlay call + the one-shot retry ledger, so a re-render
+  // never re-hits the rate-limited CoinGecko path for an unchanged token set.
+  const overlayKeyRef = useRef("");
+  const overlayRetriedRef = useRef(new Set<string>());
   // One-shot URL deep-link seed (standalone mode): consumed by the FIRST
   // section apply; `entity`+`id` params short-circuit to the entity load.
   const urlSeedRef = useRef<GovUrlState | null | undefined>(undefined);
@@ -178,7 +194,7 @@ export default function GovernanceApp() {
     if (!state) return;
     if (state.section !== "entity") previousSection.current = state.section;
     setDraft(draftFromState(state));
-    if (typeof window !== "undefined" && window.__MINI_APP_API__) writeUrl(state);
+    if (typeof window !== "undefined" && window.__MINI_APP_API__) writeUrl(state, treasuryTab);
     updateModelContext(buildModelContextLines(state, aggregates));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.scope_id, state?.applied_request_id]);
@@ -210,6 +226,38 @@ export default function GovernanceApp() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view?.view_id, state?.scope_id, loadedGroupsKey, groupLoader.tick]);
+
+  // CoinGecko icon + spot-price overlay for the treasury tab. Runs AFTER the
+  // datasets settle because it resolves the tokens actually on screen, and it
+  // never blocks a data load: the server returns whatever is cached and reports
+  // `overlay_pending` when a background fetch will find more. Pricing needs two
+  // hops (contract -> coin id -> quote), so exactly one retry is scheduled — the
+  // server chains both hops in a single pass to make that sufficient.
+  const revisionsKey = JSON.stringify(state?.dataset_revisions ?? {});
+  useEffect(() => {
+    if (!view || !state) return;
+    if (state.section !== "treasury") return;
+    if (Object.keys(state.dataset_revisions ?? {}).length === 0) return;
+    const viewId = view.view_id;
+    const timer = setTimeout(() => {
+      if (overlayKeyRef.current === `${viewId}|${revisionsKey}`) return;
+      overlayKeyRef.current = `${viewId}|${revisionsKey}`;
+      void callTool("load_governance_overlays", { view_id: viewId }).then((result) => {
+        const payload = result as { warnings?: string[] } | null;
+        if (
+          payload?.warnings?.includes("overlay_pending")
+          && !overlayRetriedRef.current.has(revisionsKey)
+        ) {
+          overlayRetriedRef.current.add(revisionsKey);
+          setTimeout(() => {
+            void callTool("load_governance_overlays", { view_id: viewId });
+          }, 5000);
+        }
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view?.view_id, state?.section, revisionsKey]);
 
   if (!view || !state) {
     return <div className="gov-loading">Loading Governance Explorer…</div>;
@@ -302,6 +350,10 @@ export default function GovernanceApp() {
         return <TopicDetail ctx={ctx} />;
       case "forum_user":
         return <ContributorDetail ctx={ctx} />;
+      case "treasury_token":
+        return <TreasuryTokenDetail ctx={ctx} />;
+      case "treasury_wallet":
+        return <TreasuryWalletDetail ctx={ctx} />;
       default:
         return <div className="gov-empty">No entity selected.</div>;
     }
@@ -378,7 +430,16 @@ export default function GovernanceApp() {
         ) : state.section === "forum" ? (
           <ForumSection ctx={ctx} />
         ) : state.section === "treasury" ? (
-          <TreasurySection ctx={ctx} />
+          <TreasurySection
+            ctx={ctx}
+            tab={treasuryTab}
+            onTab={(next) => {
+              setTreasuryTab(next);
+              if (typeof window !== "undefined" && window.__MINI_APP_API__) {
+                writeUrl(state, next);
+              }
+            }}
+          />
         ) : (
           <DelegationsSection ctx={ctx} />
         )}

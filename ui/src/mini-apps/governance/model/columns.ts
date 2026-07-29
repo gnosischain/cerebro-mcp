@@ -62,6 +62,10 @@ export const COLUMN_LABELS: Record<string, string> = {
   balance_units: "Balance",
   balance_total_raw: "Balance (raw)",
   supply_share: "Share of supply",
+  // Share of the TREASURY's own position, not of the token's supply — the two
+  // read alike at a glance and answer completely different questions.
+  treasury_share: "Share of treasury position",
+  symbol_collisions: "Others claiming symbol",
   value_usd: "USD value",
   wallet_address: "Wallet",
   tokens_held: "Tokens",
@@ -69,6 +73,13 @@ export const COLUMN_LABELS: Record<string, string> = {
   gno_units: "GNO",
   is_ltd: "Gnosis Ltd.",
   chain_id: "Chain",
+  bucket: "Month",
+  anchor_block: "Anchor block",
+  positions: "Positions",
+  tokens_named: "Named",
+  gno_units_ex_ltd: "GNO (ex-Ltd.)",
+  units: "Units",
+  units_raw: "Units (raw)",
   dimension: "Field",
   known: "Known",
   unknown: "Unknown",
@@ -78,7 +89,7 @@ export const COLUMN_LABELS: Record<string, string> = {
   first_delegation_at: "First delegation",
   last_delegation_at: "Latest delegation",
   delegated_vp_total: "Delegated VP",
-  delegated_vp_mainnet: "Delegated VP (mainnet)",
+  delegated_vp_mainnet: "Delegated VP (Ethereum)",
   delegated_vp_gnosischain: "Delegated VP (Gnosis Chain)",
 };
 
@@ -99,6 +110,7 @@ export const HIDDEN_COLUMNS: Record<string, string[]> = {
   // observed. metadata_known is a sort key, not a column.
   treasury_holdings: ["metadata_known", "decimals"],
   treasury_by_wallet: ["is_ltd"],
+  treasury_wallet_positions: ["chain_id", "decimals", "value_usd"],
 };
 
 export function hiddenColumnsFor(datasetKey: string): string[] {

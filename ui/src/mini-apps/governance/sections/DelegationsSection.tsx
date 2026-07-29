@@ -10,11 +10,16 @@ import { COLUMN_LABELS, hiddenColumnsFor } from "../model/columns";
 import { parseActivity } from "../model/parseRows";
 import { fmtNum, fmtPct, firstRow, GroupGate, KpiRow, pickNumber, useDataset, type GovViewContext } from "./common";
 
-// Delegations: Snapshot DelegateRegistry (on-chain, Ethereum mainnet) via the
-// rpc_log_indexer view. Edge counts (delegators/delegates/churn) come
-// straight from the registry; "delegated voting power" is Snapshot's realized
-// vp_by_strategy delegation share, which exists only for delegates that have
-// voted. Both lenses are labelled distinctly — counts are never voting power.
+// Delegations: Snapshot DelegateRegistry (on-chain) via the rpc_log_indexer
+// view, which carries BOTH Ethereum mainnet (chain 1) and Gnosis Chain
+// (chain 100) — the gnosis.eth space delegates on both, and a delegator can
+// delegate independently on each.
+//
+// Edge counts (delegators/delegates/churn) come straight from the registry.
+// "Delegated voting power" is Snapshot's realized vp_by_strategy delegation
+// share, which exists ONLY for delegates that have voted — the server returns
+// NULL, never 0, where no realized figure exists. Both lenses are labelled
+// distinctly: counts are never voting power.
 
 const DELEGATE_SRC = "rpc_log_indexer";
 const POWER_SRC = "governance_db + rpc_log_indexer";
@@ -41,13 +46,22 @@ export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
   ]), [churnDs]);
 
   const powerDs = useDataset(ctx, "delegation_power");
+  // A delegate who has never voted has NO realized vp_by_strategy, so the
+  // server sends NULL. finite() maps that to null and the bar chart cannot draw
+  // it — but dropping those rows silently would make the survivors read as the
+  // whole delegate set, so the count is carried into the caption.
+  const powerRows = useMemo(() => rowsToObjects(powerDs), [powerDs]);
+  const unmeasured = useMemo(
+    () => powerRows.filter((row) => finite(row.delegated_vp_total) === null).length,
+    [powerRows],
+  );
   const powerSpec = useMemo(() => {
     const spec = horizontalBarOption(
-      rowsToObjects(powerDs)
-        .map((row) => ({
-          name: shortAddr(String(row.delegate ?? "")),
-          value: finite(row.delegated_vp_total) ?? 0,
-        }))
+      powerRows
+        .flatMap((row) => {
+          const value = finite(row.delegated_vp_total);
+          return value === null ? [] : [{ name: shortAddr(String(row.delegate ?? "")), value }];
+        })
         .filter((row) => row.value > 0)
         .slice(0, POWER_BARS),
       "Delegated VP",
@@ -56,7 +70,7 @@ export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
     // in the grid row (horizontalBarOption otherwise sizes to row count).
     delete spec._cerebro_height;
     return spec;
-  }, [powerDs]);
+  }, [powerRows]);
 
   const concentrationDs = useDataset(ctx, "delegation_concentration");
   const concentrationSpec = useMemo(() => concentrationOption(
@@ -96,7 +110,7 @@ export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
             maxHeight="520px"
             hiddenColumns={hiddenColumnsFor("top_delegates")}
             columnLabels={COLUMN_LABELS}
-            sourceLabel="Snapshot delegate registry (mainnet)"
+            sourceLabel="Snapshot delegate registry (Ethereum mainnet + Gnosis Chain)"
             renderCell={(column, value) => {
               if (column === "delegate") {
                 return <span className="gov-mono" title={String(value ?? "")}>{shortAddr(String(value ?? ""))}</span>;
@@ -187,8 +201,16 @@ export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
         </div>
         <p className="gov-caption">
           Delegated voting power is Snapshot&apos;s realized vp_by_strategy at each delegate&apos;s
-          latest vote — voted delegates only, measured at snapshot time (not live). Concentration
-          is by delegator headcount, not voting power.
+          latest final vote, measured at snapshot time (not live). The delegation strategies are
+          resolved by name and network from <em>that proposal&apos;s own</em> strategy list:
+          gnosis.eth has rewritten it three times and the chain order is not the same across
+          them, so a fixed position would read the wrong chain — or nothing at all.
+          {unmeasured > 0 && (
+            <> {unmeasured} of {powerRows.length} delegates have never voted, so no realized
+            figure exists for them — that is unknown, not zero, and they are absent from this
+            chart rather than sitting at the bottom of it.</>
+          )}{" "}
+          Concentration is by delegator headcount, not voting power.
         </p>
       </GroupGate>
     </>

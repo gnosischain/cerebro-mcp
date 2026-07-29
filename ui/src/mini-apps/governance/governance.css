@@ -154,11 +154,134 @@
 .gov-ask-actions{display:flex;justify-content:flex-end;gap:8px}
 .gov-ask-actions button{border:1px solid var(--border-hover);background:var(--surface-2);color:var(--text-primary);border-radius:7px;padding:6px 13px;cursor:pointer}
 
+/* Per-chain treasury state card. Replaces the 7-item KPI row, which wrapped
+   4+3 inside .ma-kpi-grid's hard repeat(4,1fr) and read as broken layout. One
+   card PER CHAIN because the chains snapshot independently — chain 100 stops at
+   2022-11 — so a single blended row would silently average a current chain with
+   a stale one, and neither as-of would be stateable. */
+.gov-chain-card{display:grid;gap:10px;min-width:0;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface)}
+.gov-chain-card__head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;color:var(--text-secondary);font-size:12.5px}
+.gov-chain-card__head strong{color:var(--text-primary);font-size:13.5px}
+/* NAV figure. tabular-nums so the two chain cards' digits align vertically. */
+.gov-chain-card__nav{color:var(--text-primary);font:600 26px/1.1 var(--font-mono);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+/* Caption slot directly under the figure: the qualifications that must travel
+   WITH the number ("62 of 231 priced", "spot revaluation"), never a paragraph
+   away where a screenshot of the figure alone would drop them. */
+.gov-chain-card__nav small{display:block;margin-top:4px;color:var(--text-muted);font:11.5px var(--font-body);font-variant-numeric:normal;letter-spacing:0}
+/* Unpriceable chain: muted so a dash never sits at full figure weight. */
+.gov-chain-card__nav--none{color:var(--text-muted)}
+.gov-chain-card__stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:9px 14px;margin:0}
+.gov-chain-card__stat{display:grid;gap:2px;min-width:0}
+.gov-chain-card__stat dt{color:var(--text-muted);font:10px var(--font-mono);letter-spacing:.05em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gov-chain-card__stat dd{margin:0;color:var(--text-primary);font:13px var(--font-mono);font-variant-numeric:tabular-nums}
+/* The one new colour literal in this file's portfolio block: amber marks the
+   ex-Ltd. figure so the DAO-wide GNO count can never be misread as the count net
+   of Gnosis Ltd. Same amber as .gov-stale-badge / .gov-choice-flag. */
+.gov-chain-card__stat--ltd dd{color:#fbbf24}
+.gov-chain-card__anchor{color:var(--text-muted);font:10.5px var(--font-mono);overflow-wrap:anywhere}
+
+/* Priced-coverage meter — "62 of 231 held tokens priced". COUNTS, never value:
+   the share of NAV the unpriced tail carries is by definition unknowable, so a
+   value-weighted fill here would be a fabricated number. */
+.gov-coverage-meter{height:6px;border-radius:999px;background:var(--surface-3);overflow:hidden}
+.gov-coverage-meter>span{display:block;height:100%;border-radius:999px;background:var(--primary)}
+
+/* Ranked token board: button rows, so every holding is keyboard-reachable and
+   the focused one is visibly focused. Head and rows share ONE template
+   (identity | chain | USD | share | units | wallets | spark | chevron) so the
+   columns actually line up; the head is sticky and the list scrolls internally
+   because 231 holdings must not push the rest of the page off screen. */
+.gov-token-board{display:grid;gap:2px;max-height:560px;overflow-y:auto;overscroll-behavior:contain}
+.gov-token-board__head,.gov-token-row{display:grid;grid-template-columns:minmax(140px,1.7fr) 84px 104px 76px 128px 52px 72px 14px;align-items:center;gap:10px;padding:6px 8px}
+.gov-token-board__head{position:sticky;top:0;z-index:1;background:var(--surface);border-bottom:1px solid var(--border);color:var(--text-muted);font:10px var(--font-mono);letter-spacing:.05em;text-transform:uppercase}
+.gov-token-board__head>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Head labels for the numeric columns (USD, units, wallets) right-align to sit
+   over their digits. Positional because the head mirrors the fixed 8-cell
+   template above — there is no other cell order it can have. */
+.gov-token-board__head>*:nth-child(3),.gov-token-board__head>*:nth-child(5),.gov-token-board__head>*:nth-child(6){text-align:right}
+.gov-token-row{width:100%;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text-primary);text-align:left;font:12.5px var(--font-body);cursor:pointer}
+.gov-token-row>*{min-width:0}
+.gov-token-row:hover{background:var(--surface-2);border-color:var(--border)}
+.gov-token-row:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+.gov-token-row--focused{background:var(--accent-bg);border-color:var(--accent-border)}
+.gov-token-row__chain{color:var(--text-secondary);font:11px var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gov-token-row__usd{text-align:right;color:var(--text-primary);font:12px var(--font-mono);font-variant-numeric:tabular-nums}
+/* Unpriced is NOT zero. The dash renders muted so it reads as "no price known"
+   rather than as a small value that happens to round to nothing. */
+.gov-token-row__usd--none{color:var(--text-muted)}
+.gov-token-row__units{text-align:right;color:var(--text-secondary);font:11px var(--font-mono);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gov-token-row__wallets{text-align:right;color:var(--text-muted);font:11px var(--font-mono);font-variant-numeric:tabular-nums}
+.gov-token-row__meter{height:5px;border-radius:999px;background:var(--surface-3);overflow:hidden}
+.gov-token-row__meter>span{display:block;height:100%;border-radius:999px;background:var(--primary)}
+.gov-token-row__spark{color:var(--primary);opacity:.7}
+.gov-token-row__spark svg{display:block;width:100%;height:20px}
+.gov-token-row__chevron{text-align:right;color:var(--text-muted);font:10px var(--font-mono)}
+
+/* Focused-token bar. Accent-tinted so a filtered board never looks unfiltered,
+   and the clear control is always present next to the thing it clears. */
+.gov-token-focus{display:flex;align-items:center;gap:10px 12px;flex-wrap:wrap;margin:0 0 10px;padding:8px 12px;border:1px solid var(--accent-border);border-radius:9px;background:var(--accent-bg);color:var(--text-primary);font-size:12.5px}
+.gov-token-focus__meta{display:flex;align-items:center;gap:5px 12px;flex-wrap:wrap;min-width:0;color:var(--text-secondary);font:11px var(--font-mono);font-variant-numeric:tabular-nums}
+.gov-token-focus__clear,.gov-token-focus button{margin-left:auto;flex:0 0 auto;border:1px solid var(--accent-border);background:var(--surface-2);color:var(--text-primary);border-radius:999px;padding:3px 11px;cursor:pointer;font:11px var(--font-mono)}
+.gov-token-focus__clear:hover,.gov-token-focus button:hover{border-color:var(--primary)}
+
+/* Excluded-set strip under a treemap. A treemap tile's AREA is its value, so an
+   unpriced holding has no honest tile — zero area would assert it is worthless.
+   The excluded set is therefore stated in words beside the chart, never drawn. */
+.gov-unpriced{margin-top:10px;padding:9px 12px;border:1px dashed var(--border-hover);border-radius:8px;color:var(--text-muted);font-size:11.5px;line-height:1.5}
+.gov-unpriced strong{color:var(--text-secondary);font-weight:600}
+.gov-unpriced code{font:11px var(--font-mono);color:var(--text-secondary)}
+
+/* Panel-scoped mode toggles, sized for the .ma-section-meta slot so a switch
+   that changes one panel is never mistaken for a global control. */
+.gov-panel-modes{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+.gov-panel-modes button{border:1px solid var(--border);background:var(--surface-2);color:var(--text-secondary);border-radius:999px;padding:3px 10px;cursor:pointer;font:10.5px var(--font-mono)}
+.gov-panel-modes button:hover{border-color:var(--border-hover);color:var(--text-primary)}
+.gov-panel-modes button.is-active{border-color:var(--accent-border);background:var(--accent-bg);color:var(--accent-text)}
+.gov-panel-modes button:disabled{opacity:.5;cursor:default}
+
+
+/* Wallet board — the per-wallet comparison surface. Mirrors .gov-token-board:
+   button rows in a shared grid template, because every row is a drill-down and
+   head/row cells must stay positionally aligned. Eight cells:
+   wallet | chain | tokens | unnamed | GNO | GNO value | Ltd | chevron */
+.gov-wallet-board{display:grid;gap:2px;max-height:520px;overflow-y:auto;overscroll-behavior:contain}
+.gov-wallet-board__head,.gov-wallet-row{display:grid;grid-template-columns:minmax(150px,1.5fr) 84px 64px 78px 116px 108px 52px 14px;align-items:center;gap:10px;padding:6px 8px}
+.gov-wallet-board__head{position:sticky;top:0;z-index:1;background:var(--surface);border-bottom:1px solid var(--border);color:var(--text-muted);font:10px var(--font-mono);letter-spacing:.05em;text-transform:uppercase}
+.gov-wallet-board__head>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gov-wallet-row{width:100%;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text-primary);text-align:left;font:12.5px var(--font-body);cursor:pointer}
+.gov-wallet-row>*{min-width:0}
+.gov-wallet-row:hover{background:var(--surface-2);border-color:var(--border)}
+.gov-wallet-row:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+.gov-wallet-row--focused{border-color:var(--accent-border);background:var(--accent-bg)}
+/* Every numeric column is tabular-nums and right-aligned: a comparison table
+   whose digits do not line up cannot actually be compared down the column. */
+.gov-wallet-row__num,.gov-wallet-board__head--num{text-align:right;color:var(--text-secondary);font:11px var(--font-mono);font-variant-numeric:tabular-nums}
+.gov-wallet-row__usd{text-align:right;color:var(--text-primary);font:12px var(--font-mono);font-variant-numeric:tabular-nums}
+.gov-wallet-row__usd--none{color:var(--text-muted);font-family:var(--font-body);font-size:11.5px}
+.gov-ltd-badge{display:inline-block;padding:1px 7px;border-radius:999px;border:1px solid rgba(251,191,36,.5);background:rgba(251,191,36,.12);color:#fbbf24;font:10px var(--font-mono)}
+
+/* Treasury sub-tabs. Spacing only — the strip itself is the shared .tabbar. */
+.gov-subtabs{margin:2px 0 0}
+.gov-subtabs .tabbar__tab{padding:8px 13px;font-size:12.5px}
+
 @media(max-width:900px){
+  /* Wallet board: keep identity + the two figures that rank it; drop the rest.
+     display:none, not narrower — a squeezed cell still claims grid width. */
+  .gov-wallet-board__head,.gov-wallet-row{grid-template-columns:minmax(0,1fr) 96px 108px;gap:8px}
+  .gov-wallet-row__chain,.gov-wallet-row__unnamed,.gov-wallet-row__ltd,.gov-wallet-row__chevron{display:none}
+  .gov-wallet-board__head>*:nth-child(2),.gov-wallet-board__head>*:nth-child(4),.gov-wallet-board__head>*:nth-child(7),.gov-wallet-board__head>*:nth-child(8){display:none}
+
   .gov-subbar{align-items:stretch;flex-direction:column}
   .gov-subbar .ma-search{max-width:none}
   .gov-content{padding:12px}
   .gov-candidates button{grid-template-columns:1fr}
   .gov-choice{grid-template-columns:minmax(90px,140px) 1fr 90px}
   .gov-grid-2{grid-template-columns:1fr}
+  /* Token board narrows to identity | USD | units. The template is EXACTLY
+     three columns, so every other cell has to be removed outright — left in
+     place they would wrap onto phantom rows under the identity column. */
+  .gov-token-board__head,.gov-token-row{grid-template-columns:minmax(0,1fr) 92px 108px;gap:8px}
+  .gov-token-row__chain,.gov-token-row__meter,.gov-token-row__spark,.gov-token-row__wallets,.gov-token-row__chevron{display:none}
+  .gov-token-board__head>*:nth-child(2),.gov-token-board__head>*:nth-child(4),.gov-token-board__head>*:nth-child(6),.gov-token-board__head>*:nth-child(7),.gov-token-board__head>*:nth-child(8){display:none}
+  .gov-chain-card__nav{font-size:22px}
 }

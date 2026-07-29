@@ -55,7 +55,7 @@ from cerebro_mcp.clients.clickhouse import (
 )
 from cerebro_mcp.models.mini_app import MiniAppPayload, SummaryCard
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset, FailureCache
-from cerebro_mcp.tools.visualization import mini_apps, web_apps
+from cerebro_mcp.tools.visualization import coingecko, mini_apps, sql_loader, web_apps
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +108,38 @@ GNO_TOKENS = {
 #: labelled wallet: no other name is verifiable from either repo, and inventing
 #: labels for the remaining 22 would be fabricated provenance.
 LTD_WALLETS = ("0x604e4557e9020841f4e8eb98148de3d3cdea350c",)
+#: Columns the overlay resolver scans for token addresses. Narrow on purpose:
+#: this plane names its token column exactly one way, and a loose pattern would
+#: sweep unrelated columns into a CoinGecko lookup.
+TREASURY_TOKEN_COLUMN_RE = re.compile(r"^token_address$")
+#: History grain. Chain 1 publishes month-end snapshots natively; chain 100
+#: published daily until it went stale. Sampling the LAST snapshot of each month
+#: is the only grain both chains share, and it keeps every history dataset at
+#: ~99 buckets total — small enough to hydrate fully and chart client-side.
+TREASURY_HISTORY_UNIT = "month"
+#: Candidate cap per chain for the token-history series set. NOT a display N:
+#: USD ranking happens client-side (prices are a frontend overlay), so the
+#: server ships a candidate pool and the UI picks its own top-N by value.
+TREASURY_HISTORY_TOKENS = 24
 #: bytes32 of "gnosis.eth" (right-padded ASCII) — the Snapshot space id.
 GNOSIS_SPACE_ID = "0x676e6f7369732e65746800000000000000000000000000000000000000000000"
+#: The Snapshot space slug as it appears in ``governance_db.*.space_id``. The
+#: ingester only loads this one space today, but any query that reduces ACROSS
+#: proposals (rather than filtering to one) must pin it: an unpinned argMax over
+#: votes would silently follow a voter into a second space the day one is added.
+SNAPSHOT_SPACE = "gnosis.eth"
+#: Snapshot strategy names carrying delegated voting power. Matched as a
+#: SUBSTRING, deliberately: gnosis.eth has used both ``delegation`` and
+#: ``erc20-balance-of-delegation``, and Snapshot's delegation family keeps
+#: growing. See ``_delegation_slot_cte`` for why the name — not the position —
+#: is the identity.
+DELEGATION_STRATEGY_MATCH = "delegation"
+#: Row cap for ``delegation_power``. Set ABOVE the current delegate count (80)
+#: on purpose: delegates with no realized figure sort last under NULLS LAST, so
+#: a tight cap would truncate exactly the rows the UI needs in order to say how
+#: many delegates it could not measure — and an undisclosed truncation reads as
+#: "every delegate is here".
+DELEGATE_POWER_CAP = 200
 GOV_APP_META = {
     "ui": {"resourceUri": GOV_URI},
     "ui/resourceUri": GOV_URI,
@@ -121,10 +151,18 @@ MAX_RETAINED_SECTIONS = 5
 VALID_SECTIONS = {
     "overview", "proposals", "voters", "forum", "delegations", "treasury",
 }
-ENTITY_TYPES = {"proposal", "voter", "forum_topic", "forum_user"}
+ENTITY_TYPES = {
+    "proposal", "voter", "forum_topic", "forum_user",
+    "treasury_token", "treasury_wallet",
+}
 
 PROPOSAL_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")
 ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
+#: Treasury entities are ``<chain_id>:<address>``. The chain is part of the
+#: identity because 23 of the 24 census wallets exist verbatim on BOTH chains —
+#: a bare address is ambiguous 96% of the time — and because a bridged token
+#: would collide on canonical addresses the day it lands.
+TREASURY_ENTITY_ID_RE = re.compile(r"^([0-9]{1,6}):(0x[0-9a-f]{40})$")
 FORUM_ID_RE = re.compile(r"^[0-9]{1,10}$")
 GIP_QUERY_RE = re.compile(r"^gip[\s-]?0*([0-9]+)$", re.IGNORECASE)
 #: Shared GIP regex, verbatim across SQL (RE2) and TS: no digit cap, no
@@ -185,6 +223,11 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
     "treasury": {
         "core": ("treasury_summary", "treasury_holdings", "treasury_by_wallet"),
         "insights": ("treasury_coverage",),
+        "history": (
+            "treasury_chain_history",
+            "treasury_token_history",
+            "treasury_wallet_history",
+        ),
     },
 }
 #: Entity drill-down bundles (FROZEN) — loaded by ``_apply_entity_load``
@@ -199,6 +242,14 @@ ENTITY_BUNDLES: dict[str, tuple[str, ...]] = {
     "forum_user": (
         "contributor_profile", "contributor_posts", "contributor_activity",
     ),
+    "treasury_token": (
+        "treasury_token_detail", "treasury_token_holders",
+        "treasury_token_holder_series",
+    ),
+    "treasury_wallet": (
+        "treasury_wallet_detail", "treasury_wallet_positions",
+        "treasury_wallet_series",
+    ),
 }
 
 #: Provenance labels per source plane — every dataset discloses whether it is
@@ -207,6 +258,9 @@ SOURCE_LABELS = {
     "snapshot": "Snapshot off-chain signaling",
     "forum": "Forum activity",
     "cross": "Snapshot signaling + forum activity",
+    #: Snapshot votes joined to the on-chain delegate registry. Distinct from
+    #: "cross" (which is signaling + FORUM) — no forum data reaches these.
+    "signaling_onchain": "Snapshot signaling + on-chain delegate registry",
     "delegation": "Snapshot delegate registry (on-chain: mainnet + Gnosis Chain)",
     "treasury": "Verified treasury balances at pinned finalized blocks",
 }
@@ -299,7 +353,9 @@ class QuerySpec:
     parameters: dict[str, Any]
     basis: str
     #: Which data plane the dataset reads — feeds the provenance label.
-    source: Literal["snapshot", "forum", "cross", "delegation", "treasury"]
+    source: Literal[
+        "snapshot", "forum", "cross", "delegation", "treasury", "signaling_onchain",
+    ]
     cache_ttl_seconds: int = 1800
     exact_count: bool = True
 
@@ -545,6 +601,16 @@ def _validate_entity_identifier(entity_type: str, identifier: str) -> str:
         if not ADDRESS_RE.fullmatch(value):
             raise ValueError("voter identifier must be a 0x-prefixed EVM address")
         return value
+    if kind in ("treasury_token", "treasury_wallet"):
+        match = TREASURY_ENTITY_ID_RE.fullmatch(value.lower())
+        if match is None:
+            raise ValueError(
+                f"{kind} identifier must be '<chain_id>:<0x address>'"
+            )
+        chain = int(match.group(1))
+        if chain not in TREASURY_CHAINS:
+            raise ValueError(f"chain_id must be one of {sorted(TREASURY_CHAINS)}")
+        return f"{chain}:{match.group(2)}"
     if not FORUM_ID_RE.fullmatch(value) or int(value) <= 0:
         raise ValueError(f"{kind} identifier must be a positive integer id")
     return str(int(value))
@@ -634,29 +700,7 @@ def _choice_warning_scan(dataset: CachedDataset) -> bool:
 def _source_freshness_spec() -> QuerySpec:
     """Two independent freshness clocks per source: the ingestion clock
     (``ingested_at``) and the activity clock (created/last_posted)."""
-    sql = """
-SELECT source,
-       max(latest_ingested_at) AS latest_ingested_at,
-       max(latest_activity_at) AS latest_activity_at
-FROM (
-  SELECT 'snapshot' AS source, max(ingested_at) AS latest_ingested_at,
-         max(created_at) AS latest_activity_at
-  FROM governance_db.snapshot_proposals FINAL
-  UNION ALL
-  SELECT 'snapshot', max(ingested_at), max(created_at)
-  FROM governance_db.snapshot_votes FINAL
-  UNION ALL
-  SELECT 'snapshot', max(ingested_at), max(created_at)
-  FROM governance_db.snapshot_follows FINAL
-  UNION ALL
-  SELECT 'forum', max(ingested_at), max(last_posted_at)
-  FROM governance_db.forum_topics FINAL
-  UNION ALL
-  SELECT 'forum', max(ingested_at), max(created_at)
-  FROM governance_db.forum_posts FINAL
-)
-GROUP BY source
-ORDER BY source"""
+    sql = sql_loader.load_sql("governance", "source_freshness")
     return QuerySpec(
         "source_freshness", "Source freshness", sql, {},
         "ingested_at + activity clocks", "cross", 300,
@@ -706,113 +750,23 @@ def _overview_specs(range_state: dict[str, Any]) -> list[QuerySpec]:
     activity_time = _point_predicate("last_posted_at", range_state)
     days = _range_days(range_state)
 
-    space_summary = f"""
-SELECT
-  (SELECT count() FROM governance_db.snapshot_proposals FINAL WHERE {overlap}) AS proposal_count,
-  (SELECT count() FROM governance_db.snapshot_votes FINAL WHERE {votes_time}) AS vote_count,
-  (SELECT uniqExact(lower(voter)) FROM governance_db.snapshot_votes FINAL WHERE {votes_time}) AS voter_count,
-  (SELECT count() FROM governance_db.snapshot_follows FINAL WHERE {follows_time}) AS follower_count,
-  (SELECT count() FROM governance_db.forum_topics FINAL WHERE {topics_time}) AS topic_count,
-  (SELECT count() FROM governance_db.forum_posts FINAL WHERE {posts_time}) AS post_count,
-  (SELECT count() FROM governance_db.forum_users FINAL) AS forum_user_count
-ORDER BY proposal_count"""
+    space_summary = sql_loader.load_sql("governance", "space_summary", overlap=overlap, votes_time=votes_time, follows_time=follows_time, topics_time=topics_time, posts_time=posts_time)
 
     proposal_bucket, unit = _bucket("created_at", days)
     vote_bucket, _ = _bucket("created_at", days)
     topic_bucket, _ = _bucket("created_at", days)
     post_bucket, _ = _bucket("created_at", days)
-    governance_activity = f"""
-SELECT bucket, metric, metric_value, '{unit}' AS bucket_unit
-FROM (
-  SELECT {proposal_bucket} AS bucket, 'proposals_created' AS metric, count() AS metric_value
-  FROM governance_db.snapshot_proposals FINAL WHERE {_point_predicate("created_at", range_state)}
-  GROUP BY bucket
-  UNION ALL
-  SELECT {vote_bucket} AS bucket, 'votes_cast', count()
-  FROM governance_db.snapshot_votes FINAL WHERE {votes_time}
-  GROUP BY bucket
-  UNION ALL
-  SELECT {topic_bucket} AS bucket, 'topics_created', count()
-  FROM governance_db.forum_topics FINAL WHERE {topics_time}
-  GROUP BY bucket
-  UNION ALL
-  SELECT {post_bucket} AS bucket, 'posts_created', count()
-  FROM governance_db.forum_posts FINAL WHERE {posts_time}
-  GROUP BY bucket
-)
-ORDER BY bucket, metric"""
+    governance_activity = sql_loader.load_sql("governance", "governance_activity", unit=unit, proposal_bucket=proposal_bucket, vote_bucket=vote_bucket, topic_bucket=topic_bucket, post_bucket=post_bucket, proposals_time=_point_predicate("created_at", range_state), votes_time=votes_time, topics_time=topics_time, posts_time=posts_time)
 
-    proposal_types = f"""
-SELECT type, count() AS proposal_count, sum(votes_count) AS vote_count,
-       sum(scores_total) AS total_vp
-FROM governance_db.snapshot_proposals FINAL
-WHERE {overlap}
-GROUP BY type
-ORDER BY proposal_count DESC, type"""
+    proposal_types = sql_loader.load_sql("governance", "proposal_types", overlap=overlap)
 
-    quorum_distribution = f"""
-SELECT {QUORUM_STATUS_SQL} AS quorum_status,
-       count() AS proposal_count,
-       avg({QUORUM_RATIO_SQL}) AS avg_quorum_ratio
-FROM governance_db.snapshot_proposals FINAL
-WHERE {overlap}
-GROUP BY quorum_status
-ORDER BY proposal_count DESC, quorum_status"""
+    quorum_distribution = sql_loader.load_sql("governance", "quorum_distribution", quorum_status_sql=QUORUM_STATUS_SQL, quorum_ratio_sql=QUORUM_RATIO_SQL, overlap=overlap)
 
-    voter_power_concentration = f"""
-WITH sorted AS (
-  SELECT groupArray(total_vp) AS vp_values, sum(total_vp) AS all_vp,
-         count() AS voter_count
-  FROM (
-    SELECT lower(voter) AS voter_key, sum(vp) AS total_vp
-    FROM governance_db.snapshot_votes FINAL
-    WHERE {votes_time}
-    GROUP BY voter_key
-    ORDER BY total_vp DESC
-  )
-)
-SELECT tier,
-       arraySum(arraySlice(vp_values, 1, tier)) AS tier_vp,
-       all_vp,
-       arraySum(arraySlice(vp_values, 1, tier)) / nullIf(all_vp, 0) AS vp_share,
-       voter_count
-FROM sorted
-ARRAY JOIN [toUInt32(10), toUInt32(20), toUInt32(50)] AS tier
-ORDER BY tier"""
+    voter_power_concentration = sql_loader.load_sql("governance", "voter_power_concentration", votes_time=votes_time)
 
-    latest_activity = """
-SELECT kind, identifier, title, status, activity_at
-FROM (
-  SELECT 'proposal' AS kind, id AS identifier, title, state AS status,
-         created_at AS activity_at
-  FROM governance_db.snapshot_proposals FINAL
-  ORDER BY created_at DESC, id
-  LIMIT 8
-  UNION ALL
-  SELECT 'forum_topic', toString(id), title,
-         multiIf(archived = 1, 'archived', closed = 1, 'closed', 'open'),
-         bumped_at
-  FROM governance_db.forum_topics FINAL
-  ORDER BY bumped_at DESC, id
-  LIMIT 8
-)
-ORDER BY activity_at DESC, kind, identifier"""
+    latest_activity = sql_loader.load_sql("governance", "latest_activity")
 
-    forum_category_activity = f"""
-SELECT c.id AS category_id, c.name AS category_name, c.slug AS category_slug,
-       coalesce(t.topics_in_range, 0) AS topics_in_range,
-       coalesce(t.posts_in_range, 0) AS posts_in_range,
-       t.latest_post_at AS last_posted_at
-FROM governance_db.forum_categories AS c FINAL
-LEFT JOIN (
-  SELECT category_id, count() AS topics_in_range,
-         sum(posts_count) AS posts_in_range,
-         max(last_posted_at) AS latest_post_at
-  FROM governance_db.forum_topics FINAL
-  WHERE {activity_time}
-  GROUP BY category_id
-) AS t ON toInt64(t.category_id) = toInt64(c.id)
-ORDER BY topics_in_range DESC, category_id"""
+    forum_category_activity = sql_loader.load_sql("governance", "forum_category_activity", activity_time=activity_time)
 
     return [
         QuerySpec("space_summary", "Space summary", space_summary, dict(time_params),
@@ -846,65 +800,13 @@ def _proposals_specs(
     sort_fragment = PROPOSAL_SORTS.get(filters.get("sort_by", ""), PROPOSAL_SORTS[""])
     days = _range_days(range_state)
 
-    proposal_summary = f"""
-SELECT count() AS proposal_count,
-       countIf(state = 'active') AS active_count,
-       countIf(state = 'pending') AS pending_count,
-       countIf(state = 'closed') AS closed_count,
-       sum(votes_count) AS vote_count,
-       avg(votes_count) AS avg_votes,
-       quantileExact(0.5)(votes_count) AS median_votes,
-       countIf(quorum > 0 AND scores_total >= quorum) AS quorum_met_count,
-       countIf(quorum > 0 AND scores_total < quorum) AS quorum_missed_count,
-       countIf(quorum <= 0) AS quorum_unspecified_count,
-       (SELECT uniqExact(lower(voter)) FROM governance_db.snapshot_votes FINAL
-        WHERE proposal_id IN (
-          SELECT id FROM governance_db.snapshot_proposals FINAL WHERE {where}
-        )) AS unique_voters
-FROM governance_db.snapshot_proposals FINAL
-WHERE {where}
-ORDER BY proposal_count"""
+    proposal_summary = sql_loader.load_sql("governance", "proposal_summary", where=where)
 
-    proposals = f"""
-SELECT id, title, state, type, author, created_at, start_at, end_at,
-       snapshot_block, scores_total, quorum, votes_count, scores_state,
-       {QUORUM_RATIO_SQL} AS quorum_ratio,
-       {QUORUM_STATUS_SQL} AS quorum_status,
-       {_gip_sql("title")} AS gip_number,
-       discussion,
-       {DISCUSSION_TOPIC_SQL} AS discussion_topic_id,
-       JSONExtract(raw_json, 'choices', 'Array(String)') AS choices,
-       JSONExtract(raw_json, 'scores', 'Array(Float64)') AS scores,
-       length(choices) = length(scores) AND length(scores) > 0 AS len_ok,
-       if(len_ok AND arrayMax(scores) > 0,
-          choices[indexOf(scores, arrayMax(scores))], '') AS leading_choice,
-       if(len_ok AND scores_total > 0,
-          arrayMax(scores) / scores_total, NULL) AS leading_choice_share,
-       length(choices) != length(scores) AND length(scores) > 0 AS choice_shape_flagged
-FROM governance_db.snapshot_proposals FINAL
-WHERE {where}
-ORDER BY {sort_fragment}"""
+    proposals = sql_loader.load_sql("governance", "proposals", where=where, sort_fragment=sort_fragment, quorum_ratio_sql=QUORUM_RATIO_SQL, quorum_status_sql=QUORUM_STATUS_SQL, gip_title=_gip_sql("title"), discussion_topic_sql=DISCUSSION_TOPIC_SQL)
 
     start_bucket, unit = _bucket("start_at", days)
     vote_bucket, _ = _bucket("created_at", days)
-    proposal_activity = f"""
-WITH fp AS (
-  SELECT id, start_at FROM governance_db.snapshot_proposals FINAL
-  WHERE {where}
-)
-SELECT bucket, metric, metric_value, '{unit}' AS bucket_unit
-FROM (
-  SELECT {start_bucket} AS bucket, 'proposals_started' AS metric,
-         count() AS metric_value
-  FROM fp
-  GROUP BY bucket
-  UNION ALL
-  SELECT {vote_bucket} AS bucket, 'votes_cast', count()
-  FROM governance_db.snapshot_votes FINAL
-  WHERE proposal_id IN (SELECT id FROM fp)
-  GROUP BY bucket
-)
-ORDER BY bucket, metric"""
+    proposal_activity = sql_loader.load_sql("governance", "proposal_activity", where=where, unit=unit, start_bucket=start_bucket, vote_bucket=vote_bucket)
 
     return [
         QuerySpec("proposal_summary", "Proposal summary", proposal_summary,
@@ -927,80 +829,16 @@ def _voters_specs(
     # Inner column names deliberately differ from the outer aliases —
     # ClickHouse substitutes same-name aliases back into the aggregate
     # (ILLEGAL_AGGREGATION: sum(vote_count) AS vote_count).
-    voter_summary = f"""
-WITH per_voter AS (
-  SELECT lower(voter) AS voter_key, count() AS pv_votes, sum(vp) AS pv_vp
-  FROM governance_db.snapshot_votes FINAL
-  WHERE {votes_time}
-  GROUP BY voter_key
-)
-SELECT count() AS voter_count,
-       sum(pv_vp) AS total_vp,
-       sum(pv_votes) AS vote_count,
-       avg(pv_votes) AS avg_participation,
-       quantileExact(0.5)(pv_votes) AS median_participation,
-       countIf(pv_votes > 1) / nullIf(count(), 0) AS repeat_rate,
-       (SELECT count() FROM governance_db.snapshot_follows FINAL) AS follower_count
-FROM per_voter
-ORDER BY voter_count"""
+    voter_summary = sql_loader.load_sql("governance", "voter_summary", votes_time=votes_time)
 
     # any(voter) must not be aliased back to "voter" in the grouping SELECT —
     # the alias would substitute into lower(voter) (ILLEGAL_AGGREGATION).
-    voter_leaderboard = f"""
-SELECT voter_key, voter_display AS voter,
-       vote_count, total_vp, avg_vp, first_vote_at, last_vote_at
-FROM (
-  SELECT lower(voter) AS voter_key, any(voter) AS voter_display,
-         count() AS vote_count, sum(vp) AS total_vp, avg(vp) AS avg_vp,
-         min(created_at) AS first_vote_at, max(created_at) AS last_vote_at
-  FROM governance_db.snapshot_votes FINAL
-  WHERE {votes_time}
-  GROUP BY voter_key
-)
-ORDER BY {sort_fragment}"""
+    voter_leaderboard = sql_loader.load_sql("governance", "voter_leaderboard", votes_time=votes_time, sort_fragment=sort_fragment)
 
-    voter_concentration = f"""
-WITH per_voter AS (
-  SELECT lower(voter) AS voter_key, count() AS vote_count, sum(vp) AS total_vp
-  FROM governance_db.snapshot_votes FINAL
-  WHERE {votes_time}
-  GROUP BY voter_key
-),
-by_vp AS (
-  SELECT groupArray(total_vp) AS sorted_values, sum(total_vp) AS total_value
-  FROM (SELECT total_vp FROM per_voter ORDER BY total_vp DESC)
-),
-by_votes AS (
-  SELECT groupArray(toFloat64(vote_count)) AS sorted_values,
-         sum(toFloat64(vote_count)) AS total_value
-  FROM (SELECT vote_count FROM per_voter ORDER BY vote_count DESC)
-)
-SELECT metric, tier, tier_value, total_value,
-       tier_value / nullIf(total_value, 0) AS share
-FROM (
-  SELECT 'vp' AS metric, tier,
-         arraySum(arraySlice(sorted_values, 1, tier)) AS tier_value, total_value
-  FROM by_vp
-  ARRAY JOIN [toUInt32(10), toUInt32(20), toUInt32(50)] AS tier
-  UNION ALL
-  SELECT 'votes', tier,
-         arraySum(arraySlice(sorted_values, 1, tier)), total_value
-  FROM by_votes
-  ARRAY JOIN [toUInt32(10), toUInt32(20), toUInt32(50)] AS tier
-)
-ORDER BY metric, tier"""
+    voter_concentration = sql_loader.load_sql("governance", "voter_concentration", votes_time=votes_time)
 
     bucket_sql, unit = _bucket("created_at", days)
-    voter_activity = f"""
-SELECT {bucket_sql} AS bucket,
-       uniqExact(lower(voter)) AS unique_voters,
-       count() AS vote_count,
-       sum(vp) AS total_vp,
-       '{unit}' AS bucket_unit
-FROM governance_db.snapshot_votes FINAL
-WHERE {votes_time}
-GROUP BY bucket
-ORDER BY bucket"""
+    voter_activity = sql_loader.load_sql("governance", "voter_activity", bucket_sql=bucket_sql, unit=unit, votes_time=votes_time)
 
     return [
         QuerySpec("voter_summary", "Voter summary", voter_summary, dict(params),
@@ -1037,141 +875,40 @@ def _delegations_specs(
     bucket_sql, unit = _bucket("block_timestamp", days)
     sort_fragment = DELEGATE_SORTS.get(filters.get("sort_by", ""), DELEGATE_SORTS[""])
 
-    delegation_summary = f"""
-WITH active AS (
-  SELECT chain_id, delegator,
-         argMax(action, (block_number, log_index)) AS last_action,
-         argMax(delegate, (block_number, log_index)) AS current_delegate
-  FROM {src}
-  GROUP BY chain_id, delegator
-)
-SELECT
-  uniqExactIf(delegator, last_action = 'SetDelegate') AS active_delegators,
-  uniqExactIf(current_delegate, last_action = 'SetDelegate') AS active_delegates,
-  (SELECT count() FROM {src}) AS total_events,
-  (SELECT countIf(action = 'SetDelegate') FROM {src}) AS set_events,
-  (SELECT countIf(action = 'ClearDelegate') FROM {src}) AS clear_events,
-  (SELECT countIf(action = 'SetDelegate') - uniqExactIf((chain_id, delegator), action = 'SetDelegate')
-     FROM {src}) AS re_delegations,
-  (SELECT countIf(action = 'ClearDelegate') / nullIf(countIf(action = 'SetDelegate'), 0)
-     FROM {src}) AS clear_rate
-FROM active
-ORDER BY active_delegators"""
+    delegation_summary = sql_loader.load_sql("governance", "delegation_summary", src=src)
 
-    top_delegates = f"""
-SELECT current_delegate AS delegate,
-       uniqExact(delegator) AS delegator_count,
-       min(set_at) AS first_delegation_at,
-       max(set_at) AS last_delegation_at
-FROM (
-  SELECT chain_id, delegator,
-         argMax(delegate, (block_number, log_index)) AS current_delegate,
-         argMax(action, (block_number, log_index)) AS last_action,
-         argMax(block_timestamp, (block_number, log_index)) AS set_at
-  FROM {src}
-  GROUP BY chain_id, delegator
-)
-WHERE last_action = 'SetDelegate'
-GROUP BY current_delegate
-ORDER BY {sort_fragment}"""
+    top_delegates = sql_loader.load_sql("governance", "top_delegates", src=src, sort_fragment=sort_fragment)
 
-    delegation_activity = f"""
-SELECT bucket, set_events, clear_events, net_change, cumulative_net,
-       '{unit}' AS bucket_unit
-FROM (
-  SELECT bucket, set_events, clear_events,
-         (set_events - clear_events) AS net_change,
-         sum(set_events - clear_events) OVER (ORDER BY bucket) AS cumulative_net
-  FROM (
-    SELECT {bucket_sql} AS bucket,
-           countIf(action = 'SetDelegate') AS set_events,
-           countIf(action = 'ClearDelegate') AS clear_events
-    FROM {src}
-    WHERE {time_pred}
-    GROUP BY bucket
-  )
-)
-ORDER BY bucket"""
+    delegation_activity = sql_loader.load_sql("governance", "delegation_activity", src=src, time_pred=time_pred, bucket_sql=bucket_sql, unit=unit)
 
-    delegation_power = f"""
-WITH active AS (
-  SELECT chain_id, delegator,
-         argMax(action, (block_number, log_index)) AS last_action,
-         argMax(delegate, (block_number, log_index)) AS current_delegate
-  FROM {src}
-  GROUP BY chain_id, delegator
-),
-delegates AS (
-  SELECT current_delegate AS delegate, uniqExact(delegator) AS delegator_count
-  FROM active
-  WHERE last_action = 'SetDelegate'
-  GROUP BY current_delegate
-),
-latest_vote AS (
-  SELECT lower(voter) AS voter_key,
-         argMax(JSONExtract(raw_json, 'vp_by_strategy', 'Array(Float64)'), created_at) AS vps,
-         max(created_at) AS last_vote_at
-  FROM governance_db.snapshot_votes FINAL
-  WHERE vp_state = 'final'
-  GROUP BY voter_key
-)
-SELECT d.delegate AS delegate,
-       d.delegator_count AS delegator_count,
-       lv.last_vote_at AS last_vote_at,
-       if(length(lv.vps) = 5, lv.vps[4], 0) AS delegated_vp_gnosischain,
-       if(length(lv.vps) = 5, lv.vps[5], 0) AS delegated_vp_mainnet,
-       if(length(lv.vps) = 5, lv.vps[4] + lv.vps[5], 0) AS delegated_vp_total
-FROM delegates AS d
-LEFT JOIN latest_vote AS lv ON lv.voter_key = lower(d.delegate)
-ORDER BY delegated_vp_total DESC, delegate
-LIMIT 50"""
+    # Delegated voting power, resolved by strategy NAME + NETWORK rather than by
+    # array position.
+    #
+    # `vp_by_strategy` is positional against the proposal's OWN strategy list,
+    # and gnosis.eth has rewritten that list three times:
+    #
+    #   2020-11..2022-03  erc20-balance-of(1), delegation(1)                        -> delegation at [2]
+    #   2022-03..2025-10  gno(1), delegation(1), gno(100), delegation(100)          -> [2]=mainnet, [4]=gnosis
+    #   2025-11..now      contract-call(100), beacon-chain(100), contract-call(1),
+    #                     delegation(100), delegation(1)                            -> [4]=gnosis, [5]=mainnet
+    #
+    # Two traps live in that table. The obvious one: this query used to read
+    # `vps[4]`/`vps[5]` guarded on `length(vps) = 5`, so every delegate whose
+    # latest final vote predated 2025-11-16 reported 0 — 20 of 80 delegates and
+    # 112,491 of 426,575 VP (26%) invisible. The subtle one: the chain order
+    # INVERTS between the 4- and 5-strategy layouts, so "just take the last two"
+    # would have silently swapped mainnet and Gnosis Chain for 44,635 votes.
+    # Only the name+network pair is stable, so that is what we resolve on, and
+    # it survives the next strategy rewrite without a code change.
+    delegation_power = sql_loader.load_sql(
+        "governance", "delegation_power",
+        src=src, gov_db=GOV_DB, space=SNAPSHOT_SPACE,
+        delegation_match=DELEGATION_STRATEGY_MATCH, cap=DELEGATE_POWER_CAP,
+    )
 
-    delegation_concentration = f"""
-WITH per_delegate AS (
-  SELECT current_delegate AS delegate, uniqExact(delegator) AS delegator_count
-  FROM (
-    SELECT chain_id, delegator,
-           argMax(delegate, (block_number, log_index)) AS current_delegate,
-           argMax(action, (block_number, log_index)) AS last_action
-    FROM {src}
-    GROUP BY chain_id, delegator
-  )
-  WHERE last_action = 'SetDelegate'
-  GROUP BY current_delegate
-),
-sorted AS (
-  SELECT groupArray(toFloat64(delegator_count)) AS values,
-         sum(toFloat64(delegator_count)) AS total_value
-  FROM (SELECT delegator_count FROM per_delegate ORDER BY delegator_count DESC)
-)
-SELECT tier,
-       arraySum(arraySlice(values, 1, tier)) AS tier_value,
-       total_value,
-       arraySum(arraySlice(values, 1, tier)) / nullIf(total_value, 0) AS share
-FROM sorted
-ARRAY JOIN [toUInt32(5), toUInt32(10), toUInt32(20)] AS tier
-ORDER BY tier"""
+    delegation_concentration = sql_loader.load_sql("governance", "delegation_concentration", src=src)
 
-    delegation_churn = f"""
-SELECT bucket,
-       countIf(kind = 'new') AS new_delegators,
-       countIf(kind = 'repointed') AS repointed,
-       countIf(kind = 'cleared') AS cleared,
-       '{unit}' AS bucket_unit
-FROM (
-  SELECT {bucket_sql} AS bucket,
-         multiIf(action = 'ClearDelegate', 'cleared',
-                 rn = 1, 'new',
-                 'repointed') AS kind
-  FROM (
-    SELECT action, block_timestamp, block_number, log_index,
-           row_number() OVER (PARTITION BY chain_id, delegator ORDER BY block_number, log_index) AS rn
-    FROM {src}
-  )
-  WHERE {time_pred}
-)
-GROUP BY bucket
-ORDER BY bucket"""
+    delegation_churn = sql_loader.load_sql("governance", "delegation_churn", src=src, time_pred=time_pred, bucket_sql=bucket_sql, unit=unit)
 
     return [
         QuerySpec("delegation_summary", "Delegation summary", delegation_summary, {},
@@ -1185,7 +922,12 @@ ORDER BY bucket"""
                   "delegation"),
         QuerySpec("delegation_power", "Delegated voting power", delegation_power, {},
                   "realized vp_by_strategy delegation share at each delegate's latest final "
-                  "vote; voted delegates only, snapshot-time", "cross"),
+                  "vote, with the delegation strategies resolved by name+network from that "
+                  "proposal's own strategy list (gnosis.eth has rewritten it three times, and "
+                  "the chain order is not stable across them); voted delegates only, "
+                  "snapshot-time. NULL — never 0 — where no realized figure exists: a delegate "
+                  "who never voted, or a chain the proposal carried no delegation strategy for",
+                  "signaling_onchain"),
         QuerySpec("delegation_concentration", "Delegation concentration",
                   delegation_concentration, {},
                   "top-N delegate share of active delegators (headcount)", "delegation"),
@@ -1256,116 +998,63 @@ def _treasury_specs(
     ltd_list = ", ".join(f"'{address}'" for address in LTD_WALLETS) or "''"
     # Per-chain as-of. Repeated per spec rather than materialized: the frozen
     # QuerySpec contract is one self-contained statement per dataset.
-    asof_cte = f"""WITH asof AS (
-  SELECT chain_id, max(snapshot_date) AS as_of
-  FROM {src}
-  WHERE job_name = '{TREASURY_JOB}'
-  GROUP BY chain_id
-)"""
+    asof_cte = sql_loader.load_sql("governance", "_cte_treasury_asof_per_chain", src=src, job=TREASURY_JOB)
+    # Per-chain month-end sampling for the history datasets. Same per-chain
+    # discipline as asof: a global month-end would pin one chain's date onto
+    # the other's rows.
+    months_cte = sql_loader.load_sql("governance", "_cte_treasury_months_per_chain", src=src, job=TREASURY_JOB)
+    months_join = (
+        "INNER JOIN months AS m "
+        "ON t.chain_id = m.chain_id AND t.snapshot_date = m.month_end"
+    )
+    #: The focus token for the per-wallet history: the selected asset when one
+    #: is focused, otherwise GNO — the holding with an unambiguous governance
+    #: meaning on both chains.
+    focus_sql = f"{{asset:String}}" if filters.get("asset") else gno_sql
 
-    treasury_summary = f"""{asof_cte}
-SELECT
-  t.chain_id AS chain_id,
-  a.as_of AS as_of,
-  anyHeavy(t.anchor_block) AS anchor_block,
-  anyHeavy(t.anchor_hash) AS anchor_hash,
-  uniqExactIf(t.token_address, t.balance_raw != 0) AS tokens_held,
-  uniqExact(t.wallet_address) AS wallets_tracked,
-  countIf(t.balance_raw != 0) AS positions,
-  uniqExactIf(t.token_address, t.balance_raw != 0 AND t.metadata_status = 'resolved')
-    AS tokens_named,
-  sumIf(t.balance_units, t.token_address = {gno_sql}) AS gno_units,
-  sumIf(t.balance_units, t.token_address = {gno_sql}
-        AND t.wallet_address NOT IN ({ltd_list})) AS gno_units_ex_ltd,
-  uniqExactIf(t.token_address, t.balance_raw != 0 AND t.metadata_status = 'resolved')
-    / nullIf(uniqExactIf(t.token_address, t.balance_raw != 0), 0) AS metadata_known_share,
-  CAST(NULL AS Nullable(Float64)) AS nav_usd
-FROM {src} AS t
-INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
-WHERE t.job_name = '{TREASURY_JOB}' AND {chain_sql} AND {ltd_sql}
-GROUP BY t.chain_id, a.as_of
-ORDER BY as_of DESC, chain_id"""
+    treasury_summary = sql_loader.load_sql("governance", "treasury_summary", asof_cte=asof_cte, gno_sql=gno_sql, ltd_list=ltd_list, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql)
 
-    treasury_holdings = f"""{asof_cte},
-supply AS (
-  SELECT s.chain_id AS supply_chain_id,
-         s.token_address AS supply_token,
-         argMax(s.scalar_raw, s.snapshot_date) AS total_supply_raw
-  FROM {scalars} AS s
-  WHERE s.job_name = '{TREASURY_JOB}' AND s.scalar_name = 'totalSupply'
-  GROUP BY s.chain_id, s.token_address
-)
-SELECT
-  t.chain_id AS chain_id,
-  t.token_address AS token_address,
-  anyHeavy(t.symbol) AS symbol,
-  anyHeavy(t.decimals) AS decimals,
-  anyHeavy(t.metadata_status) AS metadata_status,
-  anyHeavy(t.metadata_status) = 'resolved' AS metadata_known,
-  uniqExact(t.wallet_address) AS wallets_holding,
-  toString(sum(t.balance_raw)) AS balance_total_raw,
-  if(anyHeavy(t.decimals) IS NULL, NULL, sum(t.balance_units)) AS balance_units,
-  if(anyHeavy(sp.total_supply_raw) = 0, NULL,
-     toFloat64(sum(t.balance_raw)) / toFloat64(anyHeavy(sp.total_supply_raw)))
-    AS supply_share,
-  CAST(NULL AS Nullable(Float64)) AS value_usd
-FROM {src} AS t
-INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
-LEFT JOIN supply AS sp
-       ON sp.supply_chain_id = t.chain_id AND sp.supply_token = t.token_address
-WHERE t.job_name = '{TREASURY_JOB}' AND {chain_sql} AND {asset_sql} AND {ltd_sql}
-  AND t.balance_raw != 0
-GROUP BY t.chain_id, t.token_address
-ORDER BY {sort_fragment}"""
+    treasury_holdings = sql_loader.load_sql("governance", "treasury_holdings", asof_cte=asof_cte, scalars=scalars, job=TREASURY_JOB, src=src, chain_sql=chain_sql, asset_sql=asset_sql, ltd_sql=ltd_sql, sort_fragment=sort_fragment)
 
-    treasury_by_wallet = f"""{asof_cte}
-SELECT
-  t.chain_id AS chain_id,
-  t.wallet_address AS wallet_address,
-  t.wallet_address IN ({ltd_list}) AS is_ltd,
-  uniqExactIf(t.token_address, t.balance_raw != 0) AS tokens_held,
-  countIf(t.balance_raw != 0 AND t.metadata_status != 'resolved') AS unnamed_positions,
-  sumIf(t.balance_units, t.token_address = {gno_sql}) AS gno_units,
-  CAST(NULL AS Nullable(Float64)) AS value_usd
-FROM {src} AS t
-INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
-WHERE t.job_name = '{TREASURY_JOB}' AND {chain_sql} AND {ltd_sql}
-GROUP BY t.chain_id, t.wallet_address
-ORDER BY gno_units DESC, tokens_held DESC, wallet_address"""
+    treasury_by_wallet = sql_loader.load_sql("governance", "treasury_by_wallet", asof_cte=asof_cte, ltd_list=ltd_list, gno_sql=gno_sql, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql)
 
     # The trust panel. Every dimension the tab cannot yet display is counted
     # here rather than silently rendered as absent.
-    treasury_coverage = f"""{asof_cte},
-held AS (
-  SELECT t.chain_id AS chain_id,
-         t.token_address AS token_address,
-         anyHeavy(t.symbol) AS symbol,
-         anyHeavy(t.decimals) AS decimals,
-         anyHeavy(t.metadata_status) AS metadata_status
-  FROM {src} AS t
-  INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
-  WHERE t.job_name = '{TREASURY_JOB}' AND {chain_sql} AND {ltd_sql}
-    AND t.balance_raw != 0
-  GROUP BY t.chain_id, t.token_address
-)
-SELECT dimension, known, unknown,
-       known / nullIf(known + unknown, 0) AS pct_known
-FROM (
-  SELECT 'symbol' AS dimension,
-         countIf(symbol IS NOT NULL) AS known,
-         countIf(symbol IS NULL) AS unknown
-  FROM held
-  UNION ALL
-  SELECT 'decimals', countIf(decimals IS NOT NULL), countIf(decimals IS NULL) FROM held
-  UNION ALL
-  SELECT 'metadata', countIf(metadata_status = 'resolved'),
-         countIf(metadata_status != 'resolved') FROM held
-  UNION ALL
-  SELECT 'usd_price', toUInt64(0), count() FROM held
-)
-ORDER BY dimension"""
+    # Coverage counts every dimension in ONE pass over `held`, then pivots with
+    # ARRAY JOIN. The obvious shape — four `SELECT ... FROM held` arms glued by
+    # UNION ALL — reads better but ClickHouse INLINES a CTE per reference, so it
+    # re-scanned and re-joined the whole snapshot four times and blew the 2 GiB
+    # per-query cap once the treasury passed ~390 held tokens. Aggregate once,
+    # reshape after.
+    treasury_coverage = sql_loader.load_sql("governance", "treasury_coverage", asof_cte=asof_cte, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql)
+
+    # Whole-treasury shape per month: counts (always comparable) plus GNO in
+    # units. Chains stay in separate rows via the chain_id column — the client
+    # splits panels on it and never overlays two chains on one axis.
+    treasury_chain_history = sql_loader.load_sql("governance", "treasury_chain_history", months_cte=months_cte, gno_sql=gno_sql, ltd_list=ltd_list, src=src, months_join=months_join, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql)
+
+    # Per-token monthly series for a CANDIDATE pool, ranked by how often the
+    # position actually changed.
+    #
+    # Ranking by longevity or wallet count both fail here, and fail toward
+    # spam: an airdropped token is held by every wallet from the moment it
+    # lands and never moves again, so it beats a real position on both. Counting
+    # distinct balances over the series inverts that — a dusted token has ONE
+    # value forever, while a managed position has many. GNO is pinned first.
+    #
+    # The client picks its own top-N by USD out of this pool, which also filters
+    # the residual spam for free: none of it is priced.
+    treasury_token_history = sql_loader.load_sql("governance", "treasury_token_history", months_cte=months_cte, asof_cte_body=asof_cte[5:], src=src, months_join=months_join, job=TREASURY_JOB, chain_sql=chain_sql, asset_sql=asset_sql, ltd_sql=ltd_sql, gno_picked_sql=gno_sql.replace("t.chain_id", "p_chain"), history_tokens=TREASURY_HISTORY_TOKENS)
+
+    # Per-wallet monthly series for ONE token — the focused asset, else GNO.
+    # Same unit throughout, so the stack total is meaningful and folding the
+    # tail into 'other' is a legitimate sum (unlike stacking across tokens).
+    treasury_wallet_history = sql_loader.load_sql("governance", "treasury_wallet_history", months_cte=months_cte, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql, focus_sql=focus_sql, ltd_list=ltd_list, months_join=months_join)
 
     scope = "; Ltd wallets excluded" if filters.get("exclude_ltd") else "; all treasury wallets"
+    history_basis = (
+        f"month-end snapshot per chain; chains never blended{scope}"
+    )
     return [
         QuerySpec(
             "treasury_summary", "Treasury summary", treasury_summary, dict(params),
@@ -1388,6 +1077,23 @@ ORDER BY dimension"""
             "what the plane can and cannot display for the held token set",
             "treasury", 900,
         ),
+        QuerySpec(
+            "treasury_chain_history", "Treasury over time", treasury_chain_history,
+            dict(params), history_basis, "treasury",
+        ),
+        QuerySpec(
+            "treasury_token_history", "Holdings over time", treasury_token_history,
+            dict(params),
+            "candidate pool ranked by how often the position changed (airdropped "
+            f"dust never moves); {history_basis}",
+            "treasury",
+        ),
+        QuerySpec(
+            "treasury_wallet_history", "Wallet split over time",
+            treasury_wallet_history, dict(params),
+            f"one token (focused asset, else GNO), top 5 wallets + other; {history_basis}",
+            "treasury",
+        ),
     ]
 
 
@@ -1402,80 +1108,17 @@ def _forum_specs(
     sort_fragment = FORUM_SORTS.get(filters.get("sort_by", ""), FORUM_SORTS[""])
     days = _range_days(range_state)
 
-    forum_summary = f"""
-SELECT count() AS topic_count,
-       sum(posts_count) AS post_count,
-       sum(views) AS view_count,
-       sum(like_count) AS like_count,
-       sum(participant_count) AS participant_count,
-       countIf(closed = 0 AND archived = 0) AS open_count,
-       countIf(closed = 1 AND archived = 0) AS closed_count,
-       countIf(archived = 1) AS archived_count,
-       (SELECT uniqExact(user_id) FROM governance_db.forum_posts FINAL
-        WHERE {posts_time} AND user_id > 0 AND topic_id IN (
-          SELECT id FROM governance_db.forum_topics FINAL WHERE {topic_where}
-        )) AS active_users,
-       (SELECT uniqExact(category_id) FROM governance_db.forum_topics FINAL
-        WHERE {topic_where}) AS active_categories
-FROM governance_db.forum_topics FINAL
-WHERE {topic_where}
-ORDER BY topic_count"""
+    forum_summary = sql_loader.load_sql("governance", "forum_summary", posts_time=posts_time, topic_where=topic_where)
 
-    forum_categories = """
-SELECT id AS category_id, parent_id, name, slug, topic_count, post_count,
-       description
-FROM governance_db.forum_categories FINAL
-ORDER BY topic_count DESC, category_id"""
+    forum_categories = sql_loader.load_sql("governance", "forum_categories")
 
-    forum_topics = f"""
-SELECT id, title, slug, category_id, posts_count, reply_count, views,
-       like_count, participant_count, tags, created_at, last_posted_at,
-       bumped_at, closed, archived, pinned,
-       multiIf(archived = 1, 'archived', closed = 1, 'closed', 'open') AS status,
-       {_gip_sql("title")} AS gip_number
-FROM governance_db.forum_topics FINAL
-WHERE {topic_where}
-ORDER BY {sort_fragment}"""
+    forum_topics = sql_loader.load_sql("governance", "forum_topics", gip_sql=_gip_sql("title"), topic_where=topic_where, sort_fragment=sort_fragment)
 
     topic_bucket, unit = _bucket("created_at", days)
     post_bucket, _ = _bucket("created_at", days)
-    forum_activity = f"""
-WITH ft AS (
-  SELECT id, created_at FROM governance_db.forum_topics FINAL
-  WHERE {filter_sql}
-)
-SELECT bucket, metric, metric_value, '{unit}' AS bucket_unit
-FROM (
-  SELECT {topic_bucket} AS bucket, 'topics_created' AS metric,
-         count() AS metric_value
-  FROM ft
-  WHERE {posts_time}
-  GROUP BY bucket
-  UNION ALL
-  SELECT {post_bucket} AS bucket, 'posts_created', count()
-  FROM governance_db.forum_posts FINAL
-  WHERE {posts_time} AND topic_id IN (SELECT id FROM ft)
-  GROUP BY bucket
-)
-ORDER BY bucket, metric"""
+    forum_activity = sql_loader.load_sql("governance", "forum_activity", filter_sql=filter_sql, unit=unit, topic_bucket=topic_bucket, post_bucket=post_bucket, posts_time=posts_time)
 
-    contributor_leaderboard = f"""
-SELECT u.id AS user_id, u.username, u.name, u.trust_level,
-       u.post_count AS lifetime_posts, u.topic_count AS lifetime_topics,
-       u.likes_received, u.likes_given, u.days_visited,
-       coalesce(p.posts_in_range, 0) AS posts_in_range,
-       coalesce(p.topics_started, 0) AS topics_started,
-       p.last_post_at AS last_post_at
-FROM governance_db.forum_users AS u FINAL
-LEFT JOIN (
-  SELECT user_id, count() AS posts_in_range,
-         countIf(post_number = 1) AS topics_started,
-         max(created_at) AS last_post_at
-  FROM governance_db.forum_posts FINAL
-  WHERE {posts_time}
-  GROUP BY user_id
-) AS p ON toInt64(p.user_id) = toInt64(u.id)
-ORDER BY posts_in_range DESC, user_id"""
+    contributor_leaderboard = sql_loader.load_sql("governance", "contributor_leaderboard", posts_time=posts_time)
 
     return [
         QuerySpec("forum_summary", "Forum summary", forum_summary, dict(params),
@@ -1495,106 +1138,21 @@ ORDER BY posts_in_range DESC, user_id"""
 def _proposal_entity_specs(identifier: str) -> list[QuerySpec]:
     params = {"proposal_id": identifier}
 
-    proposal_detail = f"""
-SELECT id, space_id, title, state, type, author, discussion, created_at,
-       start_at, end_at, snapshot_block, scores_total, quorum, votes_count,
-       scores_state,
-       {QUORUM_RATIO_SQL} AS quorum_ratio,
-       {QUORUM_STATUS_SQL} AS quorum_status,
-       {_gip_sql("title")} AS gip_number,
-       {DISCUSSION_TOPIC_SQL} AS discussion_topic_id,
-       JSONExtractString(raw_json, 'body') AS body_markdown,
-       JSONExtractRaw(raw_json, 'choices') AS choices_json,
-       JSONExtractRaw(raw_json, 'scores') AS scores_json,
-       concat('https://snapshot.org/#/', space_id, '/proposal/', id) AS snapshot_url
-FROM governance_db.snapshot_proposals FINAL
-WHERE id = {{proposal_id:String}}
-ORDER BY id"""
+    proposal_detail = sql_loader.load_sql("governance", "proposal_detail", quorum_ratio_sql=QUORUM_RATIO_SQL, quorum_status_sql=QUORUM_STATUS_SQL, gip_title=_gip_sql("title"), discussion_topic_sql=DISCUSSION_TOPIC_SQL)
 
-    proposal_choices = """
-SELECT choice_index, choice,
-       if(choice_index <= length(scores), scores[choice_index], NULL) AS score,
-       if(choice_index <= length(scores) AND scores_total > 0,
-          scores[choice_index] / scores_total, NULL) AS score_share,
-       scores_state
-FROM (
-  SELECT JSONExtract(raw_json, 'choices', 'Array(String)') AS choices,
-         JSONExtract(raw_json, 'scores', 'Array(Float64)') AS scores,
-         scores_total, scores_state
-  FROM governance_db.snapshot_proposals FINAL
-  WHERE id = {proposal_id:String}
-)
-ARRAY JOIN choices AS choice, arrayEnumerate(choices) AS choice_index
-ORDER BY choice_index"""
+    proposal_choices = sql_loader.load_sql("governance", "proposal_choices")
 
     # Vote trend: how votes + voting power accumulated over the proposal's
     # voting window (cgov-style turnout curve). Hourly buckets; the frontend
     # draws per-bucket votes as bars and cumulative VP as a line.
-    proposal_vote_trend = """
-SELECT bucket, votes, round(vp) AS vp,
-       round(sum(votes) OVER (ORDER BY bucket)) AS cumulative_votes,
-       round(sum(vp) OVER (ORDER BY bucket)) AS cumulative_vp,
-       'hour' AS bucket_unit
-FROM (
-  SELECT toStartOfHour(created_at) AS bucket, count() AS votes, sum(vp) AS vp
-  FROM governance_db.snapshot_votes FINAL
-  WHERE proposal_id = {proposal_id:String}
-  GROUP BY bucket
-)
-ORDER BY bucket"""
+    proposal_vote_trend = sql_loader.load_sql("governance", "proposal_vote_trend")
 
-    proposal_votes = """
-SELECT id AS vote_id, lower(voter) AS voter_key, voter, created_at, vp,
-       vp_state,
-       multiIf(JSONType(raw_json, 'choice') IN ('Int64', 'UInt64'), 'single',
-               JSONType(raw_json, 'choice') = 'Array', 'ranked',
-               'unsupported') AS choice_kind,
-       if(choice_kind = 'single',
-          JSONExtract(raw_json, 'choice', 'Int32'), NULL) AS choice_index,
-       if(choice_kind = 'ranked',
-          JSONExtract(raw_json, 'choice', 'Array(Int32)'), []) AS choice_indexes,
-       JSONExtractString(raw_json, 'reason') AS reason
-FROM governance_db.snapshot_votes FINAL
-WHERE proposal_id = {proposal_id:String}
-ORDER BY vp DESC, id"""
+    proposal_votes = sql_loader.load_sql("governance", "proposal_votes")
 
     # Two-tier links: the author-declared discussion topic ranks above exact
     # GIP-number matches; a topic linked both ways appears once as
     # 'discussion'. ALL candidates returned — the GIP relation is not 1:1.
-    proposal_forum_links = f"""
-WITH p AS (
-  SELECT id, {_gip_sql("title")} AS gip_number,
-         {DISCUSSION_TOPIC_SQL} AS discussion_topic_id
-  FROM governance_db.snapshot_proposals FINAL
-  WHERE id = {{proposal_id:String}}
-)
-SELECT linked_type, linked_id, linked_title, link_source, activity_count,
-       activity_at
-FROM (
-  SELECT 'forum_topic' AS linked_type, toString(t.id) AS linked_id,
-         t.title AS linked_title, 'discussion' AS link_source,
-         t.posts_count AS activity_count, t.last_posted_at AS activity_at
-  FROM governance_db.forum_topics AS t FINAL
-  WHERE t.id IN (SELECT discussion_topic_id FROM p
-                 WHERE discussion_topic_id IS NOT NULL)
-  UNION ALL
-  SELECT 'forum_topic', toString(t.id), t.title, 'gip', t.posts_count,
-         t.last_posted_at
-  FROM governance_db.forum_topics AS t FINAL
-  WHERE {_gip_sql("t.title")} IS NOT NULL
-    AND {_gip_sql("t.title")} IN (SELECT gip_number FROM p
-                                  WHERE gip_number IS NOT NULL)
-    AND t.id NOT IN (SELECT discussion_topic_id FROM p
-                     WHERE discussion_topic_id IS NOT NULL)
-  UNION ALL
-  SELECT 'proposal', s.id, s.title, 'gip', s.votes_count, s.created_at
-  FROM governance_db.snapshot_proposals AS s FINAL
-  WHERE s.id != {{proposal_id:String}}
-    AND {_gip_sql("s.title")} IS NOT NULL
-    AND {_gip_sql("s.title")} IN (SELECT gip_number FROM p
-                                  WHERE gip_number IS NOT NULL)
-)
-ORDER BY link_source, linked_type, linked_id"""
+    proposal_forum_links = sql_loader.load_sql("governance", "proposal_forum_links", gip_title=_gip_sql("title"), discussion_topic_sql=DISCUSSION_TOPIC_SQL, gip_topic_title=_gip_sql("t.title"), gip_proposal_title=_gip_sql("s.title"))
 
     return [
         QuerySpec("proposal_detail", "Proposal detail", proposal_detail,
@@ -1617,50 +1175,11 @@ ORDER BY link_source, linked_type, linked_id"""
 def _voter_entity_specs(identifier: str) -> list[QuerySpec]:
     params = {"voter": identifier}
 
-    voter_profile = """
-SELECT {voter:String} AS voter_key, any(voter) AS voter_display,
-       count() AS vote_count, sum(vp) AS total_vp, avg(vp) AS avg_vp,
-       min(created_at) AS first_vote_at, max(created_at) AS last_vote_at,
-       count() / nullIf((SELECT count()
-                         FROM governance_db.snapshot_proposals FINAL), 0)
-         AS participation_rate,
-       (SELECT count() FROM governance_db.snapshot_follows FINAL
-        WHERE lower(follower) = {voter:String}) AS follower_row_count
-FROM governance_db.snapshot_votes FINAL
-WHERE lower(voter) = {voter:String}
-ORDER BY voter_key"""
+    voter_profile = sql_loader.load_sql("governance", "voter_profile")
 
-    voter_votes = """
-SELECT v.id AS vote_id, v.proposal_id AS proposal_id,
-       p.title AS proposal_title, p.state AS proposal_state,
-       v.created_at AS created_at, v.vp AS vp, v.vp_state AS vp_state,
-       multiIf(JSONType(v.raw_json, 'choice') IN ('Int64', 'UInt64'), 'single',
-               JSONType(v.raw_json, 'choice') = 'Array', 'ranked',
-               'unsupported') AS choice_kind,
-       if(choice_kind = 'single',
-          JSONExtract(v.raw_json, 'choice', 'Int32'), NULL) AS choice_index,
-       if(choice_kind = 'ranked',
-          JSONExtract(v.raw_json, 'choice', 'Array(Int32)'), []) AS choice_indexes,
-       if(choice_kind = 'single' AND choice_index >= 1
-          AND choice_index <= length(p.choices),
-          p.choices[choice_index], '') AS choice_label,
-       JSONExtractString(v.raw_json, 'reason') AS reason
-FROM governance_db.snapshot_votes AS v FINAL
-LEFT JOIN (
-  SELECT id, title, state,
-         JSONExtract(raw_json, 'choices', 'Array(String)') AS choices
-  FROM governance_db.snapshot_proposals FINAL
-) AS p ON p.id = v.proposal_id
-WHERE lower(v.voter) = {voter:String}
-ORDER BY v.created_at DESC, vote_id"""
+    voter_votes = sql_loader.load_sql("governance", "voter_votes")
 
-    voter_participation = """
-SELECT toStartOfMonth(created_at) AS bucket, count() AS vote_count,
-       sum(vp) AS total_vp, 'month' AS bucket_unit
-FROM governance_db.snapshot_votes FINAL
-WHERE lower(voter) = {voter:String}
-GROUP BY bucket
-ORDER BY bucket"""
+    voter_participation = sql_loader.load_sql("governance", "voter_participation")
 
     return [
         QuerySpec("voter_profile", "Voter profile", voter_profile, dict(params),
@@ -1675,56 +1194,11 @@ ORDER BY bucket"""
 def _topic_entity_specs(identifier: str) -> list[QuerySpec]:
     params = {"topic_id": int(identifier)}
 
-    topic_detail = f"""
-SELECT t.id AS topic_id, t.title AS title, t.slug AS slug,
-       t.category_id AS category_id, c.name AS category_name,
-       t.posts_count AS posts_count, t.reply_count AS reply_count,
-       t.views AS views, t.like_count AS like_count,
-       t.participant_count AS participant_count, t.tags AS tags,
-       t.created_at AS created_at, t.last_posted_at AS last_posted_at,
-       t.bumped_at AS bumped_at, t.closed AS closed, t.archived AS archived,
-       t.pinned AS pinned,
-       multiIf(t.archived = 1, 'archived', t.closed = 1, 'closed', 'open') AS status,
-       {_gip_sql("t.title")} AS gip_number,
-       concat('{FORUM_BASE_URL}/t/', t.slug, '/', toString(t.id)) AS topic_url
-FROM governance_db.forum_topics AS t FINAL
-LEFT JOIN governance_db.forum_categories AS c FINAL
-  ON toInt64(c.id) = toInt64(t.category_id)
-WHERE t.id = {{topic_id:UInt32}}
-ORDER BY topic_id"""
+    topic_detail = sql_loader.load_sql("governance", "topic_detail", gip_topic_title=_gip_sql("t.title"), forum_base_url=FORUM_BASE_URL)
 
-    topic_posts = """
-SELECT id AS post_id, post_number, user_id, username, created_at, updated_at,
-       reply_to_post_number, reply_count, reads, like_count,
-       raw AS raw_markdown, cooked AS cooked_html,
-       extractTextFromHTML(cooked) AS plain_text
-FROM governance_db.forum_posts FINAL
-WHERE topic_id = {topic_id:UInt32}
-ORDER BY post_number, post_id"""
+    topic_posts = sql_loader.load_sql("governance", "topic_posts")
 
-    topic_proposal_links = f"""
-WITH t AS (
-  SELECT id, {_gip_sql("title")} AS gip_number
-  FROM governance_db.forum_topics FINAL
-  WHERE id = {{topic_id:UInt32}}
-)
-SELECT linked_id, linked_title, state, link_source, votes_count, created_at
-FROM (
-  SELECT p.id AS linked_id, p.title AS linked_title, p.state AS state,
-         'discussion' AS link_source, p.votes_count AS votes_count,
-         p.created_at AS created_at
-  FROM governance_db.snapshot_proposals AS p FINAL
-  WHERE {DISCUSSION_TOPIC_SQL} = {{topic_id:UInt32}}
-  UNION ALL
-  SELECT p.id, p.title, p.state, 'gip', p.votes_count, p.created_at
-  FROM governance_db.snapshot_proposals AS p FINAL
-  WHERE {_gip_sql("p.title")} IS NOT NULL
-    AND {_gip_sql("p.title")} IN (SELECT gip_number FROM t
-                                  WHERE gip_number IS NOT NULL)
-    AND ({DISCUSSION_TOPIC_SQL} IS NULL
-         OR {DISCUSSION_TOPIC_SQL} != {{topic_id:UInt32}})
-)
-ORDER BY link_source, linked_id"""
+    topic_proposal_links = sql_loader.load_sql("governance", "topic_proposal_links", gip_title=_gip_sql("title"), gip_proposal_title=_gip_sql("p.title"), discussion_topic_sql=DISCUSSION_TOPIC_SQL)
 
     return [
         QuerySpec("topic_detail", "Topic detail", topic_detail, dict(params),
@@ -1741,31 +1215,11 @@ ORDER BY link_source, linked_id"""
 def _contributor_entity_specs(identifier: str) -> list[QuerySpec]:
     params = {"user_id": int(identifier)}
 
-    contributor_profile = """
-SELECT id AS user_id, username, name, trust_level, likes_received,
-       likes_given, post_count AS lifetime_posts,
-       topic_count AS lifetime_topics, days_visited
-FROM governance_db.forum_users FINAL
-WHERE id = {user_id:UInt32}
-ORDER BY user_id"""
+    contributor_profile = sql_loader.load_sql("governance", "contributor_profile")
 
-    contributor_posts = """
-SELECT p.id AS post_id, p.topic_id AS topic_id, t.title AS topic_title,
-       p.post_number AS post_number, p.created_at AS created_at,
-       p.like_count AS like_count, p.reads AS reads,
-       substring(extractTextFromHTML(p.cooked), 1, 500) AS excerpt
-FROM governance_db.forum_posts AS p FINAL
-LEFT JOIN governance_db.forum_topics AS t FINAL ON t.id = p.topic_id
-WHERE p.user_id = {user_id:UInt32}
-ORDER BY p.created_at DESC, post_id"""
+    contributor_posts = sql_loader.load_sql("governance", "contributor_posts")
 
-    contributor_activity = """
-SELECT toStartOfMonth(created_at) AS bucket, count() AS post_count,
-       countIf(post_number = 1) AS topics_started, 'month' AS bucket_unit
-FROM governance_db.forum_posts FINAL
-WHERE user_id = {user_id:UInt32}
-GROUP BY bucket
-ORDER BY bucket"""
+    contributor_activity = sql_loader.load_sql("governance", "contributor_activity")
 
     return [
         QuerySpec("contributor_profile", "Contributor profile",
@@ -1774,6 +1228,136 @@ ORDER BY bucket"""
                   dict(params), "all history", "forum"),
         QuerySpec("contributor_activity", "Contributor activity",
                   contributor_activity, dict(params), "all history", "forum"),
+    ]
+
+
+def _treasury_entity_parts(identifier: str) -> tuple[int, str, dict[str, Any]]:
+    """Split a validated ``<chain>:<address>`` id into its SQL inputs.
+
+    The chain is interpolated (it is an int already checked against
+    TREASURY_CHAINS) so the month/as-of CTEs can be chain-pinned rather than
+    grouped per chain; the address is always a bound parameter.
+    """
+    chain_text, address = identifier.split(":", 1)
+    return int(chain_text), address, {"addr": address}
+
+
+def _treasury_entity_ctes(chain: int) -> tuple[str, str]:
+    """Chain-pinned ``asof`` and ``months`` CTEs.
+
+    The section specs group these per chain because they serve both chains at
+    once. An entity is one chain by construction, so pinning is both cheaper
+    and strictly stronger — there is no second chain to blend in.
+    """
+    src = f"{TREASURY_DB}.{TREASURY_VIEW}"
+    asof = sql_loader.load_sql("governance", "_cte_treasury_asof_one_chain", src=src, job=TREASURY_JOB, chain=chain)
+    months = sql_loader.load_sql("governance", "_cte_treasury_months_one_chain", src=src, job=TREASURY_JOB, chain=chain)
+    return asof, months
+
+
+def _treasury_token_entity_specs(identifier: str) -> list[QuerySpec]:
+    """One token, on one chain: what it is, who holds it, how that moved.
+
+    Two anti-spoof measures are computed here rather than left to the client,
+    because both need the whole chain's held set and the client only ever sees
+    one token's rows:
+
+    * ``symbol_collisions`` — how many OTHER held tokens claim this symbol. 19
+      distinct tokens in this treasury claim "USDC"; the real one and each fake
+      one all report 18, which is the honest answer: the symbol identifies
+      nothing, and the number says so instead of implying the high count means
+      "legitimate".
+    * ``treasury_share`` — a wallet's share of the treasury's whole position.
+      A contract that returns a constant balance to every caller yields exactly
+      1/n for all n wallets, which is a spoof signature no balance alone shows.
+    """
+    chain, address, params = _treasury_entity_parts(identifier)
+    src = f"{TREASURY_DB}.{TREASURY_VIEW}"
+    scalars = f"{TREASURY_DB}.{TREASURY_SCALARS_VIEW}"
+    asof_cte, months_cte = _treasury_entity_ctes(chain)
+    ltd_list = ", ".join(f"'{address_}'" for address_ in LTD_WALLETS) or "''"
+    label = f"{TREASURY_CHAINS[chain]} {address[:6]}…{address[-4:]}"
+
+    # Identity + the collision count, which needs the chain's whole held set.
+    # Held tokens aggregate to a few hundred rows before the window runs.
+    token_detail = sql_loader.load_sql("governance", "token_detail", asof_cte=asof_cte, src=src, scalars=scalars, job=TREASURY_JOB, chain=chain, label=label)
+
+    token_holders = sql_loader.load_sql("governance", "token_holders", asof_cte=asof_cte, src=src, job=TREASURY_JOB, chain=chain, ltd_list=ltd_list)
+
+    # Monthly per-wallet split for this token. Same shape as
+    # treasury_wallet_history so `walletSeries()` reads it unchanged.
+    holder_series = sql_loader.load_sql("governance", "holder_series", months_cte=months_cte, src=src, job=TREASURY_JOB, chain=chain, ltd_list=ltd_list)
+
+    chain_label = TREASURY_CHAINS[chain]
+    return [
+        QuerySpec(
+            "treasury_token_detail", "Token", token_detail, dict(params),
+            f"{chain_label}, latest published snapshot; symbol collisions counted "
+            "over the whole held set",
+            "treasury", 900,
+        ),
+        QuerySpec(
+            "treasury_token_holders", "Wallets holding it", token_holders,
+            dict(params),
+            f"{chain_label}, latest published snapshot; share is of the treasury's "
+            "own position, not of supply",
+            "treasury",
+        ),
+        QuerySpec(
+            "treasury_token_holder_series", "Wallet split over time",
+            holder_series, dict(params),
+            f"{chain_label}, month-end snapshots; top 6 wallets + other",
+            "treasury",
+        ),
+    ]
+
+
+def _treasury_wallet_entity_specs(identifier: str) -> list[QuerySpec]:
+    """One wallet, on one chain: what it holds now and how that moved.
+
+    This is where a wallet's full composition lives — and therefore the only
+    place its total can be valued. The Wallets board can only price GNO, because
+    ``treasury_by_wallet`` carries no per-token breakdown; it says so rather
+    than labelling a partial figure "wallet value".
+    """
+    chain, address, params = _treasury_entity_parts(identifier)
+    src = f"{TREASURY_DB}.{TREASURY_VIEW}"
+    asof_cte, months_cte = _treasury_entity_ctes(chain)
+    ltd_list = ", ".join(f"'{address_}'" for address_ in LTD_WALLETS) or "''"
+    gno = GNO_TOKENS.get(chain, "")
+    label = f"{TREASURY_CHAINS[chain]} {address[:6]}…{address[-4:]}"
+
+    wallet_detail = sql_loader.load_sql("governance", "wallet_detail", asof_cte=asof_cte, chain=chain, label=label, ltd_list=ltd_list, gno=gno, src=src, job=TREASURY_JOB)
+
+    # Positions carry the same two anti-spoof measures as the token page, so a
+    # wallet's list is readable without opening every token.
+    wallet_positions = sql_loader.load_sql("governance", "wallet_positions", asof_cte=asof_cte, chain=chain, src=src, job=TREASURY_JOB)
+
+    # Monthly per-token series for this wallet, ranked the same way as
+    # treasury_token_history: by how often the position actually moved, because
+    # airdropped dust is held from the moment it lands and never changes again.
+    wallet_series = sql_loader.load_sql("governance", "wallet_series", months_cte=months_cte, chain=chain, gno=gno, src=src, job=TREASURY_JOB, history_tokens=TREASURY_HISTORY_TOKENS)
+
+    chain_label = TREASURY_CHAINS[chain]
+    return [
+        QuerySpec(
+            "treasury_wallet_detail", "Wallet", wallet_detail, dict(params),
+            f"{chain_label}, latest published snapshot", "treasury", 900,
+        ),
+        QuerySpec(
+            "treasury_wallet_positions", "Positions", wallet_positions,
+            dict(params),
+            f"{chain_label}, non-zero balances at the latest snapshot; share is of "
+            "the treasury's own position in each token",
+            "treasury",
+        ),
+        QuerySpec(
+            "treasury_wallet_series", "Positions over time", wallet_series,
+            dict(params),
+            f"{chain_label}, month-end snapshots; candidate pool ranked by how "
+            "often the position changed",
+            "treasury",
+        ),
     ]
 
 
@@ -1786,6 +1370,10 @@ def _entity_specs(kind: str, identifier: str) -> list[QuerySpec]:
         return _topic_entity_specs(identifier)
     if kind == "forum_user":
         return _contributor_entity_specs(identifier)
+    if kind == "treasury_token":
+        return _treasury_token_entity_specs(identifier)
+    if kind == "treasury_wallet":
+        return _treasury_wallet_entity_specs(identifier)
     raise ValueError(f"Unsupported entity type: {kind}")
 
 
@@ -1978,6 +1566,12 @@ def _empty_state(section: str = "overview") -> dict[str, Any]:
         "section_datasets": {},
         "section_lru": [],
         "freshness": _empty_freshness(),
+        # CoinGecko overlays, patched in later by load_governance_overlays.
+        # Empty means "not resolved yet", never "worthless" — the UI renders an
+        # em-dash from the absence and must never substitute 0.
+        "icon_overlay": {},
+        "price_overlay": {},
+        "price_overlay_at": "",
     }
 
 
@@ -2348,12 +1942,19 @@ _ENTITY_DETAIL_KEY = {
     "voter": "voter_profile",
     "forum_topic": "topic_detail",
     "forum_user": "contributor_profile",
+    "treasury_token": "treasury_token_detail",
+    "treasury_wallet": "treasury_wallet_detail",
 }
 _ENTITY_LABEL_COLUMN = {
     "proposal": "title",
     "voter": "voter_display",
     "forum_topic": "title",
     "forum_user": "username",
+    # NOT `symbol`: breadcrumbs render their label raw, and a token symbol is
+    # attacker-authored. The detail specs compose `entity_label` server-side
+    # from the chain name and the address, which cannot be spoofed.
+    "treasury_token": "entity_label",
+    "treasury_wallet": "entity_label",
 }
 
 
@@ -2477,111 +2078,34 @@ def _search_candidates(ch: ClickHouseManager, query: str) -> list[dict[str, Any]
     lowered = q.lower()
     params: dict[str, Any] = {}
     gip_match = GIP_QUERY_RE.fullmatch(q)
-    gip_arms = f"""
-  SELECT 'proposal' AS entity_type, id AS identifier, title AS label,
-         'gip_proposal' AS role, toInt64(votes_count) AS evidence_count,
-         0 AS match_rank
-  FROM governance_db.snapshot_proposals FINAL
-  WHERE {_gip_sql("title")} = {{gip:Int32}}
-  UNION ALL
-  SELECT 'forum_topic', toString(id), title, 'gip_topic',
-         toInt64(posts_count), 0
-  FROM governance_db.forum_topics FINAL
-  WHERE {_gip_sql("title")} = {{gip:Int32}}"""
+    gip_arms = sql_loader.load_sql("governance", "search_gip_arms", gip_title=_gip_sql("title"))
     if PROPOSAL_ID_RE.fullmatch(lowered):
         params["q"] = lowered
-        sql = """
-SELECT 'proposal' AS entity_type, id AS identifier, title AS label,
-       'proposal' AS role, toInt64(votes_count) AS evidence_count,
-       0 AS match_rank
-FROM governance_db.snapshot_proposals FINAL
-WHERE id = {q:String}
-ORDER BY identifier"""
+        sql = sql_loader.load_sql("governance", "search_proposal_id")
     elif ADDRESS_RE.fullmatch(lowered):
         params["q"] = lowered
-        sql = """
-SELECT entity_type, identifier, label, role, evidence_count, match_rank
-FROM (
-  SELECT 'voter' AS entity_type, {q:String} AS identifier,
-         any(voter) AS label, 'voter' AS role,
-         toInt64(count()) AS evidence_count, 0 AS match_rank
-  FROM governance_db.snapshot_votes FINAL
-  WHERE lower(voter) = {q:String}
-  HAVING count() > 0
-  UNION ALL
-  SELECT 'voter', {q:String}, any(follower), 'follower', toInt64(count()), 0
-  FROM governance_db.snapshot_follows FINAL
-  WHERE lower(follower) = {q:String}
-  HAVING count() > 0
-)
-ORDER BY role"""
+        sql = sql_loader.load_sql("governance", "search_address")
     elif gip_match and int(gip_match.group(1)) <= 0x7FFFFFFF:
         # Same Int32 guard as the plain-numeric arm — an oversized "GIP-…"
         # number skips the GIP arm (falls through to text search) instead of
         # overflowing the {gip:Int32} bind.
         params["gip"] = int(gip_match.group(1))
-        sql = f"""
-SELECT entity_type, identifier, label, role, evidence_count, match_rank
-FROM (
-{gip_arms}
-)
-ORDER BY entity_type, identifier"""
+        sql = sql_loader.load_sql("governance", "search_gip", gip_arms=gip_arms)
     elif FORUM_ID_RE.fullmatch(q) and int(q) <= 0x7FFFFFFF:
         params["n"] = int(q)
         params["gip"] = int(q)
-        sql = f"""
-SELECT entity_type, identifier, label, role, evidence_count, match_rank
-FROM (
-  SELECT 'forum_topic' AS entity_type, toString(id) AS identifier,
-         title AS label, 'forum_topic' AS role,
-         toInt64(posts_count) AS evidence_count, 0 AS match_rank
-  FROM governance_db.forum_topics FINAL
-  WHERE id = {{n:UInt32}}
-  UNION ALL
-  SELECT 'forum_user', toString(id), username, 'forum_user',
-         toInt64(post_count), 0
-  FROM governance_db.forum_users FINAL
-  WHERE id = {{n:UInt32}}
-  UNION ALL
-{gip_arms}
-)
-ORDER BY match_rank, entity_type, identifier"""
+        sql = sql_loader.load_sql("governance", "search_forum_id", gip_arms=gip_arms)
     else:
         params["q"] = q
         rank_sql = (
             "multiIf(lower({col}) = lower({{q:String}}), 0, "
             "positionCaseInsensitive({col}, {{q:String}}) = 1, 1, 2)"
         )
-        sql = f"""
-SELECT entity_type, identifier, label, role, evidence_count, match_rank
-FROM (
-  SELECT 'proposal' AS entity_type, id AS identifier, title AS label,
-         'proposal_title' AS role, toInt64(votes_count) AS evidence_count,
-         {rank_sql.format(col="title")} AS match_rank
-  FROM governance_db.snapshot_proposals FINAL
-  WHERE positionCaseInsensitive(title, {{q:String}}) > 0
-  ORDER BY match_rank, evidence_count DESC, identifier
-  LIMIT 20
-  UNION ALL
-  SELECT 'forum_topic' AS entity_type, toString(id) AS identifier,
-         title AS label, 'topic_title' AS role,
-         toInt64(posts_count) AS evidence_count,
-         {rank_sql.format(col="title")} AS match_rank
-  FROM governance_db.forum_topics FINAL
-  WHERE positionCaseInsensitive(title, {{q:String}}) > 0
-  ORDER BY match_rank, evidence_count DESC, identifier
-  LIMIT 20
-  UNION ALL
-  SELECT 'forum_user' AS entity_type, toString(id) AS identifier,
-         username AS label, 'forum_username' AS role,
-         toInt64(post_count) AS evidence_count,
-         {rank_sql.format(col="username")} AS match_rank
-  FROM governance_db.forum_users FINAL
-  WHERE positionCaseInsensitive(username, {{q:String}}) > 0
-  ORDER BY match_rank, evidence_count DESC, identifier
-  LIMIT 20
-)
-ORDER BY match_rank, evidence_count DESC, entity_type, identifier"""
+        sql = sql_loader.load_sql(
+            "governance", "search_text",
+            rank_title=rank_sql.format(col="title"),
+            rank_username=rank_sql.format(col="username"),
+        )
     result = mini_apps.run_structured_query(
         ch, sql, GOV_DB, params, requested_max_rows=100,
         query_budget=INTERACTIVE_QUERY_BUDGET,
@@ -2611,7 +2135,25 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
     """Register the Governance Explorer resource, tools, and web app."""
     mini_apps.register_app(GOV_APP_ID, title=GOV_TITLE, resource_uri=GOV_URI)
 
-    @mcp.resource(GOV_URI, mime_type="text/html;profile=mcp-app")
+    @mcp.resource(
+        GOV_URI,
+        mime_type="text/html;profile=mcp-app",
+        meta={
+            "ui": {
+                "csp": {
+                    # Token logos only. An MCP-UI host blocks every remote image
+                    # unless the resource names its hosts, so without this the
+                    # treasury table renders monograms for everything. NOT
+                    # api.coingecko.com: the browser never calls it — the server
+                    # does, and the result arrives over the MCP tool channel.
+                    "resourceDomains": [
+                        "https://assets.coingecko.com",
+                        "https://coin-images.coingecko.com",
+                    ]
+                }
+            }
+        },
+    )
     def serve_governance_app() -> str:
         return get_governance_html()
 
@@ -2785,9 +2327,68 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
         except Exception as exc:
             return mini_apps.error_call_tool_result(str(exc))
 
+    @mcp.tool(meta=mini_apps.APP_ONLY_META)
+    def load_governance_overlays(
+        view_id: str,
+        request_id: int = 0,
+    ) -> CallToolResult:
+        """[App-only] Resolve CoinGecko icons + spot USD for the visible tokens.
+
+        Never blocks on the network: returns whatever is cached and kicks off
+        background fetches, with ``overlay_pending`` in the warnings telling the
+        frontend that one retry a few seconds later will find more.
+
+        Prices are CURRENT spot and are applied client-side. A historical series
+        valued with them is a constant-price revaluation, NOT historical market
+        value — the UI is required to say so. Tokens CoinGecko does not list are
+        omitted rather than priced at 0: this treasury holds 19 distinct tokens
+        spoofing the symbol ``USDC``, and a fabricated $0 would make them
+        indistinguishable from the real one.
+        """
+        try:
+            record = mini_apps.get_view(view_id)
+            if record is None:
+                return mini_apps.error_call_tool_result(
+                    f"Unknown or expired view_id: {view_id}"
+                )
+            icons, icons_pending = coingecko.build_icon_overlay(
+                record.datasets, token_columns=TREASURY_TOKEN_COLUMN_RE
+            )
+            prices, prices_pending = coingecko.build_price_overlay(
+                record.datasets, token_columns=TREASURY_TOKEN_COLUMN_RE
+            )
+            patch = {
+                "icon_overlay": icons,
+                "price_overlay": prices,
+                "price_overlay_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+            mini_apps.patch_view_state(view_id, patch)
+            payload = MiniAppPayload(
+                type="PATCH_VIEW_STATE",
+                view_id=view_id,
+                app_id=GOV_APP_ID,
+                title=record.title,
+                patch=patch,
+                warnings=(
+                    ["overlay_pending"] if (icons_pending or prices_pending) else []
+                ),
+            )
+            icon_count = sum(len(v) for v in icons.values())
+            price_count = sum(len(v) for v in prices.get("by_chain", {}).values())
+            return mini_apps.payload_to_call_tool_result(
+                payload,
+                f"Overlays: {icon_count} icon(s), {price_count} price(s)"
+                + (" — more pending." if (icons_pending or prices_pending) else "."),
+            )
+        except Exception as exc:
+            return mini_apps.error_call_tool_result(str(exc))
+
     for name in (
         "load_governance_section", "load_governance_datasets",
         "search_governance", "load_governance_entity",
+        "load_governance_overlays",
     ):
         mini_apps.mark_app_only(name)
 
@@ -2809,6 +2410,7 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
             "load_governance_datasets": load_governance_datasets,
             "search_governance": search_governance,
             "load_governance_entity": load_governance_entity,
+            "load_governance_overlays": load_governance_overlays,
         },
     )
 

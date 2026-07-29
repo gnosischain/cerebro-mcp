@@ -12,7 +12,16 @@ export type GovSection =
   | "treasury"
   | "entity";
 
-export type GovEntityType = "proposal" | "voter" | "forum_topic" | "forum_user";
+export type GovEntityType =
+  | "proposal"
+  | "voter"
+  | "forum_topic"
+  | "forum_user"
+  // Treasury entities are identified as `<chain_id>:<address>`: 23 of the 24
+  // census wallets exist verbatim on both chains, so a bare address is
+  // ambiguous 96% of the time.
+  | "treasury_token"
+  | "treasury_wallet";
 
 /** Frozen date-range contract: `""` (all history), `"90d"` / `"1y"` relative
  * presets anchored to now() UTC, or an ISO pair (custom). No window_days
@@ -88,6 +97,22 @@ export interface GovCoverage {
   warning_codes?: string[];
 }
 
+/** CoinGecko spot prices, patched in by `load_governance_overlays`.
+ *
+ * Tagged and nested so a HISTORICAL source is a drop-in with no call-site
+ * change: `priceFor(src, chain, token, date)` ignores `date` for "spot" (and
+ * the caller must then caption the chart as a constant-price revaluation) and
+ * resolves it for "historical".
+ *
+ * A token CoinGecko does not list is ABSENT, never priced 0 — this treasury
+ * holds 19 distinct tokens spoofing the symbol `USDC`, and a fabricated $0
+ * would make them indistinguishable from the real one. */
+export interface GovPriceOverlay {
+  kind: "spot" | "historical";
+  /** chainId -> lowercase token address -> USD (spot) or {date: USD}. */
+  by_chain: Record<string, Record<string, number | Record<string, number>>>;
+}
+
 export interface GovernanceViewState {
   section: GovSection;
   title?: string;
@@ -110,6 +135,15 @@ export interface GovernanceViewState {
   section_datasets?: Record<string, string[]>;
   section_lru?: string[];
   freshness: GovFreshness;
+  /** chainId -> lowercase token address -> CoinGecko logo URL. OPTIONAL: any
+   * required field here breaks the complete-literal builders in
+   * `__tests__/askCerebro.test.ts` and `devFixture.ts` at `tsc` time while
+   * vitest still passes. */
+  icon_overlay?: Record<string, Record<string, string>>;
+  price_overlay?: GovPriceOverlay;
+  /** ISO instant the quotes were taken. A price without a timestamp is not
+   * evidence — every USD figure renders this alongside it. */
+  price_overlay_at?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -230,9 +264,13 @@ export interface PostRow {
 }
 
 // ---------------------------------------------------------------------------
-// Delegation plane (Snapshot DelegateRegistry, rpc_log_indexer). Edge
-// counts come from the registry view; "delegated voting power" is Snapshot's
-// realized vp_by_strategy delegation share (voted delegates only).
+// Delegation plane (Snapshot DelegateRegistry, rpc_log_indexer) — Ethereum
+// mainnet (chain 1) AND Gnosis Chain (chain 100); the gnosis.eth space
+// delegates on both. Edge counts come from the registry view; "delegated
+// voting power" is Snapshot's realized vp_by_strategy delegation share, with
+// the delegation slots resolved per proposal (the space has rewritten its
+// strategy list three times). Voted delegates only — NULL, never 0, where no
+// realized figure exists.
 // ---------------------------------------------------------------------------
 
 export interface DelegationSummaryRow {

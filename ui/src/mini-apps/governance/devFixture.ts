@@ -129,9 +129,11 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         ["proposal", P5, "GIP-149: Temperature check (earlier signal)", "gip", 12, "2026-04-15T10:00:00Z"],
       ],
     ),
-    // Delegation plane (Snapshot DelegateRegistry, mainnet). Registry edges
-    // are counts; delegation_power carries realized vp_by_strategy (voted
-    // delegates only). delegation_activity / _churn are WIDE (parseActivity).
+    // Delegation plane (Snapshot DelegateRegistry — Ethereum mainnet AND
+    // Gnosis Chain). Registry edges are counts; delegation_power carries
+    // realized vp_by_strategy (voted delegates only), and is NULL — never 0 —
+    // where no realized figure exists. delegation_activity / _churn are WIDE
+    // (parseActivity).
     delegation_summary: descriptor(
       "delegation_summary",
       ["active_delegators", "active_delegates", "total_events", "set_events", "clear_events", "re_delegations", "clear_rate"],
@@ -164,6 +166,10 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         ["0x4fde2196d2d4fcb7a23cf333be20849ce498db2c", 156, "2026-06-20T09:00:00Z", 9000, 3000, 12000],
         ["0x6d9aba400a2a487a5fb76c6d56518835553cd284", 98, "2026-02-02T02:06:47Z", 0, 5400, 5400],
         ["0xa333100ca865cd8b504e99faf0a578b199ec49fe", 42, "2025-12-11T10:20:00Z", 2100, 0, 2100],
+        // Never voted: no realized vp_by_strategy exists, so every VP column is
+        // NULL and last_vote_at is NULL too. Present in the fixture on purpose —
+        // this is the row that catches a renderer printing a fabricated 0.
+        ["0xb64fed2aff534d5320bf401d0d5b93ed7abcf13e", 7, null, null, null, null],
       ],
     ),
     delegation_concentration: descriptor(
@@ -226,6 +232,43 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         ["usd_price", 0, 231, 0],
       ],
     ),
+    // Treasury history. Wide rows keyed by (chain_id, bucket) — chains are
+    // separate rows and are never blended onto one axis. Both chains appear so
+    // the dev view exercises the two-panel split and the stale-chain path.
+    treasury_chain_history: descriptor(
+      "treasury_chain_history",
+      ["chain_id", "bucket", "anchor_block", "tokens_held", "tokens_named", "wallets_holding", "positions", "gno_units", "gno_units_ex_ltd"],
+      [
+        [1, "2026-05-01", 25218797, 236, 236, 23, 2473, 784834.32, 424423.32],
+        [1, "2026-06-01", 25433938, 240, 240, 23, 2477, 784931.82, 424520.82],
+        [1, "2026-07-01", 25627590, 231, 231, 23, 2485, 784931.82, 424520.82],
+        [100, "2022-10-01", 25012345, 14, 14, 24, 96, 62192.91, 62192.91],
+        [100, "2022-11-01", 25236302, 14, 14, 24, 98, 62192.91, 62192.91],
+      ],
+    ),
+    treasury_token_history: descriptor(
+      "treasury_token_history",
+      ["chain_id", "bucket", "token_address", "symbol", "decimals", "metadata_status", "balance_units", "balance_total_raw", "wallets_holding"],
+      [
+        [1, "2026-06-01", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 784931.82, "784931822290089813540215", 5],
+        [1, "2026-06-01", "0xdef1ca1fb7fbcdc777520aa7f396b4e015f497ab", "COW", 18, "resolved", 56680422.1, "56680422101900000000000000", 3],
+        [1, "2026-07-01", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 784931.82, "784931822290089813540215", 5],
+        [1, "2026-07-01", "0xdef1ca1fb7fbcdc777520aa7f396b4e015f497ab", "COW", 18, "resolved", 56680422.1, "56680422101900000000000000", 3],
+        [100, "2022-11-01", "0x9c58bacc331c9aa871afd802db6379a98e80cedb", "GNO", 18, "resolved", 62192.91, "62192908894379965000000", 4],
+      ],
+    ),
+    treasury_wallet_history: descriptor(
+      "treasury_wallet_history",
+      ["chain_id", "bucket", "wallet_address", "is_ltd", "units", "units_raw"],
+      [
+        [1, "2026-06-01", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 414931.58, "414931579828128603923740"],
+        [1, "2026-06-01", "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 360411, "360410999999999999999999"],
+        [1, "2026-06-01", "other", 0, 5851.05, "5851050000000000000000"],
+        [1, "2026-07-01", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 414931.58, "414931579828128603923740"],
+        [1, "2026-07-01", "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 360411, "360410999999999999999999"],
+        [1, "2026-07-01", "other", 0, 5851.05, "5851050000000000000000"],
+      ],
+    ),
     // Proposal entity datasets (for dev-rendering ProposalDetail incl. the
     // vote-trend chart). proposal_votes / proposal_forum_links are above.
     proposal_detail: descriptor(
@@ -273,7 +316,7 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
       "voters.core": false, "voters.insights": false,
       "forum.core": false, "forum.insights": false,
       "delegations.core": false, "delegations.insights": false,
-      "treasury.core": false, "treasury.insights": false,
+      "treasury.core": false, "treasury.insights": false, "treasury.history": false,
     },
     section_fingerprints: { overview: "dev" },
     section_datasets: { overview: ["space_summary", "source_freshness", "governance_activity"] },

@@ -1951,3 +1951,18 @@ button.data-card:hover { border-color: var(--border-hover); transform: translate
 .ma-chain img,.ma-chain__fallback{width:16px;height:16px;flex:none;border-radius:50%;border:1px solid var(--border);object-fit:cover}
 .ma-chain__fallback{display:grid;place-items:center;color:#fff;font:700 8px var(--font-mono)}
 .ma-chain__name{font-size:12px}
+
+/* Token identity (shared/TokenIdentity.tsx). THREE states, because colour here
+   encodes identity AVAILABILITY: a logo when CoinGecko has one, a hued monogram
+   when only the symbol is known, and a DASHED muted ring when the symbol was
+   never observed on-chain. Hue never appears without a symbol behind it, so an
+   unnamed token reads as a stated gap rather than a broken image. */
+.ma-token{display:inline-flex;align-items:center;gap:7px;white-space:nowrap;min-width:0}
+.ma-token img,.ma-token__fallback{width:20px;height:20px;flex:none;border-radius:50%;background:var(--surface-3);border:1px solid var(--border);object-fit:cover}
+.ma-token__fallback{display:grid;place-items:center;color:var(--text-secondary);font:700 8px var(--font-mono)}
+.ma-token__fallback--raw{border-style:dashed;border-color:var(--border-hover);background:transparent;color:var(--text-muted);opacity:.75;font-weight:500}
+.ma-token__label{overflow:hidden;text-overflow:ellipsis}
+.ma-token__label--raw{color:var(--text-secondary);font-family:var(--font-mono);font-size:11.5px}
+/* Shown when the symbol is NOT unique in view — 19 tokens in the GnosisDAO
+   treasury claim the symbol USDC, so the address is what disambiguates. */
+.ma-token__disambig{margin-left:6px;color:var(--text-muted);font-family:var(--font-mono);font-size:10.5px}

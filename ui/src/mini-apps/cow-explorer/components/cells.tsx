@@ -10,7 +10,7 @@ import { displayAmount } from "../model/identity";
 import { solverName } from "../model/solverRegistry";
 import type { CowExplorerViewState } from "../types";
 import { ChainBadge } from "../../shared/ChainBadge";
-import { TokenIdentity } from "./TokenIdentity";
+import { TokenIdentity } from "../../shared/TokenIdentity";
 
 export interface CellContext {
   state: CowExplorerViewState;

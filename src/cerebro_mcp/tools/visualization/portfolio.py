@@ -12,7 +12,7 @@ from mcp.types import CallToolResult
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset
 from cerebro_mcp.models.mini_app import DatasetStats, MiniAppPayload, SummaryCard
-from cerebro_mcp.tools.visualization import mini_apps, web_apps
+from cerebro_mcp.tools.visualization import mini_apps, sql_loader, web_apps
 from cerebro_mcp.tools.visualization.mini_apps import MiniAppQueryError
 
 logger = logging.getLogger(__name__)
@@ -51,351 +51,59 @@ def get_portfolio_html() -> str:
     return _BUNDLED_PORTFOLIO_HTML
 
 
-_YIELDS_KPIS_SQL = """
-SELECT *
-FROM api_execution_yields_user_kpis
-WHERE lower(wallet_address) = {address:String}
-LIMIT 1
-"""
+_YIELDS_KPIS_SQL = sql_loader.load_sql("portfolio", "yields_kpis")
 
-_GPAY_LIFETIME_SQL = """
-SELECT *
-FROM api_execution_gpay_user_lifetime_metrics
-WHERE lower(wallet_address) = {address:String}
-LIMIT 1
-"""
+_GPAY_LIFETIME_SQL = sql_loader.load_sql("portfolio", "gpay_lifetime")
 
-_SAFE_INFO_SQL = """
-SELECT
-  safe_address,
-  creation_version,
-  block_date,
-  block_timestamp
-FROM int_execution_safes
-WHERE lower(safe_address) = {address:String}
-LIMIT 1
-"""
+_SAFE_INFO_SQL = sql_loader.load_sql("portfolio", "safe_info")
 
-_SAFE_CURRENT_OWNERS_SQL = """
-SELECT
-  safe_address,
-  owner,
-  became_owner_at,
-  current_threshold
-FROM int_execution_safes_current_owners
-WHERE lower(safe_address) = {address:String}
-ORDER BY became_owner_at ASC, owner ASC
-LIMIT 200
-"""
+_SAFE_CURRENT_OWNERS_SQL = sql_loader.load_sql("portfolio", "safe_current_owners")
 
-_OWNER_SAFE_RELATIONS_SQL = """
-SELECT
-  safe_address,
-  owner,
-  became_owner_at,
-  current_threshold
-FROM int_execution_safes_current_owners
-WHERE lower(owner) = {address:String}
-ORDER BY became_owner_at ASC, safe_address ASC
-LIMIT 200
-"""
+_OWNER_SAFE_RELATIONS_SQL = sql_loader.load_sql("portfolio", "owner_safe_relations")
 
-_GPAY_WALLET_SQL = """
-SELECT
-  address,
-  activation_date,
-  creation_time
-FROM int_execution_gpay_wallets
-WHERE lower(address) = {address:String}
-LIMIT 1
-"""
+_GPAY_WALLET_SQL = sql_loader.load_sql("portfolio", "gpay_wallet")
 
-_CIRCLES_CURRENT_SQL = """
-SELECT
-  c.avatar,
-  c.avatar_type,
-  c.name,
-  c.block_timestamp,
-  m.metadata_name,
-  m.metadata_preview_image_url
-FROM api_execution_circles_v2_avatars_current c
-LEFT JOIN api_execution_circles_v2_avatar_metadata m
-  ON m.avatar = c.avatar
-WHERE lower(c.avatar) = {address:String}
-LIMIT 1
-"""
+_CIRCLES_CURRENT_SQL = sql_loader.load_sql("portfolio", "circles_current")
 
-_CIRCLES_TRUSTS_SUMMARY_SQL = """
-SELECT *
-FROM api_execution_circles_v2_avatar_trusts_summary
-WHERE lower(avatar) = {avatar:String}
-LIMIT 1
-"""
+_CIRCLES_TRUSTS_SUMMARY_SQL = sql_loader.load_sql("portfolio", "circles_trusts_summary")
 
-_CIRCLES_BALANCE_SUMMARY_SQL = """
-SELECT
-  count() AS holdings_count,
-  sum(balance_demurraged) AS balance_demurraged
-FROM api_execution_circles_v2_avatar_balances_latest
-WHERE lower(avatar) = {avatar:String}
-"""
+_CIRCLES_BALANCE_SUMMARY_SQL = sql_loader.load_sql("portfolio", "circles_balance_summary")
 
-_CIRCLES_TOKENS_HELD_SQL = """
-SELECT
-  avatar,
-  tokens_held_count
-FROM api_execution_circles_v2_avatar_tokens_held_count
-WHERE lower(avatar) = {avatar:String}
-LIMIT 1
-"""
+_CIRCLES_TOKENS_HELD_SQL = sql_loader.load_sql("portfolio", "circles_tokens_held")
 
-_GPAY_BALANCES_LATEST_SQL = """
-WITH latest AS (
-  SELECT max(date) AS max_date
-  FROM api_execution_gpay_user_balances_daily
-  WHERE lower(wallet_address) = {address:String}
-)
-SELECT
-  wallet_address,
-  date,
-  token,
-  label,
-  value_native,
-  value_usd
-FROM api_execution_gpay_user_balances_daily
-WHERE lower(wallet_address) = {address:String}
-  AND date = (SELECT max_date FROM latest)
-ORDER BY value_usd DESC, token ASC
-LIMIT 200
-"""
+_GPAY_BALANCES_LATEST_SQL = sql_loader.load_sql("portfolio", "gpay_balances_latest")
 
-_YIELDS_LP_POSITIONS_SQL = """
-SELECT
-  provider,
-  pool_address,
-  protocol,
-  tick_lower,
-  tick_upper,
-  capital_in_usd,
-  capital_out_usd,
-  fees_collected_usd,
-  is_active,
-  is_in_range,
-  pool_current_tick,
-  entry_date,
-  last_action_date
-FROM api_execution_yields_user_lp_positions
-WHERE lower(provider) = {address:String}
-ORDER BY last_action_date DESC, protocol ASC
-LIMIT 2000
-"""
+_YIELDS_LP_POSITIONS_SQL = sql_loader.load_sql("portfolio", "yields_lp_positions")
 
-_YIELDS_LENDING_POSITIONS_SQL = """
-SELECT *
-FROM api_execution_yields_user_lending_positions
-WHERE lower(user_address) = {address:String}
-ORDER BY balance_usd DESC, protocol ASC
-LIMIT 2000
-"""
+_YIELDS_LENDING_POSITIONS_SQL = sql_loader.load_sql("portfolio", "yields_lending_positions")
 
-_YIELDS_FEE_COLLECTIONS_SQL = """
-SELECT *
-FROM api_execution_yields_user_fee_collections_daily
-WHERE lower(provider) = {address:String}
-ORDER BY date DESC, fees_usd DESC
-LIMIT 2000
-"""
+_YIELDS_FEE_COLLECTIONS_SQL = sql_loader.load_sql("portfolio", "yields_fee_collections")
 
-_YIELDS_LENDING_BALANCES_SQL = """
-SELECT *
-FROM api_execution_yields_user_lending_balances_daily
-WHERE lower(user_address) = {address:String}
-ORDER BY date DESC, balance_usd DESC
-LIMIT 2000
-"""
+_YIELDS_LENDING_BALANCES_SQL = sql_loader.load_sql("portfolio", "yields_lending_balances")
 
-_YIELDS_ACTIVITY_SQL = """
-SELECT *
-FROM api_execution_yields_user_activity
-WHERE lower(wallet_address) = {address:String}
-ORDER BY block_timestamp DESC
-LIMIT 2000
-"""
+_YIELDS_ACTIVITY_SQL = sql_loader.load_sql("portfolio", "yields_activity")
 
-_GPAY_BALANCES_DAILY_SQL = """
-SELECT *
-FROM api_execution_gpay_user_balances_daily
-WHERE lower(wallet_address) = {address:String}
-ORDER BY date DESC, value_usd DESC
-LIMIT 2000
-"""
+_GPAY_BALANCES_DAILY_SQL = sql_loader.load_sql("portfolio", "gpay_balances_daily")
 
-_GPAY_PAYMENTS_SQL = """
-SELECT *
-FROM api_execution_gpay_user_payments_daily
-WHERE lower(wallet_address) = {address:String}
-ORDER BY date DESC, value DESC
-LIMIT 2000
-"""
+_GPAY_PAYMENTS_SQL = sql_loader.load_sql("portfolio", "gpay_payments")
 
-_GPAY_CASHBACK_SQL = """
-SELECT *
-FROM api_execution_gpay_user_cashback_daily
-WHERE lower(wallet_address) = {address:String}
-ORDER BY date DESC, value DESC
-LIMIT 2000
-"""
+_GPAY_CASHBACK_SQL = sql_loader.load_sql("portfolio", "gpay_cashback")
 
-_GPAY_ACTIVITY_SQL = """
-SELECT *
-FROM api_execution_gpay_user_activity
-WHERE lower(wallet_address) = {address:String}
-ORDER BY timestamp DESC
-LIMIT 2000
-"""
+_GPAY_ACTIVITY_SQL = sql_loader.load_sql("portfolio", "gpay_activity")
 
-_GPAY_ACTIVITY_LIVE_OVERLAY_SQL = f"""
-WITH tokens AS (
-  SELECT
-    lower(address) AS token_address,
-    symbol,
-    decimals,
-    date_start,
-    date_end
-  FROM tokens_whitelist
-),
-deduped_logs AS (
-  SELECT
-    concat('0x', transaction_hash) AS transaction_hash,
-    concat('0x', lower(address)) AS token_contract,
-    topic1,
-    topic2,
-    data,
-    block_timestamp
-  FROM execution.logs
-  WHERE topic0 = '{ERC20_TRANSFER_TOPIC}'
-    AND block_timestamp >= toStartOfDay(now())
-    AND block_timestamp <= now()
-),
-transfers AS (
-  SELECT
-    l.transaction_hash,
-    l.block_timestamp,
-    t.token_address,
-    t.symbol,
-    t.decimals,
-    lower(concat('0x', substring(l.topic1, 25, 40))) AS sender,
-    lower(concat('0x', substring(l.topic2, 25, 40))) AS receiver,
-    reinterpretAsInt256(reverse(unhex(l.data))) AS value_raw
-  FROM deduped_logs l
-  INNER JOIN tokens t
-    ON lower(l.token_contract) = t.token_address
-   AND l.block_timestamp >= t.date_start
-   AND (t.date_end IS NULL OR l.block_timestamp < t.date_end)
-  WHERE lower(concat('0x', substring(l.topic1, 25, 40))) = {{address:String}}
-     OR lower(concat('0x', substring(l.topic2, 25, 40))) = {{address:String}}
-)
-SELECT
-  transaction_hash,
-  {{address:String}} AS wallet_address,
-  block_timestamp AS timestamp,
-  toDate(block_timestamp) AS date,
-  CASE
-    WHEN sender = {{address:String}} AND receiver = '0x4822521e6135cd2599199c83ea35179229a172ee'
-      THEN 'Payment'
-    WHEN receiver = {{address:String}} AND sender = '0x4822521e6135cd2599199c83ea35179229a172ee'
-      THEN 'Reversal'
-    WHEN receiver = {{address:String}} AND sender = '0xcdf50be9061086e2ecfe6e4a1bf9164d43568eec'
-      THEN 'Cashback'
-    WHEN receiver = {{address:String}} AND sender = '0x0000000000000000000000000000000000000000'
-      THEN 'Fiat Top Up'
-    WHEN sender = {{address:String}} AND receiver = '0x0000000000000000000000000000000000000000'
-      THEN 'Fiat Off-ramp'
-    WHEN receiver = {{address:String}}
-      THEN 'Crypto Deposit'
-    ELSE 'Crypto Withdrawal'
-  END AS action,
-  symbol,
-  CASE
-    WHEN sender = {{address:String}} THEN 'out'
-    ELSE 'in'
-  END AS direction,
-  round(toFloat64(value_raw) / power(10, decimals), 6) AS amount,
-  round((toFloat64(value_raw) / power(10, decimals)) * coalesce(p.price, 0), 2) AS amount_usd,
-  CASE
-    WHEN sender = {{address:String}} THEN receiver
-    ELSE sender
-  END AS counterparty
-FROM transfers
-LEFT JOIN int_execution_token_prices_daily p
-  ON p.date = toDate(block_timestamp)
- AND p.symbol = symbol
-ORDER BY timestamp DESC
-LIMIT 500
-"""
+_GPAY_ACTIVITY_LIVE_OVERLAY_SQL = sql_loader.load_sql("portfolio", "gpay_activity_live_overlay", erc20_transfer_topic=ERC20_TRANSFER_TOPIC)
 
-_CIRCLES_METADATA_SQL = """
-SELECT *
-FROM api_execution_circles_v2_avatar_metadata
-WHERE lower(avatar) = {avatar:String}
-LIMIT 1
-"""
+_CIRCLES_METADATA_SQL = sql_loader.load_sql("portfolio", "circles_metadata")
 
-_CIRCLES_BALANCES_SQL = """
-SELECT *
-FROM api_execution_circles_v2_avatar_balances_latest
-WHERE lower(avatar) = {avatar:String}
-ORDER BY balance_demurraged DESC, token_address ASC
-LIMIT 1000
-"""
+_CIRCLES_BALANCES_SQL = sql_loader.load_sql("portfolio", "circles_balances")
 
-_CIRCLES_DISTRIBUTION_SQL = """
-SELECT *
-FROM api_execution_circles_v2_avatar_token_distribution
-WHERE lower(avatar) = {avatar:String}
-ORDER BY balance_demurraged DESC, holder_category ASC
-LIMIT 1000
-"""
+_CIRCLES_DISTRIBUTION_SQL = sql_loader.load_sql("portfolio", "circles_distribution")
 
-_CIRCLES_TRUST_RELATIONS_SQL = """
-SELECT *
-FROM api_execution_circles_v2_trust_relations_current
-WHERE lower(truster) = {avatar:String}
-   OR lower(trustee) = {avatar:String}
-ORDER BY valid_from DESC
-LIMIT 2000
-"""
+_CIRCLES_TRUST_RELATIONS_SQL = sql_loader.load_sql("portfolio", "circles_trust_relations")
 
-_CIRCLES_MINT_ACTIVITY_SQL = """
-SELECT *
-FROM api_execution_circles_v2_avatar_mint_activity_daily
-WHERE lower(avatar) = {avatar:String}
-ORDER BY date DESC
-LIMIT 2000
-"""
+_CIRCLES_MINT_ACTIVITY_SQL = sql_loader.load_sql("portfolio", "circles_mint_activity")
 
-_SAFE_LIVE_OWNER_EVENTS_SQL = f"""
-SELECT
-  block_timestamp,
-  CASE
-    WHEN topic0 = '{SAFE_ADDED_OWNER_TOPIC}' THEN 'added_owner'
-    WHEN topic0 = '{SAFE_REMOVED_OWNER_TOPIC}' THEN 'removed_owner'
-    ELSE 'changed_threshold'
-  END AS event_kind,
-  lower(concat('0x', substring(data, 25, 40))) AS owner,
-  toUInt32(reinterpretAsUInt256(reverse(unhex(data)))) AS threshold
-FROM execution.logs
-WHERE lower(address) = replaceAll({{address:String}}, '0x', '')
-  AND topic0 IN (
-    '{SAFE_ADDED_OWNER_TOPIC}',
-    '{SAFE_REMOVED_OWNER_TOPIC}',
-    '{SAFE_CHANGED_THRESHOLD_TOPIC}'
-  )
-  AND block_timestamp >= toStartOfDay(now())
-  AND block_timestamp <= now()
-ORDER BY block_timestamp ASC
-LIMIT 200
-"""
+_SAFE_LIVE_OWNER_EVENTS_SQL = sql_loader.load_sql("portfolio", "safe_live_owner_events", added_owner_topic=SAFE_ADDED_OWNER_TOPIC, removed_owner_topic=SAFE_REMOVED_OWNER_TOPIC, changed_threshold_topic=SAFE_CHANGED_THRESHOLD_TOPIC)
 
 
 SECTION_DATASETS: dict[str, list[tuple[str, str, str]]] = {

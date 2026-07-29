@@ -23,7 +23,7 @@ function seed(overrides: Partial<GovUrlState> = {}): GovUrlState {
   return {
     section: "", q: "", days: null, start: "", end: "",
     pstate: "", ptype: "", quorum: "", cat: 0, fstatus: "", sort: "",
-    entity: "", id: "",
+    entity: "", id: "", ttab: "",
     ...overrides,
   };
 }

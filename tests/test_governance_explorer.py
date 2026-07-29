@@ -25,7 +25,7 @@ ASSET = "0x" + "ef" * 20
 SENTINEL_TEXT = "zz_sentinel_zz"
 GOV_TOOLS = (
     "open_governance", "load_governance_section", "load_governance_datasets",
-    "search_governance", "load_governance_entity",
+    "search_governance", "load_governance_entity", "load_governance_overlays",
 )
 APP_ONLY_TOOLS = frozenset(GOV_TOOLS) - {"open_governance"}
 
@@ -1131,6 +1131,7 @@ def test_section_groups_cover_every_dataset_key_exactly_once():
         identifier = {
             "proposal": PROPOSAL_ID, "voter": VOTER,
             "forum_topic": "12131", "forum_user": "42",
+            "treasury_token": f"1:{ASSET}", "treasury_wallet": f"100:{VOTER}",
         }[kind]
         produced = {spec.key for spec in governance_explorer._entity_specs(kind, identifier)}
         assert produced == set(keys), kind
@@ -1296,3 +1297,357 @@ def test_treasury_ltd_exclusion_is_explicit_in_sql_and_disclosed_in_basis():
     assert f"NOT IN ('{ltd}')" in on.sql
     assert "all treasury wallets" in off.basis
     assert "Ltd wallets excluded" in on.basis
+
+
+def test_treasury_history_never_blends_chains_onto_one_series():
+    """Chains publish independently and their latest snapshots are years apart.
+
+    Every history row therefore carries chain_id in its own column and every
+    aggregate groups by it, so a client cannot accidentally sum two chains onto
+    one axis. (The LONG metric/metric_value shape would have been unsafe here:
+    parseActivity's pivot keys only on `bucket`, so two chains emitting the same
+    metric name at the same bucket would silently overwrite each other.)
+    """
+    specs = {
+        spec.key: spec
+        for spec in governance_explorer._treasury_specs(
+            governance_explorer._range_state("", ""),
+            governance_explorer._default_filters(),
+        )
+    }
+    history = [key for key in specs if key.endswith("_history")]
+    assert set(history) == {
+        "treasury_chain_history", "treasury_token_history", "treasury_wallet_history",
+    }
+    for key in history:
+        sql = specs[key].sql
+        assert "chain_id AS chain_id" in sql, key
+        # Month-end sampling is resolved PER CHAIN, never globally.
+        assert "GROUP BY chain_id, bucket" in sql, key
+        assert "metric_value" not in sql, key
+
+
+def test_treasury_history_ranks_by_position_changes_not_longevity():
+    """Airdropped dust is held by every wallet from the moment it lands and then
+    never moves, so ranking history candidates by longevity or wallet count puts
+    spam first — measured: it selected ABSHIBA.com/MVDG/TICK while dropping COW,
+    SAFE and wstETH. Counting distinct balances over the series inverts that.
+    """
+    spec = next(
+        s for s in governance_explorer._treasury_specs(
+            governance_explorer._range_state("", ""),
+            governance_explorer._default_filters(),
+        )
+        if s.key == "treasury_token_history"
+    )
+    assert "uniqExact(b.balance_raw_sum) AS changes" in spec.sql
+    assert "changes DESC" in spec.sql
+    assert f"LIMIT {governance_explorer.TREASURY_HISTORY_TOKENS} BY p_chain" in spec.sql
+
+
+def test_treasury_wallet_history_follows_the_focused_asset():
+    """With no focus the per-wallet stack is GNO; focusing an asset retargets it,
+    and the asset must arrive BOUND, never interpolated into the SQL text."""
+    range_state = governance_explorer._range_state("", "")
+    default = next(
+        s for s in governance_explorer._treasury_specs(
+            range_state, governance_explorer._default_filters())
+        if s.key == "treasury_wallet_history"
+    )
+    assert governance_explorer.GNO_TOKENS[1] in default.sql
+    assert "asset" not in default.parameters
+
+    focused = next(
+        s for s in governance_explorer._treasury_specs(
+            range_state, {**governance_explorer._default_filters(), "asset": ASSET})
+        if s.key == "treasury_wallet_history"
+    )
+    assert "{asset:String}" in focused.sql
+    assert focused.parameters["asset"] == ASSET
+    assert ASSET not in focused.sql
+
+
+def test_governance_resource_declares_the_coingecko_image_hosts():
+    """An MCP-UI host blocks every remote image unless the resource names its
+    hosts, so without this meta the treasury table silently renders monograms
+    for everything. api.coingecko.com must NOT be listed: the browser never
+    calls it — the server does, over the MCP tool channel."""
+    server, _ = _server()
+    resources = server._resource_manager._resources
+    entry = next(
+        resource for uri, resource in resources.items()
+        if str(uri) == governance_explorer.GOV_URI
+    )
+    domains = entry.meta["ui"]["csp"]["resourceDomains"]
+    assert set(domains) == {
+        "https://assets.coingecko.com", "https://coin-images.coingecko.com",
+    }
+    assert not any("api.coingecko.com" in d for d in domains)
+
+
+def test_overlay_tool_never_fabricates_a_price_for_an_unlisted_token(monkeypatch):
+    """Absence, not zero. 19 distinct tokens in this treasury spoof the symbol
+    USDC; pricing an unlisted one at 0 would make it look merely worthless
+    instead of unidentifiable."""
+    from cerebro_mcp.tools.visualization import coingecko
+
+    coingecko.reset_caches_for_tests()
+    monkeypatch.setattr(coingecko, "_EXECUTOR", type("E", (), {
+        "submit": staticmethod(lambda fn, *a: fn(*a)),
+    })())
+    real, spoof = "0x" + "11" * 20, "0x" + "22" * 20
+    monkeypatch.setattr(coingecko, "fetch_coin_index",
+                        lambda: {"ethereum": {real: "real-coin"}})
+    monkeypatch.setattr(coingecko, "fetch_prices", lambda ids: {"real-coin": 4.0})
+    monkeypatch.setattr(coingecko, "fetch_icon_map", lambda chain: {})
+
+    server, ch = _server()
+    view_id = _tool(server, "open_governance")().structuredContent["view_id"]
+    _tool(server, "load_governance_section")(
+        view_id=view_id, request_id=1, section="treasury"
+    )
+    dataset = CachedDataset(
+        columns=["chain_id", "token_address"], column_types=["int", "str"],
+        rows=[[1, real], [1, spoof]],
+        stats=DatasetStats(row_count=2, rows_returned=2, mode="exact_capped"),
+        sql="--", database="governance_db", parameters={},
+    )
+    mini_apps.attach_dataset(view_id, "treasury_holdings", dataset)
+
+    for _ in range(2):  # first call warms the background pass
+        result = _tool(server, "load_governance_overlays")(view_id=view_id)
+    patch = result.structuredContent["patch"]
+    assert patch["price_overlay"]["kind"] == "spot"
+    assert patch["price_overlay"]["by_chain"]["1"] == {real: 4.0}
+    assert spoof not in patch["price_overlay"]["by_chain"]["1"]
+    assert patch["price_overlay_at"].endswith("Z")
+    coingecko.reset_caches_for_tests()
+
+
+def test_treasury_specs_reference_each_cte_once():
+    """ClickHouse INLINES a CTE per reference, so an N-reference CTE is an
+    N-times re-scan — not a shared subresult.
+
+    treasury_coverage originally read `held` from four UNION ALL arms. That is
+    the clearest way to write it and it worked at 231 held tokens, then blew the
+    2 GiB per-query cap at ~390 and took the whole panel down with a code 241.
+    It now aggregates once and pivots with ARRAY JOIN.
+
+    Any treasury CTE referenced more than twice is the same trap re-set.
+    """
+    specs = governance_explorer._treasury_specs(
+        governance_explorer._range_state("", ""),
+        governance_explorer._default_filters(),
+    )
+    for spec in specs:
+        # Both spellings: a leading `WITH foo AS (` and a continuation
+        # `,\nfoo AS (`. The original pattern only matched line-initial
+        # names, so the FIRST CTE of every spec went unchecked.
+        names = re.findall(r"(?:^|\bWITH\s+)(\w+) AS \(", spec.sql, re.MULTILINE)
+        for name in names:
+            # `<name> AS (` is the definition; every other bare mention reads it.
+            uses = len(re.findall(rf"\b{name}\b", spec.sql)) - 1
+            assert uses <= 2, (
+                f"{spec.key}: CTE `{name}` is referenced {uses}x — ClickHouse "
+                "will re-scan it that many times"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Treasury entity drill-downs
+# ---------------------------------------------------------------------------
+
+
+def _treasury_entity_specs():
+    """Every treasury entity spec, both kinds and both chains."""
+    out = []
+    for kind, ident in (
+        ("treasury_token", f"1:{ASSET}"),
+        ("treasury_token", f"100:{ASSET}"),
+        ("treasury_wallet", f"1:{VOTER}"),
+        ("treasury_wallet", f"100:{VOTER}"),
+    ):
+        normalized = governance_explorer._validate_entity_identifier(kind, ident)
+        out.extend(governance_explorer._entity_specs(kind, normalized))
+    return out
+
+
+def test_treasury_entity_identifier_carries_the_chain():
+    """A bare address is not an identity here: 23 of the 24 census wallets exist
+    verbatim on BOTH chains, so an address alone is ambiguous 96% of the time."""
+
+    for kind in ("treasury_token", "treasury_wallet"):
+        assert governance_explorer._validate_entity_identifier(
+            kind, f" 1:{ASSET.upper()} "
+        ) == f"1:{ASSET}"
+        for bad in (ASSET, f"5:{ASSET}", "1:0xnothex", "1:", ":" + ASSET, f"1:{ASSET}extra"):
+            with pytest.raises(ValueError):
+                governance_explorer._validate_entity_identifier(kind, bad)
+
+
+def test_treasury_entity_specs_pin_the_job_the_chain_and_never_use_final():
+    """The same three invariants as the section specs. The entity specs pin the
+    chain to a literal instead of grouping per chain — an entity IS one chain by
+    construction, so pinning is strictly stronger than not blending."""
+
+    specs = _treasury_entity_specs()
+    assert len(specs) == 12
+    job_pin = f"job_name = '{governance_explorer.TREASURY_JOB}'"
+    for spec in specs:
+        assert job_pin in spec.sql, spec.key
+        assert "FINAL" not in spec.sql.upper(), spec.key
+        assert re.search(r"chain_id = \d+", spec.sql), spec.key
+        # The as-of / month CTE must be chain-pinned too, or the entity would
+        # resolve its snapshot date against the OTHER chain — Ethereum publishes
+        # to 2026-07 while Gnosis Chain stops in 2022-12, so a blended as-of
+        # returns an empty page rather than an obviously wrong one.
+        head = spec.sql.split("\n)", 1)[0]
+        assert re.search(r"chain_id = \d+", head), f"{spec.key}: leading CTE not chain-pinned"
+        # The paging layer rejects a spec without one. A single-row detail query
+        # is only stable if the statement SAYS it is — this shipped broken once,
+        # and the *_detail specs are exactly the ones that look exempt.
+        assert "ORDER BY" in spec.sql, spec.key
+
+
+def test_treasury_entity_addresses_are_bound_parameters_never_interpolated():
+    """The chain is an int already checked against TREASURY_CHAINS, so it is
+    interpolated. The address never is — it reaches SQL only as {addr:String}."""
+
+    for kind, ident in (("treasury_token", f"1:{ASSET}"), ("treasury_wallet", f"1:{VOTER}")):
+        normalized = governance_explorer._validate_entity_identifier(kind, ident)
+        address = normalized.split(":", 1)[1]
+        for spec in governance_explorer._entity_specs(kind, normalized):
+            assert spec.parameters == {"addr": address}, spec.key
+            assert "{addr:String}" in spec.sql, spec.key
+            assert address not in spec.sql, spec.key
+
+
+def test_treasury_entity_specs_reference_each_cte_once():
+    """Same trap as treasury_coverage: ClickHouse inlines a CTE per reference,
+    so an N-reference CTE is an N-times re-scan, not a shared subresult."""
+
+    for spec in _treasury_entity_specs():
+        for name in re.findall(r"^\s*(\w+) AS \(", spec.sql, re.MULTILINE):
+            uses = len(re.findall(rf"\b{name}\b", spec.sql)) - 1
+            assert uses <= 2, (
+                f"{spec.key}: CTE `{name}` is referenced {uses}x — ClickHouse "
+                "will re-scan it that many times"
+            )
+
+
+def test_treasury_entity_usd_stays_a_typed_null():
+    """NULL, never 0 — pricing is a client-side overlay on this plane too."""
+
+    keys = {
+        "treasury_token_detail", "treasury_token_holders",
+        "treasury_wallet_detail", "treasury_wallet_positions",
+    }
+    for spec in _treasury_entity_specs():
+        if spec.key in keys:
+            assert "CAST(NULL AS Nullable(Float64))" in spec.sql, spec.key
+
+
+def test_treasury_entity_label_is_never_the_token_symbol():
+    """Breadcrumbs render their label raw and a token symbol is attacker-authored
+    — 19 addresses in this treasury claim 'USDC'. The detail specs compose
+    `entity_label` from the chain name and the address instead."""
+
+    assert governance_explorer._ENTITY_LABEL_COLUMN["treasury_token"] == "entity_label"
+    assert governance_explorer._ENTITY_LABEL_COLUMN["treasury_wallet"] == "entity_label"
+    for spec in _treasury_entity_specs():
+        if spec.key.endswith("_detail"):
+            # A string LITERAL composed from the chain name and the address —
+            # never a column read off a row. A `symbol` column may still exist
+            # for display (TokenIdentity sanitizes it); it just must not be what
+            # names the breadcrumb.
+            assert re.search(r"'[^']+ 0x\w{4}\u2026\w{4}' AS entity_label", spec.sql), spec.key
+
+
+# ---------------------------------------------------------------------------
+# Delegated voting power — strategy-era resolution
+# ---------------------------------------------------------------------------
+
+
+def _delegation_power_sql() -> str:
+    specs = {
+        spec.key: spec
+        for spec in governance_explorer._delegations_specs(
+            governance_explorer._range_state("", ""),
+            governance_explorer._default_filters(),
+        )
+    }
+    return specs["delegation_power"].sql
+
+
+def test_delegation_power_never_indexes_vp_by_strategy_by_fixed_position():
+    """The bug this replaces: `if(length(lv.vps) = 5, lv.vps[4], 0)`.
+
+    `vp_by_strategy` is positional against the proposal's OWN strategy list, and
+    gnosis.eth has rewritten that list three times (lengths 2, 4, 5). The fixed
+    index read 0 for every delegate whose latest final vote predated 2025-11-16
+    — 26.4% of all delegated voting power. A length guard is not a schema check.
+    """
+    sql = _delegation_power_sql()
+    # No literal subscript on the vp array, and no length guard on it.
+    assert not re.search(r"\bvps\s*\[\s*\d+\s*\]", sql)
+    assert not re.search(r"length\s*\(\s*[\w.]*vps\s*\)\s*=\s*\d+", sql)
+    # Slots come from the proposal's own strategy list instead.
+    assert "snapshot_proposals FINAL" in sql
+    assert "'strategies'" in sql
+    assert "arrayEnumerate" in sql
+
+
+def test_delegation_power_resolves_the_chain_from_network_not_position():
+    """THE TRAP. The delegation strategies appear in OPPOSITE chain order in the
+    two most recent layouts:
+
+        len 4  gno(1), delegation(1), gno(100), delegation(100)   -> [2]=eth, [4]=gno-chain
+        len 5  cc(100), beacon(100), cc(1), delegation(100), delegation(1)
+                                                                  -> [4]=gno-chain, [5]=eth
+
+    So "take the delegation entries in order" swaps mainnet and Gnosis Chain for
+    44,635 votes (7.99M VP) without changing a single total — the failure would
+    be invisible in every aggregate. Only the strategy's own `network` is stable.
+    """
+    sql = _delegation_power_sql()
+    assert "'network'" in sql
+    # Each chain's slots are selected by network literal, not by offset.
+    assert re.search(r"networks\[i\]\s*=\s*'1'", sql)
+    assert re.search(r"networks\[i\]\s*=\s*'100'", sql)
+
+
+def test_delegation_power_matches_the_strategy_name_as_a_substring():
+    """The 2020-12 layout names it `erc20-balance-of-delegation`, carrying
+    199,139 VP. An exact `name = 'delegation'` filter drops it silently."""
+    sql = _delegation_power_sql()
+    assert governance_explorer.DELEGATION_STRATEGY_MATCH == "delegation"
+    assert re.search(
+        rf"position\(names\[i\], '{governance_explorer.DELEGATION_STRATEGY_MATCH}'\) > 0",
+        sql,
+    )
+    assert "names[i] = 'delegation'" not in sql
+
+
+def test_delegation_power_emits_null_not_zero_where_nothing_was_measured():
+    """29 of 80 delegates have never voted. Zero is a measurement; absence is
+    not. The epoch guard matters for the same reason — a LEFT JOIN miss on a
+    DateTime defaults to 1970-01-01, which reads as a real vote date."""
+    sql = _delegation_power_sql()
+    assert "nullIf(lv.last_vote_at, toDateTime(0))" in sql
+    # Every VP column returns NULL when its slot set is empty.
+    assert sql.count("NULL,") >= 3
+    assert "NULLS LAST" in sql
+
+
+def test_delegation_power_pins_the_snapshot_space():
+    """Both new CTEs reduce ACROSS proposals rather than filtering to one, so an
+    unpinned argMax would follow a voter into a second space the day one lands."""
+    sql = _delegation_power_sql()
+    assert sql.count(f"space_id = '{governance_explorer.SNAPSHOT_SPACE}'") == 2
+
+
+def test_delegation_power_cap_exceeds_the_delegate_universe():
+    """Unmeasurable delegates sort last under NULLS LAST, so a tight cap would
+    truncate exactly the rows the UI counts to say what it could not measure."""
+    assert governance_explorer.DELEGATE_POWER_CAP >= 200
+    assert f"LIMIT {governance_explorer.DELEGATE_POWER_CAP}" in _delegation_power_sql()

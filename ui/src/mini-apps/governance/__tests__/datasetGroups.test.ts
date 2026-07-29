@@ -30,6 +30,11 @@ const FROZEN_SECTION_GROUPS: Record<string, Record<string, string[]>> = {
   treasury: {
     core: ["treasury_summary", "treasury_holdings", "treasury_by_wallet"],
     insights: ["treasury_coverage"],
+    history: [
+      "treasury_chain_history",
+      "treasury_token_history",
+      "treasury_wallet_history",
+    ],
   },
 };
 
@@ -38,6 +43,12 @@ const FROZEN_ENTITY_DATASETS: Record<string, string[]> = {
   voter: ["voter_profile", "voter_votes", "voter_participation"],
   forum_topic: ["topic_detail", "topic_posts", "topic_proposal_links"],
   forum_user: ["contributor_profile", "contributor_posts", "contributor_activity"],
+  treasury_token: [
+    "treasury_token_detail", "treasury_token_holders", "treasury_token_holder_series",
+  ],
+  treasury_wallet: [
+    "treasury_wallet_detail", "treasury_wallet_positions", "treasury_wallet_series",
+  ],
 };
 
 describe("frozen SECTION_GROUPS contract", () => {

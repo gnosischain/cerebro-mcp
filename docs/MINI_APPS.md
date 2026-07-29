@@ -360,7 +360,15 @@ The app and Data Catalog use isolated split bundles. Their public assets remain
 **Source**: [`ui/src/mini-apps/governance/`](../ui/src/mini-apps/governance/) · [`governance_explorer.py`](../src/cerebro_mcp/tools/visualization/governance_explorer.py)
 
 **Agent tool**: `open_governance`
-**App-only tools**: `load_governance_section`, `load_governance_datasets`, `search_governance`, `load_governance_entity`
+**App-only tools**: `load_governance_section`, `load_governance_datasets`, `search_governance`, `load_governance_entity`, `load_governance_overlays`
+
+`load_governance_overlays` resolves CoinGecko token icons and CURRENT spot USD for the tokens
+visible in the view, patching `icon_overlay` / `price_overlay` / `price_overlay_at` into view
+state. It never blocks on the network (`overlay_pending` in the warnings means one retry will
+find more), and a token CoinGecko does not list is omitted rather than priced at 0 — this
+treasury holds 19 distinct tokens spoofing the symbol `USDC`, so a fabricated $0 would make
+them indistinguishable from the real asset. Prices are spot only: a historical series valued
+with them is a constant-price revaluation, not historical market value.
 
 Read-only governance intelligence over `governance_db` (populated by the
 click-runner Snapshot + Discourse ingestors, daily cadence). Four sections —

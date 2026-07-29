@@ -11,15 +11,10 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
-from urllib.parse import urlparse
 
-import requests
 from mcp.types import CallToolResult
 
 from cerebro_mcp.chains import CHAINS, NATIVE_ICON_URLS, ChainInfo, ExplorerInfo
@@ -29,7 +24,7 @@ from cerebro_mcp.clients.clickhouse import (
 )
 from cerebro_mcp.models.mini_app import MiniAppPayload, SummaryCard
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset, FailureCache
-from cerebro_mcp.tools.visualization import mini_apps, web_apps
+from cerebro_mcp.tools.visualization import coingecko, mini_apps, sql_loader, web_apps
 
 logger = logging.getLogger(__name__)
 
@@ -184,26 +179,16 @@ CANDLE_BUCKETS = {
     "1d": "toStartOfDay(block_timestamp)",
     "1w": "toStartOfWeek(block_timestamp)",
 }
-COINGECKO_PLATFORM_IDS = {
-    1: "ethereum",
-    56: "binance-smart-chain",
-    100: "xdai",
-    137: "polygon-pos",
-    8453: "base",
-    9745: "plasma",
-    42161: "arbitrum-one",
-    43114: "avalanche",
-    57073: "ink",
-    59144: "linea",
-}
-COINGECKO_TOKEN_LIST_URL = "https://tokens.coingecko.com/{platform}/all.json"
+#: CoinGecko access moved to ``visualization.coingecko`` when the governance
+#: Treasury tab needed the same address-keyed lookups. These aliases keep the
+#: original names — they are referenced throughout this module and mirrored
+#: client-side — while the implementation lives in one place.
+COINGECKO_PLATFORM_IDS = coingecko.PLATFORM_IDS
+COINGECKO_TOKEN_LIST_URL = coingecko.TOKEN_LIST_URL
 #: Alias of the shared registry map — kept under the original name because it
 #: is referenced throughout this module and mirrored client-side.
 COINGECKO_NATIVE_ICON_URLS = NATIVE_ICON_URLS
-COINGECKO_ICON_CACHE_TTL_SECONDS = 30 * 60
-_COINGECKO_IMAGE_HOSTS = {"assets.coingecko.com", "coin-images.coingecko.com"}
-_COINGECKO_ICON_CACHE: dict[int, tuple[float, dict[str, str]]] = {}
-_COINGECKO_ICON_LOCK = threading.RLock()
+COINGECKO_ICON_CACHE_TTL_SECONDS = coingecko.ICON_CACHE_TTL_SECONDS
 _TOKEN_COLUMN_RE = re.compile(r"^(?:token|token[01]|(?:base|quote|sell|buy|fee)_token)$")
 ORDER_UID_RE = re.compile(r"^0x[0-9a-f]{112}$")
 HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
@@ -291,119 +276,22 @@ def _normalize_hex(value: str) -> str:
     return value.strip().lower()
 
 
-def _safe_coingecko_logo_url(value: Any) -> str:
-    url = str(value or "").strip()
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname not in _COINGECKO_IMAGE_HOSTS:
-        return ""
-    return url
-
-
-def _fetch_coingecko_icon_map(chain_id: int) -> dict[str, str]:
-    platform = COINGECKO_PLATFORM_IDS.get(chain_id)
-    if not platform:
-        return {}
-    response = requests.get(
-        COINGECKO_TOKEN_LIST_URL.format(platform=platform),
-        timeout=(2, 8),
-        headers={"Accept": "application/json", "User-Agent": "cerebro-cow-explorer/1"},
-    )
-    response.raise_for_status()
-    payload = response.json()
-    tokens = payload.get("tokens", []) if isinstance(payload, dict) else []
-    icons: dict[str, str] = {}
-    for item in tokens:
-        if not isinstance(item, dict):
-            continue
-        address = _normalize_hex(str(item.get("address") or ""))
-        logo_url = _safe_coingecko_logo_url(item.get("logoURI"))
-        if ADDRESS_RE.fullmatch(address) and logo_url:
-            icons[address] = logo_url
-    return icons
-
-
-#: Background fetcher for CoinGecko token lists. Two workers are plenty — a
-#: fetch per chain runs at most once per cache TTL, and NOTHING ever waits on
-#: it: data loads read the cache as-is and the frontend patches icons in later.
-_COINGECKO_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cow-icons")
-_COINGECKO_PENDING: set[int] = set()
-
-
-def _coingecko_icon_map_nowait(chain_id: int) -> tuple[dict[str, str], bool]:
-    """Return ``(cached icon map, pending)`` without ever blocking.
-
-    On a cache miss the fetch is submitted to the background executor and
-    ``pending=True`` signals the caller (the icon-overlay tool) that a retry
-    will find more icons. Data-loading paths never call this.
-    """
-    now = time.monotonic()
-    with _COINGECKO_ICON_LOCK:
-        cached = _COINGECKO_ICON_CACHE.get(chain_id)
-        if cached and now - cached[0] < COINGECKO_ICON_CACHE_TTL_SECONDS:
-            return cached[1], False
-        if chain_id not in COINGECKO_PLATFORM_IDS:
-            return {}, False
-        if chain_id in _COINGECKO_PENDING:
-            return (cached[1] if cached else {}), True
-        _COINGECKO_PENDING.add(chain_id)
-
-    def fetch() -> None:
-        icons: dict[str, str] = {}
-        try:
-            icons = _fetch_coingecko_icon_map(chain_id)
-        except (requests.RequestException, ValueError, TypeError) as exc:
-            logger.warning(
-                "CoinGecko token icons unavailable for chain %s: %s", chain_id, exc
-            )
-        finally:
-            with _COINGECKO_ICON_LOCK:
-                _COINGECKO_ICON_CACHE[chain_id] = (time.monotonic(), icons)
-                _COINGECKO_PENDING.discard(chain_id)
-
-    try:
-        _COINGECKO_EXECUTOR.submit(fetch)
-    except RuntimeError:  # interpreter shutdown
-        with _COINGECKO_ICON_LOCK:
-            _COINGECKO_PENDING.discard(chain_id)
-        return (cached[1] if cached else {}), False
-    return (cached[1] if cached else {}), True
-
-
 def _dataset_token_addresses(
     datasets: dict[str, CachedDataset],
     cap_per_chain: int = 500,
 ) -> dict[int, set[str]]:
-    """Collect distinct token addresses per chain from attached datasets."""
-    per_chain: dict[int, set[str]] = {}
-    for dataset in datasets.values():
-        token_indexes = [
-            index for index, name in enumerate(dataset.columns)
-            if _TOKEN_COLUMN_RE.fullmatch(name)
-        ]
-        if not token_indexes:
-            continue
-        chain_index = (
-            dataset.columns.index("chain_id") if "chain_id" in dataset.columns else -1
-        )
-        fallback_chain = int(dataset.parameters.get("chain_id") or 0) if dataset.parameters else 0
-        for row in dataset.rows:
-            chain_id = fallback_chain
-            if 0 <= chain_index < len(row) and row[chain_index] is not None:
-                try:
-                    chain_id = int(row[chain_index])
-                except (TypeError, ValueError):
-                    chain_id = fallback_chain
-            if chain_id <= 0:
-                continue
-            bucket = per_chain.setdefault(chain_id, set())
-            if len(bucket) >= cap_per_chain:
-                continue
-            for index in token_indexes:
-                if index < len(row):
-                    value = _normalize_hex(str(row[index] or ""))
-                    if value == NATIVE_TOKEN or ADDRESS_RE.fullmatch(value):
-                        bucket.add(value)
-    return per_chain
+    """Collect distinct token addresses per chain from attached datasets.
+
+    Thin binding of the shared collector to CoW's own column vocabulary —
+    ``_TOKEN_COLUMN_RE`` and ``NATIVE_TOKEN`` are this app's schema, not
+    CoinGecko's, so they stay here.
+    """
+    return coingecko.dataset_token_addresses(
+        datasets,
+        token_columns=_TOKEN_COLUMN_RE,
+        native_token=NATIVE_TOKEN,
+        cap_per_chain=cap_per_chain,
+    )
 
 
 def _build_icon_overlay(
@@ -415,22 +303,12 @@ def _build_icon_overlay(
     and ``pending`` means at least one chain's CoinGecko list is still being
     fetched in the background (the frontend retries once shortly after).
     """
-    overlay: dict[str, dict[str, str]] = {}
-    any_pending = False
-    for chain_id, tokens in _dataset_token_addresses(datasets).items():
-        icon_map, pending = _coingecko_icon_map_nowait(chain_id)
-        any_pending = any_pending or pending
-        chain_icons: dict[str, str] = {}
-        for token in tokens:
-            if token == NATIVE_TOKEN:
-                url = COINGECKO_NATIVE_ICON_URLS.get(chain_id, "")
-            else:
-                url = icon_map.get(token, "")
-            if url:
-                chain_icons[token] = url
-        if chain_icons:
-            overlay[str(chain_id)] = chain_icons
-    return overlay, any_pending
+    return coingecko.build_icon_overlay(
+        datasets,
+        token_columns=_TOKEN_COLUMN_RE,
+        native_token=NATIVE_TOKEN,
+        native_icon_urls=COINGECKO_NATIVE_ICON_URLS,
+    )
 
 
 def _validate_scope(scope: str) -> str:
@@ -546,21 +424,7 @@ def _time_predicate(
 
 
 def _token_metadata_cte() -> str:
-    return """
-tm AS (
-    SELECT token,
-           argMax(symbol, observed_at) AS symbol,
-           argMax(name, observed_at) AS name,
-           argMax(decimals, observed_at) AS decimals,
-           max(observed_at) AS metadata_observed_at
-    FROM cow_db.token_metadata
-    WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-    GROUP BY token
-    UNION ALL
-    SELECT '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
-           {native_symbol:String}, {native_symbol:String}, toUInt8(18),
-           toDateTime64(0, 3, 'UTC')
-)"""
+    return sql_loader.load_sql("cow", "_cte_token_metadata")
 
 
 def _token_metadata_cte_multi(scope: str, chain: ChainInfo | None = None) -> str:
@@ -574,22 +438,7 @@ def _token_metadata_cte_multi(scope: str, chain: ChainInfo | None = None) -> str
     native_tuples = ",".join(
         f"(toUInt64({c.chain_id}),'{c.native_symbol}')" for c in chains
     )
-    return f"""
-tmx AS (
-    SELECT chain_id, token,
-           argMax(symbol, observed_at) AS symbol,
-           argMax(name, observed_at) AS name,
-           argMax(decimals, observed_at) AS decimals,
-           max(observed_at) AS metadata_observed_at
-    FROM cow_db.token_metadata
-    WHERE environment={{env:String}} AND chain_id IN ({ids})
-    GROUP BY chain_id, token
-    UNION ALL
-    SELECT nt.1 AS chain_id,'{NATIVE_TOKEN}' AS token,nt.2 AS symbol,
-           nt.2 AS name,toUInt8(18) AS decimals,
-           toDateTime64(0,3,'UTC') AS metadata_observed_at
-    FROM (SELECT arrayJoin([{native_tuples}]) AS nt)
-)"""
+    return sql_loader.load_sql("cow", "_cte_token_metadata_multichain", ids=ids, native_token=NATIVE_TOKEN, native_tuples=native_tuples)
 
 
 def _trade_anchor(chain: ChainInfo | None) -> str:
@@ -739,18 +588,7 @@ def _shared_arm_ctes(ids: str) -> str:
     arm — smaller SQL (the assembled statement must stay under the length
     cap) and fewer scans.
     """
-    return f"""
-cp AS (
-  SELECT chain_id, argMax(block_number,updated_at) AS b
-  FROM cow_db.indexing_checkpoints
-  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND source='rpc'
-  GROUP BY chain_id
-), ta AS (
-  SELECT chain_id, max(block_timestamp) AS a
-  FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-  GROUP BY chain_id
-)"""
+    return sql_loader.load_sql("cow", "_cte_checkpoints", ids=ids)
 
 
 def _arm_checkpoint(cid: int) -> str:
@@ -798,13 +636,7 @@ def _overview_specs(
         "order_indexed_to", "order_observed_at", "competition_observed_at",
     )
     shared_ctes = _shared_arm_ctes(ids)
-    order_anchor_cte = f"""
-oa AS (
-  SELECT chain_id, max(creation_date) AS a
-  FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-  GROUP BY chain_id
-)"""
+    order_anchor_cte = sql_loader.load_sql("cow", "order_anchor_cte", ids=ids)
 
     def order_window(cid: int) -> str:
         if range_state["kind"] == "all":
@@ -821,30 +653,14 @@ oa AS (
             "-toIntervalDay({window_days:UInt32})"
         )
 
-    competitions_cte = f"""
-cc AS (
-  SELECT chain_id, count() AS a, maxOrNull(observed_at) AS b
-  FROM cow_db.solver_competitions FINAL
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-  GROUP BY chain_id
-)"""
+    competitions_cte = sql_loader.load_sql("cow", "competitions_cte", ids=ids)
     # Grouped single-pass shape: one trades scan and one orders scan, each
     # GROUP BY chain_id, joined onto an arrayJoin chain spine — replaces the
     # per-chain cross-join arms (10x the scans AND over the SQL length cap).
     # orders: argMax dedup grouped on the sort-key prefix streams, replacing
     # FINAL, whose k-way merge was the memory-heavy part of the all-network
     # summary; status/creation_date are latest-version exact.
-    trades_cte = f"""
-tr AS (
-  SELECT t.chain_id AS chain_id,uniq({TRADE_KEY}) AS a,uniq(tx_hash) AS b,
-         minOrNull(block_timestamp) AS c,maxOrNull(block_timestamp) AS d,
-         maxOrNull(observed_at) AS e
-  FROM cow_db.trades AS t
-  INNER JOIN cp ON cp.chain_id=t.chain_id
-  WHERE t.environment={{env:String}} AND t.chain_id IN ({ids})
-    AND t.block_number<=cp.b AND {_arm_window(0, range_state)}
-  GROUP BY t.chain_id
-)"""
+    trades_cte = sql_loader.load_sql("cow", "trades_cte", trade_key=TRADE_KEY, ids=ids, arm_window=_arm_window(0, range_state))
     # Counts + open-count are split so NEITHER deduplicates the whole orders
     # table. Once the historical backfill grew `orders` past ~4M rows, the old
     # `argMax(...) GROUP BY (chain_id, order_uid)` dedup over EVERY order built a
@@ -856,98 +672,11 @@ tr AS (
     #      currently-open order MUST be unexpired (valid_to > now, immutable), a
     #      tiny live set, so the argMax runs over that only; expired backfilled
     #      history drops out and never bloats the hash.
-    orders_cte = f"""
-og AS (
-  SELECT chain_id,uniq(order_uid) AS a,
-         minOrNull(creation_date) AS c,maxOrNull(creation_date) AS d,
-         maxOrNull(observed_at) AS e
-  FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND {order_window(0)}
-  GROUP BY chain_id
-),
-ogopen AS (
-  SELECT chain_id,countIf(status='open') AS b
-  FROM (
-    SELECT chain_id,order_uid,argMax(status,observed_at) AS status
-    FROM cow_db.orders
-    WHERE environment={{env:String}} AND chain_id IN ({ids})
-      AND valid_to>toUnixTimestamp(now())
-    GROUP BY chain_id,order_uid
-  )
-  GROUP BY chain_id
-)"""
+    orders_cte = sql_loader.load_sql("cow", "orders_cte", ids=ids, order_window=order_window(0))
     network_summary = (
-        f"WITH {shared_ctes},{order_anchor_cte},{competitions_cte},"
-        f"{trades_cte},{orders_cte}\n"
-        f"SELECT spine.chain_id AS chain_id,coalesce(tr.a,0) AS trade_count,"
-        "coalesce(tr.b,0) AS settlement_transactions,coalesce(og.a,0) AS order_count,"
-        "coalesce(ogopen.b,0) AS observed_open_orders,"
-        "coalesce(cc.a,0) AS competition_count_all_indexed,"
-        "tr.c AS indexed_from,tr.d AS indexed_to,"
-        "tr.e AS source_observed_at,og.c AS order_indexed_from,"
-        "og.d AS order_indexed_to,og.e AS order_observed_at,"
-        "cc.b AS competition_observed_at\n"
-        f"FROM (SELECT arrayJoin([{ids}]) AS chain_id) AS spine\n"
-        "LEFT JOIN tr ON tr.chain_id=spine.chain_id\n"
-        "LEFT JOIN og ON og.chain_id=spine.chain_id\n"
-        "LEFT JOIN ogopen ON ogopen.chain_id=spine.chain_id\n"
-        "LEFT JOIN cc ON cc.chain_id=spine.chain_id\n"
-        "ORDER BY spine.chain_id"
+        sql_loader.load_sql("cow", "network_summary", shared_ctes=shared_ctes, order_anchor_cte=order_anchor_cte, competitions_cte=competitions_cte, trades_cte=trades_cte, orders_cte=orders_cte, ids=ids)
     )
-    coverage = f"""
-WITH cp AS (
-  SELECT chain_id, argMax(block_number, updated_at) AS checkpoint_block,
-         max(updated_at) AS checkpoint_updated_at
-  FROM cow_db.indexing_checkpoints
-  WHERE {scope_pred} AND source='rpc'
-  GROUP BY chain_id
-), blocks AS (
-  -- block_number IS the sort key → this IN-set prunes chain_blocks from the
-  -- whole ~9.2M-row table to the ~10 checkpoint blocks. Without it the JOIN
-  -- condition alone forces a full-table scan + hash. (No FINAL: argMax dedups.)
-  SELECT b.chain_id,b.block_number,
-         argMax(b.block_timestamp,b.observed_at) AS checkpoint_timestamp
-  FROM cow_db.chain_blocks AS b
-  INNER JOIN cp
-    ON b.chain_id=cp.chain_id AND b.block_number=cp.checkpoint_block
-  WHERE b.environment={{env:String}} AND b.chain_id IN ({ids})
-    AND b.block_number IN (SELECT checkpoint_block FROM cp)
-  GROUP BY b.chain_id,b.block_number
-), obs AS (
-  -- max(observed_at) is dedup-invariant; the base table avoids expanding the
-  -- canonical view (FINAL + chain_blocks join) once per chain.
-  SELECT chain_id, max(observed_at) AS trade_observed_at
-  FROM cow_db.trades WHERE {scope_pred} GROUP BY chain_id
-), ord AS (
-  -- max(observed_at) is FINAL-invariant on a ReplacingMergeTree(observed_at);
-  -- skipping FINAL avoids the merge cost on the largest per-chain table.
-  SELECT chain_id, max(observed_at) AS order_observed_at
-  FROM cow_db.orders WHERE {scope_pred} GROUP BY chain_id
-), comp AS (
-  SELECT chain_id, max(auction_block) AS max_competition_block,
-         max(observed_at) AS competition_observed_at
-  FROM cow_db.solver_competitions FINAL WHERE {scope_pred} GROUP BY chain_id
-), np AS (
-  -- native_prices keeps observed_at in its sort key (time series); FINAL does
-  -- not collapse snapshots there, so a plain max() is the correct read.
-  SELECT chain_id, max(observed_at) AS native_price_observed_at
-  FROM cow_db.native_prices WHERE {scope_pred} GROUP BY chain_id
-)
-SELECT n.chain_id AS chain_id, cp.checkpoint_block,
-       nullIf(blocks.checkpoint_timestamp,toDateTime(0)) AS checkpoint_timestamp,
-       cp.checkpoint_updated_at, obs.trade_observed_at, ord.order_observed_at,
-       comp.max_competition_block,comp.competition_observed_at,
-       np.native_price_observed_at,
-       greatest(obs.trade_observed_at,ord.order_observed_at,
-                comp.competition_observed_at,np.native_price_observed_at) AS source_observed_at
-FROM (SELECT arrayJoin([{ids}]) AS chain_id) AS n
-LEFT JOIN cp ON n.chain_id=cp.chain_id
-LEFT JOIN blocks ON cp.chain_id=blocks.chain_id AND cp.checkpoint_block=blocks.block_number
-LEFT JOIN obs ON n.chain_id=obs.chain_id
-LEFT JOIN ord ON n.chain_id=ord.chain_id
-LEFT JOIN comp ON n.chain_id=comp.chain_id
-LEFT JOIN np ON n.chain_id=np.chain_id
-ORDER BY n.chain_id"""
+    coverage = sql_loader.load_sql("cow", "coverage", scope_pred=scope_pred, ids=ids)
     tmx = _token_metadata_cte_multi(scope, chain)
     activity_parts: list[str] = []
     pair_parts: list[str] = []
@@ -958,24 +687,8 @@ ORDER BY n.chain_id"""
             f" AND {_arm_checkpoint(cid)}"
             f" AND t.block_timestamp IS NOT NULL AND {_arm_window(cid, range_state)}"
         )
-        activity_parts.append(f"""
-SELECT toStartOfDay(t.block_timestamp) AS bucket,{cid} AS chain_id,
-       uniq({TRADE_KEY}) AS trade_count,uniq(t.tx_hash) AS settlement_transactions,
-       min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
-       max(t.observed_at) AS source_observed_at
-FROM cow_db.trades AS t
-WHERE {base_where}
-GROUP BY bucket""")
-        pair_parts.append(f"""
-SELECT {cid} AS chain_id,least(t.sell_token,t.buy_token) AS token0,
-       greatest(t.sell_token,t.buy_token) AS token1,
-       uniq({TRADE_KEY}) AS fill_count,
-       uniq(t.tx_hash) AS settlement_transactions,
-       min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
-       max(t.observed_at) AS source_observed_at
-FROM cow_db.trades AS t
-WHERE {base_where}
-GROUP BY token0,token1""")
+        activity_parts.append(sql_loader.load_sql("cow", "network_activity_arm", cid=cid, trade_key=TRADE_KEY, base_where=base_where))
+        pair_parts.append(sql_loader.load_sql("cow", "top_pairs_arm", cid=cid, trade_key=TRADE_KEY, base_where=base_where))
         # Fees stand alone on protocol_fees (small, API-enriched): joining the
         # trades view only supplied block timestamps and was the memory/time
         # hog; observed_at is the honest basis for API-sourced fee rows.
@@ -984,52 +697,16 @@ GROUP BY token0,token1""")
             "(SELECT max(observed_at) FROM cow_db.protocol_fees "
             f"WHERE environment={{env:String}} AND chain_id={cid})",
         )
-        fee_parts.append(f"""
-SELECT {cid} AS chain_id,f.token AS token,f.policy AS policy_raw,
-       count() AS fee_entries,uniqExact(f.order_uid) AS orders,
-       sum(f.amount) AS amount_sum,
-       min(f.observed_at) AS indexed_from,max(f.observed_at) AS indexed_to,
-       max(f.observed_at) AS source_observed_at
-FROM cow_db.protocol_fees AS f FINAL
-WHERE f.environment={{env:String}} AND f.chain_id={cid} AND {fee_window}
-GROUP BY f.token,f.policy""")
+        fee_parts.append(sql_loader.load_sql("cow", "fee_policy_arm", cid=cid, fee_window=fee_window))
     activity = (
         f"WITH {shared_ctes}\n"
         "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
         + "\n) ORDER BY bucket,chain_id"
     )
     pair_union = "\nUNION ALL\n".join(pair_parts)
-    top_pairs = f"""WITH {shared_ctes},{tmx}
-SELECT p.chain_id AS chain_id, p.token0 AS token0, p.token1 AS token1,
-       if(m0.token='','',m0.symbol) AS token0_symbol,
-       if(m1.token='','',m1.symbol) AS token1_symbol,
-       if(m0.token='',NULL,m0.decimals) AS token0_decimals,
-       if(m1.token='',NULL,m1.decimals) AS token1_decimals,
-       p.fill_count AS fill_count, p.settlement_transactions AS settlement_transactions,
-       p.indexed_from AS indexed_from, p.indexed_to AS indexed_to,
-       p.source_observed_at AS source_observed_at
-FROM ({pair_union}) AS p
-LEFT JOIN tmx AS m0 ON m0.chain_id=p.chain_id AND m0.token=p.token0
-LEFT JOIN tmx AS m1 ON m1.chain_id=p.chain_id AND m1.token=p.token1
-ORDER BY p.fill_count DESC, p.chain_id, p.token0, p.token1
-LIMIT 500"""
+    top_pairs = sql_loader.load_sql("cow", "top_pairs", shared_ctes=shared_ctes, tmx=tmx, pair_union=pair_union)
     fee_union = "\nUNION ALL\n".join(fee_parts)
-    fees = f"""WITH {tmx}
-SELECT u.chain_id AS chain_id, u.token AS token,
-       if(tm.token='','',tm.symbol) AS token_symbol,
-       u.policy_raw AS policy_raw,
-       multiIf(positionCaseInsensitive(u.policy_raw,'priceImprovement')>0,'price_improvement',
-               positionCaseInsensitive(u.policy_raw,'surplus')>0,'surplus',
-               positionCaseInsensitive(u.policy_raw,'volume')>0,'volume','other') AS policy_family,
-       u.fee_entries AS fee_entries, u.orders AS orders,
-       toString(u.amount_sum) AS amount_raw,
-       if(tm.token='',NULL,tm.decimals) AS token_decimals,
-       if(tm.token='',NULL,toFloat64(u.amount_sum)/pow(10,toFloat64(tm.decimals))) AS amount,
-       u.indexed_from AS indexed_from, u.indexed_to AS indexed_to,
-       u.source_observed_at AS source_observed_at
-FROM ({fee_union}) AS u
-LEFT JOIN tmx AS tm ON tm.chain_id=u.chain_id AND tm.token=u.token
-ORDER BY u.fee_entries DESC, u.chain_id, u.token, u.policy_raw"""
+    fees = sql_loader.load_sql("cow", "fees", tmx=tmx, fee_union=fee_union)
     # ---- Protocol-wide aggregates (Dune-style KPI tiles, pies, share) ----
     # Volume valuation: cow_db has NO historical price source (native_prices
     # is a live snapshot; auction_prices is patchy), so protocol KPIs are
@@ -1042,13 +719,7 @@ ORDER BY u.fee_entries DESC, u.chain_id, u.token, u.policy_raw"""
         and int(range_state.get("window_days") or 0) <= 7
     )
     if volume_ok:
-        np_cte = f""",
-np AS (
-  SELECT chain_id, token, argMax(native_price, observed_at) AS native_price
-  FROM cow_db.native_prices
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-  GROUP BY chain_id, token
-)"""
+        np_cte = sql_loader.load_sql("cow", "np_cte", ids=ids)
         np_join = "  LEFT JOIN np ON np.chain_id=t.chain_id AND np.token=t.sell_token\n"
         vol_expr = (
             "sumIf(toFloat64(t.sell_amount)*toFloat64OrZero(np.native_price)/1e36,"
@@ -1063,42 +734,13 @@ np AS (
         f" AND t.block_number<=cp.b AND t.block_timestamp IS NOT NULL"
         f" AND {_arm_window(0, range_state)}"
     )
-    kpi_select = f"""
-  SELECT uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
-         uniq(t.owner) AS unique_traders,
-         uniq(tuple(least(t.sell_token,t.buy_token),greatest(t.sell_token,t.buy_token))) AS unique_pairs,
-         {vol_expr},
-         minOrNull(t.block_timestamp) AS indexed_from,
-         maxOrNull(t.block_timestamp) AS indexed_to,
-         max(t.observed_at) AS source_observed_at
-  FROM cow_db.trades AS t
-  INNER JOIN cp ON cp.chain_id=t.chain_id
-{np_join}  WHERE {kpi_where}"""
-    protocol_kpis = f"""WITH {shared_ctes}{np_cte}
-SELECT * FROM (
-  SELECT t.chain_id AS chain_id,{kpi_select.replace("SELECT ", "", 1)}
-  GROUP BY t.chain_id
-UNION ALL
-  SELECT toUInt64(0) AS chain_id,{kpi_select.replace("SELECT ", "", 1)}
-) ORDER BY chain_id"""
+    kpi_select = sql_loader.load_sql("cow", "kpi_select", trade_key=TRADE_KEY, vol_expr=vol_expr, np_join=np_join, kpi_where=kpi_where)
+    protocol_kpis = sql_loader.load_sql("cow", "protocol_kpis", shared_ctes=shared_ctes, np_cte=np_cte, kpi_body=kpi_select.replace("SELECT ", "", 1))
     # All-time totals feed the distribution pies. Deliberately ignores the
     # global window (always all indexed history — disclosed) and deliberately
     # KEEPS NULL-timestamp rows (BNB) in the counts: an all-time count needs
     # no time axis, and excluding BNB here would silently understate it.
-    alltime_totals = f"""WITH {shared_ctes}
-SELECT t.chain_id AS chain_id,
-       uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
-       uniq(t.owner) AS unique_traders,
-       minOrNull(t.block_timestamp) AS first_trade_at,
-       maxOrNull(t.block_timestamp) AS last_trade_at,
-       minOrNull(t.block_timestamp) AS indexed_from,
-       maxOrNull(t.block_timestamp) AS indexed_to,
-       max(t.observed_at) AS source_observed_at
-FROM cow_db.trades AS t
-INNER JOIN cp ON cp.chain_id=t.chain_id
-WHERE t.environment={{env:String}} AND t.chain_id IN ({ids}) AND t.block_number<=cp.b
-GROUP BY t.chain_id
-ORDER BY t.chain_id"""
+    alltime_totals = sql_loader.load_sql("cow", "alltime_totals", shared_ctes=shared_ctes, trade_key=TRADE_KEY, ids=ids)
     # Share-over-time: ONE grouped scan (bucket x chain hash stays tiny even
     # at all-history — weeks x 10 chains), NOT ten UNION arms. The frontend
     # normalizes per bucket for the 100%-share view.
@@ -1108,18 +750,7 @@ ORDER BY t.chain_id"""
         or int(range_state.get("window_days") or 0) > 180
         else "toStartOfDay(t.block_timestamp)"
     )
-    chain_share_trend = f"""WITH {shared_ctes}
-SELECT {share_bucket} AS bucket,t.chain_id AS chain_id,
-       uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
-       min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
-       max(t.observed_at) AS source_observed_at
-FROM cow_db.trades AS t
-INNER JOIN cp ON cp.chain_id=t.chain_id
-WHERE t.environment={{env:String}} AND t.chain_id IN ({ids})
-  AND t.block_number<=cp.b AND t.block_timestamp IS NOT NULL
-  AND {_arm_window(0, range_state)}
-GROUP BY bucket,t.chain_id
-ORDER BY bucket,t.chain_id"""
+    chain_share_trend = sql_loader.load_sql("cow", "chain_share_trend", shared_ctes=shared_ctes, share_bucket=share_bucket, trade_key=TRADE_KEY, ids=ids, arm_window=_arm_window(0, range_state))
     return [
         QuerySpec("network_summary", "Indexed network summary", network_summary, p, "block_timestamp", BASE_DEDUP_MODE),
         QuerySpec("coverage_matrix", "Coverage matrix", coverage, params, "observed_at", "observed_series", 60),
@@ -1158,25 +789,8 @@ def _resolve_pair(
     # a FINAL + chain_blocks join on EVERY markets/orders/solvers load. Falls
     # back to all-history (still base-table, dedup-free counts) only when the
     # recent window is empty (e.g. a stale chain).
-    recent_sql = """
-SELECT least(sell_token,buy_token) AS token0,
-       greatest(sell_token,buy_token) AS token1, count() AS fills
-FROM cow_db.trades
-WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-  AND sell_token != buy_token
-  AND block_timestamp >= now() - INTERVAL 30 DAY
-GROUP BY token0, token1
-ORDER BY fills DESC, token0, token1
-LIMIT 1"""
-    fallback_sql = """
-SELECT least(sell_token,buy_token) AS token0,
-       greatest(sell_token,buy_token) AS token1, count() AS fills
-FROM cow_db.trades
-WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-  AND sell_token != buy_token
-GROUP BY token0, token1
-ORDER BY fills DESC, token0, token1
-LIMIT 1"""
+    recent_sql = sql_loader.load_sql("cow", "pair_discovery_recent")
+    fallback_sql = sql_loader.load_sql("cow", "pair_discovery_alltime")
     params = {"env": chain.environment, "chain_id": chain.chain_id}
     result = mini_apps.run_structured_query(
         ch, recent_sql, COW_DB, params, requested_max_rows=1,
@@ -1221,31 +835,7 @@ def _market_specs(
     # typing raw token addresses. Cheap streaming aggregate; exists even when
     # no pair could be resolved so the picker can still offer choices.
     options_params = _scope_parameters(chain.environment, chain)
-    pair_options = f"""
-WITH {_token_metadata_cte()},
-p AS (
-  SELECT least(sell_token,buy_token) AS token0,greatest(sell_token,buy_token) AS token1,
-         uniq((tx_hash,log_index,order_uid)) AS fill_count,
-         min(block_timestamp) AS indexed_from,max(block_timestamp) AS indexed_to,
-         max(observed_at) AS source_observed_at
-  FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    AND sell_token != buy_token AND block_timestamp IS NOT NULL
-    AND block_timestamp >= now() - INTERVAL 30 DAY
-  GROUP BY token0,token1
-  ORDER BY fill_count DESC,token0,token1
-  LIMIT 50
-)
-SELECT p.token0 AS token0,p.token1 AS token1,
-       if(m0.token='','',m0.symbol) AS token0_symbol,
-       if(m1.token='','',m1.symbol) AS token1_symbol,
-       p.fill_count AS fill_count,
-       p.indexed_from AS indexed_from,p.indexed_to AS indexed_to,
-       p.source_observed_at AS source_observed_at
-FROM p
-LEFT JOIN tm AS m0 ON m0.token=p.token0
-LEFT JOIN tm AS m1 ON m1.token=p.token1
-ORDER BY p.fill_count DESC,p.token0,p.token1"""
+    pair_options = sql_loader.load_sql("cow", "pair_options", token_metadata_cte=_token_metadata_cte())
     pair_options_spec = QuerySpec(
         "pair_options", "Pair picker options", pair_options, options_params,
         "block_timestamp", BASE_DEDUP_MODE, 900,
@@ -1264,167 +854,25 @@ ORDER BY p.fill_count DESC,p.token0,p.token1"""
     token_cte = _token_metadata_cte()
     pair_filter = """((t.sell_token={base:String} AND t.buy_token={quote:String})
                     OR (t.sell_token={quote:String} AND t.buy_token={base:String}))"""
-    market_summary = f"""
-WITH {token_cte}
-SELECT {{base:String}} AS base_token, {{quote:String}} AS quote_token,
-       (SELECT anyOrNull(symbol) FROM tm WHERE token={{base:String}}) AS base_symbol,
-       (SELECT anyOrNull(symbol) FROM tm WHERE token={{quote:String}}) AS quote_symbol,
-       (SELECT anyOrNull(decimals) FROM tm WHERE token={{base:String}}) AS base_decimals,
-       (SELECT anyOrNull(decimals) FROM tm WHERE token={{quote:String}}) AS quote_decimals,
-       uniq((t.tx_hash,t.log_index,t.order_uid)) AS fill_count,
-       uniq(t.tx_hash) AS settlement_transactions,
-       min(t.block_timestamp) AS indexed_from, max(t.block_timestamp) AS indexed_to,
-       max(t.observed_at) AS source_observed_at
-FROM cow_db.trades AS t
-WHERE {_scope_predicate(chain, 't')} AND {pair_filter}
-  AND t.block_timestamp IS NOT NULL AND {time_pred}
-ORDER BY base_token,quote_token"""
+    market_summary = sql_loader.load_sql("cow", "market_summary", token_metadata_cte=token_cte, scope_pred=_scope_predicate(chain, 't'), pair_filter=pair_filter, time_pred=time_pred)
     bucket = CANDLE_BUCKETS[interval]
     # The dedup subquery matters for VOLUME correctness: recent fills sit in
     # unmerged ReplacingMergeTree parts (and API+RPC dual-source rows), so a
     # raw read double-counts sums. Pair-filtered sets are small enough that
     # the argMax GROUP BY streams cheaply.
-    candles = f"""
-WITH {token_cte}, dedup AS (
-  SELECT t.tx_hash AS tx_hash, t.log_index AS log_index, t.order_uid AS order_uid,
-         argMax(t.block_timestamp,t.observed_at) AS block_timestamp,
-         argMax(t.sell_token,t.observed_at) AS sell_token,
-         argMax(t.sell_amount,t.observed_at) AS sell_amount,
-         argMax(t.buy_amount,t.observed_at) AS buy_amount,
-         max(t.observed_at) AS observed_at
-  FROM cow_db.trades AS t
-  WHERE {_scope_predicate(chain, 't')} AND {pair_filter}
-    AND t.block_timestamp IS NOT NULL AND {time_pred}
-  GROUP BY t.tx_hash, t.log_index, t.order_uid
-), fills AS (
-  SELECT d.block_timestamp, d.log_index, d.tx_hash, d.order_uid,
-         if(d.sell_token={{base:String}},
-            toFloat64(d.sell_amount)/pow(10,toFloat64(b.decimals)),
-            toFloat64(d.buy_amount)/pow(10,toFloat64(b.decimals))) AS base_qty,
-         if(d.sell_token={{base:String}},
-            toFloat64(d.buy_amount)/pow(10,toFloat64(q.decimals)),
-            toFloat64(d.sell_amount)/pow(10,toFloat64(q.decimals))) AS quote_qty,
-         d.observed_at
-  FROM dedup AS d
-  INNER JOIN tm AS b ON b.token={{base:String}}
-  INNER JOIN tm AS q ON q.token={{quote:String}}
-), priced AS (
-  SELECT *, quote_qty/nullIf(base_qty,0) AS price
-  FROM fills WHERE base_qty>0 AND quote_qty>=0
-)
-SELECT {bucket} AS bucket,
-       argMin(price, tuple(block_timestamp,log_index,tx_hash,order_uid)) AS open,
-       max(price) AS high, min(price) AS low,
-       argMax(price, tuple(block_timestamp,log_index,tx_hash,order_uid)) AS close,
-       sum(quote_qty)/nullIf(sum(base_qty),0) AS vwap,
-       sum(base_qty) AS base_volume, sum(quote_qty) AS quote_volume,
-       count() AS fill_count, min(block_timestamp) AS indexed_from,
-       max(block_timestamp) AS indexed_to, max(observed_at) AS source_observed_at
-FROM priced
-GROUP BY bucket
-ORDER BY bucket"""
+    candles = sql_loader.load_sql("cow", "candles", token_metadata_cte=token_cte, scope_pred=_scope_predicate(chain, 't'), pair_filter=pair_filter, time_pred=time_pred, bucket=bucket)
     # Top-N-first tape (see _trade_specs): a plain ORDER BY … LIMIT over the
     # base table is a bounded heap sort, memory-safe at any window; dedup
     # happens over the selected set only, and metadata joins only the capped
     # rows. The checkpoint CTE replaces the canonical view's chain_blocks join.
-    recent = f"""
-WITH {token_cte}, cp AS (
-  SELECT argMax(block_number,updated_at) AS b
-  FROM cow_db.indexing_checkpoints
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc'
-)
-SELECT u.block_timestamp AS block_timestamp, u.tx_hash AS tx_hash, u.order_uid AS order_uid,
-       u.log_index AS log_index, u.owner AS owner,
-       u.sell_token AS sell_token, if(s.token='',u.sell_token,s.symbol) AS sell_symbol,
-       if(s.token='',NULL,s.decimals) AS sell_decimals,
-       toString(u.sell_amount) AS sell_amount_raw,
-       if(s.token='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       u.buy_token AS buy_token, if(b.token='',u.buy_token,b.symbol) AS buy_symbol,
-       if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(u.buy_amount) AS buy_amount_raw,
-       if(b.token='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       toString(u.fee_amount) AS fee_amount_raw,
-       if(s.token='',NULL,toFloat64(u.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
-       u.source AS source,
-       u.obs_at AS source_observed_at
-FROM (
-  SELECT tx_hash,log_index,order_uid,
-         argMax(block_timestamp,observed_at) AS block_timestamp,
-         argMax(owner,observed_at) AS owner,
-         argMax(sell_token,observed_at) AS sell_token,
-         argMax(buy_token,observed_at) AS buy_token,
-         argMax(sell_amount,observed_at) AS sell_amount,
-         argMax(buy_amount,observed_at) AS buy_amount,
-         argMax(fee_amount,observed_at) AS fee_amount,
-         argMax(source,observed_at) AS source,
-         max(observed_at) AS obs_at
-  FROM (
-    SELECT t.tx_hash,t.log_index,t.order_uid,t.block_timestamp,t.owner,
-           t.sell_token,t.buy_token,t.sell_amount,t.buy_amount,t.fee_amount,
-           t.source,t.observed_at
-    FROM cow_db.trades AS t
-    WHERE {_scope_predicate(chain, 't')} AND {pair_filter}
-      AND t.block_number<=(SELECT b FROM cp)
-      AND t.block_timestamp IS NOT NULL AND {time_pred}
-    ORDER BY t.block_timestamp DESC
-    LIMIT {TAPE_ARM_LIMIT}
-  )
-  GROUP BY tx_hash,log_index,order_uid
-  ORDER BY block_timestamp DESC
-  LIMIT {ROW_CAP}
-) AS u
-LEFT JOIN tm AS s ON s.token=u.sell_token
-LEFT JOIN tm AS b ON b.token=u.buy_token
-ORDER BY u.block_timestamp DESC, u.log_index DESC, u.tx_hash DESC, u.order_uid DESC"""
+    recent = sql_loader.load_sql("cow", "recent", token_metadata_cte=token_cte, scope_pred=_scope_predicate(chain, 't'), pair_filter=pair_filter, time_pred=time_pred, tape_arm_limit=TAPE_ARM_LIMIT, row_cap=ROW_CAP)
     # Window anchor without a chain_blocks-FINAL triple join: max block time
     # over the (few thousand) competition auction blocks, index-looked-up.
-    auction_anchor = """SELECT max(block_timestamp) FROM cow_db.chain_blocks
-WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-  AND block_number IN (
-    SELECT argMax(auction_block, observed_at) FROM cow_db.solver_competitions FINAL
-    WHERE environment={env:String} AND chain_id={chain_id:UInt64} GROUP BY auction_id)"""
+    auction_anchor = sql_loader.load_sql("cow", "auction_block_anchor")
     auction_time, _ = _time_predicate(
         "blocks.auction_timestamp", range_state, auction_anchor
     )
-    auction_reference = f"""
-WITH {token_cte}, bp AS (
-  SELECT auction_id, argMax(price,observed_at) AS base_price,
-         max(observed_at) AS base_observed_at
-  FROM cow_db.auction_prices
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{base:String}}
-  GROUP BY auction_id
-), qp AS (
-  SELECT auction_id, argMax(price,observed_at) AS quote_price,
-         max(observed_at) AS quote_observed_at
-  FROM cow_db.auction_prices
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{quote:String}}
-  GROUP BY auction_id
-), comp AS (
-  SELECT auction_id, argMax(auction_block,observed_at) AS auction_block,
-         max(observed_at) AS competition_observed_at
-  FROM cow_db.solver_competitions FINAL
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-  GROUP BY auction_id
-), blocks AS (
-  -- Only the auction blocks (thousands, index-lookup) instead of the whole
-  -- chain_blocks table with FINAL (millions of rows — a prior OOM source).
-  SELECT block_number,argMax(block_timestamp,observed_at) AS auction_timestamp
-  FROM cow_db.chain_blocks
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    AND block_number IN (SELECT auction_block FROM comp)
-  GROUP BY block_number
-)
-SELECT bp.auction_id, blocks.auction_timestamp,
-       toFloat64(bp.base_price)/nullIf(toFloat64(qp.quote_price),0)
-         * pow(10,toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={{base:String}}))
-                  -toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={{quote:String}}))) AS price,
-       greatest(bp.base_observed_at,qp.quote_observed_at,comp.competition_observed_at) AS source_observed_at,
-       blocks.auction_timestamp AS indexed_from, blocks.auction_timestamp AS indexed_to
-FROM bp INNER JOIN qp USING auction_id
-LEFT JOIN comp USING auction_id
-LEFT JOIN blocks ON comp.auction_block=blocks.block_number
-WHERE blocks.block_number!=0 AND {auction_time}
-ORDER BY blocks.auction_timestamp"""
+    auction_reference = sql_loader.load_sql("cow", "auction_reference", token_metadata_cte=token_cte, auction_time=auction_time)
     native_reference = _native_reference_sql(chain, base, quote, range_state)
     return [
         pair_options_spec,
@@ -1488,15 +936,7 @@ def _pair_depth_specs(
     """
     # uniq, not uniqExact: an exact hash set over millions of backfilled
     # 56-byte uids is a memory risk; the count is display-only (HLL ~0.8%).
-    horizon = """
-SELECT min(observed_at) AS earliest_supported_at,
-       max(observed_at) AS latest_observed_at,
-       uniq(order_uid) AS captured_orders,
-       min(creation_date) AS earliest_creation_seen,
-       max(observed_at) AS source_observed_at
-FROM cow_db.orders
-WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-ORDER BY earliest_supported_at"""
+    horizon = sql_loader.load_sql("cow", "depth_horizon")
     # Pairs that HAVE a standing book right now (chain-scoped, pair-agnostic).
     # Some chains (Gnosis) run almost entirely on short-lived market orders and
     # hold ZERO open intents at any given moment — without this list the depth
@@ -1506,35 +946,7 @@ ORDER BY earliest_supported_at"""
     # the small live set; valid_to joins the GROUP BY key rather than being
     # argMax'd so the same-level WHERE binds the raw column (alias-in-WHERE
     # trap, code 184). The mutable status filter sits a level ABOVE the argMax.
-    open_pairs = f"""
-WITH {_token_metadata_cte()}
-SELECT p.token0 AS token0,p.token1 AS token1,
-       if(m0.token='','',m0.symbol) AS token0_symbol,
-       if(m1.token='','',m1.symbol) AS token1_symbol,
-       p.open_orders AS open_orders,
-       p.obs AS source_observed_at
-FROM (
-  SELECT least(sell_token,buy_token) AS token0,
-         greatest(sell_token,buy_token) AS token1,
-         count() AS open_orders,max(obs_at) AS obs
-  FROM (
-    SELECT order_uid,valid_to,
-           argMax(sell_token,observed_at) AS sell_token,
-           argMax(buy_token,observed_at) AS buy_token,
-           argMax(status,observed_at) AS status,
-           max(observed_at) AS obs_at
-    FROM cow_db.orders
-    WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-      AND valid_to>toUnixTimestamp(now())
-    GROUP BY order_uid,valid_to
-  )
-  WHERE status='open'
-  GROUP BY token0,token1
-) AS p
-LEFT JOIN tm AS m0 ON m0.token=p.token0
-LEFT JOIN tm AS m1 ON m1.token=p.token1
-ORDER BY p.open_orders DESC,p.token0,p.token1
-LIMIT 30"""
+    open_pairs = sql_loader.load_sql("cow", "open_intent_pairs", token_cte=_token_metadata_cte())
     specs = [
         QuerySpec(
             "depth_horizon", "Depth reconstruction horizon", horizon,
@@ -1551,16 +963,7 @@ LIMIT 30"""
     if not base or not quote:
         return specs
     token_cte = _token_metadata_cte()
-    ladder_projection = """
-SELECT order_uid,owner,kind,side,order_class,partially_fillable,
-       creation_date,valid_to,sell_token,buy_token,sell_symbol,buy_symbol,
-       sell_decimals,buy_decimals,price,amount_base,amount_quote,
-       sell_amount_raw,buy_amount_raw,
-       creation_date AS indexed_from,creation_date AS indexed_to,
-       source_observed_at
-FROM priced
-WHERE isFinite(price) AND price>0
-ORDER BY side,price,order_uid"""
+    ladder_projection = sql_loader.load_sql("cow", "ladder_projection")
     if not depth_at:
         server_as_of = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         live_params = {
@@ -1569,70 +972,7 @@ ORDER BY side,price,order_uid"""
             "quote": quote,
             "server_as_of": server_as_of.isoformat().replace("+00:00", "Z"),
         }
-        live_sql = f"""
-WITH {token_cte}, open_orders AS (
- SELECT o.*,
-   if(o.executed_sell_amount<o.sell_amount,
-      toUInt256(o.sell_amount-o.executed_sell_amount),toUInt256(0)) AS residual_sell_raw,
-   if(o.executed_buy_amount<o.buy_amount,
-      toUInt256(o.buy_amount-o.executed_buy_amount),toUInt256(0)) AS residual_buy_raw,
-   if(o.kind='buy',
-      toFloat64(o.sell_amount)*toFloat64(residual_buy_raw)
-        /nullIf(toFloat64(o.buy_amount),0),
-      toFloat64(residual_sell_raw)) AS remaining_sell_float,
-   if(o.kind='buy',
-      toFloat64(residual_buy_raw),
-      toFloat64(o.buy_amount)*toFloat64(residual_sell_raw)
-        /nullIf(toFloat64(o.sell_amount),0)) AS remaining_buy_float
- FROM (
-   -- argMax dedup replaces FINAL (whole-chain k-way merge of the ~millions-row
-   -- backfilled table). Pair + unexpired-validity prefilters are IMMUTABLE per
-   -- order_uid, so the hash holds only this pair's live-validity orders; the
-   -- immutable columns ride the GROUP BY key (explicit list — a qualified
-   -- asterisk through aggregation loses names, code 47). Mutable status is
-   -- filtered via HAVING; max(observed_at) must NOT self-alias to observed_at
-   -- beside sibling argMax(x,observed_at) (code 184) — downstream reads obs_at.
-   SELECT order_uid,owner,kind,class,partially_fillable,creation_date,valid_to,
-          sell_token,buy_token,sell_amount,buy_amount,
-          argMax(status,observed_at) AS st,
-          argMax(executed_sell_amount,observed_at) AS executed_sell_amount,
-          argMax(executed_buy_amount,observed_at) AS executed_buy_amount,
-          max(observed_at) AS obs_at
-   FROM cow_db.orders
-   WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-     AND valid_to>toUnixTimestamp(parseDateTime64BestEffort({{server_as_of:String}}))
-     AND ((sell_token={{base:String}} AND buy_token={{quote:String}})
-          OR (sell_token={{quote:String}} AND buy_token={{base:String}}))
-   GROUP BY order_uid,owner,kind,class,partially_fillable,creation_date,valid_to,
-            sell_token,buy_token,sell_amount,buy_amount
-   HAVING st='open'
- ) AS o
-), enriched AS (
- SELECT o.*,
-   if(s.token='','',s.symbol) AS sell_symbol,
-   if(b.token='','',b.symbol) AS buy_symbol,
-   if(s.token='',NULL,s.decimals) AS sell_decimals,
-   if(b.token='',NULL,b.decimals) AS buy_decimals,
-   if(s.token='',NULL,remaining_sell_float/pow(10,toFloat64(s.decimals))) AS remaining_sell,
-   if(b.token='',NULL,remaining_buy_float/pow(10,toFloat64(b.decimals))) AS remaining_buy,
-   if(o.sell_token={{base:String}},'ask','bid') AS side
- FROM open_orders o
- LEFT JOIN tm s ON s.token=o.sell_token
- LEFT JOIN tm b ON b.token=o.buy_token
- WHERE remaining_sell_float>0 AND remaining_buy_float>0
-), priced AS (
- SELECT *, class AS order_class,
-   if(side='ask',remaining_buy/nullIf(remaining_sell,0),
-                 remaining_sell/nullIf(remaining_buy,0)) AS price,
-   if(side='ask',remaining_sell,remaining_buy) AS amount_base,
-   if(side='ask',remaining_buy,remaining_sell) AS amount_quote,
-   toString(sell_amount) AS sell_amount_raw,
-   toString(buy_amount) AS buy_amount_raw,
-   obs_at AS source_observed_at
- FROM enriched
- WHERE sell_decimals IS NOT NULL AND buy_decimals IS NOT NULL
-)
-{ladder_projection}"""
+        live_sql = sql_loader.load_sql("cow", "pair_depth", token_cte=token_cte, ladder_projection=ladder_projection)
         specs.append(QuerySpec(
             "pair_depth", "Order-book depth (known open intents)", live_sql,
             live_params, "creation_date", "observed_snapshot", 60,
@@ -1645,109 +985,7 @@ WITH {token_cte}, open_orders AS (
         "quote": quote,
         "at_ts": at_ts,
     }
-    hist_sql = f"""
-WITH {token_cte}, cand AS (
-  SELECT order_uid,
-         argMax(status,observed_at) AS status_l,
-         argMax(owner,observed_at) AS owner_l,
-         argMax(kind,observed_at) AS kind_l,
-         argMax(class,observed_at) AS class_l,
-         argMax(partially_fillable,observed_at) AS pf_l,
-         argMax(sell_token,observed_at) AS st,
-         argMax(buy_token,observed_at) AS bt,
-         argMax(sell_amount,observed_at) AS sa,
-         argMax(buy_amount,observed_at) AS ba,
-         argMax(creation_date,observed_at) AS created,
-         argMax(valid_to,observed_at) AS vt,
-         max(observed_at) AS obs
-  FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    AND ((sell_token={{base:String}} AND buy_token={{quote:String}})
-         OR (sell_token={{quote:String}} AND buy_token={{base:String}}))
-    AND creation_date<=parseDateTime64BestEffort({{at_ts:String}})
-    AND toDateTime(valid_to)>parseDateTime64BestEffort({{at_ts:String}})
-  GROUP BY order_uid
-), fills AS (
-  SELECT order_uid,sum(fsa) AS filled_sell,sum(fba) AS filled_buy
-  FROM (
-    SELECT t.order_uid AS order_uid,t.tx_hash,t.log_index,
-           argMax(t.sell_amount,t.observed_at) AS fsa,
-           argMax(t.buy_amount,t.observed_at) AS fba
-    FROM cow_db.trades AS t
-    WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}}
-      AND t.order_uid IN (SELECT order_uid FROM cand)
-      AND t.block_timestamp IS NOT NULL
-      AND t.block_timestamp<=parseDateTime64BestEffort({{at_ts:String}})
-    GROUP BY t.order_uid,t.tx_hash,t.log_index
-  ) GROUP BY order_uid
-), term AS (
-  SELECT order_uid,min(event_timestamp) AS terminated_at
-  FROM cow_db.order_events
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    AND order_uid IN (SELECT order_uid FROM cand)
-    AND event_type IN ('OrderInvalidated','OrderInvalidation','status:cancelled','status:fulfilled')
-    AND event_timestamp IS NOT NULL
-    AND event_timestamp<=parseDateTime64BestEffort({{at_ts:String}})
-  GROUP BY order_uid
-), term_any AS (
-  -- Unbounded existence check (no at_ts cap): does ANY timestamped terminal
-  -- event exist for the order, ever? Backfilled cancelled orders have none —
-  -- their cancel TIME is unknowable, so they are excluded from reconstruction
-  -- at every T instead of phantom-resting until valid_to. An order cancelled
-  -- AFTER T stays in the book at T because it IS here (and not in term).
-  SELECT DISTINCT order_uid
-  FROM cow_db.order_events
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    AND order_uid IN (SELECT order_uid FROM cand)
-    AND event_type IN ('OrderInvalidated','OrderInvalidation','status:cancelled','status:fulfilled')
-    AND event_timestamp IS NOT NULL
-), book AS (
-  -- Explicit column list: a qualified asterisk (c.*) through this joined CTE
-  -- does NOT preserve plain column names on the server (code 47 downstream).
-  SELECT c.order_uid AS order_uid,c.owner_l AS owner_l,c.kind_l AS kind_l,
-    c.class_l AS class_l,c.pf_l AS pf_l,c.st AS st,c.bt AS bt,
-    c.sa AS sa,c.ba AS ba,c.created AS created,c.vt AS vt,c.obs AS obs,
-    if(f.filled_sell<c.sa,toUInt256(c.sa-f.filled_sell),toUInt256(0)) AS residual_sell_raw,
-    if(f.filled_buy<c.ba,toUInt256(c.ba-f.filled_buy),toUInt256(0)) AS residual_buy_raw,
-    if(c.kind_l='buy',
-       toFloat64(c.sa)*toFloat64(residual_buy_raw)/nullIf(toFloat64(c.ba),0),
-       toFloat64(residual_sell_raw)) AS remaining_sell_float,
-    if(c.kind_l='buy',
-       toFloat64(residual_buy_raw),
-       toFloat64(c.ba)*toFloat64(residual_sell_raw)/nullIf(toFloat64(c.sa),0)) AS remaining_buy_float
-  FROM cand AS c
-  LEFT JOIN fills AS f ON f.order_uid=c.order_uid
-  LEFT JOIN term AS x ON x.order_uid=c.order_uid
-  WHERE x.order_uid=''
-    AND (c.status_l!='cancelled' OR c.order_uid IN (SELECT order_uid FROM term_any))
-), enriched AS (
-  SELECT bk.*,
-    if(s.token='','',s.symbol) AS sell_symbol,
-    if(b.token='','',b.symbol) AS buy_symbol,
-    if(s.token='',NULL,s.decimals) AS sell_decimals,
-    if(b.token='',NULL,b.decimals) AS buy_decimals,
-    if(s.token='',NULL,remaining_sell_float/pow(10,toFloat64(s.decimals))) AS remaining_sell,
-    if(b.token='',NULL,remaining_buy_float/pow(10,toFloat64(b.decimals))) AS remaining_buy,
-    if(bk.st={{base:String}},'ask','bid') AS side
-  FROM book bk
-  LEFT JOIN tm s ON s.token=bk.st
-  LEFT JOIN tm b ON b.token=bk.bt
-  WHERE remaining_sell_float>0 AND remaining_buy_float>0
-), priced AS (
-  SELECT order_uid,owner_l AS owner,kind_l AS kind,side,class_l AS order_class,
-    pf_l AS partially_fillable,created AS creation_date,vt AS valid_to,
-    st AS sell_token,bt AS buy_token,sell_symbol,buy_symbol,
-    sell_decimals,buy_decimals,
-    if(side='ask',remaining_buy/nullIf(remaining_sell,0),
-                  remaining_sell/nullIf(remaining_buy,0)) AS price,
-    if(side='ask',remaining_sell,remaining_buy) AS amount_base,
-    if(side='ask',remaining_buy,remaining_sell) AS amount_quote,
-    toString(sa) AS sell_amount_raw,toString(ba) AS buy_amount_raw,
-    obs AS source_observed_at
-  FROM enriched
-  WHERE sell_decimals IS NOT NULL AND buy_decimals IS NOT NULL
-)
-{ladder_projection}"""
+    hist_sql = sql_loader.load_sql("cow", "pair_depth_at", token_cte=token_cte, ladder_projection=ladder_projection)
     specs.append(QuerySpec(
         "pair_depth", "Order-book depth (reconstructed)", hist_sql,
         hist_params, "creation_date", "reconstructed_point_in_time", 3600,
@@ -1876,203 +1114,7 @@ def _pair_depth_heatmap_specs(
     }
     # Grid derivation is split across CTEs so each expression references only a
     # PRIOR CTE alias (ClickHouse same-SELECT sibling-alias refs are fragile).
-    heatmap_sql = f"""
-WITH {token_cte},
-bounds AS (
-  -- Reconstruction floor: min(creation_date), NOT min(observed_at) — the
-  -- backfill recovers orders back to ~2021-08, and fills/expiry give their
-  -- removal times. Only "all" (and clamping in the first capture days)
-  -- actually reaches this floor.
-  SELECT now() AS t_now,
-         ifNull(
-           (SELECT min(creation_date) FROM cow_db.orders
-              WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}),
-           now() - INTERVAL 30 DAY) AS cap_start
-),
-win AS (
-  SELECT t_now, cap_start,
-         greatest(cap_start,
-           multiIf({{window:String}}='24h', t_now - INTERVAL 24 HOUR,
-                   {{window:String}}='7d',  t_now - INTERVAL 7 DAY,
-                   {{window:String}}='30d', t_now - INTERVAL 30 DAY,
-                   {{window:String}}='90d', t_now - INTERVAL 90 DAY,
-                   cap_start)) AS w_start
-  FROM bounds
-),
-grid AS (
-  SELECT w_start,
-         greatest(1, toUInt32(dateDiff('second', w_start, t_now))) AS span_s
-  FROM win
-),
-grid_step AS (
-  -- Caller resolution when given, else span/60. Floored at {_FOOTPRINT_MIN_STEP_S}s and
-  -- coarsened so the grid never exceeds {_FOOTPRINT_MAX_BUCKETS} columns — the row budget
-  -- is a hard cap, so a too-fine request is honored as far as it fits.
-  SELECT w_start, span_s,
-         greatest(
-           greatest(toUInt32({_FOOTPRINT_MIN_STEP_S}),
-                    if({{bucket_seconds:UInt32}} > 0,
-                       {{bucket_seconds:UInt32}}, toUInt32(intDiv(span_s, 60)))),
-           toUInt32(ceil(span_s / {float(_FOOTPRINT_MAX_BUCKETS)}))
-         ) AS step_s
-  FROM grid
-),
-grid_n AS (
-  SELECT w_start, step_s,
-         least({_FOOTPRINT_MAX_BUCKETS}, toUInt32(intDiv(span_s, step_s)) + 1) AS n_buckets
-  FROM grid_step
-),
-buckets AS (
-  SELECT arrayJoin(arrayMap(i -> w_start + toUInt32(i) * step_s, range(n_buckets))) AS bucket_ts,
-         step_s
-  FROM grid_n
-),
-dims AS (
-  SELECT (SELECT anyOrNull(decimals) FROM tm WHERE token={{base:String}}) AS base_dec,
-         (SELECT anyOrNull(decimals) FROM tm WHERE token={{quote:String}}) AS quote_dec
-),
-cand AS (
-  -- valid_to is IMMUTABLE per order_uid and alive_until <= toDateTime(valid_to),
-  -- so this prefilter is lossless for the bucket-overlap test while bounding the
-  -- argMax hash to orders whose validity reaches the window (the backfilled
-  -- orders table holds ~200K rows for a busy pair; ~99% expired long ago).
-  SELECT order_uid,
-         argMax(status,observed_at) AS status_l,
-         argMax(sell_token,observed_at) AS st,
-         argMax(sell_amount,observed_at) AS sa,
-         argMax(buy_amount,observed_at) AS ba,
-         argMax(creation_date,observed_at) AS created,
-         argMax(valid_to,observed_at) AS vt
-  FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    AND ((sell_token={{base:String}} AND buy_token={{quote:String}})
-         OR (sell_token={{quote:String}} AND buy_token={{base:String}}))
-    AND toDateTime(valid_to) > (SELECT w_start FROM win)
-  GROUP BY order_uid
-),
-term AS (
-  SELECT order_uid, min(event_timestamp) AS terminated_at
-  FROM cow_db.order_events
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    AND order_uid IN (SELECT order_uid FROM cand)
-    AND event_type IN ('OrderInvalidated','OrderInvalidation','status:cancelled','status:fulfilled')
-    AND event_timestamp IS NOT NULL
-  GROUP BY order_uid
-),
-fill AS (
-  -- Order_events does NOT reliably carry a terminal row for every filled order
-  -- (most fills are trades, not status events), so without this an order that
-  -- was filled but never got a status:fulfilled event would rest forever and
-  -- the cross-join explodes. Use the LAST fill as the completion proxy.
-  SELECT order_uid, max(block_timestamp) AS filled_out_ts
-  FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    AND order_uid IN (SELECT order_uid FROM cand)
-    AND block_timestamp IS NOT NULL
-  GROUP BY order_uid
-),
-priced AS (
-  SELECT c.order_uid AS order_uid,
-    if(c.st={{base:String}},'ask','bid') AS side,
-    if(c.st={{base:String}},
-       toFloat64(c.sa)/pow(10,toFloat64(d.base_dec)),
-       toFloat64(c.ba)/pow(10,toFloat64(d.base_dec))) AS base_amt,
-    if(c.st={{base:String}},
-       toFloat64(c.ba)/pow(10,toFloat64(d.quote_dec)),
-       toFloat64(c.sa)/pow(10,toFloat64(d.quote_dec))) AS quote_amt,
-    c.created AS created,
-    -- The book removes an order at the EARLIEST of: expiry, terminal event,
-    -- and completing fill. Far-future sentinel keeps never-terminated resting
-    -- orders alive across the window.
-    least(toDateTime(c.vt),
-          ifNull(t.terminated_at, toDateTime('2099-01-01 00:00:00')),
-          ifNull(f.filled_out_ts, toDateTime('2099-01-01 00:00:00'))) AS alive_until
-  FROM cand AS c
-  CROSS JOIN dims AS d
-  LEFT JOIN term AS t ON t.order_uid=c.order_uid
-  LEFT JOIN fill AS f ON f.order_uid=c.order_uid
-  WHERE d.base_dec IS NOT NULL AND d.quote_dec IS NOT NULL
-    -- Cancelled orders without a timestamped cancel event (and no fill to
-    -- bound removal) have an unknowable resting span — excluding them beats
-    -- painting phantom depth until valid_to (backfilled cancel-time gap).
-    AND (c.status_l!='cancelled' OR t.terminated_at IS NOT NULL
-         OR f.filled_out_ts IS NOT NULL)
-),
-bmed AS (
-  -- Per-bucket reference price, keyed by GRID INDEX (buckets start at w_start,
-  -- so an epoch-aligned key would be off by a partial step).
-  --
-  -- Reads RAW orders, deliberately NOT `priced`: CTEs are inlined, so every
-  -- extra reference re-runs the whole cand/argMax + term + fill chain. That
-  -- chain measured ~5.6s per materialization, and a second one pushed this
-  -- past the 20s interactive budget (live TIMEOUT_EXCEEDED). Skipping the
-  -- dedup is exact here, not a shortcut: sell_token/sell_amount/buy_amount/
-  -- creation_date/valid_to are all IMMUTABLE per order_uid, so duplicate
-  -- versions carry identical prices and cannot move a median. Removal logic
-  -- (fills, cancels) is irrelevant to "what was this pair worth then".
-  SELECT greatest(toInt64(0),
-           intDiv(toInt64(dateDiff('second', (SELECT w_start FROM grid_n), o.creation_date)),
-                  toInt64((SELECT step_s FROM grid_n)))) AS b_idx,
-         quantile(0.5)(if(o.sell_token={{base:String}},
-           toFloat64(o.buy_amount)/pow(10,toFloat64(d.quote_dec))
-             /nullIf(toFloat64(o.sell_amount)/pow(10,toFloat64(d.base_dec)),0),
-           toFloat64(o.sell_amount)/pow(10,toFloat64(d.quote_dec))
-             /nullIf(toFloat64(o.buy_amount)/pow(10,toFloat64(d.base_dec)),0))) AS b_med
-  FROM cow_db.orders AS o
-  CROSS JOIN dims AS d
-  WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}}
-    AND ((o.sell_token={{base:String}} AND o.buy_token={{quote:String}})
-         OR (o.sell_token={{quote:String}} AND o.buy_token={{base:String}}))
-    AND toDateTime(o.valid_to) > (SELECT w_start FROM grid_n)
-  GROUP BY b_idx
-),
-pmed AS (
-  -- Fallback reference for quiet buckets, taken from `bmed` (<=120 rows) and
-  -- NOT from `priced`: CTEs are inlined, so a third `priced` reference would
-  -- re-run the cand/term/fill chain a third time (live-measured 14.7s vs 5s).
-  SELECT quantile(0.5)(b_med) AS p_med FROM bmed
-)
-SELECT bucket, bucket_mid, rel_pct, side,
-       sum(w) AS depth_base, count() AS orders,
-       any(bucket_seconds) AS bucket_seconds,
-       any(bucket_ts) AS indexed_from, any(bucket_ts) AS indexed_to
-FROM (
-  SELECT bucket, bucket_ts, bucket_seconds, bucket_mid, side, w,
-         round((price / bucket_mid - 1) * {100.0 / _FOOTPRINT_REL_STEP})
-           / {1.0 / _FOOTPRINT_REL_STEP} AS rel_pct
-  FROM (
-    SELECT formatDateTime(b.bucket_ts, '%Y-%m-%dT%H:%i:%SZ') AS bucket,
-           b.bucket_ts AS bucket_ts,
-           b.step_s AS bucket_seconds,
-           -- Quiet buckets (no order created in them) fall back to the window
-           -- median; they are low-depth by definition, and the client also
-           -- forward-fills bucket_mid for the axis labels.
-           coalesce(m.b_med, (SELECT p_med FROM pmed)) AS bucket_mid,
-           p.quote_amt / nullIf(p.base_amt, 0) AS price,
-           p.side AS side,
-           -- Time-weighted: size x the fraction of the bucket the order rested.
-           p.base_amt * dateDiff('second',
-             greatest(toDateTime(p.created), toDateTime(b.bucket_ts)),
-             least(toDateTime(p.alive_until), toDateTime(b.bucket_ts) + b.step_s))
-             / b.step_s AS w
-    FROM buckets AS b
-    CROSS JOIN priced AS p
-    LEFT JOIN bmed AS m
-      ON m.b_idx = intDiv(
-           toInt64(dateDiff('second', (SELECT w_start FROM grid_n), b.bucket_ts)),
-           toInt64(b.step_s))
-    -- Interval overlap, not point-in-time: CoW books are transient (orders
-    -- often rest minutes), so a boundary snapshot would miss most of them.
-    WHERE p.created < (b.bucket_ts + b.step_s)
-      AND p.alive_until > b.bucket_ts
-      AND p.base_amt > 0
-  )
-  WHERE bucket_mid > 0 AND isFinite(price) AND price > 0
-    AND abs(price / bucket_mid - 1) <= {_FOOTPRINT_REL_PCT / 100.0}
-)
-WHERE w > 0
-GROUP BY bucket, bucket_mid, rel_pct, side
-ORDER BY bucket, side, rel_pct"""
+    heatmap_sql = sql_loader.load_sql("cow", "pair_depth_heatmap", token_cte=token_cte, min_step_label=f"{_FOOTPRINT_MIN_STEP_S}s", min_step_s=_FOOTPRINT_MIN_STEP_S, max_buckets=_FOOTPRINT_MAX_BUCKETS, max_buckets_f=float(_FOOTPRINT_MAX_BUCKETS), rel_bin_scale=100.0 / _FOOTPRINT_REL_STEP, rel_bin_step=1.0 / _FOOTPRINT_REL_STEP, rel_clamp=_FOOTPRINT_REL_PCT / 100.0)
     return [
         QuerySpec(
             "pair_depth_heatmap", "Order-book depth over time", heatmap_sql,
@@ -2099,53 +1141,12 @@ def _native_reference_sql(
             "observed_at<=parseDateTime64BestEffort({end_at:String})"
         )
     else:
-        native_time = """observed_at>=(
-          SELECT max(observed_at) FROM cow_db.native_prices FINAL
-          WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-            AND token IN ({base:String},{quote:String})
-        )-toIntervalDay({window_days:UInt32})"""
+        native_time = sql_loader.load_sql("cow", "_pred_native_price_window")
     if base == NATIVE_TOKEN:
-        return f"""
-WITH {token_cte}
-SELECT observed_at AS bucket, 1/nullIf(toFloat64OrNull(native_price),0)*{decimal_factor} AS price,
-       observed_at AS indexed_from, observed_at AS indexed_to, observed_at AS source_observed_at
-FROM cow_db.native_prices FINAL
-WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{quote:String}}
-  AND {native_time}
-ORDER BY observed_at"""
+        return sql_loader.load_sql("cow", "native_reference_inverted", token_cte=token_cte, decimal_factor=decimal_factor, native_time=native_time)
     if quote == NATIVE_TOKEN:
-        return f"""
-WITH {token_cte}
-SELECT observed_at AS bucket, toFloat64OrNull(native_price)*{decimal_factor} AS price,
-       observed_at AS indexed_from, observed_at AS indexed_to, observed_at AS source_observed_at
-FROM cow_db.native_prices FINAL
-WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{base:String}}
-  AND {native_time}
-ORDER BY observed_at"""
-    return f"""
-WITH {token_cte}, bp AS (
-  SELECT toStartOfMinute(observed_at) AS bucket,
-         argMax(toFloat64OrNull(native_price),observed_at) AS base_native_price,
-         max(observed_at) AS base_observed_at
-  FROM cow_db.native_prices FINAL
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{base:String}}
-    AND {native_time}
-  GROUP BY bucket
-), qp AS (
-  SELECT toStartOfMinute(observed_at) AS bucket,
-         argMax(toFloat64OrNull(native_price),observed_at) AS quote_native_price,
-         max(observed_at) AS quote_observed_at
-  FROM cow_db.native_prices FINAL
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND token={{quote:String}}
-    AND {native_time}
-  GROUP BY bucket
-)
-SELECT bp.bucket, bp.base_native_price/nullIf(qp.quote_native_price,0)*{decimal_factor} AS price,
-       least(bp.base_observed_at,qp.quote_observed_at) AS indexed_from,
-       greatest(bp.base_observed_at,qp.quote_observed_at) AS indexed_to,
-       greatest(bp.base_observed_at,qp.quote_observed_at) AS source_observed_at
-FROM bp INNER JOIN qp USING bucket
-ORDER BY bucket"""
+        return sql_loader.load_sql("cow", "native_reference_direct", token_cte=token_cte, decimal_factor=decimal_factor, native_time=native_time)
+    return sql_loader.load_sql("cow", "native_reference_cross", token_cte=token_cte, native_time=native_time, decimal_factor=decimal_factor)
 
 
 def _trade_specs(
@@ -2189,41 +1190,15 @@ def _trade_specs(
             f"AND {_arm_checkpoint(cid)} "
             f"AND t.block_timestamp IS NOT NULL AND {_arm_window(cid, range_state)}{extra}"
         )
-        activity_parts.append(f"""
-SELECT toStartOfDay(t.block_timestamp) AS bucket,{cid} AS chain_id,
-       uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
-       uniq(t.owner) AS owners,min(t.block_timestamp) AS indexed_from,
-       max(t.block_timestamp) AS indexed_to,max(t.observed_at) AS source_observed_at
-FROM cow_db.trades AS t
-WHERE {arm_where}
-GROUP BY bucket""")
-        pair_parts.append(f"""
-SELECT {cid} AS chain_id,least(t.sell_token,t.buy_token) AS token0,
-       greatest(t.sell_token,t.buy_token) AS token1,
-       uniq({TRADE_KEY}) AS fill_count,uniq(t.tx_hash) AS settlement_transactions,
-       min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
-       max(t.observed_at) AS source_observed_at
-FROM cow_db.trades AS t
-WHERE {arm_where}
-GROUP BY token0,token1""")
+        activity_parts.append(sql_loader.load_sql("cow", "trade_activity_arm", cid=cid, trade_key=TRADE_KEY, arm_where=arm_where))
+        pair_parts.append(sql_loader.load_sql("cow", "trade_pair_arm", cid=cid, trade_key=TRADE_KEY, arm_where=arm_where))
     activity = (
         f"WITH {shared_ctes}\n"
         "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
         + "\n) ORDER BY bucket,chain_id"
     )
     pair_union = "\nUNION ALL\n".join(pair_parts)
-    breakdown = f"""WITH {shared_ctes},{tmx}
-SELECT p.chain_id AS chain_id, p.token0 AS token0, p.token1 AS token1,
-       if(m0.token='','',m0.symbol) AS token0_symbol,
-       if(m1.token='','',m1.symbol) AS token1_symbol,
-       p.fill_count AS fill_count, p.settlement_transactions AS settlement_transactions,
-       p.indexed_from AS indexed_from, p.indexed_to AS indexed_to,
-       p.source_observed_at AS source_observed_at
-FROM ({pair_union}) AS p
-LEFT JOIN tmx AS m0 ON m0.chain_id=p.chain_id AND m0.token=p.token0
-LEFT JOIN tmx AS m1 ON m1.chain_id=p.chain_id AND m1.token=p.token1
-ORDER BY p.fill_count DESC,p.chain_id,p.token0,p.token1
-LIMIT 500"""
+    breakdown = sql_loader.load_sql("cow", "trade_pair_breakdown", shared_ctes=shared_ctes, tmx=tmx, pair_union=pair_union)
     # Top-N-first tape: ONE plain scan over the base table with a bounded
     # heap sort (PartialSorting) — constant memory even at all-history across
     # all networks (proven live: 6.3s where the previous shape OOMed at
@@ -2234,51 +1209,8 @@ LIMIT 500"""
     # the <0.1% ReplacingMergeTree duplicate rate), then argMax dedups and
     # the global top-ROW_CAP is taken.
     time_window = _arm_window(0, range_state)
-    deduped_tape = f"""
-SELECT u.chain_id AS chain_id,u.tx_hash AS tx_hash,u.log_index AS log_index,
-       u.order_uid AS order_uid,
-       argMax(u.block_timestamp,u.observed_at) AS block_timestamp,
-       argMax(u.owner,u.observed_at) AS owner,
-       argMax(u.sell_token,u.observed_at) AS sell_token,
-       argMax(u.buy_token,u.observed_at) AS buy_token,
-       argMax(u.sell_amount,u.observed_at) AS sell_amount,
-       argMax(u.buy_amount,u.observed_at) AS buy_amount,
-       argMax(u.fee_amount,u.observed_at) AS fee_amount,
-       argMax(u.source,u.observed_at) AS source,
-       max(u.observed_at) AS obs_at
-FROM (
-  SELECT chain_id,tx_hash,log_index,order_uid,block_timestamp,block_number,
-         owner,sell_token,buy_token,sell_amount,buy_amount,fee_amount,
-         source,observed_at
-  FROM cow_db.trades AS t
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-    AND block_timestamp IS NOT NULL AND {time_window}{extra}
-  ORDER BY block_timestamp DESC
-  LIMIT {TAPE_ARM_LIMIT}
-) AS u
-INNER JOIN cp ON cp.chain_id=u.chain_id
-WHERE u.block_number<=cp.b
-GROUP BY u.chain_id,u.tx_hash,u.log_index,u.order_uid
-ORDER BY block_timestamp DESC
-LIMIT {ROW_CAP}"""
-    trades = f"""WITH {shared_ctes},{tmx}
-SELECT u.block_timestamp AS block_timestamp,u.chain_id AS chain_id,u.tx_hash AS tx_hash,
-       u.log_index AS log_index,u.order_uid AS order_uid,u.owner AS owner,
-       u.sell_token AS sell_token,if(s.symbol='',u.sell_token,s.symbol) AS sell_symbol,
-       if(s.token='',NULL,s.decimals) AS sell_decimals,
-       toString(u.sell_amount) AS sell_amount_raw,
-       if(s.symbol='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       u.buy_token AS buy_token,if(b.symbol='',u.buy_token,b.symbol) AS buy_symbol,
-       if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(u.buy_amount) AS buy_amount_raw,
-       if(b.symbol='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       toString(u.fee_amount) AS fee_amount_raw,
-       if(s.token='',NULL,toFloat64(u.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
-       u.source AS source,u.obs_at AS source_observed_at
-FROM ({deduped_tape}) AS u
-LEFT JOIN tmx AS s ON s.chain_id=u.chain_id AND s.token=u.sell_token
-LEFT JOIN tmx AS b ON b.chain_id=u.chain_id AND b.token=u.buy_token
-ORDER BY u.block_timestamp DESC,u.log_index DESC,u.tx_hash DESC,u.order_uid DESC"""
+    deduped_tape = sql_loader.load_sql("cow", "deduped_tape", ids=ids, time_window=time_window, extra=extra, tape_arm_limit=TAPE_ARM_LIMIT, row_cap=ROW_CAP)
+    trades = sql_loader.load_sql("cow", "trade_tape", shared_ctes=shared_ctes, tmx=tmx, deduped_tape=deduped_tape)
     return [
         QuerySpec("trade_activity", "Settled fill activity", activity, params, "block_timestamp", "checkpoint_bounded"),
         QuerySpec("trade_pair_breakdown", "Settled fills by pair", breakdown, params, "block_timestamp", "checkpoint_bounded", 900),
@@ -2299,21 +1231,7 @@ def _trader_dynamics_ctes(ids: str) -> str:
     TRADER_DYNAMICS_MONTHS (live 2026-07-22): om ~696K entries / fsall ~719K.
     """
     months = TRADER_DYNAMICS_MONTHS + 1
-    return f"""
-om AS (
-  SELECT owner,toStartOfMonth(block_timestamp) AS period,max(observed_at) AS obs_at
-  FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-    AND block_timestamp IS NOT NULL
-    AND block_timestamp>=toStartOfMonth((SELECT max(a) FROM ta))-toIntervalMonth({months})
-  GROUP BY owner,period
-), fsall AS (
-  SELECT owner,min(block_timestamp) AS first_seen
-  FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-    AND block_timestamp IS NOT NULL
-  GROUP BY owner
-)"""
+    return sql_loader.load_sql("cow", "_cte_owner_months", ids=ids, months=months)
 
 
 def _traders_specs(
@@ -2338,15 +1256,7 @@ def _traders_specs(
     # for each arm — an OOM driver. `ta` (latest-trade anchor) is emitted by
     # _shared_arm_ctes and precedes this CTE. "new_traders" then means "first
     # seen within the window" — the same disclosed tradeoff as the other caps.
-    firsts_cte = f"""
-fs AS (
-  SELECT chain_id, owner, min(block_timestamp) AS first_seen
-  FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-    AND block_timestamp IS NOT NULL
-    AND block_timestamp >= (SELECT max(a) FROM ta) - toIntervalDay({CORRELATION_MAX_WINDOW_DAYS})
-  GROUP BY chain_id, owner
-)"""
+    firsts_cte = sql_loader.load_sql("cow", "firsts_cte", ids=ids, correlation_window_days=CORRELATION_MAX_WINDOW_DAYS)
     leader_parts: list[str] = []
     activity_parts: list[str] = []
     for c in chains:
@@ -2356,47 +1266,10 @@ fs AS (
             f"AND {_arm_checkpoint(cid)} "
             f"AND t.block_timestamp IS NOT NULL AND {_arm_window(cid, range_state)}"
         )
-        leader_parts.append(f"""
-SELECT {cid} AS chain_id,t.owner AS trader,
-       uniq({TRADE_KEY}) AS fill_count,
-       uniq(t.tx_hash) AS settlement_transactions,
-       uniq(tuple(least(t.sell_token,t.buy_token),greatest(t.sell_token,t.buy_token))) AS distinct_pairs,
-       min(t.block_timestamp) AS fs_arm,
-       max(t.block_timestamp) AS ls_arm,
-       max(t.observed_at) AS obs_arm
-FROM cow_db.trades AS t
-WHERE {arm_where}
-GROUP BY trader""")
-        activity_parts.append(f"""
-SELECT toStartOfDay(t.block_timestamp) AS bucket,{cid} AS chain_id,
-       uniq(t.owner) AS active_traders,
-       uniqIf(t.owner, toStartOfDay(f.first_seen)=toStartOfDay(t.block_timestamp)) AS new_traders,
-       uniq({TRADE_KEY}) AS fill_count,
-       min(t.block_timestamp) AS indexed_from,
-       max(t.block_timestamp) AS indexed_to,
-       max(t.observed_at) AS source_observed_at
-FROM cow_db.trades AS t
-INNER JOIN fs AS f ON f.chain_id={cid} AND f.owner=t.owner
-WHERE {arm_where}
-GROUP BY bucket""")
+        leader_parts.append(sql_loader.load_sql("cow", "trader_leaderboard_arm", cid=cid, trade_key=TRADE_KEY, arm_where=arm_where))
+        activity_parts.append(sql_loader.load_sql("cow", "trader_activity_arm", cid=cid, trade_key=TRADE_KEY, arm_where=arm_where))
     leader_union = "\nUNION ALL\n".join(leader_parts)
-    leaderboard = f"""
-WITH {shared_ctes}
-SELECT trader,
-       sum(fill_count) AS fill_count,
-       sum(settlement_transactions) AS settlement_transactions,
-       count() AS chains_active,
-       sum(distinct_pairs) AS distinct_pairs,
-       min(fs_arm) AS first_seen,
-       max(ls_arm) AS last_seen,
-       min(fs_arm) AS indexed_from,
-       max(ls_arm) AS indexed_to,
-       max(obs_arm) AS source_observed_at
-FROM (
-{leader_union}
-) GROUP BY trader
-ORDER BY fill_count DESC, trader
-LIMIT 200"""
+    leaderboard = sql_loader.load_sql("cow", "trader_leaderboard", shared_ctes=shared_ctes, leader_union=leader_union)
     activity = (
         f"WITH {shared_ctes},{firsts_cte}\n"
         "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
@@ -2410,56 +1283,8 @@ LIMIT 200"""
     # new + returning + reactivated == active on every row).
     dynamics_ctes = _trader_dynamics_ctes(ids)
     dyn_params = _scope_parameters(scope, None)
-    dynamics = f"""
-WITH {shared_ctes},{dynamics_ctes},
-monthly AS (
-  SELECT o.period AS period,
-         count() AS active_traders,
-         countIf(toStartOfMonth(f.first_seen)=o.period) AS new_traders,
-         countIf(p.owner!='') AS returning_traders,
-         countIf(p.owner='' AND toStartOfMonth(f.first_seen)<o.period) AS reactivated_traders,
-         max(o.obs_at) AS obs_at
-  FROM om AS o
-  INNER JOIN fsall AS f ON f.owner=o.owner
-  LEFT JOIN (SELECT owner,period+toIntervalMonth(1) AS period FROM om) AS p
-    ON p.owner=o.owner AND p.period=o.period
-  GROUP BY period
-)
-SELECT period,active_traders,new_traders,returning_traders,reactivated_traders,
-       prev_active-returning_traders AS churned_traders,
-       (new_traders+reactivated_traders)/nullIf(prev_active-returning_traders,0) AS quick_ratio,
-       returning_traders/nullIf(prev_active,0) AS retention_rate,
-       period AS indexed_from,period AS indexed_to,
-       obs_at AS source_observed_at
-FROM (
-  SELECT *,lagInFrame(active_traders,1) OVER (ORDER BY period ASC
-           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS prev_active
-  FROM monthly
-)
-WHERE prev_active>0
-ORDER BY period"""
-    retention = f"""
-WITH {shared_ctes},{dynamics_ctes},
-coh AS (
-  SELECT owner,toStartOfMonth(first_seen) AS cohort_month
-  FROM fsall
-  WHERE first_seen>=toStartOfMonth((SELECT max(a) FROM ta))-toIntervalMonth({TRADER_DYNAMICS_MONTHS})
-), csize AS (
-  SELECT cohort_month,uniqExact(owner) AS cohort_size FROM coh GROUP BY cohort_month
-)
-SELECT c.cohort_month AS cohort_month,
-       dateDiff('month',c.cohort_month,om.period) AS month_index,
-       any(cs.cohort_size) AS cohort_size,
-       uniqExact(om.owner) AS active_traders,
-       uniqExact(om.owner)/nullIf(any(cs.cohort_size),0) AS retention_share,
-       c.cohort_month AS indexed_from,max(om.period) AS indexed_to,
-       max(om.obs_at) AS source_observed_at
-FROM om
-INNER JOIN coh AS c ON c.owner=om.owner
-INNER JOIN csize AS cs ON cs.cohort_month=c.cohort_month
-WHERE om.period>=c.cohort_month
-GROUP BY cohort_month,month_index
-ORDER BY cohort_month,month_index"""
+    dynamics = sql_loader.load_sql("cow", "trader_dynamics", shared_ctes=shared_ctes, dynamics_ctes=dynamics_ctes)
+    retention = sql_loader.load_sql("cow", "trader_retention", shared_ctes=shared_ctes, dynamics_ctes=dynamics_ctes, dynamics_months=TRADER_DYNAMICS_MONTHS)
     return [
         QuerySpec("trader_leaderboard", "Trader leaderboard", leaderboard, dict(params), "block_timestamp", BASE_DEDUP_MODE, 900),
         QuerySpec("trader_activity", "Active and new traders", activity, dict(params), "block_timestamp", BASE_DEDUP_MODE, 900),
@@ -2493,11 +1318,7 @@ def _order_multi_core_specs(
             raise ValueError("owner filter must be an EVM address")
         params["owner"] = owner
         extra.append("owner={owner:String}")
-    oa_cte = f"""
-oa AS (
-  SELECT max(creation_date) AS a FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-)"""
+    oa_cte = sql_loader.load_sql("cow", "order_multi_anchor_cte", ids=ids)
     if range_state["kind"] == "all":
         window = "1"
     elif range_state["kind"] == "absolute":
@@ -2512,31 +1333,9 @@ oa AS (
     # whole backfilled orders table. status/owner filters stay OUTER: they match
     # the LATEST (deduped) status/owner, so they cannot move inside the argMax.
     outer = " AND ".join(extra) if extra else "1"
-    o_dedup = f"""
-  SELECT chain_id,order_uid,argMax(status,observed_at) AS status,
-         argMax(owner,observed_at) AS owner,
-         argMax(creation_date,observed_at) AS creation_date,
-         max(observed_at) AS obs_at
-  FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND {window}
-  GROUP BY chain_id,order_uid"""
-    summary = f"""WITH {oa_cte}
-SELECT status,count() AS order_count,uniqExact(owner) AS owners,
-       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
-       max(obs_at) AS source_observed_at
-FROM ({o_dedup})
-WHERE {outer}
-GROUP BY status
-ORDER BY order_count DESC,status"""
-    activity = f"""WITH {oa_cte}
-SELECT toStartOfDay(creation_date) AS bucket,count() AS order_count,
-       countIf(status='open') AS currently_open,
-       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
-       max(obs_at) AS source_observed_at
-FROM ({o_dedup})
-WHERE {outer}
-GROUP BY bucket
-ORDER BY bucket"""
+    o_dedup = sql_loader.load_sql("cow", "order_multi_dedup", ids=ids, window=window)
+    summary = sql_loader.load_sql("cow", "order_multi_status_summary", oa_cte=oa_cte, o_dedup=o_dedup, outer=outer)
+    activity = sql_loader.load_sql("cow", "order_multi_activity", oa_cte=oa_cte, o_dedup=o_dedup, outer=outer)
     return [
         QuerySpec("order_status_summary", "Observed order lifecycle", summary, dict(params), "creation_date", "observed_snapshot", 60),
         QuerySpec("order_activity", "Order creation activity", activity, dict(params), "creation_date", "observed_snapshot", 60),
@@ -2559,11 +1358,7 @@ def _order_type_specs(
     """
     ids = ",".join(str(c.chain_id) for c in chains)
     params = {**_scope_parameters(scope, None), **_time_params(range_state)}
-    oa_cte = f"""
-oa AS (
-  SELECT max(creation_date) AS a FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-)"""
+    oa_cte = sql_loader.load_sql("cow", "order_type_anchor_cte", ids=ids)
 
     def order_window(column: str = "creation_date") -> str:
         if range_state["kind"] == "all":
@@ -2581,53 +1376,13 @@ oa AS (
     # the WINDOW, not the whole (now multi-million-row, backfilled) orders
     # table: the default 30d view dedups ~300k rows / 0.7s instead of ~4M / 12s.
     # "All history" is unbounded by design and remains the heaviest selection.
-    o_dedup = f"""
-  SELECT chain_id,order_uid,argMax(class,observed_at) AS order_class,
-         argMax(kind,observed_at) AS order_kind,
-         argMax(signing_scheme,observed_at) AS signing_scheme,
-         argMax(partially_fillable,observed_at) AS partially_fillable,
-         argMax(status,observed_at) AS status,
-         argMax(owner,observed_at) AS owner,
-         argMax(creation_date,observed_at) AS creation_date,
-         max(observed_at) AS obs_at
-  FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND {order_window()}
-  GROUP BY chain_id,order_uid"""
-    type_summary = f"""WITH {oa_cte}
-SELECT chain_id,order_class,count() AS order_count,uniqExact(owner) AS owners,
-       countIf(status='fulfilled') AS fulfilled,countIf(status='expired') AS expired,
-       countIf(status='cancelled') AS cancelled,countIf(status='open') AS open_now,
-       countIf(status='fulfilled')/nullIf(count(),0) AS fulfilled_share,
-       countIf(partially_fillable) AS partially_fillable_count,
-       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
-       max(obs_at) AS source_observed_at
-FROM ({o_dedup})
-GROUP BY chain_id,order_class
-ORDER BY chain_id,order_count DESC"""
-    flavor_mix = f"""WITH {oa_cte}
-SELECT chain_id,order_kind,signing_scheme,partially_fillable,
-       count() AS order_count,uniqExact(owner) AS owners,
-       countIf(status='fulfilled')/nullIf(count(),0) AS fulfilled_share,
-       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
-       max(obs_at) AS source_observed_at
-FROM ({o_dedup})
-GROUP BY chain_id,order_kind,signing_scheme,partially_fillable
-ORDER BY chain_id,order_count DESC"""
-    type_trend = f"""WITH {oa_cte}
-SELECT toStartOfDay(creation_date) AS bucket,chain_id,order_class,
-       count() AS order_count,countIf(status='fulfilled') AS fulfilled_count,
-       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
-       max(obs_at) AS source_observed_at
-FROM ({o_dedup})
-GROUP BY bucket,chain_id,order_class
-ORDER BY bucket,chain_id,order_class"""
+    o_dedup = sql_loader.load_sql("cow", "order_type_dedup_cte", ids=ids, order_window=order_window())
+    type_summary = sql_loader.load_sql("cow", "type_summary", oa_cte=oa_cte, o_dedup=o_dedup)
+    flavor_mix = sql_loader.load_sql("cow", "flavor_mix", oa_cte=oa_cte, o_dedup=o_dedup)
+    type_trend = sql_loader.load_sql("cow", "type_trend", oa_cte=oa_cte, o_dedup=o_dedup)
     # ComposableCoW / programmatic footprint. event_timestamp is Nullable —
     # bucket on coalesce(event_timestamp, observed_at), disclosed in docs.
-    oea_cte = f"""
-oea AS (
-  SELECT max(coalesce(event_timestamp,observed_at)) AS a FROM cow_db.order_events
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-)"""
+    oea_cte = sql_loader.load_sql("cow", "order_type_events_cte", ids=ids)
     event_ts = "coalesce(event_timestamp,observed_at)"
     if range_state["kind"] == "all":
         event_window = "1"
@@ -2640,17 +1395,7 @@ oea AS (
         event_window = (
             f"{event_ts}>=(SELECT a FROM oea)-toIntervalDay({{window_days:UInt32}})"
         )
-    conditional_activity = f"""WITH {oea_cte}
-SELECT toStartOfDay({event_ts}) AS bucket,chain_id,event_type,
-       uniq(event_id) AS events,uniq(owner) AS creators,
-       min({event_ts}) AS indexed_from,max({event_ts}) AS indexed_to,
-       max(observed_at) AS source_observed_at
-FROM cow_db.order_events
-WHERE environment={{env:String}} AND chain_id IN ({ids})
-  AND event_type IN ('ConditionalOrderCreated','MerkleRootSet','OrderInvalidation','SwapGuardSet')
-  AND {event_window}
-GROUP BY bucket,chain_id,event_type
-ORDER BY bucket,chain_id,event_type"""
+    conditional_activity = sql_loader.load_sql("cow", "conditional_activity", oea_cte=oea_cte, event_ts=event_ts, ids=ids, event_window=event_window)
     # App-data orderClass tags (the ONLY honest TWAP signal: TWAP children
     # land as class='limit', so orders.class never says twap). The doubly-
     # nested JSON path is live-verified (probe 2026-07-23). Buckets:
@@ -2663,33 +1408,7 @@ ORDER BY bucket,chain_id,event_type"""
     # so uniq(order_uid) per hash counts its distinct orders, and the GROUP BY is
     # bounded by the ~1.2k distinct app-data hashes (NOT the millions of orders).
     # owners stay exact via uniqExact state-merge across the hashes of a class.
-    appdata_classes = f"""
-WITH ad AS (
-  SELECT app_data_hash,
-         JSONExtractString(JSONExtractString(argMax(full_app_data,observed_at),'fullAppData'),
-                           'metadata','orderClass','orderClass') AS order_class
-  FROM cow_db.app_data
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-  GROUP BY app_data_hash
-),
-od AS (
-  SELECT chain_id,app_data_hash,uniq(order_uid) AS orders,
-         uniqExactState(owner) AS owners_state,max(observed_at) AS obs_at
-  FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-  GROUP BY chain_id,app_data_hash
-)
-SELECT od.chain_id AS chain_id,
-       multiIf(od.app_data_hash='','unresolved',
-               ad.app_data_hash='','unresolved',
-               ad.order_class='','untagged',ad.order_class) AS order_class,
-       sum(od.orders) AS orders,uniqExactMerge(od.owners_state) AS owners,
-       uniqExactIf(od.app_data_hash,ad.app_data_hash!='') AS appdata_hashes,
-       max(od.obs_at) AS source_observed_at
-FROM od
-LEFT JOIN ad ON ad.app_data_hash=od.app_data_hash
-GROUP BY od.chain_id,order_class
-ORDER BY od.chain_id,orders DESC"""
+    appdata_classes = sql_loader.load_sql("cow", "appdata_classes", ids=ids)
     snapshot_params = _scope_parameters(scope, None)
     return [
         QuerySpec("order_type_summary", "Orders by class (observed subset)", type_summary, dict(params), "creation_date", "observed_snapshot", 300),
@@ -2731,23 +1450,8 @@ def _order_specs(
         params["owner"] = owner
         predicates.append("o.owner={owner:String}")
     where = " AND ".join(predicates)
-    summary = f"""
-SELECT o.status,count() AS order_count,uniqExact(o.owner) AS owners,
-       min(o.creation_date) AS indexed_from,max(o.creation_date) AS indexed_to,
-       max(o.observed_at) AS source_observed_at
-FROM cow_db.orders AS o FINAL
-WHERE {where}
-GROUP BY o.status
-ORDER BY order_count DESC,o.status"""
-    activity = f"""
-SELECT toStartOfDay(o.creation_date) AS bucket,count() AS order_count,
-       countIf(o.status='open') AS currently_open,
-       min(o.creation_date) AS indexed_from,max(o.creation_date) AS indexed_to,
-       max(o.observed_at) AS source_observed_at
-FROM cow_db.orders AS o FINAL
-WHERE {where}
-GROUP BY bucket
-ORDER BY bucket"""
+    summary = sql_loader.load_sql("cow", "order_status_summary", where=where)
+    activity = sql_loader.load_sql("cow", "order_activity", where=where)
     surplus = SURPLUS_BPS.format(
         eb="t.buy_amount", ls="o.sell_amount", es="t.sell_amount", lb="o.buy_amount",
     )
@@ -2755,22 +1459,7 @@ ORDER BY bucket"""
     # duplicate fills, disclosed) hash-joined against the SMALL deduped orders
     # set. The previous trades_canonical FINAL x orders FINAL double-merge was
     # the memory-heavy part; the argMax subquery streams on the sort key.
-    quality_join = """
-FROM cow_db.trades AS t
-INNER JOIN (
-  SELECT order_uid,
-         argMax(sell_amount,observed_at) AS sell_amount,
-         argMax(buy_amount,observed_at) AS buy_amount,
-         argMax(creation_date,observed_at) AS creation_date
-  FROM cow_db.orders
-  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-  GROUP BY order_uid
-) AS o ON o.order_uid=t.order_uid
-WHERE t.environment={env:String} AND t.chain_id={chain_id:UInt64}
-  AND t.block_number<=(
-    SELECT argMax(block_number,updated_at) FROM cow_db.indexing_checkpoints
-    WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND source='rpc')
-  AND t.block_timestamp IS NOT NULL"""
+    quality_join = sql_loader.load_sql("cow", "order_quality_join")
     # Cap the window: the three quality distributions load CONCURRENTLY and
     # each streams the full trades partition through per-day quantile state at
     # kind='all' — three unbounded aggregations at once is a concurrent-OOM
@@ -2779,88 +1468,16 @@ WHERE t.environment={env:String} AND t.chain_id={chain_id:UInt64}
     quality_time, quality_params = _time_predicate(
         "t.block_timestamp", quality_range, _trade_anchor(chain)
     )
-    quality_source = f"""
-SELECT toStartOfDay(t.block_timestamp) AS bucket,
-       {surplus} AS surplus_bps,
-       if(o.creation_date<=t.block_timestamp,
-          dateDiff('second', o.creation_date, t.block_timestamp), NULL) AS latency_seconds,
-       t.block_timestamp, t.observed_at
-{quality_join} AND {quality_time}"""
-    quality_summary = f"""
-SELECT bucket, count() AS fills,
-       avg(surplus_bps) AS avg_surplus_bps,
-       quantile(0.5)(surplus_bps) AS median_surplus_bps,
-       avgIf(latency_seconds, latency_seconds IS NOT NULL) AS avg_latency_seconds,
-       quantileIf(0.5)(latency_seconds, latency_seconds IS NOT NULL) AS median_latency_seconds,
-       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
-       max(observed_at) AS source_observed_at
-FROM ({quality_source})
-GROUP BY bucket
-ORDER BY bucket"""
-    latency_distribution = f"""
-SELECT multiIf(latency_seconds IS NULL,'unknown',
-               latency_seconds<10,'<10s',
-               latency_seconds<60,'10-60s',
-               latency_seconds<300,'1-5m',
-               latency_seconds<3600,'5-60m','>1h') AS latency_bucket,
-       count() AS fills,
-       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
-       max(observed_at) AS source_observed_at
-FROM ({quality_source})
-GROUP BY latency_bucket
-ORDER BY latency_bucket"""
-    surplus_distribution = f"""
-SELECT multiIf(surplus_bps IS NULL,'unknown',
-               surplus_bps< -50,'< -50 bps',
-               surplus_bps<0,'-50-0 bps',
-               surplus_bps<10,'0-10 bps',
-               surplus_bps<50,'10-50 bps',
-               surplus_bps<200,'50-200 bps','> 200 bps') AS surplus_bucket,
-       count() AS fills,
-       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
-       max(observed_at) AS source_observed_at
-FROM ({quality_source})
-GROUP BY surplus_bucket
-ORDER BY surplus_bucket"""
+    quality_source = sql_loader.load_sql("cow", "order_quality_source", surplus=surplus, quality_join=quality_join, quality_time=quality_time)
+    quality_summary = sql_loader.load_sql("cow", "order_quality_summary", quality_source=quality_source)
+    latency_distribution = sql_loader.load_sql("cow", "fill_latency_distribution", quality_source=quality_source)
+    surplus_distribution = sql_loader.load_sql("cow", "surplus_distribution", quality_source=quality_source)
     quality_full_params = {**params, **quality_params}
     # Surplus by order class: the quality_join shape with class carried
     # through the deduped orders build. Same 90d analytical cap; sole member
     # of its own load group so it never stacks with the quality trio.
-    class_source = f"""
-SELECT o.klass AS klass,
-       {surplus} AS surplus_bps,
-       t.block_timestamp, t.observed_at
-FROM cow_db.trades AS t
-INNER JOIN (
-  SELECT order_uid,
-         argMax(sell_amount,observed_at) AS sell_amount,
-         argMax(buy_amount,observed_at) AS buy_amount,
-         argMax(class,observed_at) AS klass
-  FROM cow_db.orders
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-  GROUP BY order_uid
-) AS o ON o.order_uid=t.order_uid
-WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}}
-  AND t.block_number<=(
-    SELECT argMax(block_number,updated_at) FROM cow_db.indexing_checkpoints
-    WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc')
-  AND t.block_timestamp IS NOT NULL AND {quality_time}"""
-    surplus_by_class = f"""
-SELECT klass AS order_class,
-       multiIf(surplus_bps IS NULL,'unknown',
-               surplus_bps< -50,'< -50 bps',
-               surplus_bps<0,'-50-0 bps',
-               surplus_bps<10,'0-10 bps',
-               surplus_bps<50,'10-50 bps',
-               surplus_bps<200,'50-200 bps','> 200 bps') AS surplus_bucket,
-       count() AS fills,
-       avgOrNull(surplus_bps) AS avg_surplus_bps,
-       quantile(0.5)(surplus_bps) AS median_surplus_bps,
-       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
-       max(observed_at) AS source_observed_at
-FROM ({class_source})
-GROUP BY order_class, surplus_bucket
-ORDER BY order_class, surplus_bucket"""
+    class_source = sql_loader.load_sql("cow", "order_class_source", surplus=surplus, quality_time=quality_time)
+    surplus_by_class = sql_loader.load_sql("cow", "surplus_by_class", class_source=class_source)
     specs = [
         QuerySpec("order_status_summary", "Observed order lifecycle", summary, dict(params), "creation_date", "observed_snapshot", 60),
         QuerySpec("order_activity", "Order creation activity", activity, dict(params), "creation_date", "observed_snapshot", 60),
@@ -2884,85 +1501,10 @@ ORDER BY order_class, surplus_bucket"""
         intent_params["owner"] = owner
         owner_predicate = "AND o.owner={owner:String}"
     token_cte = _token_metadata_cte()
-    remaining_cte = f"""
-{token_cte}, open_orders AS (
- SELECT o.*,
-   if(o.executed_sell_amount<o.sell_amount,
-      toUInt256(o.sell_amount-o.executed_sell_amount),toUInt256(0)) AS residual_sell_raw,
-   if(o.executed_buy_amount<o.buy_amount,
-      toUInt256(o.buy_amount-o.executed_buy_amount),toUInt256(0)) AS residual_buy_raw,
-   if(o.kind='buy',
-      toFloat64(o.sell_amount)*toFloat64(residual_buy_raw)
-        /nullIf(toFloat64(o.buy_amount),0),
-      toFloat64(residual_sell_raw)) AS remaining_sell_float,
-   if(o.kind='buy',
-      toFloat64(residual_buy_raw),
-      toFloat64(o.buy_amount)*toFloat64(residual_sell_raw)
-        /nullIf(toFloat64(o.sell_amount),0)) AS remaining_buy_float
- FROM cow_db.orders AS o FINAL
- WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-   AND o.status='open' AND o.valid_to>toUnixTimestamp(parseDateTime64BestEffort({{server_as_of:String}}))
-   AND o.status!='presignaturePending'
-   {owner_predicate}
-   AND ((o.sell_token={{base:String}} AND o.buy_token={{quote:String}})
-        OR (o.sell_token={{quote:String}} AND o.buy_token={{base:String}}))
-), enriched AS (
- SELECT o.*,
-   if(s.token='','',s.symbol) AS sell_symbol,
-   if(b.token='','',b.symbol) AS buy_symbol,
-   if(s.token='',NULL,s.decimals) AS sell_decimals,
-   if(b.token='',NULL,b.decimals) AS buy_decimals,
-   if(s.token='',NULL,toFloat64(o.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount_normalized,
-   if(b.token='',NULL,toFloat64(o.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount_normalized,
-   if(s.token='',NULL,remaining_sell_float/pow(10,toFloat64(s.decimals))) AS remaining_sell,
-   if(b.token='',NULL,remaining_buy_float/pow(10,toFloat64(b.decimals))) AS remaining_buy,
-   if(o.sell_token={{base:String}},'ask','bid') AS side,
-   if(s.token='' OR b.token='',NULL,if(o.sell_token={{base:String}},
-      (remaining_buy_float/pow(10,toFloat64(b.decimals)))
-        /nullIf(remaining_sell_float/pow(10,toFloat64(s.decimals)),0),
-      (remaining_sell_float/pow(10,toFloat64(s.decimals)))
-        /nullIf(remaining_buy_float/pow(10,toFloat64(b.decimals)),0))) AS limit_price,
-   if(s.token='' OR b.token='',NULL,if(o.sell_token={{base:String}},
-      remaining_sell_float/pow(10,toFloat64(s.decimals)),
-      remaining_buy_float/pow(10,toFloat64(b.decimals)))) AS base_remaining
- FROM open_orders o
- LEFT JOIN tm s ON s.token=o.sell_token
- LEFT JOIN tm b ON b.token=o.buy_token
- WHERE remaining_sell_float>0 AND remaining_buy_float>0
-), normalized AS (
- SELECT * FROM enriched
- WHERE sell_decimals IS NOT NULL AND buy_decimals IS NOT NULL
-)"""
-    known_orders = f"""
-WITH {remaining_cte}
-SELECT order_uid,owner,kind,side,status,creation_date,valid_to,sell_token,buy_token,
-       sell_symbol,buy_symbol,
-       toString(sell_amount) AS sell_amount_raw,toString(buy_amount) AS buy_amount_raw,
-       sell_decimals,buy_decimals,sell_amount_normalized,buy_amount_normalized,
-       toString(executed_sell_amount) AS executed_sell_amount_raw,
-       toString(executed_buy_amount) AS executed_buy_amount_raw,
-       toString(residual_sell_raw) AS residual_sell_amount_raw,
-       toString(residual_buy_raw) AS residual_buy_amount_raw,
-       remaining_sell,remaining_buy,limit_price,observed_at AS source_observed_at
-FROM enriched
-ORDER BY creation_date DESC,order_uid DESC"""
-    intent_summary = f"""
-WITH {remaining_cte}
-SELECT side,count() AS intent_count,sum(base_remaining) AS base_remaining,
-       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
-       max(observed_at) AS source_observed_at
-FROM normalized
-GROUP BY side
-ORDER BY side"""
-    depth = f"""
-WITH {remaining_cte}
-SELECT side,limit_price,sum(base_remaining) AS base_quantity,count() AS intent_count,
-       min(creation_date) AS indexed_from,max(creation_date) AS indexed_to,
-       max(observed_at) AS source_observed_at
-FROM normalized
-WHERE isFinite(limit_price) AND limit_price>0
-GROUP BY side,limit_price
-ORDER BY side,if(side='bid',-limit_price,limit_price)"""
+    remaining_cte = sql_loader.load_sql("cow", "order_remaining_cte", token_cte=token_cte, owner_predicate=owner_predicate)
+    known_orders = sql_loader.load_sql("cow", "known_orders", remaining_cte=remaining_cte)
+    intent_summary = sql_loader.load_sql("cow", "known_intents", remaining_cte=remaining_cte)
+    depth = sql_loader.load_sql("cow", "intent_depth", remaining_cte=remaining_cte)
     specs.extend([
         QuerySpec("known_orders", "Known open intents (observed snapshot)", known_orders, dict(intent_params), "creation_date", "observed_snapshot", 60),
         QuerySpec("known_intents", "Known intent summary", intent_summary, dict(intent_params), "creation_date", "observed_snapshot", 60),
@@ -2988,57 +1530,13 @@ def _auction_specs(
     # ~9.2M-row table (block_number is the sort key) down to the ~15k auction
     # blocks, and argMax dedups so NO FINAL. Replaces the unbounded
     # `chain_blocks FINAL` LEFT-JOIN build side that OOMed at 639 MiB.
-    blk_cte = f"""blk AS (
-  SELECT chain_id, block_number, argMax(block_timestamp, observed_at) AS block_timestamp
-  FROM cow_db.chain_blocks
-  WHERE {scope_pred_bare}
-    AND block_number IN (SELECT auction_block FROM cow_db.solver_competitions FINAL
-                         WHERE {scope_pred_bare})
-  GROUP BY chain_id, block_number
-)"""
-    anchor = f"""SELECT max(block_timestamp) FROM cow_db.chain_blocks
-WHERE {scope_pred_bare}
-  AND block_number IN (SELECT auction_block FROM cow_db.solver_competitions FINAL WHERE {scope_pred_bare})"""
+    blk_cte = sql_loader.load_sql("cow", "auction_blk_cte", scope_pred_bare=scope_pred_bare)
+    anchor = sql_loader.load_sql("cow", "auction_anchor", scope_pred_bare=scope_pred_bare)
     time_pred, time_params = _time_predicate("b.block_timestamp", range_state, anchor)
     params.update(time_params)
-    common = f"""FROM cow_db.solver_competitions AS c FINAL
-LEFT JOIN blk AS b ON b.chain_id=c.chain_id AND b.block_number=c.auction_block
-WHERE {scope_pred_c} AND b.block_number!=0 AND {time_pred}"""
-    activity = f"""
-WITH {blk_cte}
-SELECT toStartOfDay(b.block_timestamp) AS bucket,c.chain_id AS chain_id,
-       count() AS competition_count,
-       uniqExact(c.winner) AS winners,min(b.block_timestamp) AS indexed_from,
-       max(b.block_timestamp) AS indexed_to,max(c.observed_at) AS source_observed_at
-{common}
-GROUP BY bucket,chain_id
-ORDER BY bucket,chain_id"""
-    auctions = f"""
-WITH {blk_cte},
-sols AS (
- SELECT chain_id,auction_id,count() AS solution_count,countIf(is_winner) AS winner_rows,
-        min(ranking) AS best_ranking
- FROM cow_db.competition_solutions FINAL
- WHERE {scope_pred_bare}
- GROUP BY chain_id,auction_id
-), txs AS (
- SELECT chain_id,auction_id,count() AS transaction_count,groupUniqArray(tx_hash) AS tx_hashes
- FROM cow_db.competition_transactions FINAL
- WHERE {scope_pred_bare}
- GROUP BY chain_id,auction_id
-)
-SELECT c.chain_id AS chain_id,c.auction_id,b.block_timestamp AS auction_timestamp,c.auction_block,
-       c.winner AS competition_winner,c.reference_score,
-       coalesce(sols.solution_count,0) AS solution_count,
-       coalesce(txs.transaction_count,0) AS transaction_count,txs.tx_hashes,
-       b.block_timestamp AS indexed_from,b.block_timestamp AS indexed_to,
-       c.observed_at AS source_observed_at
-FROM cow_db.solver_competitions AS c FINAL
-LEFT JOIN blk AS b ON b.chain_id=c.chain_id AND b.block_number=c.auction_block
-LEFT JOIN sols ON c.chain_id=sols.chain_id AND c.auction_id=sols.auction_id
-LEFT JOIN txs ON c.chain_id=txs.chain_id AND c.auction_id=txs.auction_id
-WHERE {scope_pred_c} AND b.block_number!=0 AND {time_pred}
-ORDER BY b.block_timestamp DESC,c.auction_id DESC"""
+    common = sql_loader.load_sql("cow", "auction_common", scope_pred_c=scope_pred_c, time_pred=time_pred)
+    activity = sql_loader.load_sql("cow", "auction_activity", blk_cte=blk_cte, common=common)
+    auctions = sql_loader.load_sql("cow", "auctions", blk_cte=blk_cte, scope_pred_bare=scope_pred_bare, scope_pred_c=scope_pred_c, time_pred=time_pred)
     return [
         QuerySpec("auction_activity", "Indexed settled competitions", activity, params, "auction_block_timestamp", "observed_series"),
         QuerySpec("auctions", "Indexed settled competitions", auctions, params, "auction_block_timestamp", "observed_series"),
@@ -3084,26 +1582,8 @@ def _solver_specs(
     # FINAL) builds a hash table of millions of rows per chain; restricting to
     # blocks that actually appear as auction blocks keeps the join tiny in
     # both single-chain and all-networks mode.
-    blocks_cte = f"""
-blk AS (
-  SELECT chain_id, block_number,
-         argMax(block_timestamp, observed_at) AS block_timestamp
-  FROM cow_db.chain_blocks
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-    AND block_number IN (
-      SELECT auction_block FROM cow_db.solver_competitions FINAL
-      WHERE environment={{env:String}} AND chain_id IN ({ids})
-    )
-  GROUP BY chain_id, block_number
-)"""
-    anchor = f"""SELECT max(block_timestamp)
-FROM cow_db.chain_blocks
-WHERE environment={{env:String}} AND chain_id IN ({ids})
-  AND block_number IN (
-    SELECT max(auction_block) FROM cow_db.solver_competitions FINAL
-    WHERE environment={{env:String}} AND chain_id IN ({ids})
-    GROUP BY chain_id
-  )"""
+    blocks_cte = sql_loader.load_sql("cow", "solver_blocks_cte", ids=ids)
+    anchor = sql_loader.load_sql("cow", "solver_anchor", ids=ids)
     time_pred, time_params = _time_predicate("b.block_timestamp", range_state, anchor)
     params.update(time_params)
     common_joins = """FROM cow_db.competition_solutions AS s FINAL
@@ -3127,45 +1607,9 @@ LEFT JOIN blk AS b
         )
     else:
         settlement_time = "block_timestamp IS NOT NULL"
-    stats = f"""
-WITH {blocks_cte},
-exec AS (
-  SELECT solver, uniq(tx_hash) AS executed_settlements
-  FROM cow_db.settlements
-  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND {settlement_time}
-  GROUP BY solver
-)
-SELECT s.solver AS competition_solver,count() AS solutions,
-       uniqExact(s.auction_id) AS competitions,countIf(s.is_winner) AS wins,
-       countIf(s.is_winner)/nullIf(uniqExact(s.auction_id),0) AS win_rate,
-       uniqExact(s.chain_id) AS chains_active,
-       any(exec.executed_settlements) AS executed_settlements,
-       avg(toFloat64(s.ranking)) AS average_ranking,min(s.ranking) AS best_ranking,
-       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
-       max(s.observed_at) AS source_observed_at
-{common_joins}
-LEFT JOIN exec ON exec.solver=s.solver
-{common_where}
-GROUP BY competition_solver
-ORDER BY wins DESC,competitions DESC,competition_solver
-LIMIT 200"""
-    activity = f"""
-WITH {blocks_cte}
-SELECT toStartOfDay(b.block_timestamp) AS bucket,s.solver AS competition_solver,
-       uniqExact(s.auction_id) AS competitions,countIf(s.is_winner) AS wins,
-       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
-       max(s.observed_at) AS source_observed_at
-{common}
-GROUP BY bucket,competition_solver
-ORDER BY bucket,competition_solver"""
-    ranking = f"""
-WITH {blocks_cte}
-SELECT s.ranking,count() AS solution_count,countIf(s.is_winner) AS winners,
-       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
-       max(s.observed_at) AS source_observed_at
-{common}
-GROUP BY s.ranking
-ORDER BY s.ranking"""
+    stats = sql_loader.load_sql("cow", "solver_stats", blocks_cte=blocks_cte, ids=ids, settlement_time=settlement_time, common_joins=common_joins, common_where=common_where)
+    activity = sql_loader.load_sql("cow", "solver_activity", blocks_cte=blocks_cte, common=common)
+    ranking = sql_loader.load_sql("cow", "ranking_distribution", blocks_cte=blocks_cte, common=common)
     # ---- Solver directory (all-time presence, dual-mode) ----
     # ONE full settlements streaming scan into a ~558-entry (chain, solver)
     # hash (live-verified 1.6s) + the small competition tables. All-time by
@@ -3174,50 +1618,7 @@ ORDER BY s.ranking"""
     # tiers against the CHAIN's own freshness — a stale indexer (BNB) must
     # not mark its solvers inactive. keys via UNION DISTINCT (not FULL OUTER
     # JOIN — ClickHouse empty-key default quirks).
-    directory = f"""
-WITH st AS (
-  SELECT chain_id,solver,
-         minOrNull(block_timestamp) AS first_settlement_at,
-         maxOrNull(block_timestamp) AS last_settlement_at,
-         uniq(tx_hash) AS settlements_all_time,
-         max(observed_at) AS obs_st
-  FROM cow_db.settlements
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-  GROUP BY chain_id,solver
-), cs AS (
-  SELECT chain_id,solver,uniqExact(auction_id) AS competitions_all,
-         countIf(is_winner) AS wins_all,
-         max(observed_at) AS obs_cs
-  FROM cow_db.competition_solutions FINAL
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-  GROUP BY chain_id,solver
-), sa AS (
-  SELECT chain_id,maxOrNull(block_timestamp) AS chain_anchor_at
-  FROM cow_db.settlements
-  WHERE environment={{env:String}} AND chain_id IN ({ids})
-  GROUP BY chain_id
-), dkeys AS (
-  SELECT chain_id,solver FROM st
-  UNION DISTINCT
-  SELECT chain_id,solver FROM cs
-)
-SELECT k.chain_id AS chain_id,k.solver AS solver,
-       st.first_settlement_at AS first_settlement_at,
-       st.last_settlement_at AS last_settlement_at,
-       coalesce(st.settlements_all_time,0) AS settlements_all_time,
-       coalesce(cs.competitions_all,0) AS competitions_all,
-       coalesce(cs.wins_all,0) AS wins_all,
-       sa.chain_anchor_at AS chain_anchor_at,
-       st.first_settlement_at AS indexed_from,
-       st.last_settlement_at AS indexed_to,
-       greatest(coalesce(st.obs_st,toDateTime64(0,3,'UTC')),
-                coalesce(cs.obs_cs,toDateTime64(0,3,'UTC'))) AS source_observed_at
-FROM dkeys AS k
-LEFT JOIN st ON st.chain_id=k.chain_id AND st.solver=k.solver
-LEFT JOIN cs ON cs.chain_id=k.chain_id AND cs.solver=k.solver
-LEFT JOIN sa ON sa.chain_id=k.chain_id
-ORDER BY settlements_all_time DESC,k.chain_id,k.solver
-LIMIT 3000"""
+    directory = sql_loader.load_sql("cow", "solver_directory", ids=ids)
     # ---- Winner score gap vs reference (dual-mode) ----
     # reference_score is ALWAYS a JSON map keyed by solver address; scores are
     # opaque big-int strings — parse defensively, surface failures as a count
@@ -3226,21 +1627,7 @@ LIMIT 3000"""
         "toFloat64OrNull(s.score)"
         "-toFloat64OrNull(JSONExtractString(c.reference_score,s.solver))"
     )
-    score_gaps = f"""
-WITH {blocks_cte}
-SELECT s.chain_id AS chain_id,s.solver AS competition_solver,
-       count() AS wins_scored,
-       countIf(({gap_expr}) IS NULL) AS parse_failures,
-       avgOrNull({gap_expr}) AS avg_score_gap,
-       quantile(0.5)({gap_expr}) AS median_score_gap,
-       quantile(0.9)({gap_expr}) AS p90_score_gap,
-       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
-       max(s.observed_at) AS source_observed_at
-{common_joins}
-{common_where} AND s.is_winner
-GROUP BY chain_id,competition_solver
-ORDER BY wins_scored DESC,chain_id,competition_solver
-LIMIT 2000"""
+    score_gaps = sql_loader.load_sql("cow", "solver_score_gaps", blocks_cte=blocks_cte, gap_expr=gap_expr, common_joins=common_joins, common_where=common_where)
     dir_params = _scope_parameters(scope, None)
     specs = [
         QuerySpec("solver_stats", "Competition solver statistics", stats, params, "auction_block_timestamp", "observed_series"),
@@ -3250,19 +1637,7 @@ LIMIT 2000"""
         QuerySpec("solver_score_gaps", "Winner score gap vs reference", score_gaps, dict(params), "auction_block_timestamp", "observed_series", 900),
     ]
     if chain is None:
-        cross_chain = f"""
-WITH {blocks_cte}
-SELECT s.solver AS competition_solver, s.chain_id AS chain_id,
-       count() AS solutions, uniqExact(s.auction_id) AS competitions,
-       countIf(s.is_winner) AS wins,
-       countIf(s.is_winner)/nullIf(uniqExact(s.auction_id),0) AS win_rate,
-       min(s.ranking) AS best_ranking,
-       min(b.block_timestamp) AS indexed_from,max(b.block_timestamp) AS indexed_to,
-       max(s.observed_at) AS source_observed_at
-{common}
-GROUP BY competition_solver, chain_id
-ORDER BY competition_solver, chain_id
-LIMIT 2000"""
+        cross_chain = sql_loader.load_sql("cow", "solver_cross_chain", blocks_cte=blocks_cte, common=common)
         specs.append(QuerySpec(
             "solver_cross_chain", "Solver cross-chain comparison", cross_chain,
             params, "auction_block_timestamp", "observed_series", 900,
@@ -3274,37 +1649,7 @@ LIMIT 2000"""
     flow_time, flow_params = _time_predicate("t.block_timestamp", flow_range, _trade_anchor(chain))
     flow_params_all = {**params, **flow_params}
     flow_settle_time = _settlement_time_bound(flow_range)
-    flow = f"""
-WITH {_token_metadata_cte()},
-exec AS (
- SELECT tx_hash,argMax(solver,tuple(block_timestamp,log_index)) AS settlement_executor
- FROM cow_db.settlements
- WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-   AND block_timestamp IS NOT NULL AND {flow_settle_time}
- GROUP BY tx_hash
-),
-flows AS (
-  SELECT least(t.sell_token,t.buy_token) AS token0,
-         greatest(t.sell_token,t.buy_token) AS token1,
-         exec.settlement_executor,count() AS fill_count,
-         min(t.block_timestamp) AS indexed_from,max(t.block_timestamp) AS indexed_to,
-         max(t.observed_at) AS source_observed_at
-  FROM cow_db.trades AS t
-  INNER JOIN exec ON exec.tx_hash=t.tx_hash
-  WHERE {_scope_predicate(chain, 't')} AND t.block_timestamp IS NOT NULL AND {flow_time}
-    {''.join(f' AND {predicate}' for predicate in flow_filters)}
-  GROUP BY token0,token1,settlement_executor
-)
-SELECT f.token0 AS token0,f.token1 AS token1,
-       if(m0.token='','',m0.symbol) AS token0_symbol,
-       if(m1.token='','',m1.symbol) AS token1_symbol,
-       f.settlement_executor AS settlement_executor,f.fill_count AS fill_count,
-       f.indexed_from AS indexed_from,f.indexed_to AS indexed_to,
-       f.source_observed_at AS source_observed_at
-FROM flows AS f
-LEFT JOIN tm AS m0 ON m0.token=f.token0
-LEFT JOIN tm AS m1 ON m1.token=f.token1
-ORDER BY f.fill_count DESC,f.token0,f.token1,f.settlement_executor"""
+    flow = sql_loader.load_sql("cow", "execution_flow", token_metadata_cte=_token_metadata_cte(), flow_settle_time=flow_settle_time, scope_pred_t=_scope_predicate(chain, 't'), flow_time=flow_time, flow_filter_sql=''.join(f' AND {predicate}' for predicate in flow_filters))
     specs.append(QuerySpec(
         "execution_flow", "Pair to settlement executor flow", flow,
         flow_params_all, "block_timestamp", "checkpoint_bounded", 900,
@@ -3335,123 +1680,17 @@ def _patterns_specs(
     # Bound the settlement-executor hash-join build to the query window — an
     # unbounded per-chain aggregation (~2.6M rows) was the patterns OOM source.
     settle_time = _settlement_time_bound(corr_range)
-    exec_cte = f"""
-exec AS (
-  SELECT tx_hash, argMax(solver,tuple(block_timestamp,log_index)) AS settlement_executor
-  FROM cow_db.settlements
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    AND block_timestamp IS NOT NULL AND {settle_time}
-  GROUP BY tx_hash
-)"""
+    exec_cte = sql_loader.load_sql("cow", "exec_cte", settle_time=settle_time)
     trade_where = (
         "t.environment={env:String} AND t.chain_id={chain_id:UInt64} "
         f"AND t.block_timestamp IS NOT NULL AND {time_pred}"
     )
-    pair_matrix = f"""
-WITH {_token_metadata_cte()},{exec_cte},
-pf AS (
-  SELECT least(t.sell_token,t.buy_token) AS token0,
-         greatest(t.sell_token,t.buy_token) AS token1,
-         exec.settlement_executor AS settlement_executor,
-         count() AS fill_count,
-         min(t.block_timestamp) AS indexed_from, max(t.block_timestamp) AS indexed_to,
-         max(t.observed_at) AS source_observed_at
-  FROM cow_db.trades AS t
-  INNER JOIN exec ON exec.tx_hash=t.tx_hash
-  WHERE {trade_where}
-  GROUP BY token0, token1, settlement_executor
-),
-tp AS (
-  SELECT token0, token1 FROM pf GROUP BY token0, token1
-  ORDER BY sum(fill_count) DESC LIMIT 30
-)
-SELECT p.token0 AS token0, p.token1 AS token1,
-       if(m0.token='','',m0.symbol) AS token0_symbol,
-       if(m1.token='','',m1.symbol) AS token1_symbol,
-       p.settlement_executor AS settlement_executor,
-       p.fill_count AS fill_count,
-       p.fill_count/sum(p.fill_count) OVER (PARTITION BY p.token0,p.token1) AS pair_share,
-       p.indexed_from AS indexed_from, p.indexed_to AS indexed_to,
-       p.source_observed_at AS source_observed_at
-FROM pf AS p
-INNER JOIN tp USING (token0, token1)
-LEFT JOIN tm AS m0 ON m0.token=p.token0
-LEFT JOIN tm AS m1 ON m1.token=p.token1
-ORDER BY p.token0, p.token1, p.fill_count DESC
-LIMIT 1000"""
-    affinity = f"""
-WITH {exec_cte},
-tt AS (
-  SELECT t.owner AS trader, exec.settlement_executor AS settlement_executor,
-         count() AS fill_count,
-         min(t.block_timestamp) AS indexed_from, max(t.block_timestamp) AS indexed_to,
-         max(t.observed_at) AS source_observed_at
-  FROM cow_db.trades AS t
-  INNER JOIN exec ON exec.tx_hash=t.tx_hash
-  WHERE {trade_where}
-  GROUP BY trader, settlement_executor
-),
-topt AS (
-  SELECT trader FROM tt GROUP BY trader
-  ORDER BY sum(fill_count) DESC LIMIT 100
-),
-tot AS (SELECT sum(fill_count) AS all_fills FROM tt),
-sol AS (
-  SELECT settlement_executor, sum(fill_count) AS solver_fills
-  FROM tt GROUP BY settlement_executor
-)
-SELECT tt.trader AS trader, tt.settlement_executor AS settlement_executor,
-       tt.fill_count AS fill_count,
-       tt.fill_count/sum(tt.fill_count) OVER (PARTITION BY tt.trader) AS trader_share,
-       sol.solver_fills/(SELECT all_fills FROM tot) AS solver_global_share,
-       tt.indexed_from AS indexed_from, tt.indexed_to AS indexed_to,
-       tt.source_observed_at AS source_observed_at
-FROM tt
-INNER JOIN topt USING (trader)
-INNER JOIN sol USING (settlement_executor)
-ORDER BY tt.trader, tt.fill_count DESC
-LIMIT 2000"""
+    pair_matrix = sql_loader.load_sql("cow", "pair_matrix", token_metadata_cte=_token_metadata_cte(), exec_cte=exec_cte, trade_where=trade_where)
+    affinity = sql_loader.load_sql("cow", "affinity", exec_cte=exec_cte, trade_where=trade_where)
     fill_surplus = SURPLUS_BPS.format(
         eb="f.buy_amount", ls="o.sell_amount", es="f.sell_amount", lb="o.buy_amount",
     )
-    fee_quality = f"""
-WITH pol AS (
-  SELECT order_uid, tx_hash, log_index, any(policy) AS policy
-  FROM cow_db.protocol_fees FINAL
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-  GROUP BY order_uid, tx_hash, log_index
-)
-SELECT multiIf(positionCaseInsensitive(q.policy,'priceImprovement')>0,'price_improvement',
-               positionCaseInsensitive(q.policy,'surplus')>0,'surplus',
-               positionCaseInsensitive(q.policy,'volume')>0,'volume','other') AS policy_family,
-       count() AS fills, uniqExact(q.order_uid) AS orders,
-       avg(q.surplus_bps) AS avg_surplus_bps,
-       quantile(0.5)(q.surplus_bps) AS median_surplus_bps,
-       quantile(0.9)(q.surplus_bps) AS p90_surplus_bps,
-       min(q.block_timestamp) AS indexed_from, max(q.block_timestamp) AS indexed_to,
-       max(q.observed_at) AS source_observed_at
-FROM (
-  SELECT f.order_uid AS order_uid, pol.policy AS policy,
-         {fill_surplus} AS surplus_bps,
-         f.block_timestamp AS block_timestamp, f.observed_at AS observed_at
-  FROM cow_db.trades AS f
-  INNER JOIN pol ON pol.order_uid=f.order_uid AND pol.tx_hash=f.tx_hash
-   AND pol.log_index=f.log_index
-  INNER JOIN (
-    SELECT order_uid,
-           argMax(sell_amount,observed_at) AS sell_amount,
-           argMax(buy_amount,observed_at) AS buy_amount
-    FROM cow_db.orders
-    WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-    GROUP BY order_uid
-  ) AS o ON o.order_uid=f.order_uid
-  WHERE f.environment={{env:String}} AND f.chain_id={{chain_id:UInt64}}
-    AND f.block_timestamp IS NOT NULL
-    AND {time_pred.replace('t.block_timestamp', 'f.block_timestamp')}
-) AS q
-GROUP BY policy_family
-ORDER BY fills DESC
-LIMIT 20"""
+    fee_quality = sql_loader.load_sql("cow", "fee_quality", fill_surplus=fill_surplus, fill_time_pred=time_pred.replace('t.block_timestamp', 'f.block_timestamp'))
     # Quote-vs-execution delta: priceImprovement fee policies EMBED a
     # reference quote — the ONLY quote source in cow_db (the quotes table is
     # empty). policy is a Python-repr string, NOT JSON (single quotes; fixed
@@ -3470,46 +1709,7 @@ LIMIT 20"""
     quote_delta_expr = SURPLUS_BPS.format(
         eb="q.buy_amount", ls=quote_sell, es="q.sell_amount", lb=quote_buy,
     )
-    quote_delta = f"""
-WITH pol AS (
-  SELECT order_uid, tx_hash, log_index, any(policy) AS policy
-  FROM cow_db.protocol_fees FINAL
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-  GROUP BY order_uid, tx_hash, log_index
-)
-SELECT policy_family,
-       multiIf(delta_bps IS NULL,'unquoted',
-               delta_bps< -50,'< -50 bps',
-               delta_bps<0,'-50-0 bps',
-               delta_bps<10,'0-10 bps',
-               delta_bps<50,'10-50 bps',
-               delta_bps<200,'50-200 bps','> 200 bps') AS delta_bucket,
-       count() AS fills, uniqExact(order_uid) AS orders,
-       avgOrNull(delta_bps) AS avg_delta_bps,
-       quantile(0.5)(delta_bps) AS median_delta_bps,
-       min(block_timestamp) AS indexed_from, max(block_timestamp) AS indexed_to,
-       max(observed_at) AS source_observed_at
-FROM (
-  SELECT q.order_uid AS order_uid,
-         multiIf(positionCaseInsensitive(q.policy,'priceImprovement')>0,'price_improvement',
-                 positionCaseInsensitive(q.policy,'surplus')>0,'surplus',
-                 positionCaseInsensitive(q.policy,'volume')>0,'volume','other') AS policy_family,
-         {quote_delta_expr} AS delta_bps,
-         q.block_timestamp AS block_timestamp, q.observed_at AS observed_at
-  FROM (
-    SELECT f.order_uid AS order_uid, pol.policy AS policy,
-           f.buy_amount AS buy_amount, f.sell_amount AS sell_amount,
-           f.block_timestamp AS block_timestamp, f.observed_at AS observed_at
-    FROM cow_db.trades AS f
-    INNER JOIN pol ON pol.order_uid=f.order_uid AND pol.tx_hash=f.tx_hash
-     AND pol.log_index=f.log_index
-    WHERE f.environment={{env:String}} AND f.chain_id={{chain_id:UInt64}}
-      AND f.block_timestamp IS NOT NULL
-      AND {time_pred.replace('t.block_timestamp', 'f.block_timestamp')}
-  ) AS q
-)
-GROUP BY policy_family, delta_bucket
-ORDER BY policy_family, delta_bucket"""
+    quote_delta = sql_loader.load_sql("cow", "quote_delta", quote_delta_expr=quote_delta_expr, fill_time_pred=time_pred.replace('t.block_timestamp', 'f.block_timestamp'))
     return [
         QuerySpec("solver_pair_matrix", "Solver-pair specialization", pair_matrix, dict(params), "block_timestamp", "checkpoint_bounded", 900),
         QuerySpec("trader_solver_affinity", "Trader-solver affinity", affinity, dict(params), "block_timestamp", "checkpoint_bounded", 900),
@@ -3533,103 +1733,13 @@ def _live_specs(scope: str, chain: ChainInfo | None) -> list[QuerySpec]:
     ids = ",".join(str(c.chain_id) for c in _chains_for_scope(scope))
     feed_pred = _scope_predicate(chain, "", scope)
     tmx_cte = _token_metadata_cte_multi(scope, chain)
-    pulse = f"""
-WITH cp AS (
-  SELECT chain_id, argMax(block_number, updated_at) AS checkpoint_block,
-         max(updated_at) AS checkpoint_updated_at
-  FROM cow_db.indexing_checkpoints
-  WHERE environment={{env:String}} AND chain_id IN ({ids}) AND source='rpc'
-  GROUP BY chain_id
-), blocks AS (
-  -- block_number IN prunes chain_blocks (sort key) from ~9.2M to ~10 rows;
-  -- this runs every 10s, so the full-table join was constant instance load.
-  SELECT b.chain_id, argMax(b.block_timestamp, b.observed_at) AS checkpoint_timestamp
-  FROM cow_db.chain_blocks AS b
-  INNER JOIN cp ON b.chain_id=cp.chain_id AND b.block_number=cp.checkpoint_block
-  WHERE b.environment={{env:String}} AND b.chain_id IN ({ids})
-    AND b.block_number IN (SELECT checkpoint_block FROM cp)
-  GROUP BY b.chain_id
-)
-SELECT n.chain_id AS chain_id, cp.checkpoint_block,
-       nullIf(blocks.checkpoint_timestamp,toDateTime(0)) AS checkpoint_timestamp,
-       cp.checkpoint_updated_at,
-       if(blocks.checkpoint_timestamp IS NULL OR blocks.checkpoint_timestamp=toDateTime(0),
-          NULL,
-          dateDiff('second', blocks.checkpoint_timestamp, now())) AS lag_seconds
-FROM (SELECT arrayJoin([{ids}]) AS chain_id) AS n
-LEFT JOIN cp ON n.chain_id=cp.chain_id
-LEFT JOIN blocks ON n.chain_id=blocks.chain_id
-ORDER BY n.chain_id"""
+    pulse = sql_loader.load_sql("cow", "pulse", ids=ids)
     # Live feeds MUST dedup indexer versions: the last hour is exactly where
     # ReplacingMergeTree parts are still unmerged (and API+RPC dual-source rows
     # coexist), so a raw base-table read shows every fresh fill twice. The
     # 1-hour bound keeps the argMax GROUP BY tiny.
-    trades = f"""
-WITH {tmx_cte}
-SELECT u.block_ts AS block_timestamp,u.chain_id AS chain_id,
-       u.tx_hash,u.log_index,u.order_uid,u.owner,
-       u.sell_token,if(s.token='','',s.symbol) AS sell_symbol,
-       if(s.token='',NULL,s.decimals) AS sell_decimals,
-       toString(u.sell_amount) AS sell_amount_raw,
-       if(s.token='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       u.buy_token,if(b.token='','',b.symbol) AS buy_symbol,
-       if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(u.buy_amount) AS buy_amount_raw,
-       if(b.token='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       u.obs_at AS source_observed_at
-FROM (
-  SELECT chain_id,tx_hash,log_index,order_uid,
-         argMax(block_timestamp,observed_at) AS block_ts,
-         argMax(owner,observed_at) AS owner,
-         argMax(sell_token,observed_at) AS sell_token,
-         argMax(buy_token,observed_at) AS buy_token,
-         argMax(sell_amount,observed_at) AS sell_amount,
-         argMax(buy_amount,observed_at) AS buy_amount,
-         max(observed_at) AS obs_at
-  FROM cow_db.trades
-  WHERE {feed_pred}
-    AND block_timestamp >= {LIVE_WINDOW_SQL}
-  GROUP BY chain_id,tx_hash,log_index,order_uid
-  ORDER BY block_ts DESC,log_index DESC
-  LIMIT 50
-) AS u
-LEFT JOIN tmx AS s ON s.chain_id=u.chain_id AND s.token=u.sell_token
-LEFT JOIN tmx AS b ON b.chain_id=u.chain_id AND b.token=u.buy_token
-ORDER BY u.block_ts DESC,u.log_index DESC
-LIMIT 50"""
-    settlements = f"""
-WITH fills AS (
-  SELECT chain_id,tx_hash, uniq(tuple(log_index,order_uid)) AS fill_count
-  FROM cow_db.trades
-  WHERE {feed_pred}
-    AND block_timestamp >= {LIVE_WINDOW_SQL}
-  GROUP BY chain_id,tx_hash
-)
-SELECT u.block_ts AS block_timestamp,u.chain_id AS chain_id,
-       u.tx_hash,u.block_num AS block_number,
-       u.settlement_executor,
-       coalesce(fills.fill_count,0) AS fill_count,
-       u.obs_at AS source_observed_at
-FROM (
-  -- block_num, NOT block_number: aliasing an aggregate to a column name that
-  -- also appears in a same-level WHERE makes ClickHouse bind the WHERE
-  -- identifier to the aggregate → ILLEGAL_AGGREGATION (code 184). A distinct
-  -- alias keeps this safe even if a block_number predicate is added later.
-  SELECT chain_id,tx_hash,log_index,
-         argMax(block_timestamp,observed_at) AS block_ts,
-         argMax(block_number,observed_at) AS block_num,
-         argMax(solver,observed_at) AS settlement_executor,
-         max(observed_at) AS obs_at
-  FROM cow_db.settlements
-  WHERE {feed_pred}
-    AND block_timestamp >= {LIVE_WINDOW_SQL}
-  GROUP BY chain_id,tx_hash,log_index
-  ORDER BY block_ts DESC,log_index DESC
-  LIMIT 30
-) AS u
-LEFT JOIN fills ON fills.chain_id=u.chain_id AND fills.tx_hash=u.tx_hash
-ORDER BY u.block_ts DESC,u.log_index DESC
-LIMIT 30"""
+    trades = sql_loader.load_sql("cow", "trades", tmx=tmx_cte, feed_pred=feed_pred, live_window=LIVE_WINDOW_SQL)
+    settlements = sql_loader.load_sql("cow", "settlements", feed_pred=feed_pred, live_window=LIVE_WINDOW_SQL)
     # The backfill grew `orders` to ~12M rows, so FINAL's whole-table k-way
     # merge blew the memory budget at all-networks scope (code 241). valid_to
     # is IMMUTABLE per order_uid, so prefiltering the raw scan to unexpired
@@ -3639,73 +1749,13 @@ LIMIT 30"""
     # join the GROUP BY key instead of being argMax'd — an aggregate alias on
     # valid_to beside the same-level WHERE is the alias-in-WHERE trap
     # (code 184). Token-metadata joins on the selected 100 rows only.
-    open_orders = f"""
-WITH {tmx_cte}
-SELECT u.order_uid,u.chain_id AS chain_id,u.owner,u.kind,u.st AS status,u.creation_date,u.valid_to,
-       u.partially_fillable,
-       u.sell_token,if(s.token='','',s.symbol) AS sell_symbol,
-       if(s.token='',NULL,s.decimals) AS sell_decimals,
-       toString(u.sell_amount) AS sell_amount_raw,
-       if(s.token='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       u.buy_token,if(b.token='','',b.symbol) AS buy_symbol,
-       if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(u.buy_amount) AS buy_amount_raw,
-       if(b.token='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       if(u.sell_amount>0,
-          least(1,toFloat64(u.exec_sell)/toFloat64(u.sell_amount)),0) AS fill_ratio,
-       u.obs_at AS source_observed_at
-FROM (
-  SELECT chain_id,order_uid,creation_date,valid_to,
-         argMax(status,observed_at) AS st,
-         argMax(owner,observed_at) AS owner,
-         argMax(kind,observed_at) AS kind,
-         argMax(partially_fillable,observed_at) AS partially_fillable,
-         argMax(sell_token,observed_at) AS sell_token,
-         argMax(buy_token,observed_at) AS buy_token,
-         argMax(sell_amount,observed_at) AS sell_amount,
-         argMax(buy_amount,observed_at) AS buy_amount,
-         argMax(executed_sell_amount,observed_at) AS exec_sell,
-         max(observed_at) AS obs_at
-  FROM cow_db.orders
-  WHERE {feed_pred}
-    AND valid_to>toUnixTimestamp(now())
-  GROUP BY chain_id,order_uid,creation_date,valid_to
-  HAVING st='open'
-  ORDER BY creation_date DESC,order_uid DESC
-  LIMIT 100
-) AS u
-LEFT JOIN tmx AS s ON s.chain_id=u.chain_id AND s.token=u.sell_token
-LEFT JOIN tmx AS b ON b.chain_id=u.chain_id AND b.token=u.buy_token
-ORDER BY u.creation_date DESC,u.order_uid DESC
-LIMIT 100"""
+    open_orders = sql_loader.load_sql("cow", "open_orders", tmx=tmx_cte, feed_pred=feed_pred)
     # order_events likewise outgrew FINAL; the 1h observed_at bound keeps the
     # argMax hash to an hour of rows, and event_id is the unique event key.
-    events = f"""
-SELECT argMax(event_type,observed_at) AS event_type,chain_id,
-       argMax(order_uid,observed_at) AS order_uid,
-       argMax(owner,observed_at) AS owner,
-       argMax(block_number,observed_at) AS block_number,
-       argMax(transaction_hash,observed_at) AS transaction_hash,
-       argMax(event_timestamp,observed_at) AS event_timestamp,
-       max(observed_at) AS source_observed_at
-FROM cow_db.order_events
-WHERE {feed_pred}
-  AND observed_at >= now() - INTERVAL 1 HOUR
-GROUP BY chain_id,event_id
-ORDER BY source_observed_at DESC,event_id DESC
-LIMIT 50"""
+    events = sql_loader.load_sql("cow", "events", feed_pred=feed_pred)
     # Minute-bucketed heartbeat for the live band chart: 1h bound keeps the
     # (minute x chain) hash at <= 60 x 10 entries regardless of load.
-    minute_activity = f"""
-SELECT toStartOfMinute(block_timestamp) AS bucket,chain_id,
-       uniq({TRADE_KEY}) AS fills,uniq(tx_hash) AS settlements,
-       min(block_timestamp) AS indexed_from,max(block_timestamp) AS indexed_to,
-       max(observed_at) AS source_observed_at
-FROM cow_db.trades
-WHERE {feed_pred}
-  AND block_timestamp >= {LIVE_WINDOW_SQL}
-GROUP BY bucket,chain_id
-ORDER BY bucket,chain_id"""
+    minute_activity = sql_loader.load_sql("cow", "minute_activity", feed_pred=feed_pred, live_window=LIVE_WINDOW_SQL, trade_key=TRADE_KEY)
     return [
         QuerySpec("live_pulse", "Indexing pulse", pulse, {"env": scope}, "observed_at", "observed_series", 10),
         QuerySpec("live_trades", "Latest settled fills", trades, dict(params), "block_timestamp", "checkpoint_bounded", 15),
@@ -3751,108 +1801,16 @@ def _entity_specs(
 
 
 def _order_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
-    detail = f"""
-WITH {_token_metadata_cte()}
-SELECT o.order_uid,o.owner,o.sell_token,o.buy_token,o.receiver,
-       if(s.token='','',s.symbol) AS sell_symbol,
-       if(b.token='','',b.symbol) AS buy_symbol,
-       if(s.token='',NULL,s.decimals) AS sell_decimals,
-       if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(o.sell_amount) AS sell_amount_raw,
-       if(s.token='',NULL,toFloat64(o.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       toString(o.buy_amount) AS buy_amount_raw,
-       if(b.token='',NULL,toFloat64(o.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       toString(o.fee_amount) AS fee_amount_raw,
-       if(s.token='',NULL,toFloat64(o.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
-       toString(o.executed_sell_amount) AS executed_sell_amount_raw,
-       if(s.token='',NULL,toFloat64(o.executed_sell_amount)/pow(10,toFloat64(s.decimals))) AS executed_sell_amount,
-       toString(o.executed_buy_amount) AS executed_buy_amount_raw,
-       if(b.token='',NULL,toFloat64(o.executed_buy_amount)/pow(10,toFloat64(b.decimals))) AS executed_buy_amount,
-       toString(o.executed_fee_amount) AS executed_fee_amount_raw,
-       if(s.token='',NULL,toFloat64(o.executed_fee_amount)/pow(10,toFloat64(s.decimals))) AS executed_fee_amount,
-       o.valid_to,o.kind,o.partially_fillable,o.signing_scheme,o.creation_date,o.status,o.class,
-       o.app_data_hash,o.source,o.source_updated_at,o.observed_at AS source_observed_at
-FROM cow_db.orders AS o FINAL
-LEFT JOIN tm AS s ON s.token=o.sell_token
-LEFT JOIN tm AS b ON b.token=o.buy_token
-WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}} AND o.order_uid={{id:String}}
-ORDER BY o.observed_at DESC"""
-    trades = f"""
-WITH {_token_metadata_cte()}
-SELECT t.block_timestamp,t.tx_hash,t.log_index,t.owner,t.sell_token,t.buy_token,
-       if(s.token='','',s.symbol) AS sell_symbol,
-       if(b.token='','',b.symbol) AS buy_symbol,
-       if(s.token='',NULL,s.decimals) AS sell_decimals,
-       if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(t.sell_amount) AS sell_amount_raw,
-       if(s.token='',NULL,toFloat64(t.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       toString(t.buy_amount) AS buy_amount_raw,
-       if(b.token='',NULL,toFloat64(t.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       toString(t.fee_amount) AS fee_amount_raw,
-       if(s.token='',NULL,toFloat64(t.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
-       t.source,t.observed_at AS source_observed_at
-FROM cow_db.trades AS t
-LEFT JOIN tm AS s ON s.token=t.sell_token
-LEFT JOIN tm AS b ON b.token=t.buy_token
-WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}} AND t.order_uid={{id:String}}
-ORDER BY t.block_timestamp DESC,t.log_index DESC,t.tx_hash DESC"""
-    events = """
-SELECT event_id,event_type,owner,block_number,transaction_hash,log_index,event_timestamp,
-       payload,source,observed_at AS source_observed_at
-FROM cow_db.order_events FINAL
-WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND order_uid={id:String}
-ORDER BY coalesce(event_timestamp,observed_at),event_id"""
-    fees = f"""
-WITH {_token_metadata_cte()}
-SELECT f.tx_hash,f.log_index,f.fee_index,f.token,
-       if(tm.token='','',tm.symbol) AS token_symbol,
-       toString(f.amount) AS amount_raw,
-       if(tm.token='',NULL,tm.decimals) AS token_decimals,
-       if(tm.token='',NULL,toFloat64(f.amount)/pow(10,toFloat64(tm.decimals))) AS amount,
-       f.policy,
-       multiIf(positionCaseInsensitive(f.policy,'priceImprovement')>0,'price_improvement',
-               positionCaseInsensitive(f.policy,'surplus')>0,'surplus',
-               positionCaseInsensitive(f.policy,'volume')>0,'volume','other') AS policy_family,
-       f.source,f.observed_at AS source_observed_at
-FROM cow_db.protocol_fees AS f FINAL
-LEFT JOIN tm ON tm.token=f.token
-WHERE f.environment={{env:String}} AND f.chain_id={{chain_id:UInt64}} AND f.order_uid={{id:String}}
-ORDER BY f.observed_at,f.tx_hash,f.log_index,f.fee_index"""
-    app_data = """
-WITH ord AS (
- SELECT app_data_hash FROM cow_db.orders FINAL
- WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND order_uid={id:String}
- LIMIT 1
-)
-SELECT a.app_data_hash,a.full_app_data,a.source,a.observed_at AS source_observed_at
-FROM cow_db.app_data AS a FINAL
-INNER JOIN ord ON a.app_data_hash=ord.app_data_hash
-WHERE a.environment={env:String} AND a.chain_id={chain_id:UInt64}
-ORDER BY a.observed_at DESC"""
+    detail = sql_loader.load_sql("cow", "order_detail", token_metadata_cte=_token_metadata_cte())
+    trades = sql_loader.load_sql("cow", "order_trades", token_metadata_cte=_token_metadata_cte())
+    events = sql_loader.load_sql("cow", "order_events")
+    fees = sql_loader.load_sql("cow", "order_fees", token_metadata_cte=_token_metadata_cte())
+    app_data = sql_loader.load_sql("cow", "order_app_data")
     realized_surplus = SURPLUS_BPS.format(
         eb="any(o.executed_buy_amount)", ls="any(o.sell_amount)",
         es="any(o.executed_sell_amount)", lb="any(o.buy_amount)",
     )
-    quality = f"""
-WITH o AS (
-  SELECT * FROM cow_db.orders FINAL
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND order_uid={{id:String}}
-  LIMIT 1
-)
-SELECT
- (SELECT count() FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND order_uid={{id:String}}) AS fills,
- any(o.kind) AS kind,
- {realized_surplus} AS realized_surplus_bps,
- if(any(o.kind)='buy',
-    toFloat64(any(o.executed_buy_amount))/nullIf(toFloat64(any(o.buy_amount)),0),
-    toFloat64(any(o.executed_sell_amount))/nullIf(toFloat64(any(o.sell_amount)),0)) AS fill_ratio,
- any(o.creation_date) AS creation_date,
- (SELECT min(block_timestamp) FROM cow_db.trades
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND order_uid={{id:String}}) AS first_fill_at,
- max(o.observed_at) AS source_observed_at
-FROM o
-ORDER BY fills"""
+    quality = sql_loader.load_sql("cow", "order_quality", realized_surplus=realized_surplus)
     return _entity_query_specs([
         ("order_detail", "Order", detail, "creation_date"),
         ("order_quality", "Execution quality vs limit", quality, "observed_at"),
@@ -3864,56 +1822,10 @@ ORDER BY fills"""
 
 
 def _transaction_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
-    detail = """
-WITH comp AS (
- SELECT auction_id FROM cow_db.competition_transactions FINAL
- WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND tx_hash={id:String}
-)
-SELECT s.tx_hash,s.block_number,s.block_hash,s.block_timestamp,
-       s.solver AS settlement_executor,s.log_index,comp.auction_id,
-       s.observed_at AS source_observed_at
-FROM cow_db.settlements_canonical s
-LEFT JOIN comp ON 1
-WHERE s.environment={env:String} AND s.chain_id={chain_id:UInt64} AND s.tx_hash={id:String}
-ORDER BY s.log_index"""
-    trades = f"""
-WITH {_token_metadata_cte()}
-SELECT t.block_timestamp,t.log_index,t.order_uid,t.owner,t.sell_token,t.buy_token,
-       if(s.symbol='',t.sell_token,s.symbol) AS sell_symbol,
-       if(b.symbol='',t.buy_token,b.symbol) AS buy_symbol,
-       if(s.token='',NULL,s.decimals) AS sell_decimals,
-       if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(t.sell_amount) AS sell_amount_raw,
-       if(s.token='',NULL,toFloat64(t.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       toString(t.buy_amount) AS buy_amount_raw,
-       if(b.token='',NULL,toFloat64(t.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       toString(t.fee_amount) AS fee_amount_raw,
-       if(s.token='',NULL,toFloat64(t.fee_amount)/pow(10,toFloat64(s.decimals))) AS fee_amount,
-       t.source,t.observed_at AS source_observed_at
-FROM cow_db.trades_canonical AS t
-LEFT JOIN tm AS s ON s.token=t.sell_token
-LEFT JOIN tm AS b ON b.token=t.buy_token
-WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}} AND t.tx_hash={{id:String}}
-ORDER BY t.log_index,t.order_uid"""
-    interactions = """
-SELECT block_timestamp,log_index,target,toString(value) AS value_raw,selector,
-       observed_at AS source_observed_at
-FROM cow_db.interactions_canonical
-WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND tx_hash={id:String}
-ORDER BY log_index,target"""
-    competition = """
-SELECT ct.auction_id,ct.tx_index,c.winner AS competition_winner,c.reference_score,
-       c.auction_block,ws.solver AS winning_solution_solver,
-       ws.tx_hash AS solution_tx_hash,ws.solution_index,
-       greatest(ct.observed_at,c.observed_at,ws.observed_at) AS source_observed_at
-FROM cow_db.competition_transactions AS ct FINAL
-LEFT JOIN cow_db.solver_competitions AS c FINAL
- ON ct.environment=c.environment AND ct.chain_id=c.chain_id AND ct.auction_id=c.auction_id
-LEFT JOIN cow_db.competition_solutions AS ws FINAL
- ON ct.environment=ws.environment AND ct.chain_id=ws.chain_id
- AND ct.auction_id=ws.auction_id AND ws.is_winner
-WHERE ct.environment={env:String} AND ct.chain_id={chain_id:UInt64} AND ct.tx_hash={id:String}
-ORDER BY ct.auction_id,ct.tx_index,ws.solution_index"""
+    detail = sql_loader.load_sql("cow", "transaction_detail")
+    trades = sql_loader.load_sql("cow", "transaction_trades", token_metadata_cte=_token_metadata_cte())
+    interactions = sql_loader.load_sql("cow", "transaction_interactions")
+    competition = sql_loader.load_sql("cow", "transaction_competition")
     return _entity_query_specs([
         ("transaction_detail", "Settlement transaction", detail, "block_timestamp"),
         ("transaction_trades", "Settled fills", trades, "block_timestamp"),
@@ -3926,93 +1838,14 @@ def _address_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
     # Counts read the base tables dedup-free (<0.1% RMT duplicate rate,
     # disclosed) — counting through the canonical views pays a FINAL +
     # chain_blocks join per subquery, which made entity opens multi-second.
-    summary = """
-SELECT
- (SELECT count() FROM cow_db.trades PREWHERE owner={id:String} WHERE environment={env:String} AND chain_id={chain_id:UInt64}) AS owned_fills,
- (SELECT count() FROM cow_db.orders FINAL WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND owner={id:String}) AS owned_orders,
- (SELECT count() FROM cow_db.settlements PREWHERE solver={id:String} WHERE environment={env:String} AND chain_id={chain_id:UInt64}) AS executed_settlements,
- (SELECT count() FROM cow_db.competition_solutions FINAL WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}) AS submitted_solutions,
- (SELECT max(observed_at) FROM cow_db.orders FINAL WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND owner={id:String}) AS source_observed_at
-ORDER BY owned_fills"""
+    summary = sql_loader.load_sql("cow", "address_summary")
     # Top-N-first owner tape: PREWHERE prunes column reads before the wide
     # SELECT list materializes (owner is not in the sort key, so this is a
     # full-partition scan either way — PREWHERE + bounded heap keep it cheap
     # and memory-safe at the entity view's all-history default).
-    trades = f"""
-WITH {_token_metadata_cte()}, cp AS (
-  SELECT argMax(block_number,updated_at) AS b
-  FROM cow_db.indexing_checkpoints
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc'
-)
-SELECT u.block_timestamp,u.tx_hash,u.log_index,u.order_uid,u.sell_token,u.buy_token,
-       if(s.token='','',s.symbol) AS sell_symbol,
-       if(b.token='','',b.symbol) AS buy_symbol,
-       if(s.token='',NULL,s.decimals) AS sell_decimals,
-       if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(u.sell_amount) AS sell_amount_raw,
-       if(s.token='',NULL,toFloat64(u.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       toString(u.buy_amount) AS buy_amount_raw,
-       if(b.token='',NULL,toFloat64(u.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       u.obs_at AS source_observed_at
-FROM (
-  SELECT tx_hash,log_index,order_uid,
-         argMax(block_timestamp,observed_at) AS block_timestamp,
-         argMax(sell_token,observed_at) AS sell_token,
-         argMax(buy_token,observed_at) AS buy_token,
-         argMax(sell_amount,observed_at) AS sell_amount,
-         argMax(buy_amount,observed_at) AS buy_amount,
-         max(observed_at) AS obs_at
-  FROM (
-    SELECT t.tx_hash,t.log_index,t.order_uid,t.block_timestamp,
-           t.sell_token,t.buy_token,t.sell_amount,t.buy_amount,t.observed_at
-    FROM cow_db.trades AS t
-    PREWHERE t.owner={{id:String}}
-    WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}}
-      AND t.block_number<=(SELECT b FROM cp)
-    ORDER BY t.block_timestamp DESC
-    LIMIT {TAPE_ARM_LIMIT}
-  )
-  GROUP BY tx_hash,log_index,order_uid
-  ORDER BY block_timestamp DESC
-  LIMIT {ROW_CAP}
-) AS u
-LEFT JOIN tm AS s ON s.token=u.sell_token
-LEFT JOIN tm AS b ON b.token=u.buy_token
-ORDER BY u.block_timestamp DESC,u.log_index DESC"""
-    orders = f"""
-WITH {_token_metadata_cte()}
-SELECT o.order_uid,o.creation_date,o.status,o.kind,o.sell_token,o.buy_token,
-       if(s.token='','',s.symbol) AS sell_symbol,
-       if(b.token='','',b.symbol) AS buy_symbol,
-       if(s.token='',NULL,s.decimals) AS sell_decimals,
-       if(b.token='',NULL,b.decimals) AS buy_decimals,
-       toString(o.sell_amount) AS sell_amount_raw,
-       if(s.token='',NULL,toFloat64(o.sell_amount)/pow(10,toFloat64(s.decimals))) AS sell_amount,
-       toString(o.buy_amount) AS buy_amount_raw,
-       if(b.token='',NULL,toFloat64(o.buy_amount)/pow(10,toFloat64(b.decimals))) AS buy_amount,
-       o.valid_to,o.observed_at AS source_observed_at
-FROM cow_db.orders AS o FINAL
-LEFT JOIN tm AS s ON s.token=o.sell_token
-LEFT JOIN tm AS b ON b.token=o.buy_token
-WHERE o.environment={{env:String}} AND o.chain_id={{chain_id:UInt64}} AND o.owner={{id:String}}
-ORDER BY o.creation_date DESC,o.order_uid DESC"""
-    solver = f"""
-SELECT * FROM (
-  SELECT 'settlement_executor' AS role,tx_hash AS identifier,
-         toNullable(block_timestamp) AS event_time,observed_at AS source_observed_at
-  FROM cow_db.settlements
-  PREWHERE solver={{id:String}}
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-  ORDER BY block_timestamp DESC
-  LIMIT {ROW_CAP}
-  UNION ALL
-  SELECT 'competition_solver',toString(auction_id),CAST(NULL AS Nullable(DateTime64(3))),
-         observed_at
-  FROM cow_db.competition_solutions FINAL
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND solver={{id:String}}
-)
-ORDER BY event_time DESC,identifier DESC
-LIMIT {ROW_CAP}"""
+    trades = sql_loader.load_sql("cow", "address_trades", token_metadata_cte=_token_metadata_cte(), tape_arm_limit=TAPE_ARM_LIMIT, row_cap=ROW_CAP)
+    orders = sql_loader.load_sql("cow", "address_orders", token_metadata_cte=_token_metadata_cte())
+    solver = sql_loader.load_sql("cow", "address_solver_activity", row_cap=ROW_CAP)
     return _entity_query_specs([
         ("address_summary", "Address activity summary", summary, "observed_at"),
         ("address_trades", "Owned settled fills", trades, "block_timestamp"),
@@ -4022,77 +1855,10 @@ LIMIT {ROW_CAP}"""
 
 
 def _token_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
-    detail = f"""
-WITH {_token_metadata_cte()}
-SELECT token,symbol,name,decimals,
-       if(token='{NATIVE_TOKEN}','synthetic_native','token_metadata') AS source,
-       metadata_observed_at AS source_observed_at
-FROM tm
-WHERE token={{id:String}}
-ORDER BY token"""
-    pairs = f"""
-WITH {_token_metadata_cte()}, cp AS (
-  SELECT argMax(block_number,updated_at) AS b
-  FROM cow_db.indexing_checkpoints
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc'
-),
-p AS (
-  SELECT least(sell_token,buy_token) AS token0,greatest(sell_token,buy_token) AS token1,
-         count() AS fill_count,uniq(tx_hash) AS settlement_transactions,
-         min(block_timestamp) AS indexed_from,max(block_timestamp) AS indexed_to,
-         max(observed_at) AS source_observed_at
-  FROM cow_db.trades
-  PREWHERE (sell_token={{id:String}} OR buy_token={{id:String}})
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-   AND block_number<=(SELECT b FROM cp) AND block_timestamp IS NOT NULL
-  GROUP BY token0,token1
-)
-SELECT p.token0 AS token0,p.token1 AS token1,
-       if(m0.token='','',m0.symbol) AS token0_symbol,
-       if(m1.token='','',m1.symbol) AS token1_symbol,
-       p.fill_count AS fill_count,p.settlement_transactions AS settlement_transactions,
-       p.indexed_from AS indexed_from,p.indexed_to AS indexed_to,
-       p.source_observed_at AS source_observed_at
-FROM p
-LEFT JOIN tm AS m0 ON m0.token=p.token0
-LEFT JOIN tm AS m1 ON m1.token=p.token1
-ORDER BY p.fill_count DESC,p.token0,p.token1"""
-    executions = f"""
-WITH {_token_metadata_cte()}, fills AS (
- SELECT t.block_timestamp,t.tx_hash,t.observed_at,
-        if(t.sell_token={{id:String}},t.buy_token,t.sell_token) AS quote_token,
-        if(t.sell_token={{id:String}},qbuy.symbol,qsell.symbol) AS quote_symbol,
-        if(t.sell_token={{id:String}},
-           toFloat64(t.sell_amount)/pow(10,toFloat64(base.decimals)),
-           toFloat64(t.buy_amount)/pow(10,toFloat64(base.decimals))) AS base_qty,
-        if(t.sell_token={{id:String}},
-           toFloat64(t.buy_amount)/pow(10,toFloat64(qbuy.decimals)),
-           toFloat64(t.sell_amount)/pow(10,toFloat64(qsell.decimals))) AS quote_qty
- FROM cow_db.trades AS t
- INNER JOIN tm AS base ON base.token={{id:String}}
- INNER JOIN tm AS qbuy ON qbuy.token=t.buy_token
- INNER JOIN tm AS qsell ON qsell.token=t.sell_token
- PREWHERE (t.sell_token={{id:String}} OR t.buy_token={{id:String}})
- WHERE t.environment={{env:String}} AND t.chain_id={{chain_id:UInt64}}
-  AND t.block_timestamp IS NOT NULL
-  AND t.block_number<=(SELECT argMax(block_number,updated_at) FROM cow_db.indexing_checkpoints
-                       WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}} AND source='rpc')
-)
-SELECT toStartOfDay(block_timestamp) AS bucket,quote_token,any(quote_symbol) AS quote_symbol,
-       sum(quote_qty)/nullIf(sum(base_qty),0) AS vwap_quote_per_token,
-       sum(base_qty) AS base_volume,count() AS fill_count,
-       uniq(tx_hash) AS settlement_transactions,min(block_timestamp) AS indexed_from,
-       max(block_timestamp) AS indexed_to,max(observed_at) AS source_observed_at
-FROM fills
-WHERE base_qty>0 AND quote_qty>=0
-GROUP BY bucket,quote_token
-ORDER BY bucket,quote_token"""
-    native = """
-SELECT observed_at,native_price,source,observed_at AS indexed_from,
-       observed_at AS indexed_to,observed_at AS source_observed_at
-FROM cow_db.native_prices FINAL
-WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND token={id:String}
-ORDER BY observed_at"""
+    detail = sql_loader.load_sql("cow", "token_detail", token_metadata_cte=_token_metadata_cte(), native_token=NATIVE_TOKEN)
+    pairs = sql_loader.load_sql("cow", "token_pairs", token_metadata_cte=_token_metadata_cte())
+    executions = sql_loader.load_sql("cow", "token_execution_prices", token_metadata_cte=_token_metadata_cte())
+    native = sql_loader.load_sql("cow", "token_native_prices")
     return _entity_query_specs([
         ("token_detail", "Token metadata", detail, "observed_at"),
         ("token_pairs", "Indexed execution pairs", pairs, "block_timestamp"),
@@ -4105,46 +1871,11 @@ def _auction_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
     # chain_blocks pruned to this auction's block (block_number IN, sort-key
     # pruned; argMax dedups → no FINAL). The prior `chain_blocks FINAL` LEFT
     # JOIN materialized the whole ~2.3M-row table for a single-auction lookup.
-    detail = """
-SELECT c.auction_id,c.winner AS competition_winner,c.reference_score,c.auction_block,
-       nullIf(b.block_timestamp,toDateTime(0)) AS auction_timestamp,
-       c.source,c.observed_at AS source_observed_at
-FROM cow_db.solver_competitions AS c FINAL
-LEFT JOIN (
-  SELECT chain_id, block_number, argMax(block_timestamp, observed_at) AS block_timestamp
-  FROM cow_db.chain_blocks
-  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-    AND block_number IN (SELECT auction_block FROM cow_db.solver_competitions FINAL
-                         WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND auction_id={id:UInt64})
-  GROUP BY chain_id, block_number
-) AS b ON b.chain_id=c.chain_id AND b.block_number=c.auction_block
-WHERE c.environment={env:String} AND c.chain_id={chain_id:UInt64} AND c.auction_id={id:UInt64}
-ORDER BY c.observed_at DESC"""
-    orders = """
-SELECT order_uid,payload,observed_at AS source_observed_at
-FROM cow_db.auction_orders FINAL
-WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND auction_id={id:UInt64}
-ORDER BY order_uid"""
-    prices = f"""
-WITH {_token_metadata_cte()}
-SELECT p.token,
-       if(tm.token='','',tm.symbol) AS token_symbol,
-       toString(p.price) AS price_raw,p.observed_at AS source_observed_at
-FROM cow_db.auction_prices AS p FINAL
-LEFT JOIN tm ON tm.token=p.token
-WHERE p.environment={{env:String}} AND p.chain_id={{chain_id:UInt64}} AND p.auction_id={{id:UInt64}}
-ORDER BY p.token"""
-    solutions = """
-SELECT solution_index,solver AS competition_solver,score,ranking,is_winner,tx_hash,
-       payload,observed_at AS source_observed_at
-FROM cow_db.competition_solutions FINAL
-WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND auction_id={id:UInt64}
-ORDER BY ranking,solution_index"""
-    transactions = """
-SELECT tx_index,tx_hash,source,observed_at AS source_observed_at
-FROM cow_db.competition_transactions FINAL
-WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND auction_id={id:UInt64}
-ORDER BY tx_index,tx_hash"""
+    detail = sql_loader.load_sql("cow", "auction_detail")
+    orders = sql_loader.load_sql("cow", "auction_orders")
+    prices = sql_loader.load_sql("cow", "auction_prices", token_metadata_cte=_token_metadata_cte())
+    solutions = sql_loader.load_sql("cow", "auction_solutions")
+    transactions = sql_loader.load_sql("cow", "auction_transactions")
     return _entity_query_specs([
         ("auction_detail", "Auction", detail, "auction_block_timestamp"),
         ("auction_orders", "Auction orders", orders, "observed_at"),
@@ -4155,183 +1886,25 @@ ORDER BY tx_index,tx_hash"""
 
 
 def _solver_entity_specs(params: dict[str, Any]) -> list[QuerySpec]:
-    summary = """
-SELECT uniqExact(auction_id) AS competitions,
-       count() AS solutions,
-       countIf(is_winner) AS wins,
-       countIf(is_winner)/nullIf(uniqExact(auction_id),0) AS win_rate,
-       countIf(is_winner AND ranking!=1) AS multi_winner_solutions,
-       countIf(is_winner AND ranking!=1)/nullIf(countIf(is_winner),0) AS multi_winner_share,
-       countIf(toUInt256OrZero(score)=0 AND score NOT IN ('','0')) AS score_parse_failures,
-       avg(toFloat64(ranking)) AS average_ranking,
-       min(ranking) AS best_ranking,
-       (SELECT uniq(tx_hash) FROM cow_db.settlements
-        WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}) AS executed_settlements,
-       max(observed_at) AS source_observed_at
-FROM cow_db.competition_solutions FINAL
-WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}
-ORDER BY competitions"""
-    competitions = """
-SELECT auction_id,solution_index,score,ranking,is_winner,tx_hash,
-       observed_at AS source_observed_at
-FROM cow_db.competition_solutions FINAL
-WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}
-ORDER BY observed_at DESC,auction_id DESC,ranking"""
-    solutions = """
-SELECT ranking,count() AS solution_count,countIf(is_winner) AS wins,
-       max(observed_at) AS source_observed_at
-FROM cow_db.competition_solutions FINAL
-WHERE environment={env:String} AND chain_id={chain_id:UInt64} AND solver={id:String}
-GROUP BY ranking
-ORDER BY ranking"""
+    summary = sql_loader.load_sql("cow", "solver_summary")
+    competitions = sql_loader.load_sql("cow", "solver_competitions")
+    solutions = sql_loader.load_sql("cow", "solver_solutions")
     # Top-N-first executor tape on the base table (solver is not in the sort
     # key — full-partition scan either way; PREWHERE + bounded heap keep it
     # cheap and memory-safe at all-history).
-    settlements = f"""
-SELECT tx_hash,log_index,
-       argMax(block_number,observed_at) AS block_number,
-       argMax(block_timestamp,observed_at) AS block_timestamp,
-       any({{id:String}}) AS settlement_executor,
-       max(observed_at) AS source_observed_at
-FROM (
-  SELECT tx_hash,log_index,block_number,block_timestamp,observed_at
-  FROM cow_db.settlements
-  PREWHERE solver={{id:String}}
-  WHERE environment={{env:String}} AND chain_id={{chain_id:UInt64}}
-  ORDER BY block_timestamp DESC
-  LIMIT {TAPE_ARM_LIMIT}
-)
-GROUP BY tx_hash,log_index
-ORDER BY block_timestamp DESC,log_index DESC
-LIMIT {ROW_CAP}"""
+    settlements = sql_loader.load_sql("cow", "solver_settlements", tape_arm_limit=TAPE_ARM_LIMIT, row_cap=ROW_CAP)
     # Shared accounting CTEs: this solver's settlements over the last 30
     # indexed days, and the per-token net flow between traders and the
     # settlement contract in each of those batches. This is ORDER-LEVEL,
     # TRADE-IMPLIED accounting — AMM leg amounts, plain ERC20 transfers, and
     # buffer balances are NOT in cow_db, so it shows what the solver had to
     # source externally (or what accrued), not audited buffer books.
-    accounting_ctes = """
-exec AS (
-  -- Base settlements (NOT the settlements_canonical view, whose FINAL +
-  -- chain_blocks materialization OOMed the box). The block_timestamp bound
-  -- keeps the GROUP BY tx_hash hash to ~30d of txs (small); the scan streams.
-  -- The resulting tx_hash set is this solver's settlement txs — and tx_hash IS
-  -- in the trades sort key (environment, chain_id, tx_hash, log_index), so it
-  -- PRUNES the trades_canonical scan in `flows` (block_number would NOT — it is
-  -- not in the sort key).
-  SELECT tx_hash, argMax(solver,tuple(block_timestamp,log_index)) AS s
-  FROM cow_db.settlements
-  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-    AND block_timestamp >= (
-      SELECT max(block_timestamp) FROM cow_db.settlements
-      WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-    ) - toIntervalDay(30)
-  GROUP BY tx_hash
-  HAVING s={id:String}
-),
-fills_d AS (
-  -- Deduped base trades for this solver's settlement txs. tx_hash IN (…) PRUNES
-  -- (tx_hash is in the sort key) to ~125k rows; argMax over the RMT version key
-  -- dedups WITHOUT touching trades_canonical (whose internal chain_blocks-FINAL
-  -- reorg-join would scan ~2.2M chain_blocks regardless). Settlements 30d back
-  -- are committed/final, so the reorg-safe view buys nothing here.
-  SELECT tx_hash, log_index, order_uid,
-         argMax(block_timestamp,observed_at) AS block_timestamp,
-         argMax(sell_token,observed_at) AS sell_token,
-         argMax(buy_token,observed_at) AS buy_token,
-         argMax(sell_amount,observed_at) AS sell_amount,
-         argMax(buy_amount,observed_at) AS buy_amount
-  FROM cow_db.trades
-  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-    AND tx_hash IN (SELECT tx_hash FROM exec)
-  GROUP BY tx_hash, log_index, order_uid
-),
-flows AS (
-  SELECT u.tx_hash AS tx_hash, any(u.block_timestamp) AS block_timestamp,
-         u.token AS token, sum(u.amt) AS net_atoms
-  FROM (
-    SELECT tx_hash, block_timestamp, sell_token AS token, toInt256(sell_amount) AS amt FROM fills_d
-    UNION ALL
-    SELECT tx_hash, block_timestamp, buy_token, -toInt256(buy_amount) FROM fills_d
-  ) AS u
-  GROUP BY u.tx_hash, u.token
-),
-am AS (
-  SELECT tx_hash, argMax(auction_id,observed_at) AS auction_id
-  FROM cow_db.competition_transactions FINAL
-  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-  GROUP BY tx_hash
-),
-pr AS (
-  SELECT auction_id, token, argMax(price,observed_at) AS price
-  FROM cow_db.auction_prices FINAL
-  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-  GROUP BY auction_id, token
-)"""
-    imbalance_settlements = f"""
-WITH {accounting_ctes}
-SELECT f.tx_hash AS tx_hash, any(f.block_timestamp) AS block_timestamp,
-       count() AS tokens_touched,
-       countIf(toFloat64(pr.price)=0) AS unpriced_tokens,
-       sum(if(toFloat64(pr.price)>0,
-              toFloat64(f.net_atoms)*toFloat64(pr.price)/1e18, 0)) AS net_native_wei_known,
-       max(f.block_timestamp) AS source_observed_at
-FROM flows AS f
-LEFT JOIN am ON am.tx_hash=f.tx_hash
-LEFT JOIN pr ON pr.auction_id=am.auction_id AND pr.token=f.token
-GROUP BY f.tx_hash
-ORDER BY block_timestamp DESC, tx_hash
-LIMIT 500"""
-    imbalance_tokens = f"""
-WITH {_token_metadata_cte()},{accounting_ctes}
-SELECT f.token AS token,
-       if(tm.token='','',tm.symbol) AS token_symbol,
-       if(any(tm.token)='',NULL,any(tm.decimals)) AS token_decimals,
-       count() AS settlements,
-       toString(sum(f.net_atoms)) AS net_amount_raw,
-       if(any(tm.token)='',NULL,
-          toFloat64(sum(f.net_atoms))/pow(10,toFloat64(any(tm.decimals)))) AS net_amount,
-       sum(if(toFloat64(pr.price)>0,
-              toFloat64(f.net_atoms)*toFloat64(pr.price)/1e18, 0)) AS net_native_wei_known,
-       max(f.block_timestamp) AS source_observed_at
-FROM flows AS f
-LEFT JOIN am ON am.tx_hash=f.tx_hash
-LEFT JOIN pr ON pr.auction_id=am.auction_id AND pr.token=f.token
-LEFT JOIN tm ON tm.token=f.token
-GROUP BY f.token, token_symbol
-ORDER BY abs(sum(if(toFloat64(pr.price)>0,toFloat64(f.net_atoms)*toFloat64(pr.price)/1e18,0))) DESC, token
-LIMIT 200"""
+    accounting_ctes = sql_loader.load_sql("cow", "solver_accounting_ctes")
+    imbalance_settlements = sql_loader.load_sql("cow", "solver_imbalance_settlements", accounting_ctes=accounting_ctes)
+    imbalance_tokens = sql_loader.load_sql("cow", "solver_imbalance_tokens", token_metadata_cte=_token_metadata_cte(), accounting_ctes=accounting_ctes)
     # reference_score is ALWAYS a JSON map keyed by solver address (verified
     # live 2026-07-21): JSONExtractString is the only parse path.
-    score_gap = """
-WITH blk AS (
-  SELECT chain_id, block_number,
-         argMax(block_timestamp, observed_at) AS block_timestamp
-  FROM cow_db.chain_blocks
-  WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-    AND block_number IN (
-      SELECT auction_block FROM cow_db.solver_competitions FINAL
-      WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-    )
-  GROUP BY chain_id, block_number
-)
-SELECT c.auction_id AS auction_id,
-       b.block_timestamp AS auction_timestamp,
-       toFloat64OrNull(s.score) AS winning_score,
-       toFloat64OrNull(JSONExtractString(c.reference_score,{id:String})) AS reference_score,
-       toFloat64OrNull(s.score)
-         - toFloat64OrNull(JSONExtractString(c.reference_score,{id:String})) AS score_gap,
-       (toFloat64OrNull(s.score) IS NOT NULL
-        AND toFloat64OrNull(JSONExtractString(c.reference_score,{id:String})) IS NOT NULL) AS scores_parsed,
-       s.observed_at AS source_observed_at
-FROM cow_db.solver_competitions AS c FINAL
-INNER JOIN cow_db.competition_solutions AS s FINAL
-  ON s.environment=c.environment AND s.chain_id=c.chain_id
- AND s.auction_id=c.auction_id AND s.is_winner AND s.solver={id:String}
-LEFT JOIN blk AS b ON b.chain_id=c.chain_id AND b.block_number=c.auction_block
-WHERE c.environment={env:String} AND c.chain_id={chain_id:UInt64}
-ORDER BY auction_timestamp DESC, auction_id DESC
-LIMIT 500"""
+    score_gap = sql_loader.load_sql("cow", "solver_score_gap")
     return _entity_query_specs([
         ("solver_summary", "Solver dashboard summary", summary, "observed_at"),
         ("solver_competitions", "Competition solver entries", competitions, "observed_at"),
@@ -4712,35 +2285,13 @@ def _search_candidates(
     where, params = _search_scope(scope, chain_id)
     params["q"] = q
     if ORDER_UID_RE.fullmatch(q):
-        sql = f"""SELECT chain_id,'order' AS entity_type,'order' AS role,count() AS evidence_count
-FROM cow_db.orders FINAL WHERE {where} AND order_uid={{q:String}}
-GROUP BY chain_id ORDER BY chain_id"""
+        sql = sql_loader.load_sql("cow", "search_transaction_hash", where=where)
         identifier = q
     elif HASH_RE.fullmatch(q):
-        sql = f"""SELECT chain_id,'transaction' AS entity_type,'transaction' AS role,sum(evidence_count) AS evidence_count
-FROM (
- SELECT chain_id,count() AS evidence_count FROM cow_db.trades WHERE {where} AND tx_hash={{q:String}} GROUP BY chain_id
- UNION ALL
- SELECT chain_id,count() FROM cow_db.settlements WHERE {where} AND tx_hash={{q:String}} GROUP BY chain_id
- UNION ALL
- SELECT chain_id,count() FROM cow_db.competition_transactions FINAL WHERE {where} AND tx_hash={{q:String}} GROUP BY chain_id
-) GROUP BY chain_id ORDER BY chain_id"""
+        sql = sql_loader.load_sql("cow", "search_transaction_arm", where=where)
         identifier = q
     elif ADDRESS_RE.fullmatch(q):
-        sql = f"""SELECT chain_id,role,sum(evidence_count) AS evidence_count
-FROM (
- SELECT chain_id,'owner' AS role,count() AS evidence_count FROM cow_db.orders FINAL WHERE {where} AND owner={{q:String}} GROUP BY chain_id
- UNION ALL
- SELECT chain_id,'token',count() FROM cow_db.token_metadata FINAL WHERE {where} AND token={{q:String}} GROUP BY chain_id
- UNION ALL
- SELECT chain_id,'settlement_executor',count() FROM cow_db.settlements WHERE {where} AND solver={{q:String}} GROUP BY chain_id
- UNION ALL
- SELECT chain_id,'competition_solver',count() FROM cow_db.competition_solutions FINAL WHERE {where} AND solver={{q:String}} GROUP BY chain_id
- UNION ALL
- SELECT chain_id,'competition_winner',count() FROM cow_db.solver_competitions FINAL WHERE {where} AND winner={{q:String}} GROUP BY chain_id
- UNION ALL
- SELECT chain_id,'interaction_target',count() FROM cow_db.interactions_canonical WHERE {where} AND target={{q:String}} GROUP BY chain_id
-) GROUP BY chain_id,role HAVING evidence_count>0 ORDER BY chain_id,role"""
+        sql = sql_loader.load_sql("cow", "search_address_or_token", where=where)
         identifier = q
     elif INTEGER_RE.fullmatch(q):
         params["auction_id"] = int(q)

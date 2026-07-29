@@ -156,6 +156,33 @@ A bare metric name is a bug because two readers will interpret it differently an
 
 ---
 
+## 9. Never index a versioned payload by fixed position
+
+Any array that is positional against an external schema — Snapshot's `vp_by_strategy` against a
+proposal's `strategies`, `scores` against `choices`, an ABI-decoded tuple against its ABI — must be
+addressed by **name**, resolved from the schema that same row was produced under. A hardcoded index,
+or a guard on a hardcoded `length(...)`, silently breaks the day the schema changes and takes the
+historical rows with it.
+
+The canonical failure in this repo: `delegation_power` read `vp_by_strategy[4]`/`[5]` guarded on
+`length(vps) = 5`. `gnosis.eth` had rewritten its strategy list three times, so **every** delegate
+whose latest vote predated the newest layout reported 0 — 26% of all delegated voting power, silently.
+The near-miss fix was worse: the delegation strategies appear in the opposite chain order in the
+previous layout, so "take the last two entries" would have swapped mainnet and Gnosis Chain across
+44,635 votes without changing a single total.
+
+Three rules follow:
+
+- **Resolve by name, from the row's own schema.** Join to the record that defines the layout and match
+  on the name/identifier, not the offset. Match names as substrings when the family has variants
+  (`delegation` also appears as `erc20-balance-of-delegation`).
+- **A length guard is not a schema check.** `if(length(x) = N, ..., 0)` reads as defensive and behaves
+  as a silent filter. If the shape is unexpected the answer is NULL, not a default.
+- **Assert the eras, not just the current one.** A test that only exercises today's payload shape
+  cannot see this class of bug. Pin at least one row from each historical layout.
+
+---
+
 ## Operational note for agents
 
 When you adopt any cerebro analysis persona, your first chart, first query, and first narrative paragraph should reflect these rules. If you write something that violates a rule, fix it before you call `generate_*_report`. The gates in `session_state.py` will catch many of these violations and reject the report; the gates that exist as soft warnings should be treated as hard bugs unless you have an explicit override reason in the report narrative.
