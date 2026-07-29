@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { ChartCard } from "../../../components/ChartCard";
 import { DatasetPanel, GroupBanner } from "../components/DatasetPanel";
 import { FreshnessStrip } from "../components/FreshnessStrip";
+import { LiveNowPanel } from "../components/LiveNowPanel";
 import {
   activityComboOption,
   concentrationOption,
@@ -13,8 +14,13 @@ import { rowsToObjects } from "../../shared/rowDataset";
 import { parseActivity } from "../model/parseRows";
 import { dataset, fmtNum, firstRow, GroupGate, KpiRow, pickNumber, pickString, useDataset, type GovViewContext } from "./common";
 
-// Overview: 7 headline KPIs, the expanded dual-clock freshness strip, five
-// insight charts, and two latest-activity click-through feeds.
+// Overview: a "what is live now" panel, 7 headline KPIs, the expanded
+// dual-clock freshness strip, five insight charts, and two latest-activity
+// click-through feeds.
+//
+// The live-now panel leads because it is the only part of this section that is
+// actionable — everything below it is retrospective. It sits in its own load
+// group so it paints before the insight charts finish.
 
 const KPI_DEFS: Array<{ label: string; keys: string[] }> = [
   { label: "Proposals", keys: ["proposal_count", "proposals"] },
@@ -89,9 +95,22 @@ export function OverviewSection({ ctx }: { ctx: GovViewContext }) {
   const latestTopics = latest.filter((row) => kindOf(row).includes("topic") || kindOf(row) === "forum");
 
   const retryInsights = () => ctx.retryGroup("overview", "insights");
+  // Hoisted out of the JSX: these are hooks, and a hook call inside a prop
+  // reads as conditional even when it is not.
+  const liveVotes = useDataset(ctx, "live_votes");
+  const gipPipeline = useDataset(ctx, "gip_pipeline");
 
   return (
     <>
+      <GroupGate ctx={ctx} section="overview" group="live">
+        <LiveNowPanel
+          votes={liveVotes}
+          pipeline={gipPipeline}
+          onProposal={(id) => ctx.onEntity("proposal", id)}
+          onTopic={(id) => ctx.onEntity("forum_topic", id)}
+        />
+      </GroupGate>
+
       <GroupGate ctx={ctx} section="overview" group="core">
         <KpiRow
           items={KPI_DEFS.map((def) => ({

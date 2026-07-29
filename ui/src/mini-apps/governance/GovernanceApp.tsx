@@ -21,6 +21,7 @@ import { DEFAULT_TREASURY_TAB, type TreasuryTabId } from "./model/treasuryTabs";
 import { DelegationsSection } from "./sections/DelegationsSection";
 import { TreasurySection } from "./sections/TreasurySection";
 import { ForumSection } from "./sections/ForumSection";
+import { GraphSection } from "./sections/GraphSection";
 import { OverviewSection } from "./sections/OverviewSection";
 import { ProposalsSection } from "./sections/ProposalsSection";
 import { VotersSection } from "./sections/VotersSection";
@@ -46,6 +47,7 @@ const SECTIONS: Array<{ id: GovSectionId; label: string }> = [
   { id: "forum", label: "Forum" },
   { id: "delegations", label: "Delegations" },
   { id: "treasury", label: "Treasury" },
+  { id: "graph", label: "Graph" },
 ];
 
 /** Large paginated datasets render via PaginatedTable / local paging — they
@@ -429,6 +431,8 @@ export default function GovernanceApp() {
           <VotersSection ctx={ctx} />
         ) : state.section === "forum" ? (
           <ForumSection ctx={ctx} />
+        ) : state.section === "graph" ? (
+          <GraphSection ctx={ctx} />
         ) : state.section === "treasury" ? (
           <TreasurySection
             ctx={ctx}

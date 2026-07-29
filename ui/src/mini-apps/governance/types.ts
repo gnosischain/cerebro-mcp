@@ -10,6 +10,7 @@ export type GovSection =
   | "forum"
   | "delegations"
   | "treasury"
+  | "graph"
   | "entity";
 
 export type GovEntityType =

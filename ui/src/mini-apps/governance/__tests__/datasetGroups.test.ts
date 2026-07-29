@@ -9,6 +9,7 @@ import { DATASET_GROUP, ENTITY_DATASETS, SECTION_GROUPS } from "../model/dataset
 const FROZEN_SECTION_GROUPS: Record<string, Record<string, string[]>> = {
   overview: {
     core: ["space_summary", "source_freshness", "governance_activity"],
+    live: ["live_votes", "gip_pipeline"],
     insights: ["proposal_types", "quorum_distribution", "voter_power_concentration", "latest_activity", "forum_category_activity"],
   },
   proposals: {
@@ -26,6 +27,9 @@ const FROZEN_SECTION_GROUPS: Record<string, Record<string, string[]>> = {
   delegations: {
     core: ["delegation_summary", "top_delegates"],
     insights: ["delegation_activity", "delegation_power", "delegation_concentration", "delegation_churn"],
+  },
+  graph: {
+    core: ["graph_nodes", "graph_edges"],
   },
   treasury: {
     core: ["treasury_summary", "treasury_holdings", "treasury_by_wallet"],

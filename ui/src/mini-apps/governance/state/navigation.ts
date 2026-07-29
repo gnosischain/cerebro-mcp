@@ -21,7 +21,7 @@ export type GovToolCall = Record<string, unknown> & { __tool: string };
 export type GovSectionId = Exclude<GovSection, "entity">;
 
 const SECTION_IDS = new Set<string>([
-  "overview", "proposals", "voters", "forum", "delegations", "treasury",
+  "overview", "proposals", "voters", "forum", "delegations", "treasury", "graph",
 ]);
 const ENTITY_TYPES = new Set<string>([
   "proposal", "voter", "forum_topic", "forum_user",

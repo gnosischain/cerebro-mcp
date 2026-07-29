@@ -140,6 +140,18 @@ DELEGATION_STRATEGY_MATCH = "delegation"
 #: many delegates it could not measure — and an undisclosed truncation reads as
 #: "every delegate is here".
 DELEGATE_POWER_CAP = 200
+#: Rows in the Overview "moving toward a GIP" list. 157 phase-1/phase-2 topics
+#: exist; the panel is a "what is live now" glance, not the forum browser, so it
+#: shows the freshest slice and the Forum tab carries the rest.
+GIP_PIPELINE_CAP = 24
+#: A phase-1/phase-2 topic untouched for this long is dormant, not pending.
+#: Only 8 of 157 open topics clear it — the panel answers "what is moving now",
+#: so the rest are excluded and COUNTED rather than listed.
+GIP_PIPELINE_IDLE_DAYS = 180
+#: Citation edges kept for the knowledge graph. 150 GIP nodes at this cap stays
+#: well inside what a force layout can place legibly; the tail is long and thin
+#: (single mentions) and adds hairball, not signal.
+GRAPH_EDGE_CAP = 400
 GOV_APP_META = {
     "ui": {"resourceUri": GOV_URI},
     "ui/resourceUri": GOV_URI,
@@ -149,7 +161,7 @@ ROW_CAP = 10_000
 #: evicts a section scope. Datasets are small; memory cost is negligible.
 MAX_RETAINED_SECTIONS = 5
 VALID_SECTIONS = {
-    "overview", "proposals", "voters", "forum", "delegations", "treasury",
+    "overview", "proposals", "voters", "forum", "delegations", "treasury", "graph",
 }
 ENTITY_TYPES = {
     "proposal", "voter", "forum_topic", "forum_user",
@@ -168,6 +180,10 @@ GIP_QUERY_RE = re.compile(r"^gip[\s-]?0*([0-9]+)$", re.IGNORECASE)
 #: Shared GIP regex, verbatim across SQL (RE2) and TS: no digit cap, no
 #: trailing boundary; ``AGIP-5`` must NOT match (word boundary before GIP).
 GIP_PATTERN = r"\bGIP[\s-]?0*([0-9]+)"
+#: The same pattern as a SQL string literal — RE2 inside ClickHouse needs the
+#: backslashes doubled, exactly as GIP_SQL does. Kept beside GIP_PATTERN so the
+#: two can never drift.
+GIP_PATTERN_SQL = r"(?i)\\bGIP[\\s-]?0*([0-9]+)"
 #: SQL fragment template — ``{col}`` is a trusted internal column reference,
 #: never user input. The regex is a SQL string literal, hence ``\\b``.
 GIP_SQL = r"toInt32OrNull(extract({col}, '(?i)\\bGIP[\\s-]?0*([0-9]+)'))"
@@ -191,6 +207,7 @@ FORUM_BASE_URL = "https://forum.gnosis.io"
 SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
     "overview": {
         "core": ("space_summary", "source_freshness", "governance_activity"),
+        "live": ("live_votes", "gip_pipeline"),
         "insights": (
             "proposal_types",
             "quorum_distribution",
@@ -219,6 +236,9 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
             "delegation_concentration",
             "delegation_churn",
         ),
+    },
+    "graph": {
+        "core": ("graph_nodes", "graph_edges"),
     },
     "treasury": {
         "core": ("treasury_summary", "treasury_holdings", "treasury_by_wallet"),
@@ -337,6 +357,7 @@ TREASURY_SORTS = {
 }
 SECTION_SORTS: dict[str, dict[str, str]] = {
     "overview": {"": ""},
+    "graph": {"": ""},
     "proposals": PROPOSAL_SORTS,
     "voters": VOTER_SORTS,
     "forum": FORUM_SORTS,
@@ -768,6 +789,19 @@ def _overview_specs(range_state: dict[str, Any]) -> list[QuerySpec]:
 
     forum_category_activity = sql_loader.load_sql("governance", "forum_category_activity", activity_time=activity_time)
 
+    # "What is live now." Deliberately NOT date-scoped: the toolbar range asks
+    # "what happened in this window", and these two ask "what needs attention
+    # today" — a 90-day filter would hide an open vote that started 100 days ago.
+    live_votes = sql_loader.load_sql(
+        "governance", "live_votes", gov_db=GOV_DB, gip_title=_gip_sql("title"),
+        quorum_status_sql=QUORUM_STATUS_SQL, quorum_ratio_sql=QUORUM_RATIO_SQL,
+    )
+    gip_pipeline = sql_loader.load_sql(
+        "governance", "gip_pipeline", gov_db=GOV_DB, gip_title=_gip_sql("t.title"),
+        gip_prop=_gip_sql("title"), cap=GIP_PIPELINE_CAP,
+        idle_days=GIP_PIPELINE_IDLE_DAYS,
+    )
+
     return [
         QuerySpec("space_summary", "Space summary", space_summary, dict(time_params),
                   "date-scoped counts; forum_user_count is all-time (no created_at)",
@@ -775,6 +809,17 @@ def _overview_specs(range_state: dict[str, Any]) -> list[QuerySpec]:
         _source_freshness_spec(),
         QuerySpec("governance_activity", "Governance activity", governance_activity,
                   dict(time_params), "created_at", "cross"),
+        QuerySpec("live_votes", "Open votes", live_votes, {},
+                  "Snapshot proposals whose voting window covers now(); NOT "
+                  "date-scoped — an open vote is open regardless of the toolbar "
+                  "range", "snapshot", 300),
+        QuerySpec("gip_pipeline", "Moving toward a GIP", gip_pipeline, {},
+                  "phase-1 / phase-2 forum topics that have NOT yet reached a "
+                  f"Snapshot vote and were active within {GIP_PIPELINE_IDLE_DAYS} "
+                  "days; phase-2 is the community's pre-vote signalling stage. "
+                  "Dormant pending topics are counted in dormant_hidden, not "
+                  "listed. NOT date-scoped",
+                  "forum", 300),
         QuerySpec("proposal_types", "Proposal types", proposal_types,
                   dict(time_params), "voting-window overlap", "snapshot"),
         QuerySpec("quorum_distribution", "Quorum attainment", quorum_distribution,
@@ -934,6 +979,44 @@ def _delegations_specs(
         QuerySpec("delegation_churn", "Delegation churn", delegation_churn,
                   dict(time_params), "new/re-pointed/cleared delegators per period; block_timestamp",
                   "delegation"),
+    ]
+
+
+def _graph_specs(range_state: dict[str, Any]) -> list[QuerySpec]:
+    """The GIP knowledge graph: what cites what.
+
+    Nodes are GIP NUMBERS, not people. 5,370 forum users would swamp any layout
+    and the interesting structure is between proposals anyway. A GIP number is
+    also the one identifier that spans both planes — the forum topic and the
+    Snapshot proposal each carry it in their title — so it is what lets the two
+    sources be joined at all.
+
+    Edges are citations extracted from post bodies. This is EVIDENCE of a
+    relationship, not a claim about one: GIP-122's thread mentioning GIP-98
+    twenty-one times says the discussion referenced it, not that one supersedes
+    the other. The UI must not editorialise that into a dependency.
+
+    Not date-scoped: a citation graph truncated to 90 days is a different graph,
+    not a filtered one.
+    """
+    nodes = sql_loader.load_sql(
+        "governance", "graph_nodes", gov_db=GOV_DB, gip_title=_gip_sql("title"),
+        quorum_status_sql=QUORUM_STATUS_SQL,
+    )
+    edges = sql_loader.load_sql(
+        "governance", "graph_edges", gov_db=GOV_DB, gip_title=_gip_sql("title"),
+        gip_pattern=GIP_PATTERN_SQL, cap=GRAPH_EDGE_CAP,
+    )
+    return [
+        QuerySpec("graph_nodes", "GIPs", nodes, {},
+                  "one node per GIP number found in a forum title or a Snapshot "
+                  "proposal title; stage is evidence (a proposal exists / the "
+                  "forum's own phase tag), never inferred", "cross", 900),
+        QuerySpec("graph_edges", "Citations", edges, {},
+                  "GIP-to-GIP mentions extracted from forum post bodies; weight "
+                  "is the mention count. Evidence of reference, NOT of "
+                  f"dependency or supersession. Top {GRAPH_EDGE_CAP} by weight",
+                  "forum", 900),
     ]
 
 
@@ -1390,6 +1473,8 @@ def _section_specs(
         return _voters_specs(range_state, filters)
     if section == "forum":
         return _forum_specs(range_state, filters)
+    if section == "graph":
+        return _graph_specs(range_state)
     if section == "delegations":
         return _delegations_specs(range_state, filters)
     if section == "treasury":

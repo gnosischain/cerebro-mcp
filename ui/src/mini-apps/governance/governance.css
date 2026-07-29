@@ -285,3 +285,171 @@
   .gov-token-board__head>*:nth-child(2),.gov-token-board__head>*:nth-child(4),.gov-token-board__head>*:nth-child(6),.gov-token-board__head>*:nth-child(7),.gov-token-board__head>*:nth-child(8){display:none}
   .gov-chain-card__nav{font-size:22px}
 }
+
+/* ---------------------------------------------------------------------------
+   "What is live now" panel (Overview). Two columns on desktop, stacked on
+   mobile. The empty state is styled as prose, not as a missing region — an
+   unstyled gap reads as a loading failure.
+   --------------------------------------------------------------------------- */
+.gov-livenow {
+  display: grid;
+  /* minmax(0, 1fr), NOT 1fr: the default `auto` minimum lets a long unbroken
+     proposal title expand its own column and crush the sibling to nothing. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+@media (max-width: 900px) {
+  .gov-livenow { grid-template-columns: 1fr; }
+}
+.gov-livenow__col {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--surface-raised);
+}
+.gov-livenow__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+}
+.gov-livenow__count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.gov-livenow__empty {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.gov-livenow__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  /* The panel leads the Overview, so it must not push the KPIs off-screen.
+     24 pipeline rows is roughly 8 screens; cap and scroll instead. */
+  max-height: 320px;
+  overflow-y: auto;
+}
+.gov-livenow__row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.gov-livenow__row:last-child { border-bottom: none; }
+.gov-livenow__main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* Without this the flex item refuses to shrink and text-overflow never
+     engages, so the title runs off the panel instead of eliding. */
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.gov-livenow__main:hover .gov-livenow__title { text-decoration: underline; }
+.gov-livenow__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gov-livenow__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.gov-livenow__clock { color: var(--accent); }
+.gov-livenow__idle { color: var(--text-secondary); font-style: italic; }
+.gov-phase {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  flex: none;
+}
+/* phase-2 is the pre-vote stage — the one worth noticing. */
+.gov-phase--phase-2 { color: var(--accent); border-color: var(--accent); }
+
+/* GIP and phase chips must never absorb the shrink that the title needs — the
+   title is what elides, the chips are fixed identity. */
+.gov-livenow__main .gov-gip,
+.gov-livenow__main .gov-phase { flex: none; white-space: nowrap; margin-left: 0; }
+
+/* GIP knowledge graph */
+.gov-graph-focus { margin: 0 0 10px; font-size: 14px; color: var(--text-primary); }
+.gov-graph-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.gov-graph-actions button {
+  font: 11px var(--font-mono);
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.gov-graph-actions button:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Graph legend / stage filter chips */
+.gov-graph-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.gov-graph-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font: 10px var(--font-mono);
+  padding: 3px 8px; border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-raised); color: var(--text-primary); cursor: pointer;
+}
+/* Deselected reads as "filtered out", not as "disabled" — it is still clickable. */
+.gov-graph-chip--off { opacity: 0.4; }
+.gov-graph-chip__n { opacity: 0.6; }
+.gov-graph-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.gov-graph-anomaly { color: #e0885a; }
+
+/* Citation lists on the pinned-GIP panel */
+.gov-cites { min-width: 0; }
+.gov-cites__head {
+  margin: 12px 0 6px; font-size: 12px; font-weight: 600;
+  letter-spacing: 0.02em; color: var(--text-primary);
+}
+.gov-cites__list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+.gov-cites__list button {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0;
+  background: none; border: none; padding: 4px 0; text-align: left; cursor: pointer;
+  color: var(--text-primary); font-size: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.gov-cites__list button:hover .gov-cites__title { text-decoration: underline; }
+.gov-cites__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gov-cites__n { flex: none; font: 10px var(--font-mono); color: var(--text-secondary); }
+
+/* Inline key hint in captions. */
+.gov-caption kbd {
+  font: 10px var(--font-mono);
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-raised);
+}

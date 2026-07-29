@@ -62,6 +62,7 @@ export function activityComboOption(
       ...(def.type === "bar" ? { barMaxWidth: 22 } : { showSymbol: false, smooth: true }),
       data: rows.map((row) => Number(row[def.field] ?? 0)),
     })),
+    _cerebro_height: "620px",
   } as EChartsOption;
 }
 
@@ -549,5 +550,369 @@ export function concentrationBarOption(
     xAxis: { type: "value", max: total > 0 ? total : 1, show: false },
     yAxis: { type: "category", data: [""], show: false },
     series,
+  } as EChartsOption;
+}
+
+// ---------------------------------------------------------------------------
+// GIP knowledge graph
+// ---------------------------------------------------------------------------
+//
+// The structure of this graph, measured rather than assumed, is what picks the
+// layout:
+//
+//   * 90.4% of citations point BACKWARD in GIP number (141 of 156) — a newer
+//     GIP cites an older one. It is very nearly a temporal DAG.
+//   * 57 of 149 nodes have no edge at all.
+//   * Max degree is 13 and 24 nodes have degree 1 — sparse, with no real
+//     community structure.
+//
+// A force layout throws all three away: it hides the chronology that IS the
+// signal, scatters the 57 isolates as noise, and finds clusters in a graph that
+// does not have any. So the default is a TIMELINE, carrying four dimensions:
+//
+//   x  when       — the GIP's first-seen DATE. Not its number: GIP numbers run
+//                   only 89% in date order (17 inversions across 148 pairs), so
+//                   the number is a label and the date is the chronology.
+//   y  influence  — citations RECEIVED. Lifecycle stage was tried here first
+//                   and failed: 121 of 149 GIPs are 'voted', so the lanes
+//                   collapsed into one line and every arc went flat.
+//   colour stage  — the lifecycle, which needs a channel but not an axis.
+//   size   volume — forum posts, i.e. how much was said, not how much it
+//                   mattered. Those are different claims and get different
+//                   channels.
+//
+// The force view stays available for the rare "who clumps with whom" question.
+
+export interface GipNode {
+  gip: number;
+  label: string;
+  stage: string;
+  posts: number | null;
+  participants: number | null;
+  views: number | null;
+  votes: number | null;
+  quorumStatus: string;
+  author: string;
+  proposalState: string;
+  firstSeen: string;
+  lastActivity: string;
+  topicId: number | null;
+  proposalId: string;
+}
+
+export interface GipEdge {
+  src: number;
+  dst: number;
+  weight: number;
+  topics: number | null;
+  firstMention: string;
+  lastMention: string;
+}
+
+/** Lifecycle stage -> colour AND lane. Fixed, not palette-assigned: the stages
+ * are an ordered lifecycle, so the reader learns the mapping once and carries
+ * it between renders and between the two layouts. */
+const STAGE_COLORS: Record<string, string> = {
+  voted: "#a5e05a",
+  "phase-3": "#7c9cf5",
+  "phase-2": "#b58cf0",
+  "phase-1": "#6f7a8c",
+  unstaged: "#4a5160",
+};
+
+export const GIP_STAGE_ORDER = ["voted", "phase-3", "phase-2", "phase-1", "unstaged"];
+
+export const GIP_STAGE_COLOR = (stage: string): string =>
+  STAGE_COLORS[stage] ?? STAGE_COLORS.unstaged;
+
+export interface GipDegree { inbound: number; outbound: number; weight: number }
+
+/** In/out citation degree per GIP. Derived here rather than in SQL because the
+ * client already holds every edge, and computing it server-side would mean a
+ * second full scan of the post bodies. */
+export function gipDegrees(edges: GipEdge[]): Map<number, GipDegree> {
+  const out = new Map<number, GipDegree>();
+  const bump = (gip: number, key: "inbound" | "outbound", weight: number) => {
+    const entry = out.get(gip) ?? { inbound: 0, outbound: 0, weight: 0 };
+    entry[key] += 1;
+    entry.weight += weight;
+    out.set(gip, entry);
+  };
+  for (const e of edges) {
+    bump(e.src, "outbound", e.weight);
+    bump(e.dst, "inbound", e.weight);
+  }
+  return out;
+}
+
+/** Edges whose BOTH endpoints exist as nodes.
+ *
+ * Load-bearing: ECharts silently invents a node for an unknown link endpoint,
+ * which renders as a real GIP that merely has no data. GIP numbers appear in
+ * post bodies far more often than they exist as a topic or proposal, so this is
+ * the common case, not an edge case. */
+export function drawableEdges(nodes: GipNode[], edges: GipEdge[]): GipEdge[] {
+  const present = new Set(nodes.map((n) => n.gip));
+  return edges.filter((e) => present.has(e.src) && present.has(e.dst));
+}
+
+/** Size = forum posts, i.e. how much was SAID. Influence has its own axis, so
+ * conflating the two here would spend two channels on one measure. Clamped so a
+ * 1-post stub is still clickable and a 300-post megathread cannot eat the plot. */
+function nodeSize(posts: number | null, maxPosts: number): number {
+  return 7 + Math.sqrt(Math.max(0, posts ?? 0) / Math.max(1, maxPosts)) * 20;
+}
+
+function tooltipHtml(d: Record<string, unknown>, deg: GipDegree | undefined): string {
+  const rows = [
+    `<strong>GIP-${d.gip}</strong>`,
+    escapeHtml(String(d.fullLabel ?? "")),
+    `<span style="opacity:.7">${escapeHtml(String(d.stage ?? ""))}` +
+      `${d.proposalState ? ` · ${escapeHtml(String(d.proposalState))}` : ""}` +
+      `${d.quorumStatus ? ` · quorum ${escapeHtml(String(d.quorumStatus))}` : ""}</span>`,
+    `cited by ${deg?.inbound ?? 0} · cites ${deg?.outbound ?? 0}`,
+    `${d.posts ?? 0} posts · ${d.participants ?? 0} participants${
+      Number(d.votes) > 0 ? ` · ${d.votes} votes` : ""
+    }`,
+    `first seen ${String(d.firstSeen ?? "").slice(0, 10)}`,
+  ];
+  return rows.filter(Boolean).join("<br/>");
+}
+
+interface GraphOpts {
+  focus?: number | null;
+  /** Hide the 57 nodes with no citation in either direction. */
+  hideIsolated?: boolean;
+  stages?: string[];
+}
+
+function visibleNodes(nodes: GipNode[], degrees: Map<number, GipDegree>, opts?: GraphOpts): GipNode[] {
+  const stages = opts?.stages;
+  return nodes.filter((n) => {
+    if (stages && stages.length > 0 && !stages.includes(n.stage)) return false;
+    if (opts?.hideIsolated && !degrees.has(n.gip)) return false;
+    return true;
+  });
+}
+
+/** TIMELINE (default). x = real first-seen date, y = lifecycle lane, links = arcs.
+ *
+ * Arc direction encodes something real: a backward arc (right to left) is the
+ * normal case — a newer GIP citing an older one. The 15 forward arcs are drawn
+ * on the opposite side so they stand out, because a GIP citing a LATER one only
+ * happens when a thread was edited after the fact. */
+export function gipTimelineOption(
+  nodes: GipNode[],
+  edges: GipEdge[],
+  opts?: GraphOpts,
+): EChartsOption {
+  const degrees = gipDegrees(drawableEdges(nodes, edges));
+  const shown = visibleNodes(nodes, degrees, opts);
+  const present = new Set(shown.map((n) => n.gip));
+  const links = drawableEdges(nodes, edges).filter((e) => present.has(e.src) && present.has(e.dst));
+  const focus = opts?.focus ?? null;
+  const maxPosts = Math.max(1, ...shown.map((n) => n.posts ?? 0));
+
+  return {
+    tooltip: {
+      confine: true,
+      textStyle: { fontFamily: LABEL_FONT, fontSize: 11 },
+      formatter: (p: unknown) => {
+        const param = p as { dataType?: string; data?: Record<string, unknown> };
+        const d = param.data ?? {};
+        if (param.dataType === "edge") {
+          return [
+            `GIP-${d.srcGip} <span style="opacity:.6">cites</span> GIP-${d.dstGip}`,
+            `${d.weight} mention${Number(d.weight) === 1 ? "" : "s"}`,
+            `${String(d.firstMention ?? "").slice(0, 10)} \u2192 ${String(d.lastMention ?? "").slice(0, 10)}`,
+          ].join("<br/>");
+        }
+        return tooltipHtml(d, degrees.get(Number(d.gip)));
+      },
+    },
+    grid: { left: 62, right: 28, top: 28, bottom: 44 },
+    xAxis: {
+      type: "time",
+      axisLabel: { fontFamily: LABEL_FONT, fontSize: 10 },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      name: "citations received",
+      nameTextStyle: { fontFamily: LABEL_FONT, fontSize: 10 },
+      nameLocation: "middle",
+      nameGap: 40,
+      minInterval: 1,
+      axisLabel: { fontFamily: LABEL_FONT, fontSize: 10 },
+      splitLine: { show: true, lineStyle: { opacity: 0.1 } },
+    },
+    // Wheel must scroll the PAGE, not the chart. A 560px canvas that swallows
+    // every wheel event traps the reader: they scroll, nothing moves, and the
+    // chart silently zooms instead. Zoom is still available on ctrl/meta+wheel
+    // and on drag, which is the standard map gesture and is discoverable from
+    // the caption.
+    dataZoom: [{
+      type: "inside",
+      zoomOnMouseWheel: "ctrl",
+      moveOnMouseWheel: false,
+      moveOnMouseMove: true,
+    }],
+    series: [{
+      type: "graph",
+      coordinateSystem: "cartesian2d",
+      // The axes ARE the layout — nothing to simulate.
+      layout: "none",
+      emphasis: { focus: "adjacency", label: { show: true } },
+      label: {
+        show: true,
+        position: "top",
+        formatter: (p: unknown) => {
+          const d = (p as { data?: Record<string, unknown> }).data ?? {};
+          const inbound = degrees.get(Number(d.gip))?.inbound ?? 0;
+          // Only label what a reader can act on: the hubs and the pinned node.
+          return inbound >= 4 || Number(d.gip) === focus ? `GIP-${d.gip}` : "";
+        },
+        fontFamily: LABEL_FONT,
+        fontSize: 9,
+      },
+      data: shown.map((n) => ({
+        name: `GIP-${n.gip}`,
+        value: [n.firstSeen.replace(" ", "T"), degrees.get(n.gip)?.inbound ?? 0],
+        gip: n.gip,
+        fullLabel: n.label,
+        stage: n.stage,
+        proposalState: n.proposalState,
+        quorumStatus: n.quorumStatus,
+        posts: n.posts,
+        participants: n.participants,
+        votes: n.votes,
+        firstSeen: n.firstSeen,
+        topicId: n.topicId,
+        proposalId: n.proposalId,
+        symbolSize: nodeSize(n.posts, maxPosts),
+        itemStyle: {
+          color: GIP_STAGE_COLOR(n.stage),
+          borderColor: n.gip === focus ? "#fff" : "transparent",
+          borderWidth: n.gip === focus ? 2 : 0,
+          opacity: focus === null || n.gip === focus ? 0.95 : 0.5,
+        },
+      })),
+      links: links.map((e) => {
+        const backward = e.dst < e.src;
+        const touchesFocus = focus !== null && (e.src === focus || e.dst === focus);
+        return {
+          source: `GIP-${e.src}`,
+          target: `GIP-${e.dst}`,
+          srcGip: e.src,
+          dstGip: e.dst,
+          weight: e.weight,
+          firstMention: e.firstMention,
+          lastMention: e.lastMention,
+          lineStyle: {
+            // Sign flips the arc to the other side, so the 15 forward citations
+            // are visibly different from the 141 backward ones rather than
+            // blending in. 0.4 rather than a gentle bow: most citations land
+            // between nodes at similar heights, and a flat line reads as noise.
+            curveness: backward ? 0.4 : -0.4,
+            width: Math.min(5, 0.5 + Math.log2(e.weight + 1)),
+            opacity: focus === null ? 0.34 : touchesFocus ? 0.9 : 0.05,
+            color: backward ? undefined : "#e0885a",
+          },
+        };
+      }),
+    }],
+    _cerebro_height: "560px",
+  } as EChartsOption;
+}
+
+/** FORCE / clusters. The alternate view — no chronology, but it answers "what
+ * clumps together", which the timeline cannot show. */
+export function gipGraphOption(
+  nodes: GipNode[],
+  edges: GipEdge[],
+  opts?: GraphOpts,
+): EChartsOption {
+  const degrees = gipDegrees(drawableEdges(nodes, edges));
+  const shown = visibleNodes(nodes, degrees, opts);
+  const present = new Set(shown.map((n) => n.gip));
+  const links = drawableEdges(nodes, edges).filter((e) => present.has(e.src) && present.has(e.dst));
+  const focus = opts?.focus ?? null;
+
+  return {
+    tooltip: {
+      confine: true,
+      textStyle: { fontFamily: LABEL_FONT, fontSize: 11 },
+      formatter: (p: unknown) => {
+        const param = p as { dataType?: string; data?: Record<string, unknown> };
+        const d = param.data ?? {};
+        if (param.dataType === "edge") {
+          return `GIP-${d.srcGip} cites GIP-${d.dstGip}<br/>${d.weight} mention${
+            Number(d.weight) === 1 ? "" : "s"
+          }`;
+        }
+        return tooltipHtml(d, degrees.get(Number(d.gip)));
+      },
+    },
+    // No ECharts legend: the section's own stage chips already carry the same
+    // five colours PLUS a count and a filter action. Two legends for one
+    // encoding is one legend too many, and the chart's copy was the weaker one.
+    series: [{
+      type: "graph",
+      layout: "force",
+      // 'move' not true: `roam: true` binds wheel-zoom, which fights page
+      // scroll exactly as the timeline's dataZoom did. Panning by drag stays.
+      roam: "move",
+      // Dragging a node moved it and changed nothing — motion that looks like
+      // it did something. The layout is the answer here, not a canvas to
+      // rearrange.
+      draggable: false,
+      categories: GIP_STAGE_ORDER.map((name) => ({
+        name,
+        itemStyle: { color: STAGE_COLORS[name] },
+      })),
+      force: { repulsion: 220, edgeLength: [40, 160], gravity: 0.06 },
+      label: {
+        show: true,
+        formatter: (p: unknown) => {
+          const d = (p as { data?: Record<string, unknown> }).data ?? {};
+          const inbound = degrees.get(Number(d.gip))?.inbound ?? 0;
+          return inbound >= 4 || Number(d.gip) === focus ? `GIP-${d.gip}` : "";
+        },
+        fontFamily: LABEL_FONT,
+        fontSize: 10,
+      },
+      emphasis: { focus: "adjacency", label: { show: true } },
+      data: shown.map((n) => ({
+        id: String(n.gip),
+        name: `GIP-${n.gip}`,
+        gip: n.gip,
+        fullLabel: n.label,
+        stage: n.stage,
+        proposalState: n.proposalState,
+        quorumStatus: n.quorumStatus,
+        posts: n.posts,
+        participants: n.participants,
+        votes: n.votes,
+        firstSeen: n.firstSeen,
+        topicId: n.topicId,
+        proposalId: n.proposalId,
+        symbolSize: nodeSize(n.posts, Math.max(1, ...shown.map((x) => x.posts ?? 0))),
+        category: Math.max(0, GIP_STAGE_ORDER.indexOf(n.stage)),
+        itemStyle: n.gip === focus ? { borderColor: "#fff", borderWidth: 2 } : undefined,
+      })),
+      links: links.map((e) => ({
+        source: String(e.src),
+        target: String(e.dst),
+        srcGip: e.src,
+        dstGip: e.dst,
+        weight: e.weight,
+        lineStyle: {
+          width: Math.min(5, 0.5 + Math.log2(e.weight + 1)),
+          opacity: 0.4,
+          curveness: 0.12,
+        },
+      })),
+    }],
+    _cerebro_height: "560px",
   } as EChartsOption;
 }

@@ -52,6 +52,58 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     // LONG format — one row per (bucket, metric), mirroring the backend
     // UNION ALL SQL. parseActivity pivots to wide. The last bucket has no
     // proposals_created / votes_cast rows (missing metric -> chart ?? 0).
+    // Live-now panel. live_votes is INTENTIONALLY empty: every one of the 253
+    // indexed proposals has closed, so the empty state is the normal render and
+    // the fixture must exercise it rather than hide it behind sample rows.
+    live_votes: descriptor(
+      "live_votes",
+      ["proposal_id", "title", "gip", "state", "start_at", "end_at", "hours_left",
+       "votes_count", "scores_total", "quorum", "quorum_status", "quorum_ratio"],
+      [],
+    ),
+    gip_pipeline: descriptor(
+      "gip_pipeline",
+      ["topic_id", "title", "gip", "phase", "posts_count", "participant_count",
+       "views", "created_at", "last_posted_at", "days_idle", "dormant_hidden"],
+      [
+        [12390, "GIP 152 - Should GnosisDAO spin out the Gnosis App into an independent entity?", 152, "phase-2", 51, 24, 4100, "2026-06-30T09:00:00Z", "2026-07-28T23:11:45Z", 1, 88],
+        // No GIP number in the title yet — renders without a badge, which is
+        // the honest state for a draft.
+        [12383, "[REVIEW] GIP-XXX: Transition to an Independent Structural Governance", null, "phase-2", 16, 9, 1200, "2026-07-02T08:30:00Z", "2026-07-17T00:49:11Z", 12, 88],
+        // Idle past the render threshold — exercises the "idle Nd" marker.
+        [11739, "GIP-141: Should Gnosis DAO Fund the Strategic Visual Adoption Package?", 141, "phase-2", 18, 11, 900, "2026-01-04T09:00:00Z", "2026-03-05T14:58:55Z", 146, 88],
+        [12201, "GIP-Draft: fund a public Gnosis Chain block explorer mirror", null, "phase-1", 7, 5, 480, "2026-05-20T10:00:00Z", "2026-06-27T16:58:53Z", 32, 88],
+      ],
+    ),
+    graph_nodes: descriptor(
+      "graph_nodes",
+      ["gip", "label", "topic_id", "proposal_id", "stage", "proposal_state",
+       "quorum_status", "author", "posts", "participants", "views", "category_id",
+       "votes", "first_seen", "last_activity", "has_topic", "has_proposal"],
+      [
+        [122, "GIP-122: Should GnosisDAO fund X?", 9901, "0xaa", "voted", "closed", "met", "0xd714", 64, 30, 5200, 21, 210, "2025-01-14 09:00:00", "2026-03-01 00:00:00", 1, 1],
+        [98, "GIP-98: Earlier decision this one builds on", 9800, "0xbb", "voted", "closed", "missed", "0xd714", 31, 18, 3100, 21, 180, "2024-06-02 09:00:00", "2025-08-01 00:00:00", 1, 1],
+        // Discussed but never voted — the node exists, the proposal link does not.
+        [152, "GIP 152 - Should GnosisDAO spin out the Gnosis App?", 12390, "", "phase-2", "", "", "", 51, 24, 4100, 21, 0, "2026-06-30 09:00:00", "2026-07-28 23:11:45", 1, 0],
+        // Isolated: in the node set, absent from every edge. Exercises the
+        // hide-isolated toggle and the "isolated, not missing" copy.
+        [6, "GIP-6: Deploy Gnosis Auction", 1078, "", "unstaged", "", "", "", 10, 6, 700, 21, 0, "2021-03-01 09:00:00", "2021-03-30 15:11:54", 1, 0],
+      ],
+    ),
+    graph_edges: descriptor(
+      "graph_edges",
+      ["src_gip", "dst_gip", "weight", "topics", "first_mention", "last_mention"],
+      [
+        [122, 98, 21, 1, "2025-02-13 20:22:43", "2026-01-28 04:18:10"],
+        [152, 122, 4, 1, "2026-07-01 10:00:00", "2026-07-20 10:00:00"],
+        // Forward citation (older cites newer) — the rare case, drawn on the
+        // opposite side in amber so it does not blend in.
+        [98, 122, 1, 1, "2025-03-01 10:00:00", "2025-03-01 10:00:00"],
+        // Points at a GIP absent from graph_nodes — must be DROPPED, not turned
+        // into a phantom node by the chart runtime.
+        [122, 9999, 2, 1, "2025-01-01 00:00:00", "2025-01-01 00:00:00"],
+      ],
+    ),
     governance_activity: descriptor(
       "governance_activity",
       ["bucket", "metric", "metric_value", "bucket_unit"],
@@ -311,15 +363,21 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     },
     // Every frozen `section.group` key appears exactly once (test-enforced).
     loaded_groups: {
-      "overview.core": true, "overview.insights": false,
+      "overview.core": true, "overview.live": true, "overview.insights": false,
       "proposals.core": false, "proposals.charts": false,
       "voters.core": false, "voters.insights": false,
       "forum.core": false, "forum.insights": false,
       "delegations.core": false, "delegations.insights": false,
       "treasury.core": false, "treasury.insights": false, "treasury.history": false,
+      "graph.core": false,
     },
     section_fingerprints: { overview: "dev" },
-    section_datasets: { overview: ["space_summary", "source_freshness", "governance_activity"] },
+    section_datasets: {
+      overview: [
+        "space_summary", "source_freshness", "governance_activity",
+        "live_votes", "gip_pipeline",
+      ],
+    },
     section_lru: ["overview"],
     freshness: {
       // Dev-only stale variant: snapshot is flagged stale so the STALE badge

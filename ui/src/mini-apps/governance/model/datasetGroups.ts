@@ -7,6 +7,7 @@
 export const SECTION_GROUPS: Record<string, Record<string, readonly string[]>> = {
   overview: {
     core: ["space_summary", "source_freshness", "governance_activity"],
+    live: ["live_votes", "gip_pipeline"],
     insights: [
       "proposal_types",
       "quorum_distribution",
@@ -35,6 +36,9 @@ export const SECTION_GROUPS: Record<string, Record<string, readonly string[]>> =
       "delegation_concentration",
       "delegation_churn",
     ],
+  },
+  graph: {
+    core: ["graph_nodes", "graph_edges"],
   },
   treasury: {
     core: ["treasury_summary", "treasury_holdings", "treasury_by_wallet"],
