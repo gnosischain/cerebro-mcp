@@ -17,6 +17,7 @@ from cerebro_mcp.runtime.observability import (
     observe_clickhouse_table_access,
 )
 from cerebro_mcp.safety import (
+    dedup_hygiene_warnings,
     enforce_result_limit,
     extract_table_names,
     validate_identifier,
@@ -571,6 +572,13 @@ class ClickHouseManager:
             )
 
         warnings: list[str] = []
+        # ReplacingMergeTree read hygiene. Widens THIS existing warnings channel
+        # rather than adding a parallel guard: run_query is the single choke
+        # point every read passes through, so ad-hoc model-authored SQL is
+        # covered here the way the mini-app specs are covered by their tests.
+        # Warnings only — the correct branch depends on the physical relation
+        # and a regex cannot always tell which one applies.
+        warnings.extend(dedup_hygiene_warnings(sql))
         if requested_max_rows > effective_fetch_cap:
             if audience == "tool":
                 warnings.append("tool_row_cap_applied")

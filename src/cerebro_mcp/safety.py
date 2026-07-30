@@ -196,3 +196,85 @@ def extract_table_names(sql: str) -> list[str]:
             seen.add(qualified)
             tables.append(qualified)
     return tables
+
+
+# ---------------------------------------------------------------------------
+# ReplacingMergeTree read hygiene
+# ---------------------------------------------------------------------------
+#
+# Implements the DETECTION heuristics of the `ch-final-three-way-rule` lesson
+# (src/cerebro_mcp/prompts/lessons/ch-final-three-way-rule.md), which is the
+# arbiter for a rule stated in six places with wording that reads as
+# contradictory. These are WARNINGS, never rejections: the branches depend on
+# the physical relation, and a regex cannot always tell which one applies.
+#
+# Why this exists: the mini-app SQL specs are test-guarded
+# (test_every_spec_targets_governance_db_with_final_order_by_and_binds), but
+# AD-HOC model-authored SQL through execute_query had no check at all. Omitting
+# FINAL on a raw ReplacingMergeTree does not error — duplicate generations
+# survive until a background merge, so counts and sums come back silently
+# INFLATED. A wrong number that looks plausible is worse than a failure.
+
+#: Raw ReplacingMergeTree plane where FINAL is MANDATORY (branch 1).
+#: Deliberately NOT cow_db: its large tables are branch 3, where FINAL is
+#: forbidden because it OOMs (code 241), so a "missing FINAL" warning there
+#: would be actively wrong advice.
+_FINAL_REQUIRED_DB = "governance_db"
+
+#: Canonical views that resolve dedup internally (branch 2) — FINAL forbidden.
+#: Matched by the `v_` prefix, which is the repo's convention for them.
+_CANONICAL_VIEW_PREFIX = "v_"
+
+#: Not job-scoped, so an unpinned read spans every census job and
+#: double-counts any token measured twice.
+_JOB_SCOPED_VIEW = "v_treasury_balances"
+
+_FINAL_AFTER_REF_RE = re.compile(r"\s+(AS\s+\w+\s+)?FINAL\b", re.IGNORECASE)
+
+
+def dedup_hygiene_warnings(sql: str) -> list[str]:
+    """Warn on ReplacingMergeTree reads that silently return wrong numbers.
+
+    Returns human-readable warnings; an empty list means nothing detected.
+    Comments and string literals are stripped first, so a ``-- FINAL`` comment
+    never satisfies the check.
+    """
+    cleaned = _strip_comments_and_strings(sql)
+    warnings: list[str] = []
+
+    # Branch 1 — raw table without FINAL.
+    for match in re.finditer(rf"\b{_FINAL_REQUIRED_DB}\.([a-zA-Z_][a-zA-Z0-9_]*)", cleaned):
+        table = match.group(1)
+        if table.startswith(_CANONICAL_VIEW_PREFIX):
+            continue  # branch 2: dedup resolved inside the view
+        if not _FINAL_AFTER_REF_RE.match(cleaned[match.end():]):
+            warnings.append(
+                f"DEDUP RISK: {_FINAL_REQUIRED_DB}.{table} is a ReplacingMergeTree "
+                "re-inserted daily and this read has no FINAL, so several "
+                "generations are counted at once — counts and sums are inflated "
+                "with no error. Use `FROM "
+                f"{_FINAL_REQUIRED_DB}.{table} FINAL` (alias BEFORE FINAL). "
+                "See lesson ch-final-three-way-rule."
+            )
+
+    # Branch 2 rider — the job-scoped view read without its job pin.
+    if _JOB_SCOPED_VIEW in cleaned and "job_name" not in cleaned:
+        warnings.append(
+            f"DEDUP RISK: {_JOB_SCOPED_VIEW} is not job-scoped; without a "
+            "`job_name` predicate this spans every census job (185M+ rows) and "
+            "double-counts any token measured twice. Pin job_name."
+        )
+
+    # Scratch scan tables are ReplacingMergeTree too — a bare count() overcounts
+    # after a resumed scan. The lesson notes this variant had no test anywhere.
+    if re.search(r"\bscratch\.rpc_[a-zA-Z0-9_]+", cleaned) and re.search(
+        r"\bcount\s*\(", cleaned, re.IGNORECASE
+    ):
+        if not re.search(r"\buniqExact\s*\(", cleaned, re.IGNORECASE):
+            warnings.append(
+                "DEDUP RISK: scratch.rpc_* tables are ReplacingMergeTree, so a "
+                "bare count() overcounts after a resumed scan. Use uniqExact() "
+                "on the identity column, or FINAL."
+            )
+
+    return warnings
