@@ -252,6 +252,59 @@ export function sameNodeUniverse(
   return true;
 }
 
+/**
+ * Index of the candidate whose rendered centre is closest to the click, or -1.
+ *
+ * A pick square catches every point that overlaps it, and in a dense cluster
+ * that is several nodes. Returning the first hit selects by buffer order, which
+ * from the user's side looks random; nearest-centre selects what they aimed at.
+ */
+export function nearestPointToClick(
+  candidates: number[],
+  screenOf: (index: number) => [number, number],
+  click: [number, number],
+): number {
+  let nearest = -1;
+  let best = Infinity;
+  for (const index of candidates) {
+    const [sx, sy] = screenOf(index);
+    const dist = Math.hypot(sx - click[0], sy - click[1]);
+    if (dist < best) {
+      best = dist;
+      nearest = index;
+    }
+  }
+  return nearest;
+}
+
+/**
+ * True when the last push targeted THIS graph instance with THIS node universe
+ * — i.e. the positions already in the renderer can be reused.
+ *
+ * The instance check is load-bearing. `sameNodeUniverse` alone answers "is the
+ * data the same", and the push effect uses that to SKIP `setPointPositions`.
+ * But the memo of the last push lives in a ref, which survives the renderer
+ * being torn down and rebuilt — so after any remount with unchanged data
+ * (StrictMode's double-mount, a `staticLayout` flip, "Retry visual renderer")
+ * the effect concluded "already pushed" and handed the FRESH graph no point
+ * buffers at all. The next `render()` then died inside cosmos with
+ * `(regl) missing buffer for attribute "pointIndices"`, which surfaces as
+ * "Visual renderer unavailable" and the table fallback.
+ *
+ * It went unnoticed in the Graph Explorer because its model is empty on mount
+ * (data arrives from a later tool call, after the double-mount) so the ref was
+ * still blank. A mini-app that mounts with rows already in hand — governance's
+ * GIP graph reads synchronous descriptor previews — hit it every single time.
+ */
+export function samePushTarget(
+  previous: { ids: readonly string[]; graph: unknown },
+  graph: unknown,
+  nextIds: readonly string[],
+): boolean {
+  if (previous.graph !== graph) return false;
+  return sameNodeUniverse(previous.ids, nextIds);
+}
+
 /** Pure reheat-alpha (vitest target): a no-op republish gets 0; a fresh/
  * replaced graph settles fully; an incremental push (positions retained) gets
  * a gentle top-up. */
@@ -337,8 +390,33 @@ export function CosmosCanvas({
       reportRendererError(error, phase);
     }
   };
+  /** Single click selects, a second click on the same point within 320ms
+   * expands. Shared by Cosmos's own pick and the CPU fallback below so the two
+   * paths cannot drift. */
+  const routePointClick = (index: number) => {
+    const now = Date.now();
+    const last = lastClickRef.current;
+    const id = modelRef.current.indexToId[index];
+    if (!id) return;
+    if (last.index === index && now - last.t < 320) {
+      cbRef.current.onExpandNode(id);
+      lastClickRef.current = { index: -1, t: 0 };
+      return;
+    }
+    lastClickRef.current = { index, t: now };
+    cbRef.current.onSelectNode(id);
+  };
+
   // double-click detection (Cosmos exposes single-click only)
   const lastClickRef = useRef<{ index: number; t: number }>({ index: -1, t: 0 });
+  /**
+   * Timestamp of the last click a point-pick claimed, so `onBackgroundClick`
+   * can stand down. Cosmos fires its background callback whenever ITS pick
+   * misses — which, given the pick is what's broken, is every node click.
+   * Without this the CPU fallback selects a node and cosmos immediately clears
+   * it in the same gesture.
+   */
+  const pointClaimedClickRef = useRef(0);
   // Camera lock: false while framing a fresh graph's initial spread; true once
   // locked (expands/Play/resize never recenter). A full-churn push unlocks it.
   // Set true on every data change; the tick performs ONE fit when the layout
@@ -548,19 +626,13 @@ export function CosmosCanvas({
       onZoom: guardRuntime("zoom callback failed", () =>
         overlayRef.current?.updateLabels()),
       onBackgroundClick: guardRuntime("background selection failed", () => {
+        // A point pick (native or the CPU fallback) already claimed this click.
+        if (Date.now() - pointClaimedClickRef.current < 250) return;
         cbRef.current.onViewClick?.();
       }),
       onPointClick: guardRuntime("node selection failed", (index: number) => {
-        const now = Date.now();
-        const last = lastClickRef.current;
-        const id = modelRef.current.indexToId[index];
-        if (last.index === index && now - last.t < 320) {
-          if (id) cbRef.current.onExpandNode(id);
-          lastClickRef.current = { index: -1, t: 0 };
-          return;
-        }
-        lastClickRef.current = { index, t: now };
-        if (id) cbRef.current.onSelectNode(id);
+        pointClaimedClickRef.current = Date.now();
+        routePointClick(index);
       }),
       onLinkClick: guardRuntime("edge selection failed", (linkIndex: number) => {
         const id = modelRef.current.linkIds[linkIndex];
@@ -583,6 +655,57 @@ export function CosmosCanvas({
     }
     graphRef.current = graph;
 
+    // CPU PICK FALLBACK -- restores click-to-select.
+    //
+    // Cosmos resolves a clicked point on the GPU: `findHoveredItem()` runs a
+    // pick pass into `points.hoveredFbo` and reads back an index + a found
+    // flag. On this stack that flag never comes back set, so `onPointClick`
+    // never fires and `onBackgroundClick` fires for every node click instead --
+    // i.e. clicking a node silently CLEARED the selection. Verified in the
+    // browser: with the cursor 1px from a node's centre, cosmos had the mouse
+    // mapped correctly (`store.mousePosition` matched the point's space
+    // position to ~1 unit) yet `store.hoveredPoint` stayed undefined. Not a
+    // size, pause, DPR, overlay or pointer-delivery problem -- all eliminated.
+    //
+    // `getPointsInRect`, cosmos's own CPU-side spatial query, resolves the same
+    // point correctly from the raw event offset. So we pick there and route
+    // through the same handler. Cosmos's native `onPointClick` is left wired:
+    // whichever path resolves first claims the click, so if the GPU pick starts
+    // working (library fix, other hardware) this becomes dead weight rather
+    // than a double-selection.
+    const PICK_RADIUS_PX = 14;
+    const onCanvasClick = guardRuntime("fallback node pick failed", (event: Event) => {
+      const mouse = event as MouseEvent;
+      const g = graphRef.current;
+      if (!g || !modelRef.current.n) return;
+      // Already handled by the native pick for this gesture.
+      if (Date.now() - pointClaimedClickRef.current < 250) return;
+      const x = mouse.offsetX;
+      const y = mouse.offsetY;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      const hits = g.getPointsInRect([
+        [x - PICK_RADIUS_PX, y - PICK_RADIUS_PX],
+        [x + PICK_RADIUS_PX, y + PICK_RADIUS_PX],
+      ]);
+      if (!hits || hits.length === 0) return;
+      // Several points can share the pick square; take the nearest centre so a
+      // click between two nodes resolves the way the user aimed. Positions are
+      // fetched ONCE — `getPointPositions()` copies the whole buffer out of the
+      // GPU, so calling it per candidate turned a click into O(hits) copies.
+      const positions = g.getPointPositions();
+      const nearest = nearestPointToClick(
+        Array.from(hits),
+        (index) => g.spaceToScreenPosition([positions[index * 2], positions[index * 2 + 1]]),
+        [x, y],
+      );
+      if (nearest < 0) return;
+      pointClaimedClickRef.current = Date.now();
+      routePointClick(nearest);
+    });
+    // Capture phase: cosmos's own click handling runs on the canvas too, and we
+    // must set the claim flag before its background callback can read it.
+    container.addEventListener("click", onCanvasClick, true);
+
     // Context loss is dispatched by the canvas rather than thrown through
     // React. Capture it at the renderer container so it follows the same
     // isolated fallback path as initialization and buffer-update failures.
@@ -592,6 +715,7 @@ export function CosmosCanvas({
     };
     container.addEventListener("webglcontextlost", onContextLost, true);
     return () => {
+      container.removeEventListener("click", onCanvasClick, true);
       container.removeEventListener("webglcontextlost", onContextLost, true);
       const restoreWasPending = cameraRestorePendingRef.current;
       cancelCameraRestoreRef.current?.();
@@ -788,10 +912,12 @@ export function CosmosCanvas({
     return true;
   };
 
-  const prevPushRef = useRef<{ ids: readonly string[]; model: GraphModel | null }>({
-    ids: [],
-    model: null,
-  });
+  // `graph` is part of the memo, not just the data: see `samePushTarget`.
+  const prevPushRef = useRef<{
+    ids: readonly string[];
+    model: GraphModel | null;
+    graph: unknown;
+  }>({ ids: [], model: null, graph: null });
   useEffect(() => {
     const graph = graphRef.current;
     keepWarmStateRef.current.hasNodes = model.n > 0;
@@ -821,7 +947,7 @@ export function CosmosCanvas({
         return;
       }
       const prev = prevPushRef.current;
-      const sameGraph = sameNodeUniverse(prev.ids, model.indexToId);
+      const sameGraph = samePushTarget(prev, graph, model.indexToId);
     // Topology churn measured on RETAINED ids (not count delta — a same-sized
     // but completely different graph must read as full churn). Drives the
     // re-energize alpha below.
@@ -844,7 +970,7 @@ export function CosmosCanvas({
         /* keep seeded positions */
       }
       }
-      prevPushRef.current = { ids: model.indexToId, model };
+      prevPushRef.current = { ids: model.indexToId, model, graph };
       if (!sameGraph) {
         graph.setPointPositions(
           cachedCamera

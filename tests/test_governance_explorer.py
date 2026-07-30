@@ -1651,3 +1651,62 @@ def test_delegation_power_cap_exceeds_the_delegate_universe():
     truncate exactly the rows the UI counts to say what it could not measure."""
     assert governance_explorer.DELEGATE_POWER_CAP >= 200
     assert f"LIMIT {governance_explorer.DELEGATE_POWER_CAP}" in _delegation_power_sql()
+
+
+def _gip_pipeline_sql() -> str:
+    specs = {
+        spec.key: spec
+        for spec in governance_explorer._overview_specs(
+            governance_explorer._range_state("", "")
+        )
+    }
+    return specs["gip_pipeline"].sql
+
+
+def test_gip_pipeline_lists_only_the_pre_vote_stage():
+    """"Moving toward a GIP" must mean phase-2, the pre-vote signalling stage.
+
+    It used to list phase-1 too. phase-1 is the IDEA stage — upstream of a vote
+    rather than moving toward one — and the only two phase-1 rows that ever
+    qualified were the weakest in the panel (one had a single participant, five
+    posts, and had been idle four months). They read as noise beside real GIPs.
+    """
+    sql = _gip_pipeline_sql()
+    # The row filter selects phase-2 only; phase-1 survives solely as a count.
+    assert re.search(r"WHERE\s+phase\s*=\s*'phase-2'", sql)
+    assert "ideas_hidden" in sql
+
+
+def test_gip_pipeline_window_is_tight_enough_to_mean_moving():
+    """A 180-day window listed threads idle four months, which is not "moving".
+
+    45 days is taken from the measured distribution, not picked: 3 of 157 open
+    topics were touched within 30 days, 5 within 45, then nothing new until 104.
+    """
+    assert governance_explorer.GIP_PIPELINE_IDLE_DAYS == 45
+    assert f"days_idle <= {governance_explorer.GIP_PIPELINE_IDLE_DAYS}" in _gip_pipeline_sql()
+
+
+def test_gip_pipeline_exclusion_counts_leave_no_undisclosed_rows():
+    """The two counts must PARTITION every pending row the list omits.
+
+    Scoping `dormant_hidden` to phase-2 (the first attempt) left a phase-1 topic
+    idle past the window in neither bucket: excluded and undisclosed, which is
+    exactly the failure the counts exist to prevent. Verified against the live
+    DB on 2026-07-30: 93 pending = 2 listed + 1 idea + 90 dormant, gap 0.
+    """
+    sql = _gip_pipeline_sql()
+    idle = governance_explorer.GIP_PIPELINE_IDLE_DAYS
+    # dormant counts BOTH phases past the window...
+    assert re.search(
+        r"SELECT count\(\) FROM pending\s*\n\s*WHERE days_idle > %d\) AS dormant_hidden" % idle,
+        sql,
+    )
+    # ...so the ideas count only has to cover phase-1 INSIDE the window.
+    assert re.search(
+        r"WHERE phase = 'phase-1' AND days_idle <= %d\) AS ideas_hidden" % idle,
+        sql,
+    )
+    # Both counts read from the not-yet-voted population the list is drawn from,
+    # so they describe the same universe rather than a wider one.
+    assert sql.count("FROM pending") == 3

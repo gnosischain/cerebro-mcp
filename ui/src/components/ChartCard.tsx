@@ -19,6 +19,22 @@ interface Props {
   sourceModel?: string;
   /** Hide the CHART_NN id badge (mini-app hosts have no chart numbering). */
   hideId?: boolean;
+  /**
+   * Fill the parent instead of standing as a card: no head, no border, no
+   * margin, `height: 100%`. For a surface where the chart IS the view and the
+   * card chrome is pure overhead — the head/foot cost ~70px, which on a
+   * full-height graph is the difference between readable and cramped. The
+   * caller owns provenance in that case (pass no `sourceModel`/`sql`).
+   */
+  flush?: boolean;
+  /**
+   * Override the spec's own `_cerebro_height`. For charts placed in a paired
+   * grid row: the card CONTAINERS already stretch to a shared height, but two
+   * specs from different builders (620px combo beside a 350px default) leave one
+   * chart floating in dead space. The layout knows the row height; the spec
+   * builder does not, so the layout gets the last word.
+   */
+  height?: string;
   onEvents?: Record<string, (params: unknown) => void>;
   /** Called once with the ECharts instance when the chart mounts — for
    * low-level wiring (e.g. zrender clicks + convertFromPixel) not expressible
@@ -118,7 +134,7 @@ function chartLabel(chartId: string): string {
   return chartId.replace(/^chart[_-]?/i, "CHART_").toUpperCase();
 }
 
-function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEvents, onChartReady, renderer = "canvas" }: Props) {
+function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, flush = false, height, onEvents, onChartReady, renderer = "canvas" }: Props) {
   const { isDark } = useTheme();
   // Mini-app surfaces (near-black/white paper) need the `-mini` label themes;
   // reports keep the indigo/cream "Terminal" themes.
@@ -212,7 +228,9 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEven
   }, [spec, isDark, surface, title]);
 
   const chartHeight =
-    ((spec as Record<string, unknown>)?._cerebro_height as string) || "350px";
+    height
+    || ((spec as Record<string, unknown>)?._cerebro_height as string)
+    || "350px";
 
   // Canvas backing stores go stale (→ stretched, fuzzy text) when the card's
   // container resizes without a window resize event (grid reflows, section
@@ -246,11 +264,16 @@ function ChartCardInner({ chartId, spec, title, sql, sourceModel, hideId, onEven
   );
 
   return (
-    <div id={`chart-${chartId}`} className="chart-card">
-      <div className="chart-card-head">
-        <div className="chart-card-title">{title || ""}</div>
-        {!hideId && <div className="chart-card-id">{label}</div>}
-      </div>
+    <div
+      id={`chart-${chartId}`}
+      className={flush ? "chart-card chart-card--flush" : "chart-card"}
+    >
+      {!flush && (
+        <div className="chart-card-head">
+          <div className="chart-card-title">{title || ""}</div>
+          {!hideId && <div className="chart-card-id">{label}</div>}
+        </div>
+      )}
       <div className="chart-card-body" ref={bodyRef}>
         <ReactECharts
           ref={echartsRef}

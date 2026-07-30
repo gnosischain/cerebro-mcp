@@ -7,6 +7,7 @@ import type { ActivityRow, ConcentrationRow } from "../types";
 import { finite } from "../../shared/rowDataset";
 import { sanitizeSymbol } from "../../shared/TokenIdentity";
 import { shortAddr } from "../../../utils/format";
+import { COLOR_BY_KIND } from "../../graph-explorer/model/palette";
 import {
   LABEL_FONT,
   MAX_SERIES_DEFAULT,
@@ -62,7 +63,11 @@ export function activityComboOption(
       ...(def.type === "bar" ? { barMaxWidth: 22 } : { showSymbol: false, smooth: true }),
       data: rows.map((row) => Number(row[def.field] ?? 0)),
     })),
-    _cerebro_height: "620px",
+    // 620px made the Overview's activity chart the whole fold on a laptop, so
+    // the panels under it read as "the page ends here". 420px matches the
+    // paired-grid height used elsewhere in the app, which keeps the section
+    // rhythm consistent whether a chart is full-width or half.
+    _cerebro_height: "420px",
   } as EChartsOption;
 }
 
@@ -612,13 +617,25 @@ export interface GipEdge {
 /** Lifecycle stage -> colour AND lane. Fixed, not palette-assigned: the stages
  * are an ordered lifecycle, so the reader learns the mapping once and carries
  * it between renders and between the two layouts. */
-const STAGE_COLORS: Record<string, string> = {
-  voted: "#a5e05a",
-  "phase-3": "#7c9cf5",
-  "phase-2": "#b58cf0",
-  "phase-1": "#6f7a8c",
-  unstaged: "#4a5160",
-};
+/** Neutral for a backward (normal-direction) citation arc. Explicit, because a
+ * `lines` series with an undefined lineStyle.color falls back to the PALETTE —
+ * which painted every arc the same green as a voted node and made the chart
+ * read as one connected blob. */
+const ARC_COLOR = "#8892a4";
+/** The graph fills its grid cell; the cell's height comes from the CSS flex
+ * chain, exactly as graph-explorer's canvas does. Measuring in JS was the wrong
+ * instinct — the earlier `useFitHeight` hook existed only to compensate for a
+ * broken cascade I had introduced myself. */
+const GRAPH_HEIGHT = "100%";
+/** A forward citation — older GIP citing a newer one. 15 of 156, and only when
+ * a thread was edited after the fact, so it gets its own hue. */
+const ARC_FORWARD_COLOR = "#e0885a";
+
+/** Lifecycle stage -> colour, read from graph-explorer's shared kind palette
+ * rather than redeclared here. The Clusters view runs on THAT canvas and
+ * colours nodes by `kind`, so a second copy of these hexes would let the two
+ * GIP views drift into disagreeing about what "phase-2" looks like. */
+const STAGE_COLORS: Record<string, string> = COLOR_BY_KIND;
 
 export const GIP_STAGE_ORDER = ["voted", "phase-3", "phase-2", "phase-1", "unstaged"];
 
@@ -712,15 +729,20 @@ export function gipTimelineOption(
   const links = drawableEdges(nodes, edges).filter((e) => present.has(e.src) && present.has(e.dst));
   const focus = opts?.focus ?? null;
   const maxPosts = Math.max(1, ...shown.map((n) => n.posts ?? 0));
+  const xy = (n: GipNode): [string, number] => [
+    n.firstSeen.replace(" ", "T"),
+    degrees.get(n.gip)?.inbound ?? 0,
+  ];
+  const at = new Map(shown.map((n) => [n.gip, xy(n)]));
 
   return {
     tooltip: {
       confine: true,
       textStyle: { fontFamily: LABEL_FONT, fontSize: 11 },
       formatter: (p: unknown) => {
-        const param = p as { dataType?: string; data?: Record<string, unknown> };
+        const param = p as { seriesType?: string; data?: Record<string, unknown> };
         const d = param.data ?? {};
-        if (param.dataType === "edge") {
+        if (param.seriesType === "lines") {
           return [
             `GIP-${d.srcGip} <span style="opacity:.6">cites</span> GIP-${d.dstGip}`,
             `${d.weight} mention${Number(d.weight) === 1 ? "" : "s"}`,
@@ -748,80 +770,95 @@ export function gipTimelineOption(
     },
     // Wheel must scroll the PAGE, not the chart. A 560px canvas that swallows
     // every wheel event traps the reader: they scroll, nothing moves, and the
-    // chart silently zooms instead. Zoom is still available on ctrl/meta+wheel
-    // and on drag, which is the standard map gesture and is discoverable from
-    // the caption.
+    // chart silently zooms instead. Zoom stays on ctrl+wheel, the standard map
+    // gesture, and the caption says so.
     dataZoom: [{
       type: "inside",
       zoomOnMouseWheel: "ctrl",
       moveOnMouseWheel: false,
       moveOnMouseMove: true,
     }],
-    series: [{
-      type: "graph",
-      coordinateSystem: "cartesian2d",
-      // The axes ARE the layout — nothing to simulate.
-      layout: "none",
-      emphasis: { focus: "adjacency", label: { show: true } },
-      label: {
-        show: true,
-        position: "top",
-        formatter: (p: unknown) => {
-          const d = (p as { data?: Record<string, unknown> }).data ?? {};
-          const inbound = degrees.get(Number(d.gip))?.inbound ?? 0;
-          // Only label what a reader can act on: the hubs and the pinned node.
-          return inbound >= 4 || Number(d.gip) === focus ? `GIP-${d.gip}` : "";
-        },
-        fontFamily: LABEL_FONT,
-        fontSize: 9,
+    series: [
+      // Arcs FIRST so the nodes paint on top of them.
+      //
+      // A `lines` series, not a `graph` series. They draw the same picture, but
+      // ECharts does not emit click events for a graph on a cartesian
+      // coordinate system — every node was inert, and a zrender hit-test
+      // workaround then fought the force view's own clicks. Scatter + Lines
+      // both emit clicks natively, so the interaction needs no workaround.
+      {
+        type: "lines",
+        coordinateSystem: "cartesian2d",
+        polyline: false,
+        silent: false,
+        data: links.map((e) => {
+          const backward = e.dst < e.src;
+          const touchesFocus = focus !== null && (e.src === focus || e.dst === focus);
+          return {
+            coords: [at.get(e.src), at.get(e.dst)],
+            srcGip: e.src,
+            dstGip: e.dst,
+            weight: e.weight,
+            firstMention: e.firstMention,
+            lastMention: e.lastMention,
+            lineStyle: {
+              // Sign flips the arc to the other side, so the 15 forward
+              // citations read differently from the 141 backward ones rather
+              // than blending in.
+              curveness: backward ? 0.4 : -0.4,
+              width: Math.min(5, 0.5 + Math.log2(e.weight + 1)),
+              opacity: focus === null ? 0.34 : touchesFocus ? 0.9 : 0.05,
+              color: backward ? ARC_COLOR : ARC_FORWARD_COLOR,
+            },
+          };
+        }),
       },
-      data: shown.map((n) => ({
-        name: `GIP-${n.gip}`,
-        value: [n.firstSeen.replace(" ", "T"), degrees.get(n.gip)?.inbound ?? 0],
-        gip: n.gip,
-        fullLabel: n.label,
-        stage: n.stage,
-        proposalState: n.proposalState,
-        quorumStatus: n.quorumStatus,
-        posts: n.posts,
-        participants: n.participants,
-        votes: n.votes,
-        firstSeen: n.firstSeen,
-        topicId: n.topicId,
-        proposalId: n.proposalId,
-        symbolSize: nodeSize(n.posts, maxPosts),
-        itemStyle: {
-          color: GIP_STAGE_COLOR(n.stage),
-          borderColor: n.gip === focus ? "#fff" : "transparent",
-          borderWidth: n.gip === focus ? 2 : 0,
-          opacity: focus === null || n.gip === focus ? 0.95 : 0.5,
-        },
-      })),
-      links: links.map((e) => {
-        const backward = e.dst < e.src;
-        const touchesFocus = focus !== null && (e.src === focus || e.dst === focus);
-        return {
-          source: `GIP-${e.src}`,
-          target: `GIP-${e.dst}`,
-          srcGip: e.src,
-          dstGip: e.dst,
-          weight: e.weight,
-          firstMention: e.firstMention,
-          lastMention: e.lastMention,
-          lineStyle: {
-            // Sign flips the arc to the other side, so the 15 forward citations
-            // are visibly different from the 141 backward ones rather than
-            // blending in. 0.4 rather than a gentle bow: most citations land
-            // between nodes at similar heights, and a flat line reads as noise.
-            curveness: backward ? 0.4 : -0.4,
-            width: Math.min(5, 0.5 + Math.log2(e.weight + 1)),
-            opacity: focus === null ? 0.34 : touchesFocus ? 0.9 : 0.05,
-            color: backward ? undefined : "#e0885a",
+      {
+        type: "scatter",
+        coordinateSystem: "cartesian2d",
+        emphasis: { scale: 1.25, focus: "self" },
+        label: {
+          show: true,
+          position: "top",
+          formatter: (p: unknown) => {
+            const d = (p as { data?: Record<string, unknown> }).data ?? {};
+            const inbound = degrees.get(Number(d.gip))?.inbound ?? 0;
+            // Only label what a reader can act on: the hubs and the pinned node.
+            return inbound >= 4 || Number(d.gip) === focus ? `GIP-${d.gip}` : "";
           },
-        };
-      }),
-    }],
-    _cerebro_height: "560px",
+          fontFamily: LABEL_FONT,
+          fontSize: 9,
+          // The theme gives scatter labels a chip background; against 149 dots
+          // that reads as a second set of nodes.
+          backgroundColor: "transparent",
+          borderWidth: 0,
+          padding: 0,
+        },
+        data: shown.map((n) => ({
+          name: `GIP-${n.gip}`,
+          value: xy(n),
+          gip: n.gip,
+          fullLabel: n.label,
+          stage: n.stage,
+          proposalState: n.proposalState,
+          quorumStatus: n.quorumStatus,
+          posts: n.posts,
+          participants: n.participants,
+          votes: n.votes,
+          firstSeen: n.firstSeen,
+          topicId: n.topicId,
+          proposalId: n.proposalId,
+          symbolSize: nodeSize(n.posts, maxPosts),
+          itemStyle: {
+            color: GIP_STAGE_COLOR(n.stage),
+            borderColor: n.gip === focus ? "#fff" : "transparent",
+            borderWidth: n.gip === focus ? 2 : 0,
+            opacity: focus === null || n.gip === focus ? 0.95 : 0.5,
+          },
+        })),
+      },
+    ],
+    _cerebro_height: GRAPH_HEIGHT,
   } as EChartsOption;
 }
 
@@ -907,12 +944,13 @@ export function gipGraphOption(
         dstGip: e.dst,
         weight: e.weight,
         lineStyle: {
+          color: ARC_COLOR,
           width: Math.min(5, 0.5 + Math.log2(e.weight + 1)),
           opacity: 0.4,
           curveness: 0.12,
         },
       })),
     }],
-    _cerebro_height: "560px",
+    _cerebro_height: GRAPH_HEIGHT,
   } as EChartsOption;
 }

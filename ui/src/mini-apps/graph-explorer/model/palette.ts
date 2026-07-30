@@ -17,6 +17,15 @@ export const COLOR_BY_KIND: Record<string, string> = {
   // payout, not a payment to someone.
   burn: "#64748b",
   seed: "#fbbf24",
+  // Governance GIP lifecycle stages. The Graph tab reuses this canvas, and a
+  // GIP's "kind" IS its lifecycle stage — so these drive both the node colour
+  // and the canvas legend. Kept here rather than in the governance app so the
+  // two GIP views (WebGL clusters, ECharts timeline) cannot drift apart.
+  voted: "#a5e05a",
+  "phase-3": "#7c9cf5",
+  "phase-2": "#b58cf0",
+  "phase-1": "#6f7a8c",
+  unstaged: "#4a5160",
   // Flows-mode sector kinds (address attribution from data labels).
   bridges: "#fb923c",
   dex: "#22d3ee",

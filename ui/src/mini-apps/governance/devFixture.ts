@@ -64,15 +64,19 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     gip_pipeline: descriptor(
       "gip_pipeline",
       ["topic_id", "title", "gip", "phase", "posts_count", "participant_count",
-       "views", "created_at", "last_posted_at", "days_idle", "dormant_hidden"],
+       "views", "created_at", "last_posted_at", "days_idle", "dormant_hidden",
+       "ideas_hidden"],
+      // Mirrors the SQL: phase-2 ONLY and days_idle <= 45. A phase-1 row or a
+      // four-month-idle row here would be a fixture the query can never return,
+      // which is how the panel came to look like it was listing dead threads.
       [
-        [12390, "GIP 152 - Should GnosisDAO spin out the Gnosis App into an independent entity?", 152, "phase-2", 51, 24, 4100, "2026-06-30T09:00:00Z", "2026-07-28T23:11:45Z", 1, 88],
+        [12390, "GIP 152 - Should GnosisDAO spin out the Gnosis App into an independent entity?", 152, "phase-2", 51, 24, 4100, "2026-06-30T09:00:00Z", "2026-07-28T23:11:45Z", 1, 4, 2],
         // No GIP number in the title yet — renders without a badge, which is
         // the honest state for a draft.
-        [12383, "[REVIEW] GIP-XXX: Transition to an Independent Structural Governance", null, "phase-2", 16, 9, 1200, "2026-07-02T08:30:00Z", "2026-07-17T00:49:11Z", 12, 88],
-        // Idle past the render threshold — exercises the "idle Nd" marker.
-        [11739, "GIP-141: Should Gnosis DAO Fund the Strategic Visual Adoption Package?", 141, "phase-2", 18, 11, 900, "2026-01-04T09:00:00Z", "2026-03-05T14:58:55Z", 146, 88],
-        [12201, "GIP-Draft: fund a public Gnosis Chain block explorer mirror", null, "phase-1", 7, 5, 480, "2026-05-20T10:00:00Z", "2026-06-27T16:58:53Z", 32, 88],
+        [12383, "[REVIEW] GIP-XXX: Transition to an Independent Structural Governance", null, "phase-2", 16, 9, 1200, "2026-07-02T08:30:00Z", "2026-07-17T00:49:11Z", 12, 4, 2],
+        // Idle past the render threshold but inside the window — exercises the
+        // "idle Nd" marker without pretending a dormant thread is live.
+        [12210, "GIP-129: Should GnosisDAO establish Seldon Inc and appoint a Gnosis VPN steward?", 129, "phase-2", 14, 10, 900, "2026-05-02T09:00:00Z", "2026-06-25T14:58:55Z", 35, 4, 2],
       ],
     ),
     graph_nodes: descriptor(
@@ -387,3 +391,40 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     },
   },
 };
+
+/**
+ * `MOCK_PAYLOAD` with `?section=<id>` applied, for `npm run dev`.
+ *
+ * The fixture carries descriptors for EVERY section, but ships every
+ * `loaded_groups` flag except overview's as `false` — so without this, a tab
+ * click in dev fires a tool call that has no host to answer it and the section
+ * renders as a skeleton or a load error. Only the overview was ever reachable
+ * from a browser, which is why layout work on the other tabs had to be verified
+ * against a built bundle and a live server.
+ *
+ * Flips the requested section's groups to loaded, which is enough: `useDataset`
+ * falls back to each descriptor's `preview_rows` when nothing is hydrated.
+ */
+export function devPayload(search: string): MiniAppPayload<GovernanceViewState> {
+  const section = new URLSearchParams(search).get("section");
+  const state = MOCK_PAYLOAD.view_state;
+  if (!state || !section || section === state.section) return MOCK_PAYLOAD;
+  const groups = state.loaded_groups ?? {};
+  // Unknown section id: leave the fixture alone rather than inventing groups.
+  if (!Object.keys(groups).some((key) => key.startsWith(`${section}.`))) {
+    return MOCK_PAYLOAD;
+  }
+  return {
+    ...MOCK_PAYLOAD,
+    view_state: {
+      ...state,
+      section: section as GovernanceViewState["section"],
+      loaded_groups: Object.fromEntries(
+        Object.entries(groups).map(([key, loaded]) => [
+          key,
+          key.startsWith(`${section}.`) ? true : loaded,
+        ]),
+      ),
+    },
+  };
+}

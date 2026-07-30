@@ -515,6 +515,22 @@ body {
   container-type: inline-size;
 }
 /* Terminal direction is intentionally flat — no hover lift on chart cards. */
+/* Fill-the-parent variant: the chart IS the view, so the card's border, margin
+ * and head are pure overhead. Used by the governance graph tab, where those
+ * ~70px came straight out of the graph. Height comes from the parent's flex or
+ * grid chain — nothing here declares one. */
+.chart-card--flush {
+  height: 100%;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+.chart-card--flush > .chart-card-body {
+  min-height: 0;
+  padding: 0;
+}
+
 .chart-card-head {
   padding: 0.95rem 1.25rem 0.5rem;
   background: transparent;

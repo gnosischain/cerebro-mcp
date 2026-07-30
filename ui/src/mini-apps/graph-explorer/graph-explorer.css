@@ -8,8 +8,13 @@
  *   statusbar      22px
  */
 
-html, body, #root { height: 100%; margin: 0; }
-body { overflow: hidden; }
+/* NOTE: the global `html, body, #root` and `body { overflow }` rules that used
+ * to live here have moved to graph-explorer-shell.css, imported only by
+ * graph-explorer-main.tsx. They were the ONLY unscoped selectors in this file,
+ * and they made it unsafe to import from another mini-app — the governance app
+ * reuses the canvas subsystem below, and inheriting a 100%-height root broke its
+ * unrelated chart grids. Everything in this file is now `.ge-*` scoped; keep it
+ * that way so the canvas stays reusable. */
 
 /* Subtle keyboard-focus ring. The default UA ring (big blue halo) looks
  * like a "giant blue circle" on small round buttons — replace with a
@@ -3650,9 +3655,15 @@ button.ge-atlas-item {
   z-index: auto;
   flex: 1 1 auto;
   min-width: 0;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  scrollbar-width: thin;
+  /* WRAP, never scroll. `overflow-x: auto` here made this ~28px button row a
+   * scroll container on BOTH axes — per CSS Overflow L3, a non-visible
+   * overflow-x forces overflow-y to compute to `auto` — which clipped every
+   * dropdown anchored below it: the `⚙ Forces` panel (.ge-sim-panel) and the
+   * Advanced panel (.ge-canvas-advanced__panel) both live inside this box, so
+   * both were invisible when opened. Their z-index 40/45 could never help,
+   * because clipping is applied independently of stacking order. */
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 .ge-graph-search { flex: 0 1 260px; min-width: 150px; }
 .ge-graph-search input { width: 100%; min-width: 0; }
@@ -3694,7 +3705,11 @@ button.ge-atlas-item {
   max-height: 88px;
   padding: 6px 10px 8px;
   overflow-x: auto;
-  overflow-y: hidden;
+  /* `hidden` silently truncated every legend row past the 88px cap with no way
+   * to reach them — and because .ge-legend-title is `flex: 0 0 100%`, any graph
+   * with more than ~2 kinds/profiles hit it. `auto` keeps the cap but gives the
+   * rows a scrollbar. */
+  overflow-y: auto;
 }
 .ge-legend-section {
   min-width: max-content;

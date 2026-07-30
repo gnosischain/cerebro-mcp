@@ -144,10 +144,13 @@ DELEGATE_POWER_CAP = 200
 #: exist; the panel is a "what is live now" glance, not the forum browser, so it
 #: shows the freshest slice and the Forum tab carries the rest.
 GIP_PIPELINE_CAP = 24
-#: A phase-1/phase-2 topic untouched for this long is dormant, not pending.
-#: Only 8 of 157 open topics clear it — the panel answers "what is moving now",
-#: so the rest are excluded and COUNTED rather than listed.
-GIP_PIPELINE_IDLE_DAYS = 180
+#: A pending topic untouched for this long is dormant, not moving. Set from the
+#: measured distribution (2026-07-30): of 157 open phase-1/2 topics the median
+#: has been idle 1,265 days, and recency clusters hard — 3 within 30 days, 5
+#: within 45, then NOTHING new until 104 days. 45 sits on that cliff. At 180 the
+#: panel listed threads idle four months, which is not "moving toward" anything.
+#: Excluded topics are COUNTED (dormant_hidden), never silently dropped.
+GIP_PIPELINE_IDLE_DAYS = 45
 #: Citation edges kept for the knowledge graph. 150 GIP nodes at this cap stays
 #: well inside what a force layout can place legibly; the tail is long and thin
 #: (single mentions) and adds hairball, not signal.
@@ -814,11 +817,13 @@ def _overview_specs(range_state: dict[str, Any]) -> list[QuerySpec]:
                   "date-scoped — an open vote is open regardless of the toolbar "
                   "range", "snapshot", 300),
         QuerySpec("gip_pipeline", "Moving toward a GIP", gip_pipeline, {},
-                  "phase-1 / phase-2 forum topics that have NOT yet reached a "
-                  f"Snapshot vote and were active within {GIP_PIPELINE_IDLE_DAYS} "
-                  "days; phase-2 is the community's pre-vote signalling stage. "
-                  "Dormant pending topics are counted in dormant_hidden, not "
-                  "listed. NOT date-scoped",
+                  "phase-2 forum topics that have NOT yet reached a Snapshot "
+                  f"vote and were active within {GIP_PIPELINE_IDLE_DAYS} days. "
+                  "phase-2 is the community's pre-vote signalling stage, which "
+                  "is what 'moving toward a GIP' means; phase-1 is the idea "
+                  "stage and is counted in ideas_hidden, not listed. Dormant "
+                  "phase-2 topics are counted in dormant_hidden. Neither is "
+                  "silently dropped. NOT date-scoped",
                   "forum", 300),
         QuerySpec("proposal_types", "Proposal types", proposal_types,
                   dict(time_params), "voting-window overlap", "snapshot"),

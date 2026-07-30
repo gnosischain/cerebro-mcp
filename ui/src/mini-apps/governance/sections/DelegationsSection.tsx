@@ -25,6 +25,16 @@ const DELEGATE_SRC = "rpc_log_indexer";
 const POWER_SRC = "governance_db + rpc_log_indexer";
 const POWER_BARS = 12;
 
+/** One height for every chart in the two paired rows below.
+ *
+ * The cards already stretch to a common height — `.gov-grid-2 > .ma-section` is
+ * a flex column whose body flexes — but the CHARTS inside them came from three
+ * different builders declaring 620px, a row-count-derived height, and nothing
+ * (ChartCard's 350px default). So each row had one full chart and one short one
+ * with ~270px of dead space under it. The row height is a layout decision, so
+ * the layout states it once here. */
+const GRID_CHART_HEIGHT = "420px";
+
 export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
   const groups = ctx.state.loaded_groups ?? {};
   const summary = firstRow(ctx, "delegation_summary");
@@ -65,10 +75,10 @@ export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
         .filter((row) => row.value > 0)
         .slice(0, POWER_BARS),
       "Delegated VP",
-    ) as EChartsOption & { _cerebro_height?: string };
-    // Use the shared 350px card height so this chart aligns with its siblings
-    // in the grid row (horizontalBarOption otherwise sizes to row count).
-    delete spec._cerebro_height;
+    ) as EChartsOption;
+    // No height fiddling here — `horizontalBarOption` sizes to row count, and
+    // the grid row's shared height (GRID_CHART_HEIGHT, passed to every ChartCard
+    // below) overrides it.
     return spec;
   }, [powerRows]);
 
@@ -143,6 +153,7 @@ export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
             <ChartCard
               chartId="gov-delegation-activity"
               hideId
+              height={GRID_CHART_HEIGHT}
               sql={ctx.descriptors.delegation_activity?.sql}
               sourceModel={DELEGATE_SRC}
               spec={activitySpec}
@@ -159,6 +170,7 @@ export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
             <ChartCard
               chartId="gov-delegation-power"
               hideId
+              height={GRID_CHART_HEIGHT}
               sql={ctx.descriptors.delegation_power?.sql}
               sourceModel={POWER_SRC}
               spec={powerSpec}
@@ -177,6 +189,7 @@ export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
             <ChartCard
               chartId="gov-delegation-concentration"
               hideId
+              height={GRID_CHART_HEIGHT}
               sql={ctx.descriptors.delegation_concentration?.sql}
               sourceModel={DELEGATE_SRC}
               spec={concentrationSpec}
@@ -193,6 +206,7 @@ export function DelegationsSection({ ctx }: { ctx: GovViewContext }) {
             <ChartCard
               chartId="gov-delegation-churn"
               hideId
+              height={GRID_CHART_HEIGHT}
               sql={ctx.descriptors.delegation_churn?.sql}
               sourceModel={DELEGATE_SRC}
               spec={churnSpec}

@@ -1,7 +1,19 @@
 /* Governance Explorer — .gov-* scoped styles inside .mini-app-scope.
    Token-styled (var(--…)) so light/dark themes come from the shared tokens. */
 
-.gov-body{min-height:calc(100vh - 70px);background:var(--bg)}
+/* No min-height. `.ma-body` is already `flex:1 1 auto; min-height:0` inside a
+   `height:100dvh` chrome, so it fills the viewport on its own — a
+   `calc(100vh - 70px)` floor on the SAME element only guaranteed the page could
+   always scroll a bit, and fought any child that wanted to fill it. */
+.gov-body{background:var(--bg)}
+/* Full-canvas sections (the graph tab). Mirrors the sanctioned `.ma-body--flush`
+   (padding 0, no scroll) that graph-explorer and model-lineage use, and adds the
+   flex column the content needs to claim the remaining height — `.ma-body` is a
+   plain block, and making it flex globally would reflow every app.
+   The padding/overflow are restated rather than inherited from `.ma-body--flush`
+   so this class works on its own: forgetting them left `.ma-body`'s
+   `padding: 14px 18px 32px` in place and the graph 46px short of the fold. */
+.gov-body--flush{display:flex;flex-direction:column;padding:0;overflow:hidden}
 .gov-loading{min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text-secondary);font:14px var(--font-mono)}
 .gov-subbar,.gov-statusline,.gov-breadcrumbs,.gov-candidates-row{display:flex;align-items:center;gap:8px}
 .gov-subbar{width:100%;justify-content:space-between;padding:7px 12px;background:var(--surface);border-bottom:1px solid var(--border)}
@@ -12,6 +24,16 @@
 .gov-controls button:disabled{opacity:.5;cursor:default}
 .gov-statusline{position:sticky;top:0;z-index:6;padding:7px 16px;border-bottom:1px solid var(--border);background:var(--surface);color:var(--text-muted);font:11px var(--font-mono);flex-wrap:wrap}
 .gov-content{max-width:1500px;margin:0 auto;padding:18px 20px 64px}
+/* The graph section owns its own spacing and must reach the fold exactly: no
+   page padding, no max-width, and a flex column so the toolbar can be
+   `flex:0 0 auto` and the graph row `flex:1 1 auto; min-height:0`. This is the
+   same chain graph-explorer uses, with zero JS measurement.
+   `margin:0` is LOAD-BEARING, not tidying: `.gov-content` carries `margin:0 auto`
+   to centre a max-width page, and inside a flex column an auto margin on the
+   cross axis absorbs the free space INSTEAD of stretching — so the graph shrank
+   to fit-content (1071px of a 1900px window, 414px wasted each side) and a
+   149-node blob became too dense to click a single node in. */
+.gov-content--flush{max-width:none;margin:0;padding:0;min-height:0;flex:1 1 auto;display:flex;flex-direction:column}
 .gov-content .ma-section{margin-top:16px}
 .gov-empty{min-height:120px;display:grid;place-items:center;color:var(--text-muted);border:1px dashed var(--border);border-radius:8px}
 
@@ -434,7 +456,9 @@
   margin: 12px 0 6px; font-size: 12px; font-weight: 600;
   letter-spacing: 0.02em; color: var(--text-primary);
 }
-.gov-cites__list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+/* No max-height/overflow: the aside itself scrolls, and nesting a third
+   scrollbar inside a 320px column made both lists unusable. */
+.gov-cites__list { list-style: none; margin: 0; padding: 0; }
 .gov-cites__list button {
   display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0;
   background: none; border: none; padding: 4px 0; text-align: left; cursor: pointer;
@@ -452,4 +476,140 @@
   border-radius: 4px;
   border: 1px solid var(--border-subtle);
   background: var(--surface-raised);
+}
+
+/* ---------------------------------------------------------------------------
+   Graph tab layout: chart beside its detail, not above it. A pinned GIP's
+   detail used to render UNDER a full-height canvas, so reading it scrolled the
+   graph you were reading about off the screen.
+   --------------------------------------------------------------------------- */
+.gov-graph-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 12px;
+  /* Claim the remainder of the flush content column, and allow shrinking below
+     content height — without `min-height: 0` a grid child that wants to scroll
+     pushes the row taller instead. No `align-items`: the default `stretch` is
+     what makes the aside match the chart for free, and the `start` that used to
+     be here is exactly what cut it short. */
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 16px 14px;
+}
+@media (max-width: 1100px) {
+  /* Below this the aside would squeeze the chart to nothing; stack instead. On a
+     stacked layout the row can no longer fill the fold, so let the page scroll
+     rather than crushing two panels into one viewport. */
+  .gov-graph-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: minmax(360px, auto);
+    flex: 0 0 auto;
+    overflow-y: auto;
+  }
+}
+/* The chart column. `position: relative` anchors the SQL overlay; the flush
+   ChartCard inside fills it. */
+.gov-graph-chart {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+/* Provenance on demand, over the chart instead of above or below it — the graph
+   needs that height more than a permanently-visible SQL block does. */
+.gov-graph-sql {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--surface);
+  font: 11px/1.5 var(--font-mono);
+  color: var(--text-secondary);
+}
+.gov-graph-sql pre { margin: 0; white-space: pre-wrap; }
+.gov-graph-sql__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+.gov-graph-sql__head button {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-primary);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font: 10px var(--font-mono);
+  cursor: pointer;
+}
+.gov-graph-side {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  padding: 12px 14px;
+  /* NO height declaration. Grid `stretch` matches it to the chart column, which
+     is how `.ge-details` does it in graph-explorer; `min-height: 0` is what lets
+     it scroll its own overflow instead of stretching the row. */
+  min-height: 0;
+  overflow-y: auto;
+}
+.gov-graph-side__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.gov-graph-side__clear {
+  font: 10px var(--font-mono);
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
+}
+.gov-graph-side__clear:hover { color: var(--accent); }
+.gov-graph-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  margin: 10px 0;
+}
+.gov-graph-facts div { display: flex; flex-direction: column; gap: 1px; }
+.gov-graph-facts dt {
+  font: 9px var(--font-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.gov-graph-facts dd { margin: 0; font-size: 13px; color: var(--text-primary); }
+
+/* One compact line instead of four KPI cards — measured, the cards cost ~90px
+   of the 650px the scroll container actually has, and the graph needed it.
+   (There used to be a second, stale copy of this rule below, which left a
+   `margin: 0 0 10px` on a centered flex item.) */
+.gov-graph-summary { font-size: 12px; color: var(--text-secondary); }
+.gov-graph-summary strong { font-family: var(--font-mono); color: var(--text-primary); }
+
+/* Graph tab: one control bar, no separate summary row. Every pixel above the
+   canvas is a pixel the graph does not get, and this tab is the canvas. */
+.gov-graph-bar { flex: 0 0 auto; flex-wrap: wrap; row-gap: 6px; }
+/* The WebGL canvas is a grid item, so `stretch` sizes it; `.ge-canvas` is
+   flex-column and its stage claims the remainder from there. `min-height: 0` so
+   `.ge-canvas`'s own 360px floor cannot push the row past the fold. */
+.gov-graph-canvas {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  min-width: 0;
+  min-height: 0;
 }

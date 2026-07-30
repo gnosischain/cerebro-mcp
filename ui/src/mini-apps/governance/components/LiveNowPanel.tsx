@@ -14,11 +14,22 @@ import { fmtNum } from "../sections/common";
 // empty region with no words reads as "still loading" or "something broke".
 // It says nothing is open, which is the actual finding.
 //
-// "Moving toward a GIP" excludes two things, both deliberately: a GIP that
-// already reached a Snapshot vote is PAST a vote, not moving toward one; and a
-// pending topic untouched for six months is dormant, not pending. The dormant
-// count is stated rather than hidden — 88 of them exist, and a list that
-// quietly dropped them would imply a pipeline that is not there.
+// "Moving toward a GIP" excludes three things, all deliberately, and states a
+// count for each rather than quietly dropping it:
+//   - a GIP that already reached a Snapshot vote is PAST a vote;
+//   - a phase-1 topic is at the IDEA stage, upstream of a vote rather than
+//     moving toward one (phase-2 is the pre-vote signalling stage, and that is
+//     what this panel's title actually claims);
+//   - a phase-2 topic untouched for the idle window is dormant, not moving.
+// The window is 45 days, taken from the measured distribution rather than
+// picked: of 157 open phase-1/2 topics the median has been idle 1,265 days, and
+// recency clusters hard -- 3 within 30 days, 5 within 45, then nothing new until
+// 104. A 180-day window listed threads idle four months and read as noise.
+
+/** Mirrors GIP_PIPELINE_IDLE_DAYS in governance_explorer.py. Only used for
+ * copy: the filtering itself is done in SQL, so a drift here misstates the
+ * window but cannot change which rows appear. */
+const IDLE_WINDOW_DAYS = 45;
 
 /** Idle-days as a short human phrase. Only rendered past a week — "idle 1d" on
  * a thread posted to yesterday is noise. */
@@ -50,6 +61,7 @@ export function LiveNowPanel({ votes, pipeline, onProposal, onTopic }: LiveNowPa
   const pipelineRows = rowsToObjects(pipeline);
   // Constant column, so any row carries it; 0 when the list itself is empty.
   const dormant = finite(pipelineRows[0]?.dormant_hidden) ?? 0;
+  const ideas = finite(pipelineRows[0]?.ideas_hidden) ?? 0;
 
   return (
     <div className="gov-livenow">
@@ -104,7 +116,7 @@ export function LiveNowPanel({ votes, pipeline, onProposal, onTopic }: LiveNowPa
         </h3>
         {pipelineRows.length === 0 ? (
           <p className="gov-livenow__empty">
-            No forum topic is tagged phase-1 or phase-2 right now.
+            No phase-2 topic has been touched in the last {IDLE_WINDOW_DAYS} days.
           </p>
         ) : (
           <ul className="gov-livenow__list">
@@ -136,15 +148,21 @@ export function LiveNowPanel({ votes, pipeline, onProposal, onTopic }: LiveNowPa
           </ul>
         )}
         <p className="gov-caption">
-          <strong>phase-2</strong> is the community&apos;s pre-vote signalling stage and{" "}
-          <strong>phase-1</strong> the idea stage — these are the forum&apos;s own tags, not an
-          inference. A row without a GIP number has none in its title yet. Topics whose GIP
-          already reached a Snapshot vote are excluded: those are past a vote, not moving toward
-          one.
+          <strong>phase-2</strong> is the community&apos;s pre-vote signalling stage — the forum&apos;s
+          own tag, not an inference — and reaching it is what &ldquo;moving toward a GIP&rdquo;
+          means. A row without a GIP number has none in its title yet. Topics whose GIP already
+          reached a Snapshot vote are excluded: those are past a vote, not moving toward one.
+          Nothing here is silently dropped — every exclusion is counted below.
+          {ideas > 0 && (
+            <> <strong>{ideas}</strong> active <strong>phase-1</strong>{" "}
+            {ideas === 1 ? "topic is" : "topics are"} not listed: that is the idea stage, which is
+            upstream of a vote rather than moving toward one.</>
+          )}
           {dormant > 0 && (
-            <> A further <strong>{dormant}</strong> pending {dormant === 1 ? "topic has" : "topics have"}{" "}
-            had no activity in six months and {dormant === 1 ? "is" : "are"} not shown — dormant,
-            not missing. The Forum tab lists them.</>
+            <> A further <strong>{dormant}</strong> pending{" "}
+            {dormant === 1 ? "topic has" : "topics have"} had no activity in{" "}
+            {IDLE_WINDOW_DAYS} days and {dormant === 1 ? "is" : "are"} not shown — dormant, not
+            missing. The Forum tab lists them.</>
           )}
         </p>
       </section>

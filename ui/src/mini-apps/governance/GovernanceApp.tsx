@@ -14,7 +14,7 @@ import { TopicDetail } from "./detail/TopicDetail";
 import { TreasuryTokenDetail } from "./detail/TreasuryTokenDetail";
 import { TreasuryWalletDetail } from "./detail/TreasuryWalletDetail";
 import { VoterDetail } from "./detail/VoterDetail";
-import { MOCK_PAYLOAD } from "./devFixture";
+import { devPayload } from "./devFixture";
 import { buildModelContextLines, type GovAggregates } from "./model/contextPrompt";
 import { parseSpaceSummary } from "./model/parseRows";
 import { DEFAULT_TREASURY_TAB, type TreasuryTabId } from "./model/treasuryTabs";
@@ -118,7 +118,7 @@ export default function GovernanceApp() {
   const { view, callTool, fetchRows, updateModelContext, sendMessage, openLink } =
     useMiniApp<GovernanceViewState>({
       appId: APP_ID,
-      mockPayload: import.meta.env.DEV ? MOCK_PAYLOAD : undefined,
+      mockPayload: import.meta.env.DEV ? devPayload(window.location.search) : undefined,
     });
   const state = view?.view_state;
   const descriptors = view?.datasets ?? {};
@@ -361,14 +361,34 @@ export default function GovernanceApp() {
     }
   };
 
+  // The graph tab is the app's only full-canvas section, and three separate
+  // layout decisions key off it. Named once so they cannot drift apart.
+  const isGraph = state.section === "graph";
+
   return (
-    <MiniAppChrome activeTabId="governance" rightSlot={controls} subBar={subBar} bodyClassName="gov-body">
-      <div className="gov-statusline">
-        <span>Gnosis DAO governance</span>
-        <span>Snapshot signaling + forum activity — not binding execution</span>
-        <span>{loader.loading ? "Loading…" : "Ready"}</span>
-        {state.section !== "overview" && <FreshnessStrip freshness={state.freshness} />}
-      </div>
+    <MiniAppChrome
+      activeTabId="governance"
+      rightSlot={controls}
+      subBar={subBar}
+      // The graph tab is a full-height canvas: it opts into the sanctioned
+      // flush body (no padding, no page scroll) that graph-explorer and
+      // model-lineage already use, and sizes itself from the flex chain.
+      bodyClassName={isGraph ? "gov-body gov-body--flush" : "gov-body"}
+    >
+      {/* Skipped entirely on `graph`, not just its FreshnessStrip: the strip's
+          own shell, padding and border cost ~29px that a full-height canvas
+          cannot spare. Provenance lives on the Overview's expanded strip, on
+          every panel's source label, and behind the graph toolbar's View SQL. */}
+      {!isGraph && (
+        <div className="gov-statusline">
+          <span>Gnosis DAO governance</span>
+          <span>Snapshot signaling + forum activity — not binding execution</span>
+          <span>{loader.loading ? "Loading…" : "Ready"}</span>
+          {state.section !== "overview" && (
+            <FreshnessStrip freshness={state.freshness} />
+          )}
+        </div>
+      )}
       {state.search.candidates.length > 0 && (
         <div className="gov-candidates">
           <strong>Choose a match</strong>
@@ -420,7 +440,7 @@ export default function GovernanceApp() {
           ))}
         </div>
       )}
-      <main className="gov-content">
+      <main className={isGraph ? "gov-content gov-content--flush" : "gov-content"}>
         {state.section === "entity" ? (
           entityView()
         ) : state.section === "overview" ? (

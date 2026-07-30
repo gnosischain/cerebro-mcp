@@ -14,6 +14,10 @@ import {
   // Split bid|ask cells on the CoW depth footprint — one rect per side inside
   // a grid cell is not expressible with any built-in series type.
   CustomChart,
+  // Citation arcs on the governance GIP timeline. A `graph` series would draw
+  // the same picture, but graph-on-cartesian does not emit click events, so the
+  // nodes are a Scatter and the edges are Lines — both of which do.
+  LinesChart,
 } from "echarts/charts";
 import {
   TitleComponent,
@@ -48,6 +52,7 @@ echarts.use([
   FunnelChart,
   CandlestickChart,
   CustomChart,
+  LinesChart,
   TitleComponent,
   TooltipComponent,
   LegendComponent,

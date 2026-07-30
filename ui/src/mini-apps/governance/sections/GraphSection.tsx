@@ -1,21 +1,21 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { ChartCard } from "../../../components/ChartCard";
 import { SegmentedControl } from "../../shared/SegmentedControl";
 import { finite, rowsToObjects } from "../../shared/rowDataset";
-import { DatasetPanel } from "../components/DatasetPanel";
 import { GipBadge } from "../components/GipBadge";
 import {
   GIP_STAGE_COLOR,
   GIP_STAGE_ORDER,
   drawableEdges,
   gipDegrees,
-  gipGraphOption,
   gipTimelineOption,
   type GipEdge,
   type GipNode,
 } from "../model/chartOptions";
-import { GroupGate, KpiRow, fmtNum, useDataset, type GovViewContext } from "./common";
+import { GraphCanvas } from "../../graph-explorer/canvas/GraphCanvas";
+import { buildGipGraphModel } from "../model/gipGraphModel";
+import { GroupGate, fmtNum, useDataset, type GovViewContext } from "./common";
 
 // The GIP knowledge graph.
 //
@@ -38,14 +38,6 @@ import { GroupGate, KpiRow, fmtNum, useDataset, type GovViewContext } from "./co
 
 const SRC = "governance_db (forum titles + post bodies, Snapshot titles)";
 
-/** The slice of the ECharts instance this section touches. */
-interface EChartsLike {
-  getZr?: () => {
-    on: (event: string, handler: (e: { offsetX: number; offsetY: number }) => void) => void;
-  } | null;
-  convertToPixel?: (finder: unknown, value: unknown) => unknown;
-}
-
 type LayoutId = "timeline" | "clusters";
 
 function fmtDate(value: string): string {
@@ -53,12 +45,11 @@ function fmtDate(value: string): string {
 }
 
 export function GraphSection({ ctx }: { ctx: GovViewContext }) {
-  const groups = ctx.state.loaded_groups ?? {};
-  const retry = () => ctx.retryGroup("graph", "core");
   const [focus, setFocus] = useState<number | null>(null);
   const [layout, setLayout] = useState<LayoutId>("timeline");
   const [hideIsolated, setHideIsolated] = useState(true);
   const [stages, setStages] = useState<string[]>([]);
+  const [showSql, setShowSql] = useState(false);
 
   const nodesDs = useDataset(ctx, "graph_nodes");
   const edgesDs = useDataset(ctx, "graph_edges");
@@ -110,15 +101,25 @@ export function GraphSection({ ctx }: { ctx: GovViewContext }) {
     [nodes, degrees],
   );
 
+  // No measured height. Both layouts are grid items in a flex chain that
+  // reaches the fold, exactly as graph-explorer's canvas does — see
+  // `.gov-content--flush` / `.gov-graph-layout`. The hook that used to live
+  // here only existed to compensate for a cascade I had broken myself.
   const opts = useMemo(
     () => ({ focus, hideIsolated, stages }),
     [focus, hideIsolated, stages],
   );
-  const spec = useMemo(
-    () => (layout === "timeline"
-      ? gipTimelineOption(nodes, edges, opts)
-      : gipGraphOption(nodes, edges, opts)),
-    [layout, nodes, edges, opts],
+  const spec = useMemo(() => gipTimelineOption(nodes, edges, opts), [nodes, edges, opts]);
+  // The Clusters view runs on the Graph Explorer's WebGL canvas, which already
+  // has fit-to-view, zoom, focus mode, labels, a legend, an error boundary and
+  // a table fallback. Rebuilding those on a second ECharts force chart was the
+  // wrong instinct.
+  const canvasModel = useMemo(
+    () => buildGipGraphModel(
+      hideIsolated ? nodes.filter((n) => degrees.has(n.gip)) : nodes,
+      drawable,
+    ),
+    [nodes, drawable, degrees, hideIsolated],
   );
 
   const byGip = useMemo(() => new Map(nodes.map((n) => [n.gip, n])), [nodes]);
@@ -135,67 +136,20 @@ export function GraphSection({ ctx }: { ctx: GovViewContext }) {
     [drawable, focus],
   );
 
+  /** Fallback content for the side panel: the GIPs the forum returns to most.
+   * An empty aside beside a full-height chart reads as a broken layout. */
+  const topCited = useMemo(() => {
+    const rows = [...degrees.entries()]
+      .filter(([, d]) => d.inbound > 0)
+      .sort((a, b) => b[1].inbound - a[1].inbound)
+      .slice(0, 12);
+    return rows.map(([gip, d]) => ({ gip, weight: d.inbound, last: "" }));
+  }, [degrees]);
+
   const toggleStage = (stage: string) =>
     setStages((current) => (current.includes(stage)
       ? current.filter((s) => s !== stage)
       : [...current, stage]));
-
-  // ECharts does not emit a series `click` for a graph on a CARTESIAN
-  // coordinate system, so the handler wired through onEvents never fired in the
-  // timeline view and every node looked inert. ChartCard exposes the instance
-  // for exactly this case: hit-test in pixel space off a zrender click, which
-  // works in both layouts and does not depend on the series emitting anything.
-  const hitRef = useRef<GipNode[]>(nodes);
-  hitRef.current = nodes;
-  const degreeRef = useRef(degrees);
-  degreeRef.current = degrees;
-  // The hit-test only applies to the cartesian layout. In the force view there
-  // are no axes, so convertToPixel returns null for every node — and an
-  // unguarded handler would then treat EVERY click as "hit nothing" and clear
-  // the focus that the series click had just set, one frame earlier. That is
-  // what made nodes look inert after the refactor.
-  const layoutRef = useRef<LayoutId>(layout);
-  layoutRef.current = layout;
-
-  const onChartReady = useCallback((instance: unknown) => {
-    const chart = instance as EChartsLike;
-    const zr = chart.getZr?.();
-    if (!zr) return;
-    zr.on("click", (event) => {
-      if (layoutRef.current !== "timeline") return;
-      let best: { gip: number; d2: number } | null = null;
-      let converted = 0;
-      for (const n of hitRef.current) {
-        let px: unknown = null;
-        try {
-          // Finder is the AXIS PAIR, not the series: a graph series on a
-          // cartesian system does not register as a convertible coordinate
-          // system, so { seriesIndex: 0 } returns null for every node.
-          px = chart.convertToPixel?.({ xAxisIndex: 0, yAxisIndex: 0 }, [
-            n.firstSeen.replace(" ", "T"),
-            degreeRef.current.get(n.gip)?.inbound ?? 0,
-          ]);
-        } catch {
-          px = null;
-        }
-        if (!Array.isArray(px) || !Number.isFinite(px[0]) || !Number.isFinite(px[1])) continue;
-        converted += 1;
-        const d2 = (Number(px[0]) - event.offsetX) ** 2 + (Number(px[1]) - event.offsetY) ** 2;
-        if (!best || d2 < best.d2) best = { gip: n.gip, d2 };
-      }
-      // Nothing convertible means the coordinate system is not ready, not that
-      // the reader clicked empty space — leave the pin alone.
-      if (converted === 0) return;
-      // ~20px: generous enough for the smallest node, tight enough that a click
-      // on empty canvas clears the pin instead of snapping to something distant.
-      if (best && best.d2 <= 20 * 20) {
-        const hit = best.gip;
-        setFocus((current) => (current === hit ? null : hit));
-      } else {
-        setFocus(null);
-      }
-    });
-  }, []);
 
   const stageCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -205,17 +159,12 @@ export function GraphSection({ ctx }: { ctx: GovViewContext }) {
 
   return (
     <GroupGate ctx={ctx} section="graph" group="core">
-      <KpiRow
-        items={[
-          { label: "GIPs", value: fmtNum(nodes.length) },
-          { label: "Reached a vote", value: fmtNum(nodes.filter((n) => n.stage === "voted").length) },
-          { label: "Citations", value: fmtNum(drawable.reduce((sum, e) => sum + e.weight, 0)) },
-          { label: "In the citation web", value: fmtNum(nodes.length - isolated) },
-        ]}
-        meta={`${isolated} GIPs neither cite nor are cited — isolated, not missing`}
-      />
-
-      <div className="gov-toolbar">
+      <div className="gov-toolbar gov-graph-bar">
+        <span className="gov-graph-summary">
+          <strong>{fmtNum(nodes.length)}</strong> GIPs ·{" "}
+          <strong>{fmtNum(drawable.reduce((sum, e) => sum + e.weight, 0))}</strong> citations ·{" "}
+          <strong>{fmtNum(nodes.length - isolated)}</strong> connected
+        </span>
         <label>
           Layout
           <SegmentedControl<LayoutId>
@@ -255,129 +204,233 @@ export function GraphSection({ ctx }: { ctx: GovViewContext }) {
             );
           })}
         </span>
+        {/* The chart is rendered flush — no card head or foot — so provenance
+            lives here. It opens over the graph rather than above or below it. */}
+        <button
+          type="button"
+          className="gov-graph-chip"
+          aria-pressed={showSql}
+          onClick={() => setShowSql((current) => !current)}
+        >
+          {showSql ? "Hide SQL" : "View SQL"}
+        </button>
       </div>
 
-      <DatasetPanel
-        title={layout === "timeline" ? "GIP citations over time" : "GIP citation clusters"}
-        descriptor={ctx.descriptors.graph_nodes}
-        groupLoaded={groups["graph.core"]}
-        onRetry={retry}
-        emptyLabel="No GIP numbers found in forum or proposal titles."
-      >
-        <ChartCard
-          chartId={`gov-gip-${layout}`}
-          hideId
-          sql={ctx.descriptors.graph_edges?.sql}
-          sourceModel={SRC}
-          spec={spec}
-          onChartReady={onChartReady}
-          onEvents={{
-            click: (params: unknown) => {
-              const p = params as {
-                dataType?: string;
-                name?: string;
-                data?: Record<string, unknown>;
-              };
-              if (p.dataType === "edge") {
-                // Clicking an arc used to do nothing at all. Pin the CITING
-                // GIP — the arc's own detail then appears in that node's
-                // "Cites" list, which is where an edge's story actually lives.
-                const src = finite((p.data as { srcGip?: unknown })?.srcGip);
+      <div className="gov-graph-layout">
+        {layout === "timeline" ? (
+          /* No DatasetPanel, no carded ChartCard: between them they cost a
+             section head, a chart head and a foot — ~178px on the one tab where
+             the chart IS the view. The section-level GroupGate already covers
+             loading and failure; the only state left to handle here is "the
+             query returned nothing". */
+          <div className="gov-graph-chart">
+            {nodes.length === 0 ? (
+              <div className="gov-empty">
+                No GIP numbers found in forum or proposal titles.
+              </div>
+            ) : (
+              <ChartCard
+                chartId="gov-gip-timeline"
+                hideId
+                flush
+                spec={spec}
+                onEvents={{
+                  click: (params: unknown) => {
+                    const p = params as {
+                      seriesType?: string;
+                      name?: string;
+                      data?: Record<string, unknown>;
+                    };
+                    // An arc pins the CITING GIP — the arc's own detail then
+                    // shows up in that node's "Cites" list.
+                    if (p.seriesType === "lines") {
+                      const src = finite(p.data?.srcGip);
+                      if (src !== null) setFocus(src);
+                      return;
+                    }
+                    const gip = finite(p.data?.gip)
+                      ?? finite(String(p.name ?? "").replace(/^GIP-/, ""));
+                    if (gip === null) return;
+                    setFocus((current) => (current === gip ? null : gip));
+                  },
+                }}
+              />
+            )}
+            {showSql && <GraphSql ctx={ctx} onClose={() => setShowSql(false)} />}
+          </div>
+        ) : (
+          <div className="ge-canvas gov-graph-canvas">
+            <GraphCanvas
+              model={canvasModel}
+              stateKey="governance:gip-citations"
+              selectedNodeId={focus === null ? "" : String(focus)}
+              emptyHint="No GIP cites another — nothing to lay out."
+              onSelectNode={(id) => setFocus(finite(id))}
+              onSelectEdge={(id) => {
+                // Edge ids are "<src>-><dst>"; pin the citing GIP.
+                const src = finite(String(id).split("->")[0]);
                 if (src !== null) setFocus(src);
-                return;
-              }
-              // `params.name` — not `params.data.gip`. A graph series on a
-              // cartesian coordinate system reshapes each item, so `data` is
-              // not the object we handed in and reading `.gip` off it came back
-              // undefined for every click. `name` is always the series item's
-              // name, which is "GIP-<n>" by construction.
-              const gip = finite(p.data?.gip)
-                ?? finite(String(p.name ?? "").replace(/^GIP-/, ""));
-              if (gip === null) return;
-              setFocus((current) => (current === gip ? null : gip));
-            },
-          }}
-        />
-        <p className="gov-caption">
-          An edge means one GIP&apos;s forum thread <strong>mentioned</strong> another&apos;s
-          number — evidence that the discussion referenced it, <strong>not</strong> that one
-          depends on or supersedes the other. Node size is citations <em>received</em>.
-          {layout === "timeline" ? (
-            <> The x-axis is each GIP&apos;s first-seen date, not its number: GIP numbers run only
-            89% in date order. Arcs curve up when a newer GIP cites an older one — the normal
-            case, 141 of 156 — and curve down in amber for the {" "}
-            <span className="gov-graph-anomaly">15 that point forward</span>, which happens when a
-            thread was edited after the fact.</>
+              }}
+              onExpandNode={() => undefined}
+              onViewClick={() => setFocus(null)}
+              fallbackNodeActionLabel="Inspect GIP"
+              // The toolbar above already carries every stage swatch WITH its
+              // count, so the canvas's own NODE KINDS strip was the same legend
+              // twice — and it cost ~85px of graph. Still one click away.
+              legendDefaultOpen={false}
+              // No force sliders. They are tuned for graph-explorer's
+              // hundred-thousand-node transaction graphs; at 149 GIPs the
+              // layout settles instantly and the four sliders are noise — and
+              // at this canvas width they sit two disclosures deep (Advanced ->
+              // ⚙ Forces), which is worse than not offering them.
+              showSimControls={false}
+              // No `stats`: CanvasStatsData wants hopsUsed / maxHops /
+              // activeProfileCount / catalogSize, which are graph-explorer
+              // traversal concepts with no meaning for a citation graph. The
+              // counts already sit in the summary line above.
+            />
+            {showSql && <GraphSql ctx={ctx} onClose={() => setShowSql(false)} />}
+          </div>
+        )}
+
+        {/* Beside the chart, not below it. A pinned GIP's detail used to render
+            under a full-height canvas, so reading it meant scrolling the graph
+            you were reading it ABOUT off the screen. */}
+        <aside className="gov-graph-side">
+          {selected ? (
+            <>
+              <h3 className="gov-graph-side__head">
+                <GipBadge gip={selected.gip} />
+                <button type="button" className="gov-graph-side__clear" onClick={() => setFocus(null)}>
+                  clear
+                </button>
+              </h3>
+              <p className="gov-graph-focus">{selected.label}</p>
+
+              <dl className="gov-graph-facts">
+                <div><dt>Stage</dt><dd>{selected.stage}</dd></div>
+                <div><dt>Cited by</dt><dd>{fmtNum(citedBy.length)}</dd></div>
+                <div><dt>Cites</dt><dd>{fmtNum(cites.length)}</dd></div>
+                <div><dt>Forum posts</dt><dd>{fmtNum(selected.posts)}</dd></div>
+                <div><dt>Participants</dt><dd>{fmtNum(selected.participants)}</dd></div>
+                <div>
+                  <dt>Votes</dt>
+                  <dd>{selected.proposalId ? fmtNum(selected.votes) : "—"}</dd>
+                </div>
+              </dl>
+              <p className="gov-caption">
+                First seen {fmtDate(selected.firstSeen)} · last activity{" "}
+                {fmtDate(selected.lastActivity)}
+                {selected.quorumStatus ? ` · quorum ${selected.quorumStatus}` : ""}
+              </p>
+
+              <div className="gov-graph-actions">
+                {selected.topicId !== null && selected.topicId > 0 && (
+                  <button type="button" onClick={() => ctx.onEntity("forum_topic", String(selected.topicId))}>
+                    Forum topic
+                  </button>
+                )}
+                {selected.proposalId !== "" && (
+                  <button type="button" onClick={() => ctx.onEntity("proposal", selected.proposalId)}>
+                    Snapshot proposal
+                  </button>
+                )}
+              </div>
+
+              {selected.proposalId === "" && (
+                <p className="gov-caption">
+                  No Snapshot proposal carries this GIP number — discussed but never put to a
+                  vote, or the vote predates what is indexed here.
+                </p>
+              )}
+
+              <CitationList
+                title={`Cited by (${citedBy.length})`}
+                empty="Nothing cites this GIP."
+                rows={citedBy.map((e) => ({ gip: e.src, weight: e.weight, last: e.lastMention }))}
+                byGip={byGip}
+                onPick={setFocus}
+              />
+              <CitationList
+                title={`Cites (${cites.length})`}
+                empty="This GIP's thread cites no other GIP."
+                rows={cites.map((e) => ({ gip: e.dst, weight: e.weight, last: e.lastMention }))}
+                byGip={byGip}
+                onPick={setFocus}
+              />
+            </>
           ) : (
-            <> No chronology in this view — it answers &ldquo;what clumps together&rdquo;, which
-            the timeline cannot show. Scroll to zoom, drag to pan.</>
-          )}{" "}
-          Click a node to pin it, or an arc to pin the GIP that made the citation.
-          Plain scroll moves the page; hold <kbd>ctrl</kbd> and scroll to zoom the chart,
-          and drag to pan.
-        </p>
-      </DatasetPanel>
-
-      {selected && (
-        <DatasetPanel title={`GIP-${selected.gip}`} descriptor={ctx.descriptors.graph_nodes} groupLoaded>
-          <p className="gov-graph-focus">{selected.label}</p>
-          <KpiRow
-            items={[
-              { label: "Stage", value: selected.stage },
-              { label: "Cited by", value: fmtNum(citedBy.length) },
-              { label: "Cites", value: fmtNum(cites.length) },
-              { label: "Forum posts", value: fmtNum(selected.posts) },
-              { label: "Participants", value: fmtNum(selected.participants) },
-              {
-                label: "Votes",
-                value: selected.proposalId ? fmtNum(selected.votes) : "—",
-              },
-            ]}
-            meta={`First seen ${fmtDate(selected.firstSeen)} · last activity ${
-              fmtDate(selected.lastActivity)
-            }${selected.quorumStatus ? ` · quorum ${selected.quorumStatus}` : ""}`}
-          />
-
-          <div className="gov-graph-actions">
-            {selected.topicId !== null && selected.topicId > 0 && (
-              <button type="button" onClick={() => ctx.onEntity("forum_topic", String(selected.topicId))}>
-                Open forum topic
-              </button>
-            )}
-            {selected.proposalId !== "" && (
-              <button type="button" onClick={() => ctx.onEntity("proposal", selected.proposalId)}>
-                Open Snapshot proposal
-              </button>
-            )}
-            <button type="button" onClick={() => setFocus(null)}>Clear</button>
-          </div>
-
-          {selected.proposalId === "" && (
-            <p className="gov-caption">
-              No Snapshot proposal carries this GIP number — it was discussed but never put to a
-              vote, or the vote predates what is indexed here.
-            </p>
+            <>
+              <h3 className="gov-graph-side__head">Most cited</h3>
+              <HowToRead layout={layout} />
+              <p className="gov-caption">
+                Click a node or an arc to inspect it. These are the GIPs the forum returns to
+                most — citations received, which is the y-axis.
+              </p>
+              <CitationList
+                title=""
+                empty="No citations recorded."
+                rows={topCited}
+                byGip={byGip}
+                onPick={setFocus}
+              />
+            </>
           )}
+        </aside>
+      </div>
 
-          <div className="gov-grid-2">
-            <CitationList
-              title={`Cited by (${citedBy.length})`}
-              empty="Nothing cites this GIP."
-              rows={citedBy.map((e) => ({ gip: e.src, weight: e.weight, last: e.lastMention }))}
-              byGip={byGip}
-              onPick={setFocus}
-            />
-            <CitationList
-              title={`Cites (${cites.length})`}
-              empty="This GIP's thread cites no other GIP."
-              rows={cites.map((e) => ({ gip: e.dst, weight: e.weight, last: e.lastMention }))}
-              byGip={byGip}
-              onPick={setFocus}
-            />
-          </div>
-        </DatasetPanel>
-      )}
     </GroupGate>
+  );
+}
+
+/** Provenance for both layouts, drawn OVER the graph. The nodes and the edges
+ * come from two different queries, so both are shown — reading one without the
+ * other would misrepresent where an arc came from. */
+function GraphSql({ ctx, onClose }: { ctx: GovViewContext; onClose: () => void }) {
+  const parts = [
+    ["Nodes", ctx.descriptors.graph_nodes?.sql],
+    ["Edges", ctx.descriptors.graph_edges?.sql],
+  ].filter(([, sql]) => Boolean(sql)) as Array<[string, string]>;
+  return (
+    <div className="gov-graph-sql">
+      <div className="gov-graph-sql__head">
+        <span>{SRC}</span>
+        <button type="button" onClick={onClose}>close</button>
+      </div>
+      {parts.length === 0 ? (
+        <p>SQL not available for this view.</p>
+      ) : (
+        parts.map(([label, sql]) => (
+          <div key={label}>
+            <h4>{label}</h4>
+            <pre><code>{sql}</code></pre>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+/** What the marks mean. Lives in the side panel rather than under the chart:
+ * as a caption it was three lines of prose between the graph and the fold, and
+ * the graph needed that height more than the prose did. */
+function HowToRead({ layout }: { layout: LayoutId }) {
+  return (
+    <p className="gov-caption">
+      An edge means one GIP&apos;s forum thread <strong>mentioned</strong> another&apos;s number
+      — evidence the discussion referenced it, <strong>not</strong> that one depends on or
+      supersedes the other. Node size is forum posts.
+      {layout === "timeline" ? (
+        <> The x-axis is each GIP&apos;s first-seen date, not its number: GIP numbers run only
+        89% in date order. Arcs curve up when a newer GIP cites an older one — 141 of 156 — and
+        down in <span className="gov-graph-anomaly">amber for the 15 pointing forward</span>,
+        which happens when a thread was edited after the fact.</>
+      ) : (
+        <> No chronology here — this answers &ldquo;what clumps together&rdquo;, which the
+        timeline cannot show.</>
+      )}{" "}
+      Plain scroll moves the page; <kbd>ctrl</kbd>+scroll zooms, drag pans.
+    </p>
   );
 }
 
@@ -390,7 +443,7 @@ function CitationList({ title, empty, rows, byGip, onPick }: {
 }) {
   return (
     <div className="gov-cites">
-      <h4 className="gov-cites__head">{title}</h4>
+      {title && <h4 className="gov-cites__head">{title}</h4>}
       {rows.length === 0 ? (
         <p className="gov-caption">{empty}</p>
       ) : (
@@ -403,7 +456,7 @@ function CitationList({ title, empty, rows, byGip, onPick }: {
                   <GipBadge gip={row.gip} />
                   <span className="gov-cites__title">{other?.label ?? `GIP-${row.gip}`}</span>
                   <span className="gov-cites__n">
-                    {row.weight}&times; · {fmtDate(row.last)}
+                    {row.weight}&times;{row.last ? ` · ${fmtDate(row.last)}` : ""}
                   </span>
                 </button>
               </li>

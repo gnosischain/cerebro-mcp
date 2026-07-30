@@ -1,0 +1,30 @@
+/* Graph Explorer APP SHELL — global document rules, imported ONLY by
+ * graph-explorer-main.tsx.
+ *
+ * These two rules used to live at the top of graph-explorer.css. They are the
+ * only unscoped selectors in that 4,000-line file; everything else is `.ge-*`.
+ * Keeping them there made the stylesheet unshareable: the governance mini-app
+ * imports it to reuse the WebGL canvas subsystem, and importing it silently
+ * applied `html, body, #root { height: 100% }` and `body { overflow: hidden }`
+ * to every governance tab. That changed the height cascade app-wide and
+ * misaligned unrelated chart grids (`.gov-grid-2` pairs stopped sharing a
+ * height), because those grids size against a chain that assumed a
+ * content-height root.
+ *
+ * Split out so `graph-explorer.css` is safe for any app to import. Anything
+ * global belongs here; anything `.ge-*` belongs there.
+ */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* The Graph Explorer fills the viewport exactly and scrolls internally — the
+ * outer document must never scroll. Scoped to this app on purpose: a mini-app
+ * that reuses the canvas still wants its own page to scroll normally. */
+body {
+  overflow: hidden;
+}

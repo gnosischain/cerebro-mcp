@@ -89,8 +89,19 @@ interface Props {
   onFallbackEdgeAction?: (edgeId: string) => void;
   fallbackEdgeActionLabel?: string;
   /** Hide the force Play/Pause. Default true — every force mode now shows it;
-   * a static-layout mode (Flows-Layered) hides it via `staticLayout`. */
+   * a static-layout mode (Flows-Layered) hides it via `staticLayout`. Also
+   * hides the ⚙ Forces tuning panel: pausing and tuning are one feature, and
+   * offering sliders with no way to stop the sim is a half-control. */
   showSimControls?: boolean;
+  /**
+   * Start with the kind/relationship legend collapsed. Default true (open),
+   * which is right when this canvas owns the whole view. A host that already
+   * shows the same swatches in its own toolbar should pass false: two legends
+   * for one colour scale is noise, and the strip costs ~85px the graph wants.
+   * The `Legend ▾` button still reveals it, and a user's own toggle is still
+   * remembered per `stateKey`.
+   */
+  legendDefaultOpen?: boolean;
   /** Optional labels for the sim Play/Pause (Timeline uses "Layout" to
    * distinguish from its scrubber "Time" play). */
   simLabel?: { play: string; pause: string };
@@ -122,6 +133,7 @@ export function GraphCanvas({
   onFallbackEdgeAction,
   fallbackEdgeActionLabel = "Open transactions",
   showSimControls = true,
+  legendDefaultOpen = true,
   simLabel,
   staticLayout = false,
   children,
@@ -243,7 +255,7 @@ export function GraphCanvas({
     () => new Set(cachedCanvasState?.hiddenProfiles ?? []),
   );
   const [legendOpen, setLegendOpen] = useState(
-    () => cachedCanvasState?.legendOpen ?? true,
+    () => cachedCanvasState?.legendOpen ?? legendDefaultOpen,
   );
   // Stats chip is opt-out (compact by default, collapsible to a pill).
   const [statsOpen, setStatsOpen] = useState(
@@ -477,7 +489,7 @@ export function GraphCanvas({
           onToggleSim={toggleSim}
           simControlLabel={simLabel}
           showSimControls={showSimControls && !staticLayout}
-          showForcesPanel={!staticLayout}
+          showForcesPanel={showSimControls && !staticLayout}
           simParams={simParams}
           onSimParamsChange={onSimParamsChange}
           labelMode={labelMode}
