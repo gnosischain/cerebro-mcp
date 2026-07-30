@@ -1,4 +1,16 @@
-"""dbt engineering-knowledge tools: search_dbt_knowledge + get_dbt_change_context.
+"""Engineering-knowledge tools for the two corpora this server can see.
+
+TWO corpora, deliberately separate, because they answer different questions:
+
+  - `search_dbt_knowledge` / `get_dbt_change_context` -> dbt-cerebro's lessons and
+    per-model contracts, fetched as a REMOTE artifact. Use when changing a dbt
+    MODEL.
+  - `search_cerebro_knowledge` / `get_cerebro_change_context` -> THIS repo's own
+    lessons, shipped as package data. Use when changing cerebro-mcp's own code.
+
+Sending an agent to the wrong one is the failure this split exists to prevent: a
+ClickHouse trap in a mini-app query plane is not a dbt model hazard, and until
+these tools existed the repo could serve the former's lessons and none of its own.
 
 Serves the agent-context artifact built in the dbt-cerebro repo (lesson
 records with a status lifecycle + per-model resolved engineering contracts)
@@ -17,6 +29,7 @@ from __future__ import annotations
 from typing import Optional
 
 from cerebro_mcp.loaders.agent_context import agent_context
+from cerebro_mcp.loaders.cerebro_lessons import cerebro_lessons
 from cerebro_mcp.loaders.manifest import manifest
 
 STALE_WARNING = (
@@ -109,6 +122,21 @@ def _format_contract(name: str, entry: dict) -> str:
         lineage += f"; api marts affected (transitive): {api_count}"
     lines.append(lineage)
     return "\n".join(lines)
+
+
+def _format_cerebro_lesson(lesson: dict, full: bool = False) -> str:
+    head = (
+        f"### [{lesson.get('status', '?')}] {lesson.get('id', '?')}: "
+        f"{lesson.get('title', '')}\n"
+        f"- layer: {lesson.get('layer', '?')}\n"
+        f"- symptom: {lesson.get('symptom', '')}\n"
+        f"- scope: {lesson.get('scope', '')}\n"
+        f"- record: {lesson.get('path', '')} (last verified {lesson.get('last_verified', '?')})"
+    )
+    if not full:
+        return head
+    evidence = "\n".join(f"  - {e}" for e in (lesson.get("evidence") or []))
+    return f"{head}\n- evidence:\n{evidence}\n\n{lesson.get('body', '')}"
 
 
 def register_agent_knowledge_tools(mcp):
@@ -225,3 +253,112 @@ def register_agent_knowledge_tools(mcp):
                 "full record (detection + safe remediation)."
             )
         return "\n".join(parts)
+
+    @mcp.tool()
+    def search_cerebro_knowledge(query: str, path: Optional[str] = None, limit: int = 5) -> str:
+        """Search THIS repo's own lesson records — mistake classes cerebro-mcp has
+        already paid for (ClickHouse traps in the query planes, mini-app bundle
+        staleness, gates that silently stopped guarding, silent-empty-result SQL).
+
+        For a dbt MODEL use get_dbt_change_context instead; that is a different
+        corpus describing a different repo.
+
+        Args:
+            query: Symptom words, e.g. "returns zero rows no error",
+                   "memory limit exceeded", "ui change not showing up".
+            path: Optional repo-relative path — lessons that apply to that layer
+                  rank higher.
+            limit: Max lessons returned (default 5; the top hit includes its full body).
+
+        Returns:
+            Ranked records with status, layer, symptom, evidence and — for the top
+            hit — root cause, forbidden action, detection and safe remediation.
+        """
+        results = cerebro_lessons.search(query, path=path, limit=limit)
+        if not results:
+            return (
+                f"No cerebro-mcp lesson matches '{query}'. Try symptom words (empty, "
+                "silently, memory, stale, nondeterministic, wrong column), or browse "
+                "src/cerebro_mcp/prompts/lessons/INDEX.md. If this is a NEW mistake "
+                "class, record it with the /incident workflow "
+                "(docs/workflows/incident.md)."
+            )
+        parts = [f"# cerebro-mcp lessons matching '{query}'\n"]
+        for i, lesson in enumerate(results):
+            parts.append(_format_cerebro_lesson(lesson, full=(i == 0)))
+            parts.append("")
+        if len(results) > 1:
+            parts.append(
+                "(Only the top hit includes its full body — re-query with the exact "
+                "lesson id to read another in full.)"
+            )
+        return "\n".join(parts)
+
+    @mcp.tool()
+    def get_cerebro_change_context(paths: str, task: str = "change") -> str:
+        """Get the change packet for cerebro-mcp's OWN code BEFORE editing it: the
+        rules and known hazards for that layer, which guides to read, and how to
+        validate. Call this first when changing this repo.
+
+        For a dbt model use get_dbt_change_context; this covers cerebro-mcp itself.
+
+        Args:
+            paths: Comma-separated repo-relative paths or directories, e.g.
+                   "src/cerebro_mcp/tools/visualization/queries/cow/open_orders.sql".
+            task: One of change | debug | review (tunes the guidance line).
+
+        Returns:
+            One packet per path: applicable rules, hazards (id + status + title),
+            validation commands and guides. Read-only.
+        """
+        cerebro_lessons.change_packets += 1
+        wanted = [p.strip() for p in (paths or "").split(",") if p.strip()]
+        if not wanted:
+            return "Pass at least one repo-relative path."
+        blocks = []
+        for path in wanted:
+            resolved = cerebro_lessons.resolve(path)
+            lines = [f"## {path}"]
+            lines.append(
+                "profiles: " + (", ".join(resolved["profiles"]) or "(global only)")
+            )
+            if resolved["guides"]:
+                lines.append("read first: " + ", ".join(resolved["guides"]))
+            if resolved["rules"]:
+                lines.append("\nrules:")
+                for rule in resolved["rules"]:
+                    ref = f"  [lesson: {rule['lesson']}]" if rule.get("lesson") else ""
+                    text = " ".join(str(rule.get("text", "")).split())
+                    lines.append(f"- {text}{ref}")
+            if resolved["hazards"]:
+                lines.append("\nhazards:")
+                for hid in resolved["hazards"]:
+                    lesson = cerebro_lessons.get(hid) or {}
+                    lines.append(
+                        f"- [{lesson.get('status', '?')}] {hid}: {lesson.get('title', '')}"
+                    )
+                lines.append(
+                    "  (full record: search_cerebro_knowledge(\"<lesson id>\"))"
+                )
+            if resolved["validation"]:
+                lines.append("\nvalidate with:")
+                lines.extend(f"- {v}" for v in resolved["validation"])
+            blocks.append("\n".join(lines))
+
+        guidance = {
+            "change": (
+                "Read the guides above, then check each hazard applies before you "
+                "edit. Widen an existing guard rather than adding a parallel one."
+            ),
+            "debug": (
+                "Match the symptom against the hazards above BEFORE forming a "
+                "hypothesis — over half of these were originally misdiagnosed as "
+                "something else."
+            ),
+            "review": (
+                "Check the diff against each hazard, and whether a new mistake "
+                "class needs recording (/incident)."
+            ),
+        }.get(task, "")
+        out = "\n\n".join(blocks)
+        return f"{out}\n\n---\n{guidance}" if guidance else out

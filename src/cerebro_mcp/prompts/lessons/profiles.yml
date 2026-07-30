@@ -1,0 +1,146 @@
+# Path profiles: which lessons and rules apply to which part of the repo.
+#
+# Profiles MATCH CLASSES OF PATHS — they never enumerate files. Membership is
+# resolved at query time against the path an agent names, so adding a file to a
+# directory picks up that directory's hazards with no edit here.
+#
+# Resolution order: `global` first, then every profile whose `path_prefix`
+# matches, in file order (longest/most specific last so it wins scalars). List
+# fields (rules, hazards) merge with de-dup; `guide` accumulates.
+#
+# Every `lesson:` / `hazards:` id must resolve to a record in this directory —
+# tests/test_cerebro_lessons.py fails the build otherwise.
+
+version: 1
+
+global:
+  rules:
+    - text: >-
+        The user commits their own work. Stop at "changes ready in the working
+        tree" — never `git commit`, `git push`, or stage.
+    - text: >-
+        A gate you have never seen fail has not been tested. Prove a new guard
+        rejects the input it exists to reject, then revert.
+      lesson: negated-grep-passes-when-tool-absent
+    - text: >-
+        Prefer widening an existing guard to adding a parallel one. Most rules in
+        this repo are already stated in 2-6 places; the lessons store is the
+        arbiter and other sites should cite it.
+  hazards: []
+  guide: AGENTS.md
+
+profiles:
+  - name: sql_query_files
+    description: Hand-written .sql loaded by sql_loader (mini-app query planes)
+    match:
+      path_prefix: src/cerebro_mcp/tools/visualization/queries/
+    rules:
+      - text: >-
+          `@name` is a Python-side fragment substituted by sql_loader; `{name:Type}`
+          is a ClickHouse bound parameter and must be left alone. An unused
+          fragment or an unsubstituted token RAISES rather than silently dropping
+          a filter.
+      - text: >-
+          The alias must precede FINAL — `FROM t AS x FINAL`, never
+          `FROM t FINAL AS x`.
+        lesson: ch-final-three-way-rule
+      - text: >-
+          sql_loader is lru_cached, so editing a .sql needs a SERVER RESTART to
+          take effect. A rebuilt UI bundle does not.
+        lesson: sql-loader-cache-needs-restart
+    hazards:
+      - ch-final-three-way-rule
+      - ch-cte-inlined-per-reference
+      - ch-output-alias-shadows-column
+      - ch-alias-in-where-illegal-aggregation
+      - ch-bare-limit-nondeterministic
+      - versioned-payload-positional-index
+      - sql-loader-cache-needs-restart
+    validation:
+      - .venv/bin/python -m pytest tests/test_sql_loader.py -q
+    guide: src/cerebro_mcp/tools/visualization/queries/AGENTS.md
+
+  - name: sql_emitting_python
+    description: Modules that build SQL strings in Python
+    match:
+      path_prefix: src/cerebro_mcp/semantic/
+    rules:
+      - text: >-
+          Hex columns carry no `0x` and are lowercase; an address is the last 40
+          chars of a 64-char topic word. Never wrap a column in `lower()` —
+          lowercase the PARAMETER instead, or the index is defeated.
+      - text: >-
+          These tables are ordered by block, not hash: a bare
+          `WHERE transaction_hash = ...` times out. Resolve hash to block first.
+      - text: >-
+          ClickHouse LEFT JOIN yields DEFAULT VALUES, not NULL, and
+          `sum(Nullable)` collapses an all-NULL group to 0 — neither is an
+          "unknown" marker.
+    hazards:
+      - ch-output-alias-shadows-column
+      - ch-cte-inlined-per-reference
+      - ch-bare-limit-nondeterministic
+      - dataset-column-order-is-a-contract
+      - dbt-sqlx-silently-not-compiled
+
+  - name: miniapp_backends
+    description: QuerySpec builders and dataset delivery for the mini-apps
+    match:
+      path_prefix: src/cerebro_mcp/tools/visualization/
+    rules:
+      - text: >-
+          A dataset that fails must render a visible stub; a deliberate exclusion
+          must be COUNTED. Never let either disappear.
+        lesson: failed-dataset-must-stay-visible
+      - text: >-
+          Any spec feeding a paged table needs a deterministic ORDER BY.
+        lesson: ch-bare-limit-nondeterministic
+      - text: >-
+          The devFixture must MIRROR the SQL it stands in for. A fixture row the
+          query can never return produces a dev loop that validates nothing.
+    hazards:
+      - failed-dataset-must-stay-visible
+      - dataset-column-order-is-a-contract
+      - ch-final-three-way-rule
+    guide: src/cerebro_mcp/tools/visualization/AGENTS.md
+
+  - name: miniapp_ui
+    description: React + ECharts mini-app front-ends
+    match:
+      path_prefix: ui/src/mini-apps/
+    rules:
+      - text: >-
+          Served from PREBUILT bundles — `make build-ui-<app>` or the change is
+          invisible. `make dev` serves live source and cannot reproduce a
+          bundle bug.
+        lesson: stale-prebuilt-miniapp-bundle
+      - text: >-
+          Fill the fold with the CSS flex chain, never a measured height. `100vh`
+          is wrong inside `.ma-body`, and a JS measurement usually means a broken
+          cascade elsewhere.
+        lesson: shared-stylesheet-unscoped-selectors
+      - text: >-
+          An ECharts `graph` series on `coordinateSystem: cartesian2d` emits NO
+          click events — use `scatter` + `lines`. A `lines` series with no
+          explicit lineStyle.color falls back to the palette.
+    hazards:
+      - stale-prebuilt-miniapp-bundle
+      - shared-stylesheet-unscoped-selectors
+      - failed-dataset-must-stay-visible
+    validation:
+      - npm test --prefix ui
+    guide: ui/src/mini-apps/AGENTS.md
+
+  - name: build_and_gates
+    description: Makefile targets, CI workflows and git hooks
+    match:
+      path_prefix: Makefile
+    rules:
+      - text: >-
+          Recipes run under /bin/sh. Use POSIX `grep -E`, never a negated
+          non-POSIX tool — absence becomes a pass.
+        lesson: negated-grep-passes-when-tool-absent
+    hazards:
+      - negated-grep-passes-when-tool-absent
+      - stale-prebuilt-miniapp-bundle
+    guide: AGENTS.md

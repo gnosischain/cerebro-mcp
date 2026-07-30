@@ -81,6 +81,63 @@ def manifest_models_hash(manifest_loader: Any) -> Optional[str]:
         return None
 
 
+def score_lessons(
+    lessons: Any,
+    query: str,
+    limit: int = 5,
+    boost_ids: Optional[set[str]] = None,
+) -> list[dict[str, Any]]:
+    """Rank lesson records against a query. Shared by every lesson corpus.
+
+    Extracted from AgentContextLoader.search so the repo-local corpus
+    (loaders/cerebro_lessons.py) ranks identically rather than growing a second,
+    subtly-different ranker — the retrieval evals in
+    tests/test_agent_knowledge_eval.py and tests/test_cerebro_lessons.py then
+    hold both to the same bar.
+
+    Substring token scoring, weighted by field: an id/title hit outranks a
+    symptom hit outranks a scope hit outranks a body hit, with a bonus for the
+    whole query appearing as a phrase. `boost_ids` lifts records already known to
+    be in the caller's blast radius (a dbt model's hazards, or the hazards of the
+    path an agent named). Deterministic tiebreak on id so results never reorder
+    between identical calls.
+    """
+    tokens = [t for t in query.lower().split() if len(t) > 1]
+    if not tokens:
+        return []
+    phrase = query.lower().strip()
+    boost = boost_ids or set()
+    scored: list[tuple[float, dict]] = []
+
+    for lesson in lessons:
+        title = str(lesson.get("title", "")).lower()
+        symptom = str(lesson.get("symptom", "")).lower()
+        scope = str(lesson.get("scope", "")).lower()
+        body = str(lesson.get("body", "")).lower()
+        lid = lesson.get("id", "")
+        score = 0.0
+        for t in tokens:
+            if t in lid.lower():
+                score += 3
+            if t in title:
+                score += 3
+            if t in symptom:
+                score += 2
+            if t in scope:
+                score += 1.5
+            if t in body:
+                score += 1
+        if phrase and (phrase in title or phrase in body):
+            score += 5
+        if lid in boost:
+            score += 4  # already known to be in the caller's blast radius
+        if score > 0:
+            scored.append((score, lesson))
+
+    scored.sort(key=lambda x: (-x[0], x[1].get("id", "")))
+    return [lesson for _, lesson in scored[:limit]]
+
+
 class AgentContextLoader:
     """Loads and serves the agent-context artifact (local path wins over URL)."""
 
@@ -197,12 +254,6 @@ class AgentContextLoader:
         weighted by field (title/symptom > scope > body), exact-phrase boost.
         """
         self.searches += 1
-        tokens = [t for t in query.lower().split() if len(t) > 1]
-        if not tokens:
-            return []
-        phrase = query.lower().strip()
-        scored: list[tuple[float, dict]] = []
-
         model_hazards: set[str] = set()
         if model_name:
             entry = self.get_model(model_name)
@@ -210,34 +261,9 @@ class AgentContextLoader:
                 model_hazards = {
                     h.get("id", "") for h in (entry.get("contract") or {}).get("hazards", [])
                 }
-
-        for lesson in self.lessons.values():
-            title = str(lesson.get("title", "")).lower()
-            symptom = str(lesson.get("symptom", "")).lower()
-            scope = str(lesson.get("scope", "")).lower()
-            body = str(lesson.get("body", "")).lower()
-            lid = lesson.get("id", "")
-            score = 0.0
-            for t in tokens:
-                if t in lid.lower():
-                    score += 3
-                if t in title:
-                    score += 3
-                if t in symptom:
-                    score += 2
-                if t in scope:
-                    score += 1.5
-                if t in body:
-                    score += 1
-            if phrase and (phrase in title or phrase in body):
-                score += 5
-            if lid in model_hazards:
-                score += 4  # the asking model is in this lesson's blast radius
-            if score > 0:
-                scored.append((score, lesson))
-
-        scored.sort(key=lambda x: (-x[0], x[1].get("id", "")))
-        results = [lesson for _, lesson in scored[:limit]]
+        results = score_lessons(
+            self.lessons.values(), query, limit=limit, boost_ids=model_hazards
+        )
         if results:
             self.search_hits += 1
         return results

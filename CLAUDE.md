@@ -1,5 +1,24 @@
 # Cerebro MCP — Project Instructions
 
+**Changing this repo's code?** The canonical guide is [AGENTS.md](AGENTS.md) — read it
+first, and run `get_cerebro_change_context(paths=...)` before editing. Mistake classes
+this repo has already paid for live in
+[`src/cerebro_mcp/prompts/lessons/INDEX.md`](src/cerebro_mcp/prompts/lessons/INDEX.md)
+and are searchable with `search_cerebro_knowledge(query)`.
+
+@AGENTS.md
+
+Scoped guides (read the one for the directory you touch):
+`src/cerebro_mcp/tools/visualization/AGENTS.md`,
+`src/cerebro_mcp/tools/visualization/queries/AGENTS.md`,
+`ui/src/mini-apps/AGENTS.md`, `benchmarks/AGENTS.md`.
+Vendor-neutral workflows: `docs/workflows/`.
+
+---
+
+Everything below is the **analyst runtime** contract — how to answer questions with
+the platform, not how to modify it.
+
 ## Start here: Cerebro Dispatcher
 
 For any non-trivial user request (anything beyond a single scalar question, "open report 3", or an explicit specialist invocation), start by calling:
@@ -80,7 +99,7 @@ When the user **explicitly asks for a report / dashboard / analysis**:
     - **stationarity_on_correlations** — rejects `corr(x, y)` over a series with a `date` / `month` / `week` column unless the SQL or chart metadata mentions stationarity, first-differencing, Spearman, ADF, cointegration, or `lagInFrame`.
     - **aggregator_volume_dedup** — rejects `SUM(volume_usd)` over `fct_execution_pools_daily` / `fct_execution_trades_by_protocol_daily` / `fct_execution_trades_by_token_daily` without a deduplication CTE or first-hop-only acknowledgment.
     - **discovered_model_coverage** — rejects reports where any model returned by `search_models` / `discover_models` / `discover_metrics` was not subsequently queried (`execute_query` / `start_query`) or explored (`get_model_details`) or excluded via `record_model_exclusion(name, reason)`. The discovered set is shared across model and metric discovery — sloppy `discover_metrics` floods the gate identically. **Use the batch helpers below; calling singular `record_model_exclusion` per model is the slowest possible path.**
-- All eight design principles are documented in [`src/cerebro_mcp/prompts/agents/_shared_quality_rules.md`](src/cerebro_mcp/prompts/agents/_shared_quality_rules.md). Every analysis persona references this file at the top of its operational rules.
+- All ten design principles (0–9) are documented in [`src/cerebro_mcp/prompts/agents/_shared_quality_rules.md`](src/cerebro_mcp/prompts/agents/_shared_quality_rules.md). Every analysis persona references this file at the top of its operational rules.
 
 **Batch / scope-shortcut exclusion tools** (use ONE of these; not the singular `record_model_exclusion` in a loop):
 - `record_model_exclusion_batch(model_names, reason)` — explicit list, one call.
