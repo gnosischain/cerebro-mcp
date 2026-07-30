@@ -64,6 +64,21 @@ _last_semantic_refresh = 0.0
 # underlying artifact didn't change, so a fresh `force_reload` would be a
 # no-op. We only re-evaluate when mtime advances past what's recorded here.
 _seen_artifact_mtime: dict[str, float] = {}
+#: Single-flight guard for :func:`_maybe_refresh_semantic`.
+#:
+#: That function is reached INLINE from ``_route``, which backs ``find``,
+#: ``preflight_analytics_request`` and ``query_metrics`` — so it lands on
+#: ordinary-looking calls. On a changed ETag it pulls ~32MB across five
+#: sequential HTTPS GETs whose ``requests`` timeouts are scalars, i.e.
+#: per-socket-read rather than total-request deadlines. Before this guard the
+#: TTL check and its timestamp write were separate statements, so several
+#: concurrent callers could each start their own full refresh.
+#:
+#: Acquired NON-blocking on purpose: a caller that loses the race must serve
+#: the existing snapshot, not queue behind someone else's multi-megabyte
+#: download. The loaders publish their snapshots atomically under their own
+#: locks, so reading the slightly-older snapshot is always safe.
+_semantic_refresh_lock = threading.Lock()
 BUNDLE_MANIFEST_FILENAME = "bundle_manifest.json"
 _TIME_DIMENSION_HINTS = (
     (("over time", "trend", "daily", "by day"), "day"),
@@ -671,6 +686,17 @@ def _maybe_refresh_semantic() -> None:
     (no TTL gating) and the original TTL-gated reload for the
     deployed HTTPS source.
     """
+    if not _semantic_refresh_lock.acquire(blocking=False):
+        # Another thread is already refreshing; serve the current snapshot.
+        return
+    try:
+        _maybe_refresh_semantic_locked()
+    finally:
+        _semantic_refresh_lock.release()
+
+
+def _maybe_refresh_semantic_locked() -> None:
+    """Body of :func:`_maybe_refresh_semantic`, run under the single-flight lock."""
     global _last_semantic_refresh
     advanced, advance_reason = _local_artifacts_advanced()
     if advanced:

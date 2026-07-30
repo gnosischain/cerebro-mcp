@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from typing import Optional
 from urllib.parse import quote, urlparse
@@ -196,6 +197,21 @@ class DocsLoader:
         self._content_hash: str | None = None
         self._last_load_time: float = 0.0
         self._last_refresh_error: str | None = None
+
+        # Serializes refresh-and-publish. Tool bodies now run concurrently on
+        # worker threads (runtime/offload.py), so two callers could otherwise
+        # both cross the TTL and each re-fetch the ~5MB index plus two llms.txt
+        # artifacts, and `_apply_index` could publish a torn `_docs` list.
+        self._lock = threading.RLock()
+
+        # Timestamp of the last refresh ATTEMPT, as opposed to the last
+        # attempt that actually changed content. The TTL gate must read this:
+        # `_last_load_time` only advances when the hash changes, so on an
+        # unchanged (304) index it never moves and every subsequent call
+        # re-fires all three HTTP fetches for the life of the process. That is
+        # the `search_docs` stall — a tool that looks trivial but performs
+        # three unbounded network round-trips per invocation.
+        self._last_refresh_attempt: float = 0.0
 
     def load(self) -> None:
         """Load docs index from URL or local file."""
@@ -407,26 +423,33 @@ class DocsLoader:
         changed = False
         error = None
 
-        if settings.DOCS_SEARCH_INDEX_URL:
-            result = self._fetch_index(conditional=True)
-            if result is None:
-                error = self._last_refresh_error
-            else:
-                data, new_hash = result
-                if new_hash != self._content_hash:
-                    self._raw_index_data = data
-                    self._content_hash = new_hash
-                    self._last_load_time = time.time()
-                    self._last_refresh_error = None
-                    changed = True
+        with self._lock:
+            # Stamped even when nothing changed and even on failure, so the
+            # TTL gate rate-limits ATTEMPTS. Set before the fetches so a
+            # concurrent caller that is already past the interval does not
+            # pile a second set of network round-trips onto this one.
+            self._last_refresh_attempt = time.time()
 
-        if self._load_llms_index(log_errors=False):
-            changed = True
-        if self._load_gnosis_chain_llms(log_errors=False):
-            changed = True
+            if settings.DOCS_SEARCH_INDEX_URL:
+                result = self._fetch_index(conditional=True)
+                if result is None:
+                    error = self._last_refresh_error
+                else:
+                    data, new_hash = result
+                    if new_hash != self._content_hash:
+                        self._raw_index_data = data
+                        self._content_hash = new_hash
+                        self._last_load_time = time.time()
+                        self._last_refresh_error = None
+                        changed = True
 
-        if self._raw_index_data:
-            self._apply_index(self._raw_index_data)
+            if self._load_llms_index(log_errors=False):
+                changed = True
+            if self._load_gnosis_chain_llms(log_errors=False):
+                changed = True
+
+            if self._raw_index_data:
+                self._apply_index(self._raw_index_data)
 
         return changed, error
 
@@ -580,6 +603,17 @@ class DocsLoader:
     @property
     def is_loaded(self) -> bool:
         return self._loaded
+
+    @property
+    def last_refresh_attempt(self) -> float:
+        """When a refresh was last ATTEMPTED (changed or not).
+
+        TTL gates must use this, not :attr:`last_load_time` — that one only
+        advances on a content change, so an unchanged index leaves it frozen
+        and every later call re-fetches. Falls back to ``last_load_time`` so a
+        process that only ever called ``load()`` still reports sensibly.
+        """
+        return self._last_refresh_attempt or self._last_load_time
 
     @property
     def entry_count(self) -> int:

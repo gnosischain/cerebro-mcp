@@ -727,14 +727,23 @@ def create_report_artifact(
                 chart_ids_in_content.append(cid)
                 seen.add(cid)
 
+    # Snapshot the registry ONCE under the lock, then read only the snapshot
+    # below. Tool bodies run concurrently on worker threads
+    # (runtime/offload.py), and `_prune_expired_charts` evicts on a TTL — so the
+    # old pattern of `if cid in _chart_registry: _chart_registry[cid][...]`
+    # could raise KeyError when an eviction landed between the two, and the gate
+    # could otherwise be evaluated against a registry that changed mid-pass.
+    with _chart_lock:
+        registry = dict(_chart_registry)
+
     if enforce_quality_gate:
         # Scope the gate to charts actually referenced by this report's
         # markdown. The global _chart_registry persists across sessions and
         # turns, so unreferenced legacy charts must not block a clean report.
         scoped_registry = {
-            cid: _chart_registry[cid]
+            cid: registry[cid]
             for cid in chart_ids_in_content
-            if cid in _chart_registry
+            if cid in registry
         }
         passed, reason, _warnings = state.check_report_preconditions(
             scoped_registry
@@ -745,7 +754,7 @@ def create_report_artifact(
     has_grid = "{{grid:" in content_markdown
     kpi_count = sum(
         1 for cid in chart_ids_in_content
-        if _chart_registry.get(cid, {}).get("chart_type") == "numberDisplay"
+        if registry.get(cid, {}).get("chart_type") == "numberDisplay"
     )
     if not has_grid and kpi_count >= 2:
         raise ValueError(
@@ -757,24 +766,25 @@ def create_report_artifact(
     chart_queries: dict = {}
     missing = []
     for cid in chart_ids_in_content:
-        if cid in _chart_registry:
-            chart_specs[cid] = _chart_registry[cid]["option"]
+        entry = registry.get(cid)
+        if entry is not None:
+            chart_specs[cid] = entry["option"]
             chart_queries[cid] = {
-                "sql": _chart_registry[cid].get("sql", ""),
-                "database": _chart_registry[cid].get("database", "dbt"),
-                "title": _chart_registry[cid].get("title", ""),
-                "source": _chart_registry[cid].get("source", "raw"),
+                "sql": entry.get("sql", ""),
+                "database": entry.get("database", "dbt"),
+                "title": entry.get("title", ""),
+                "source": entry.get("source", "raw"),
             }
-            source_model = _chart_registry[cid].get("source_model")
+            source_model = entry.get("source_model")
             if source_model:
                 chart_queries[cid]["source_model"] = source_model
-            rationale = _chart_registry[cid].get("rationale")
+            rationale = entry.get("rationale")
             if not rationale and explain_context:
                 from cerebro_mcp.runtime.context_enrichment import (
                     build_sql_context_block,
                 )
 
-                chart_sql = _chart_registry[cid].get("sql", "")
+                chart_sql = entry.get("sql", "")
                 if chart_sql:
                     rationale = build_sql_context_block(chart_sql)
             if rationale:
@@ -785,7 +795,7 @@ def create_report_artifact(
     if missing:
         raise ValueError(
             f"Chart IDs not found in registry: {', '.join(missing)}. "
-            f"Available: {', '.join(_chart_registry.keys()) or 'none'}."
+            f"Available: {', '.join(registry.keys()) or 'none'}."
         )
 
     rendered_html = _markdown_to_html(

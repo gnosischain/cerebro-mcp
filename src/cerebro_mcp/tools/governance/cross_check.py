@@ -8,11 +8,26 @@ import operator
 import re
 from typing import Any
 
-from cerebro_mcp.clients.clickhouse import ClickHouseManager
+from cerebro_mcp.clients.clickhouse import ClickHouseManager, QueryBudget
 from cerebro_mcp.models.custom_tool import VerificationClaim
 from cerebro_mcp.runtime.tool_output import format_results_table, truncate_response
 
 logger = logging.getLogger(__name__)
+
+#: Per-claim ceiling for the optional ``check_query``. Verification is a
+#: cross-check, not analysis — a claim that cannot be confirmed in 10s should
+#: report that rather than hold the caller.
+CHECK_QUERY_BUDGET = QueryBudget(
+    max_execution_time=10,
+    max_memory_usage=1024 * 2**20,
+    max_result_rows=1_000,
+    max_threads=2,
+)
+
+#: Hard cap on claims per call. The check queries run SERIALLY, so cost is
+#: linear in claim count; an unbounded list is an unbounded tool. Well above
+#: any realistic report (the gates require a handful of numbers, not dozens).
+MAX_CLAIMS_PER_CALL = 25
 
 # ---------------------------------------------------------------------------
 # Safe formula evaluator
@@ -117,11 +132,17 @@ def _verify_one_claim(
 
             state.record_execute_query(claim.check_query)
 
+            # Bounded: verify_numbers runs a caller-supplied query PER CLAIM,
+            # serially. Without a budget each one could sit at the full
+            # statement timeout, so a handful of slow claims turned a
+            # verification step into a multi-minute tool. CHECK_QUERY_BUDGET
+            # caps execution time per claim.
             executed = ch.run_query(
                 claim.check_query,
                 database=claim.check_database,
                 requested_max_rows=5,
                 audience="tool",
+                query_budget=CHECK_QUERY_BUDGET,
             )
             result = ch.build_query_result(executed, max_rows=5)
 
@@ -216,6 +237,13 @@ def register_cross_check_tools(mcp, ch: ClickHouseManager):
 
         if not claims:
             return "Error: No claims provided"
+
+        if len(claims) > MAX_CLAIMS_PER_CALL:
+            return (
+                f"Error: {len(claims)} claims exceeds the {MAX_CLAIMS_PER_CALL} "
+                "per-call limit. Each claim's check_query runs serially, so a "
+                "long list becomes an unbounded tool call. Split into batches."
+            )
 
         sections = ["## Verification Results\n"]
         passed_count = 0

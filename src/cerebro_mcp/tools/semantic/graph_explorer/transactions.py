@@ -181,6 +181,28 @@ _DISCOVERY_MIN_SLICE = timedelta(hours=1)
 _DISCOVERY_DEFAULT_TILE_SECONDS = 24 * 60 * 60
 _DISCOVERY_MIN_TILE_SECONDS = int(_DISCOVERY_MIN_SLICE.total_seconds())
 _DISCOVERY_WALL_BUDGET_SECONDS = 3.75
+
+# Bounds for the pure-RPC address sweep (`_discover_address_transactions_rpc`).
+# That path is NOT covered by _DISCOVERY_WALL_BUDGET_SECONDS above, which guards
+# only ClickHouse discovery. Unbounded, a genesis-to-head sweep fans out to
+# hundreds of eth_getLogs calls that each split recursively on failure — the
+# most likely cause of the observed multi-minute server stalls, since before
+# `install_tool_offload` this ran inline on the event loop.
+#
+# 90s is generous for a legitimate incremental (post-cursor) sweep while still
+# terminating; the job cap rejects a genesis-scale request up front with an
+# actionable message instead of discovering the cost 90 seconds later.
+_RPC_DISCOVERY_WALL_BUDGET_SECONDS = 90.0
+_RPC_DISCOVERY_MAX_JOBS = 64
+
+
+class RpcSweepTimeout(RuntimeError):
+    """The RPC log sweep exceeded its wall-clock budget."""
+
+
+class RpcSweepTooLarge(RuntimeError):
+    """The requested block window needs more eth_getLogs jobs than allowed."""
+
 _DISCOVERY_HORIZON_QUERY_BUDGET = QueryBudget(
     # A one-second guard made the four-relation UNION horizon probe fail at
     # ~1004ms on the live warehouse, which incorrectly made every discovery
@@ -822,7 +844,21 @@ def _discover_address_transactions_rpc(
         [TRANSFER_TOPIC0, None, topic_address],
     )
 
+    # Wall-clock bound for the whole RPC sweep. Without it this is the single
+    # most expensive tool in the server: a genesis-to-head scan fans out to
+    # (head / chunk_size) * 2 jobs, and each failed job splits RECURSIVELY down
+    # to min_chunk_size, so the call tree is unbounded in both breadth and
+    # depth. `_DISCOVERY_WALL_BUDGET_SECONDS` above guards only the ClickHouse
+    # discovery path, never this one.
+    rpc_deadline = time.monotonic() + _RPC_DISCOVERY_WALL_BUDGET_SECONDS
+
     def fetch_window(lo: int, hi: int, topics_filter: list[Any]) -> list[dict[str, Any]]:
+        if time.monotonic() > rpc_deadline:
+            raise RpcSweepTimeout(
+                f"RPC log sweep exceeded its "
+                f"{_RPC_DISCOVERY_WALL_BUDGET_SECONDS:.0f}s budget before "
+                f"blocks {lo}-{hi}"
+            )
         last_error: Exception | None = None
         for _attempt in range(2):
             try:
@@ -871,14 +907,28 @@ def _discover_address_transactions_rpc(
         hi = min(head, lo + chunk_size - 1)
         jobs.extend((lo, hi, topic_filter) for topic_filter in directions)
 
+    if len(jobs) > _RPC_DISCOVERY_MAX_JOBS:
+        raise RpcSweepTooLarge(
+            f"RPC log sweep would need {len(jobs)} eth_getLogs jobs for blocks "
+            f"{start}-{head} (limit {_RPC_DISCOVERY_MAX_JOBS}). Narrow the "
+            f"window with after_block, or use the indexed ClickHouse path."
+        )
+
     logs: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(jobs)))) as pool:
+    pool = ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(jobs))))
+    try:
         futures = {
             pool.submit(fetch_window, lo, hi, topic_filter): (lo, hi)
             for lo, hi, topic_filter in jobs
         }
         for future in as_completed(futures):
             logs.extend(future.result())
+    finally:
+        # NOT `with ThreadPoolExecutor(...)`: its __exit__ is
+        # shutdown(wait=True), so a raising future.result() still waited for
+        # every remaining job to finish — turning one failure into a full-sweep
+        # stall. Cancel what has not started and return immediately.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     allowed_tokens = {
         _normalize_node_id(value) for value in (tokens or []) if value

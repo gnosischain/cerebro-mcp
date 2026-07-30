@@ -277,8 +277,15 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             # Sprint 3 — register a new workflow in the event log. Failures
             # in the event_store_sync helper are silenced; storyteller
             # operation must never fail because observability did.
-            _session["id"] = _uuid.uuid4().hex[:16]
-            record_storyteller_session_started(_session["id"])
+            #
+            # Hold the id in a local and pass THAT, rather than re-reading
+            # `_session["id"]`: tool bodies run concurrently on worker threads
+            # (runtime/offload.py), so a second start_session landing between
+            # the write and the read would make this call register the other
+            # session's id.
+            session_id = _uuid.uuid4().hex[:16]
+            _session["id"] = session_id
+            record_storyteller_session_started(session_id)
             return _ok(snap, "Storyteller session started.")
         except Exception as exc:  # pragma: no cover - defensive
             return _err(exc)

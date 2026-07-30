@@ -30,6 +30,7 @@ then slot 0.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -65,6 +66,13 @@ _cache: dict[str, tuple[float, AbiRecord]] = {}
 _negative_cache: dict[str, float] = {}
 NEGATIVE_CACHE_TTL_SECONDS = 120
 
+#: Guards BOTH dicts above. Tool bodies run on worker threads (see
+#: ``runtime/offload.py::install_tool_offload``), so two resolutions can now
+#: interleave here. The read-then-pop and len-then-pop sequences below are not
+#: atomic, so without this a concurrent eviction raises StopIteration from
+#: ``next(iter(...))`` on an emptied dict, or resurrects a just-expired entry.
+_cache_lock = threading.Lock()
+
 
 def _cache_key(chain_id: int, address: str, target: str) -> str:
     """Chain + address + target.
@@ -82,38 +90,42 @@ def _cache_key(chain_id: int, address: str, target: str) -> str:
 
 def _cache_get(chain_id: int, address: str, target: str) -> AbiRecord | None:
     key = _cache_key(chain_id, address, target)
-    hit = _cache.get(key)
-    if not hit:
-        return None
-    ts, rec = hit
-    if time.time() - ts > settings.ABI_CACHE_TTL_SECONDS:
-        _cache.pop(key, None)
-        return None
-    return rec
+    with _cache_lock:
+        hit = _cache.get(key)
+        if not hit:
+            return None
+        ts, rec = hit
+        if time.time() - ts > settings.ABI_CACHE_TTL_SECONDS:
+            _cache.pop(key, None)
+            return None
+        return rec
 
 
 def _cache_set(chain_id: int, address: str, target: str, record: AbiRecord) -> None:
-    if len(_cache) >= settings.ABI_CACHE_MAX_ENTRIES:
-        # FIFO eviction — cheap; resolver is not on a hot path.
-        _cache.pop(next(iter(_cache)))
-    _cache[_cache_key(chain_id, address, target)] = (time.time(), record)
+    with _cache_lock:
+        if len(_cache) >= settings.ABI_CACHE_MAX_ENTRIES:
+            # FIFO eviction — cheap; resolver is not on a hot path.
+            _cache.pop(next(iter(_cache)))
+        _cache[_cache_key(chain_id, address, target)] = (time.time(), record)
 
 
 def _negative_cached(chain_id: int, address: str, target: str) -> bool:
     key = _cache_key(chain_id, address, target)
-    ts = _negative_cache.get(key)
-    if ts is None:
-        return False
-    if time.time() - ts > NEGATIVE_CACHE_TTL_SECONDS:
-        _negative_cache.pop(key, None)
-        return False
-    return True
+    with _cache_lock:
+        ts = _negative_cache.get(key)
+        if ts is None:
+            return False
+        if time.time() - ts > NEGATIVE_CACHE_TTL_SECONDS:
+            _negative_cache.pop(key, None)
+            return False
+        return True
 
 
 def _negative_cache_set(chain_id: int, address: str, target: str) -> None:
-    if len(_negative_cache) >= settings.ABI_CACHE_MAX_ENTRIES:
-        _negative_cache.pop(next(iter(_negative_cache)))
-    _negative_cache[_cache_key(chain_id, address, target)] = time.time()
+    with _cache_lock:
+        if len(_negative_cache) >= settings.ABI_CACHE_MAX_ENTRIES:
+            _negative_cache.pop(next(iter(_negative_cache)))
+        _negative_cache[_cache_key(chain_id, address, target)] = time.time()
 
 
 def clear_caches() -> None:
@@ -123,8 +135,9 @@ def clear_caches() -> None:
     previously 404'd — otherwise the miss is remembered for
     ``NEGATIVE_CACHE_TTL_SECONDS``. Tests use it for isolation.
     """
-    _cache.clear()
-    _negative_cache.clear()
+    with _cache_lock:
+        _cache.clear()
+        _negative_cache.clear()
 
 
 # ---------------------------------------------------------------------------

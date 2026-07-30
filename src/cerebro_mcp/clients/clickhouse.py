@@ -234,6 +234,8 @@ class ClickHouseManager:
         self._local = threading.local()
         self._schema_cache: dict[str, tuple[float, dict]] = {}
         self._table_page_cache: dict[str, tuple[float, dict]] = {}
+        # Unlike the clients above, these caches are SHARED across threads.
+        self._cache_lock = threading.Lock()
 
     def get_client(self, database: str):
         clients = getattr(self._local, "clients", None)
@@ -681,14 +683,20 @@ class ClickHouseManager:
         )
 
     def _cache_get(self, key: str, *, page_cache: bool = False) -> dict | None:
+        # Locked: the clients are thread-local but these two caches are
+        # per-MANAGER and shared, and tool bodies now run concurrently on
+        # worker threads (runtime/offload.py). The contains-then-read and
+        # len-then-del sequences are not atomic, so an interleaved eviction
+        # otherwise raises KeyError / StopIteration.
         cache = self._table_page_cache if page_cache else self._schema_cache
         ttl = self.TABLE_PAGE_CACHE_TTL if page_cache else self.SCHEMA_CACHE_TTL
-        if key in cache:
-            ts, result = cache[key]
-            if time.time() - ts < ttl:
-                return result
-            del cache[key]
-        return None
+        with self._cache_lock:
+            if key in cache:
+                ts, result = cache[key]
+                if time.time() - ts < ttl:
+                    return result
+                del cache[key]
+            return None
 
     def _cache_set(self, key: str, result: dict, *, page_cache: bool = False) -> None:
         cache = self._table_page_cache if page_cache else self._schema_cache
@@ -697,10 +705,11 @@ class ClickHouseManager:
             if page_cache
             else self.SCHEMA_CACHE_MAX_ENTRIES
         )
-        if len(cache) >= max_entries:
-            oldest_key = next(iter(cache))
-            del cache[oldest_key]
-        cache[key] = (time.time(), result)
+        with self._cache_lock:
+            if len(cache) >= max_entries:
+                oldest_key = next(iter(cache))
+                del cache[oldest_key]
+            cache[key] = (time.time(), result)
 
     @property
     def schema_cache_size(self) -> int:

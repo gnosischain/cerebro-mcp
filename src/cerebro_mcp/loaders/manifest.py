@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Optional
 
@@ -68,16 +69,25 @@ class ManifestLoader:
         self._last_load_time: float = 0.0
         self._last_refresh_error: str | None = None
 
+        # Serializes refresh-and-publish. Tool bodies run concurrently on
+        # worker threads (runtime/offload.py), so without this two callers can
+        # both cross the TTL and each fetch + parse the ~21MB manifest at once
+        # (doubling peak RSS), and a reader can observe a TORN swap — the new
+        # `_models` against the old `_parent_map`. RLock because the refresh
+        # path re-enters via _load_local_manifest.
+        self._lock = threading.RLock()
+
     def load(self) -> None:
         """Load manifest from URL or local file and build indexes."""
         result = self._fetch_manifest()
         if result:
             data, content_hash = result
             indexes = self._build_indexes_internal(data)
-            self._apply_indexes(indexes)
-            self._content_hash = content_hash
-            self._last_load_time = time.time()
-            self._loaded = True
+            with self._lock:
+                self._apply_indexes(indexes)
+                self._content_hash = content_hash
+                self._last_load_time = time.time()
+                self._loaded = True
 
     def _fetch_manifest(
         self, conditional: bool = False
@@ -166,12 +176,18 @@ class ManifestLoader:
         if new_hash == self._content_hash:
             return False, None
 
-        # Build new indexes atomically
+        # Build the new indexes OUTSIDE the lock (it is the expensive part and
+        # touches nothing shared), then publish them under it so no reader can
+        # observe a half-swapped index set.
         indexes = self._build_indexes_internal(data)
-        self._apply_indexes(indexes)
-        self._content_hash = new_hash
-        self._last_load_time = time.time()
-        self._last_refresh_error = None
+        with self._lock:
+            if new_hash == self._content_hash:
+                # Another thread published this same revision while we built.
+                return False, None
+            self._apply_indexes(indexes)
+            self._content_hash = new_hash
+            self._last_load_time = time.time()
+            self._last_refresh_error = None
         return True, None
 
     @staticmethod

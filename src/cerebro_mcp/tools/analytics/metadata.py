@@ -820,9 +820,15 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
                 QUERY_COOKBOOK,
             )
 
-            # Periodically check for docs refresh
-            if docs_index.is_loaded and docs_index.last_load_time:
-                if time.time() - docs_index.last_load_time > settings.DOCS_REFRESH_INTERVAL_SECONDS:
+            # Periodically check for docs refresh. Gated on the last refresh
+            # ATTEMPT, not the last content change: last_load_time freezes when
+            # the index is unchanged, so gating on it made every call past the
+            # interval re-fire three HTTP fetches inline.
+            if docs_index.is_loaded and docs_index.last_refresh_attempt:
+                if (
+                    time.time() - docs_index.last_refresh_attempt
+                    > settings.DOCS_REFRESH_INTERVAL_SECONDS
+                ):
                     docs_index.reload_if_changed()
 
             # 1. Score existing static sources

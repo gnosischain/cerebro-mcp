@@ -10,6 +10,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from cerebro_mcp.runtime import runtime_state
+from cerebro_mcp.runtime.offload import install_tool_offload
 from cerebro_mcp.runtime.bootstrap import (
     ensure_writable_dir,
     init_ssl_trust,
@@ -414,6 +415,22 @@ register_find_tool(mcp)
 register_load_tools_tool(mcp)
 
 install_auto_tool_tracing(mcp)
+
+# Offload every SYNC tool onto a worker thread. MUST come after every
+# `register_*` call above (including `register_find_tool` /
+# `register_load_tools_tool`), because it rewrites the tools already present in
+# the registry — anything registered later would stay inline on the event loop.
+# Order relative to `install_auto_tool_tracing` does not matter: that patches
+# `ToolManager.call_tool`, this rewrites `Tool.fn`.
+_offloaded_tool_count = install_tool_offload(mcp)
+log_event(
+    logger,
+    "tool_offload_installed",
+    wrapped=_offloaded_tool_count,
+    total=len(getattr(getattr(mcp, "_tool_manager", None), "_tools", {}) or {}),
+    max_threads=settings.TOOL_OFFLOAD_MAX_THREADS,
+    enabled=str(settings.TOOL_OFFLOAD_ENABLED).lower(),
+)
 
 
 @mcp.custom_route("/livez", methods=["GET"])

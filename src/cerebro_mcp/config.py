@@ -383,6 +383,25 @@ class Settings(BaseSettings):
     GRAFANA_MIN_REFRESH_SECONDS: int = 60
     GRAFANA_MAX_PANELS: int = 30
 
+    # --- Tool offload (event-loop protection) ---
+    # FastMCP runs sync tool bodies INLINE on the single asyncio event loop, so
+    # one slow tool stalls every concurrent call — observed twice in production
+    # as "every tool times out, including SELECT 1", because the request was
+    # never dispatched. `install_tool_offload` moves every sync tool onto a
+    # worker thread.
+    #
+    #   TOOL_OFFLOAD_ENABLED      Kill switch. This is a broad behavioural
+    #     change on a single-replica service, so it must be revertible by
+    #     configmap without a rebuild. Setting False restores the old inline
+    #     behavior (and the wedge).
+    #   TOOL_OFFLOAD_MAX_THREADS  Concurrency cap. Offload converts a
+    #     server-wide wedge into one slow call holding one thread token; with no
+    #     cap, enough slow calls exhaust anyio's default 40-thread pool — which
+    #     the readiness probe's ClickHouse check also borrows from — and the
+    #     wedge returns. Excess calls queue on the limiter instead.
+    TOOL_OFFLOAD_ENABLED: bool = True
+    TOOL_OFFLOAD_MAX_THREADS: int = 24
+
     # Thinking / performance tracing
     THINKING_MODE_ENABLED: bool = True
     THINKING_ALWAYS_ON: bool = True

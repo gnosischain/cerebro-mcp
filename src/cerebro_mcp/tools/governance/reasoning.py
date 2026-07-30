@@ -118,6 +118,8 @@ _EXCLUDED_AUTO_TRACE_TOOLS = {
     "get_performance_stats",
 }
 _PRUNE_INTERVAL_SECONDS = 3600
+#: Ceiling on how many session traces ``get_performance_stats`` will read.
+MAX_PERFORMANCE_STATS_SESSIONS = 50
 _AUTO_TRACE_INSTALLED_ATTR = "_cerebro_auto_trace_installed"
 _AUTO_TRACE_TOOL_MANAGER_ORIGINAL_ATTR = "_cerebro_original_tool_manager_call_tool"
 _AUTO_TRACE_TOOL_MANAGER_INSTALLED_ATTR = "_cerebro_tool_manager_tracing_installed"
@@ -1609,11 +1611,22 @@ def register_reasoning_tools(mcp):
         monitoring and benchmarking MCP performance over time.
 
         Args:
-            last_n: Number of recent sessions to analyze. Default: 10.
+            last_n: Number of recent sessions to analyze, 1..50. Default: 10.
 
         Returns:
             Markdown report with aggregated performance metrics.
         """
+        # Clamped. `_list_session_files` only applies its slice `if last_n > 0`,
+        # so 0 or a negative value read and JSON-parsed EVERY session file in
+        # the retention window — multi-megabyte files, and more of them now that
+        # sessions rotate on a step cap. That made a stats call an unbounded
+        # tool.
+        try:
+            last_n = int(last_n)
+        except (TypeError, ValueError):
+            last_n = 10
+        last_n = max(1, min(last_n, MAX_PERFORMANCE_STATS_SESSIONS))
+
         files = _list_session_files(last_n=last_n)
 
         if not files:

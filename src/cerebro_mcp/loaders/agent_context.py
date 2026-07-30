@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Optional
 
@@ -147,6 +148,13 @@ class AgentContextLoader:
         self._last_load_time = 0.0
         self._last_error: Optional[str] = None
         self._etag: Optional[str] = None
+        # Serializes refresh so concurrent tool bodies (now on worker threads,
+        # see runtime/offload.py) cannot each fetch the artifact at once.
+        self._lock = threading.RLock()
+        # Last refresh ATTEMPT. `_last_load_time` advances only on SUCCESS, so
+        # gating the TTL on it means a failing or 304 endpoint is re-fetched on
+        # every single call for the life of the process.
+        self._last_refresh_attempt = 0.0
         # Observability counters (surfaced via stats()).
         self.searches = 0
         self.search_hits = 0
@@ -187,7 +195,13 @@ class AgentContextLoader:
 
     def maybe_refresh(self) -> None:
         ttl = settings.AGENT_CONTEXT_REFRESH_INTERVAL_SECONDS
-        if not self._loaded or (time.time() - self._last_load_time) > ttl:
+        with self._lock:
+            attempted = self._last_refresh_attempt or self._last_load_time
+            if self._loaded and (time.time() - attempted) <= ttl:
+                return
+            # Stamp BEFORE the fetch: on failure this is what stops the retry
+            # from firing again on the very next tool call.
+            self._last_refresh_attempt = time.time()
             try:
                 self.load()
             except Exception as exc:  # pragma: no cover - network trouble
