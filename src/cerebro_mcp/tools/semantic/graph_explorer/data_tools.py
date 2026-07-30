@@ -191,7 +191,12 @@ def register_data_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 "warnings": ["no seed_ids provided"],
             }
         hops = max(1, min(int(hops), constants.MAX_HOPS))
-        max_nodes = max(1, int(max_nodes))
+        # Upper bound too, not just a floor. `node_cap` limits how much data
+        # comes back but not how long the walk takes — each hop issues a query
+        # per profile group — so an unbounded cap combined with MAX_HOPS made
+        # this an arbitrarily long tool call. Paired with the wall budget passed
+        # to bfs_expand below.
+        max_nodes = max(1, min(int(max_nodes), constants.MAX_NEIGHBORS_CEILING))
         if profiles:
             profile_objs = [
                 p for p in (profile_by_id(pid) for pid in profiles) if p is not None
@@ -227,6 +232,7 @@ def register_data_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
                 for s in seeds
             },
             visited=set(seeds),
+            wall_budget_seconds=constants.NEIGHBORHOOD_WALL_BUDGET_SECONDS,
         )
         warnings.extend(walk.warnings)
         graph_telemetry.record(

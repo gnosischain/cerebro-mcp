@@ -383,6 +383,18 @@ class Settings(BaseSettings):
     GRAFANA_MIN_REFRESH_SECONDS: int = 60
     GRAFANA_MAX_PANELS: int = 30
 
+    # --- Outbound HTTP ---
+    # `requests` takes either a scalar timeout or a (connect, read) tuple. A
+    # SCALAR is a per-socket-operation deadline, NOT a total-request one: a
+    # server that dribbles one byte every N-1 seconds keeps the connection alive
+    # forever. Splitting out a short connect timeout makes an unreachable or
+    # black-holed host fail in seconds instead of waiting the full read budget.
+    #
+    # This bounds each PHASE, not total duration — `requests` has no total
+    # timeout. Sequences that issue several fetches in a row (the semantic
+    # refresh does five) still need their own wall-clock guard on top.
+    HTTP_CONNECT_TIMEOUT_SECONDS: float = 5.0
+
     # --- Tool offload (event-loop protection) ---
     # FastMCP runs sync tool bodies INLINE on the single asyncio event loop, so
     # one slow tool stalls every concurrent call — observed twice in production

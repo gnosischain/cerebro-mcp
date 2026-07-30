@@ -900,7 +900,26 @@ def create_report_artifact(
         pass
 
     if reset_session_state:
-        state.reset()
+        # DELIBERATELY NOT `state.reset()`.
+        #
+        # `state` is a module-level singleton shared by EVERY concurrent client
+        # (session_state.py). Under stateless Streamable HTTP the SDK issues no
+        # mcp-session-id and builds a fresh transport per request, so there is
+        # no server-side handle spanning a conversation — the singleton is the
+        # only thing that lets evidence from call 1 satisfy a gate in call 8.
+        #
+        # The consequence was that finishing a report here wiped the
+        # discovery evidence of any OTHER conversation mid-analysis. Observed
+        # signature: `exclude_all_discovered_except` returning
+        # "Excluded 0 / kept 0", after which that session's report gate could
+        # never be satisfied. This was the only writer that cleared
+        # `discovered_models` (preflight only sets flags, it does not clear).
+        #
+        # Not resetting makes the gates more PERMISSIVE for a second report in
+        # the same conversation, which is a far smaller harm than destroying a
+        # concurrent analysis. Real per-session isolation needs a session
+        # identity, i.e. stateful transport — a separate decision.
+        pass
 
     link_line = f"\n\n[Open Report]({file_uri})" if file_uri else ""
 

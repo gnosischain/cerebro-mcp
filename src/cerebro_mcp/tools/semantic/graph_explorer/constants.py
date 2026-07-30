@@ -19,6 +19,16 @@ MAX_HOPS = 50
 # schemas) — a CONTRACT pinned by eval fixtures; never change silently.
 DEFAULT_WINDOW_DAYS = 365
 DEFAULT_MAX_NEIGHBORS = 250
+# Hard ceiling on a caller-supplied max_nodes. The DEFAULT above is a contract
+# pinned by eval fixtures and is unchanged; this only bounds how far a caller
+# may raise it. Without a ceiling, max_nodes combined with MAX_HOPS = 50 made
+# explore_neighborhood an arbitrarily long call (one query per profile per hop),
+# which — before tool bodies were offloaded — stalled the whole server.
+MAX_NEIGHBORS_CEILING = 5000
+# Wall-clock budget for a single explore_neighborhood traversal. Node caps limit
+# how much data returns, not how long the walk runs; exceeding this is reported
+# as truncation, because a partial neighborhood is a useful answer.
+NEIGHBORHOOD_WALL_BUDGET_SECONDS = 45.0
 # UI-ONLY defaults, published to the frontend via view_state["limits"] so the
 # two ends can never drift again. Split from the public tool defaults above.
 DEFAULT_EXPAND_DEPTH = 1   # one double-click = one comprehensible hop

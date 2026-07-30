@@ -120,7 +120,9 @@ class ManifestLoader:
                         headers["If-Modified-Since"] = self._last_modified_header
 
                 resp = requests.get(
-                    settings.DBT_MANIFEST_URL, timeout=timeout, headers=headers
+                    settings.DBT_MANIFEST_URL,
+                    timeout=(settings.HTTP_CONNECT_TIMEOUT_SECONDS, timeout),
+                    headers=headers,
                 )
 
                 if resp.status_code == 304:

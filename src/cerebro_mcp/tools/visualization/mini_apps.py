@@ -597,6 +597,7 @@ def load_bounded_dataset(
     database: str = "dbt",
     parameters: dict[str, Any] | None = None,
     force_refresh: bool = False,
+    query_budget: QueryBudget | None = None,
 ) -> CachedDataset:
     """Return a ``CachedDataset`` sized via the dataset-mode rules.
 
@@ -623,7 +624,12 @@ def load_bounded_dataset(
     # 2. count — a failure here means the user's SQL is broken; propagate.
     try:
         count_result = run_structured_query(
-            ch, _wrap_count(sql), database, parameters, requested_max_rows=1
+            ch,
+            _wrap_count(sql),
+            database,
+            parameters,
+            requested_max_rows=1,
+            query_budget=query_budget,
         )
         total = int(count_result.rows[0][0]) if count_result.rows else 0
     except Exception as exc:
@@ -640,6 +646,7 @@ def load_bounded_dataset(
                 database,
                 parameters,
                 requested_max_rows=SAMPLE_TARGET,
+                query_budget=query_budget,
             )
         except Exception as exc:
             logger.warning("mini_app exact load failed: %s", exc)
@@ -670,6 +677,7 @@ def load_bounded_dataset(
                     database,
                     parameters,
                     requested_max_rows=SAMPLE_TARGET,
+                    query_budget=query_budget,
                 )
             except Exception as exc:
                 logger.info(

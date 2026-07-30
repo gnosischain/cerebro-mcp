@@ -290,6 +290,23 @@ def read_function_history(
             return True
         return False
 
+    # Check BEFORE starting the pool, not only inside it. `deadline` was
+    # computed at entry but consumed only as run_pool's `should_stop`, so the
+    # bound resolution above — a binary search per bound, tens of RPC calls,
+    # each with its own timeout and retries — ran entirely unguarded and could
+    # exhaust the budget before a single sample was taken. Without this, a slow
+    # setup then ALSO launched the full sweep.
+    #
+    # Residual: this bounds the compounding, not the setup itself. Fully
+    # bounding it means threading the deadline into `_resolve_bound` /
+    # `block_at_timestamp`.
+    if past_deadline():
+        warnings.append(
+            "Deadline exhausted while resolving block bounds; no samples were "
+            "taken. Narrow the window (`since`) or reduce `points`."
+        )
+        blocks = []
+
     for point in run_pool(
         sample,
         blocks,

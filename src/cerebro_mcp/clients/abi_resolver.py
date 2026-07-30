@@ -309,6 +309,9 @@ _HTTP_HEADERS = {
 #: Per-source timeout. Deliberately below RPC_TIMEOUT_SECONDS: a full miss
 #: walks Blockscout then Sourcify, and these tools are synchronous.
 _EXPLORER_TIMEOUT_SECONDS = 8
+#: (connect, read) — a scalar here is a per-socket-read deadline, so an
+#: unreachable explorer would hang for the full read budget on connect.
+_EXPLORER_TIMEOUT = (settings.HTTP_CONNECT_TIMEOUT_SECONDS, _EXPLORER_TIMEOUT_SECONDS)
 
 
 def _blockscout_api_base(chain_id: int) -> str:
@@ -328,7 +331,7 @@ def _fetch_blockscout(address: str, chain_id: int) -> dict[str, Any]:
         raise ValueError("no Blockscout instance for this chain")
     resp = requests.get(
         f"{base}/smart-contracts/{address.lower()}",
-        timeout=_EXPLORER_TIMEOUT_SECONDS,
+        timeout=_EXPLORER_TIMEOUT,
         headers=_HTTP_HEADERS,
     )
     resp.raise_for_status()
@@ -388,7 +391,7 @@ def _resolve_from_sourcify(
         resp = requests.get(
             f"{SOURCIFY_API_BASE}/v2/contract/{int(chain_id)}/{address}",
             params={"fields": "abi"},
-            timeout=_EXPLORER_TIMEOUT_SECONDS,
+            timeout=_EXPLORER_TIMEOUT,
             headers=_HTTP_HEADERS,
         )
         if resp.status_code == 404:

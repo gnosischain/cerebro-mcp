@@ -131,10 +131,13 @@ def test_get_docs_context_uses_full_artifact_when_requested():
             result = loader.get_context(full=True)
 
     assert result == "full context"
-    mock_get.assert_called_once_with(
-        "https://docs.analytics.gnosis.io/llms-ctx-full.txt",
-        timeout=30,
-    )
+    assert mock_get.call_count == 1
+    args, kwargs = mock_get.call_args
+    assert args[0] == "https://docs.analytics.gnosis.io/llms-ctx-full.txt"
+    # (connect, read) tuple rather than a scalar — a scalar timeout is a
+    # per-socket-operation deadline and never bounded a slow connect. `settings`
+    # is a MagicMock here, so assert on the read component only.
+    assert kwargs["timeout"][1] == 30
 
 
 def test_parse_gnosis_chain_llms_splits_file_chunks_and_urls():

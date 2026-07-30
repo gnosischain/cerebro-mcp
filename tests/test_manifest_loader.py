@@ -490,9 +490,14 @@ class TestConditionalGET:
                 mock_settings.DBT_MANIFEST_URL = "http://test.com/manifest.json"
                 loader.reload_if_changed()
 
-        # Verify the timeout was 1 second
+        # Verify the READ timeout was 1 second. The timeout is a
+        # (connect, read) tuple: a scalar is a per-socket-operation deadline,
+        # so it never bounded a slow-connecting host. Only the read component
+        # carries this test's intent — the short conditional-GET budget.
+        # `settings` is patched with a MagicMock here, so the connect component
+        # is not a real number — only assert the read component.
         call_kwargs = mock_get.call_args[1]
-        assert call_kwargs["timeout"] == 1
+        assert call_kwargs["timeout"][1] == 1
 
     def test_content_hash_dedup(self):
         """Same content should not trigger index rebuild."""

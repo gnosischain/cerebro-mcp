@@ -1137,7 +1137,13 @@ def register_ui_tools(mcp, ch: ClickHouseManager) -> dict[str, Any]:
         existing_edge_count = len(initial_edges)
         existing_node_count = len(initial_nodes)
         warnings: list[str] = list(source_failures)
-        hops_to_run = max(1, int(hops or 1))
+        # Clamp to the REMAINING session budget, which is what the docstring
+        # promises. The guard above only refuses to start once current_hops has
+        # already reached MAX_HOPS; it never bounded a single call, so
+        # `hops=1000` ran 1000 hops in one go (each hop = one query per profile
+        # group) and only the RECORDED total was clamped afterwards at :1389.
+        hops_remaining = max(1, constants.MAX_HOPS - current_hops)
+        hops_to_run = max(1, min(int(hops or 1), hops_remaining))
 
         # Frontier construction. Two intents share this tool:
         #  - Expanding a SPECIFIC node (usually selected): frontier is that

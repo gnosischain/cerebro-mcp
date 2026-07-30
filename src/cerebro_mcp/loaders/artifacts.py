@@ -211,7 +211,11 @@ class ArtifactLoader:
                     headers["If-None-Match"] = self._etag
                 if conditional and self._last_modified_header:
                     headers["If-Modified-Since"] = self._last_modified_header
-                response = requests.get(self._url, timeout=timeout, headers=headers)
+                response = requests.get(
+                    self._url,
+                    timeout=(settings.HTTP_CONNECT_TIMEOUT_SECONDS, timeout),
+                    headers=headers,
+                )
                 if response.status_code == 304:
                     return None
                 if response.status_code == 200:

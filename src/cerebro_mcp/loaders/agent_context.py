@@ -224,7 +224,11 @@ class AgentContextLoader:
             return None
         headers = {"If-None-Match": self._etag} if self._etag else {}
         try:
-            resp = requests.get(url, headers=headers, timeout=30)
+            resp = requests.get(
+                url,
+                headers=headers,
+                timeout=(settings.HTTP_CONNECT_TIMEOUT_SECONDS, 30),
+            )
             if resp.status_code == 304:
                 self._last_load_time = time.time()
                 return None

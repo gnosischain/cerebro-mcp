@@ -248,7 +248,7 @@ class DocsLoader:
 
                 resp = requests.get(
                     settings.DOCS_SEARCH_INDEX_URL,
-                    timeout=timeout,
+                    timeout=(settings.HTTP_CONNECT_TIMEOUT_SECONDS, timeout),
                     headers=headers,
                 )
 
@@ -321,7 +321,10 @@ class DocsLoader:
             return self._artifact_cache[url]
 
         try:
-            resp = requests.get(url, timeout=30)
+            resp = requests.get(
+                url,
+                timeout=(settings.HTTP_CONNECT_TIMEOUT_SECONDS, 30),
+            )
         except Exception:
             return None
 
@@ -337,7 +340,10 @@ class DocsLoader:
             return False
 
         try:
-            resp = requests.get(overview_url, timeout=30)
+            resp = requests.get(
+                overview_url,
+                timeout=(settings.HTTP_CONNECT_TIMEOUT_SECONDS, 30),
+            )
         except Exception as exc:
             if log_errors:
                 logger.warning("Error fetching docs overview URL: %s", exc)
@@ -363,7 +369,10 @@ class DocsLoader:
             return False
 
         try:
-            resp = requests.get(settings.GNOSIS_CHAIN_DOCS_LLM_URL, timeout=30)
+            resp = requests.get(
+                settings.GNOSIS_CHAIN_DOCS_LLM_URL,
+                timeout=(settings.HTTP_CONNECT_TIMEOUT_SECONDS, 30),
+            )
         except Exception as exc:
             if log_errors:
                 logger.warning("Error fetching Gnosis Chain docs llms URL: %s", exc)

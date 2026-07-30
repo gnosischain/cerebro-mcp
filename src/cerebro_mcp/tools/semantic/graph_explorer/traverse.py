@@ -17,6 +17,7 @@ profiles on that hop; kinds are learned from returned nodes for later hops.
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -180,6 +181,7 @@ def bfs_expand(
     initial_edges: dict[str, dict[str, Any]] | None = None,
     visited: set[str] | None = None,
     fetch: Callable[..., tuple[list[dict], list[dict], list[str]]] | None = None,
+    wall_budget_seconds: float | None = None,
 ) -> TraversalResult:
     """THE bounded multi-hop BFS (see module docstring for the two modes).
 
@@ -199,8 +201,25 @@ def bfs_expand(
     current: list[tuple[str, str]] = list(frontier)
     hops_to_run = max(1, int(hops or 1))
 
+    # Wall-clock guard. The node-count bounds below (`node_cap`,
+    # `per_hop_budget`) cap how much data comes BACK, not how long the walk
+    # takes: each hop issues a ClickHouse query per profile group, so a
+    # many-hop walk with a large cap can run far longer than any caller
+    # expects. Treated as truncation, not an error — a partial neighborhood is
+    # a useful answer, a stalled tool is not.
+    deadline = (
+        time.monotonic() + wall_budget_seconds
+        if wall_budget_seconds and wall_budget_seconds > 0
+        else None
+    )
+
     for hop_round in range(hops_to_run):
         if not current:
+            break
+        if deadline is not None and time.monotonic() > deadline:
+            if per_hop_budget is not None:
+                result.truncated_at_hop = hop_round
+            result.truncated = True
             break
         remaining_global = node_cap - len(result.nodes)
         if remaining_global <= 0:
