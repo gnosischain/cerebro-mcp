@@ -208,3 +208,31 @@ def test_path_boost_lifts_a_lesson_that_applies_to_that_layer():
     assert any(x in cerebro_lessons.resolve(
         "src/cerebro_mcp/tools/visualization/queries/x.sql")["hazards"] for x in scoped)
     assert generic  # the unboosted call is the control
+
+
+def test_stopwords_do_not_outrank_a_real_symptom_match():
+    """Matching is SUBSTRING, so a two-letter stopword is nearly a wildcard.
+
+    `no` hits "not", "none", "known", "cannot"; `is` hits "this", "exists". With
+    a title hit weighted above a symptom hit, a record whose TITLE merely
+    contained "is ... not" outranked the record whose SYMPTOM matched `class`,
+    `border` AND `background` — for a query about a CSS rule not applying. The
+    stopword filter is what stops a well-worded query being decided by its glue.
+    """
+    from cerebro_mcp.loaders.agent_context import _QUERY_STOPWORDS, score_lessons
+
+    # The exact regression: glue words must not carry the query.
+    hits = [l["id"] for l in cerebro_lessons.search(
+        "class is applied but no border or background", limit=3)]
+    assert hits[0] == "css-undefined-token-drops-rule", hits
+
+    # A query made only of stopwords must still return something rather than
+    # silently finding nothing — the filter falls back rather than emptying.
+    assert score_lessons(list(cerebro_lessons.lessons.values()), "is the a", limit=3)
+
+    # The list stays closed-class: nothing domain-bearing may be added to it, or
+    # real queries start losing terms.
+    for meaningful in ("sql", "usd", "vp", "id", "ttl", "final", "cte", "css"):
+        assert meaningful not in _QUERY_STOPWORDS, (
+            f"{meaningful!r} carries meaning in this corpus and must stay searchable"
+        )

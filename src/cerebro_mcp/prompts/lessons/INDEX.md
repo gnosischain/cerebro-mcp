@@ -87,6 +87,16 @@ separate corpus.
   GIP citation arc bowed downward past the y=0 floor and was clipped away; the guard
   had asserted the two signs were opposite, which was true and yet exactly the bug.
 
+## Runtime and configuration
+
+- [default-off-flag-fails-silently](default-off-flag-fails-silently.md)
+  `enforced` — a subsystem behind a default-off flag reads as healthy when it is
+  simply not running. `SEMANTIC_ENABLED` defaults False, so the deployed remote
+  served an empty graph catalog and no metric discovery while ClickHouse, the
+  manifest and the docs index were all green — nothing in `system_status`
+  distinguished it from a working server. Second instance of that observable, after
+  a swallowed loader `NameError` produced exactly the same silence.
+
 ## Build, deploy and gates
 
 - [stale-prebuilt-miniapp-bundle](stale-prebuilt-miniapp-bundle.md) `observed` — the

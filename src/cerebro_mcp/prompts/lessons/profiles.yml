@@ -26,7 +26,14 @@ global:
         Prefer widening an existing guard to adding a parallel one. Most rules in
         this repo are already stated in 2-6 places; the lessons store is the
         arbiter and other sites should cite it.
-  hazards: []
+    - text: >-
+        A capability behind a default-off flag or an optional artifact MUST report
+        its state in system_status. Otherwise a deployment that merely forgot the
+        env var is indistinguishable from a healthy one, and "the probes are
+        green" stops meaning anything.
+      lesson: default-off-flag-fails-silently
+  hazards:
+    - default-off-flag-fails-silently
   guide: AGENTS.md
 
 profiles:

@@ -82,6 +82,25 @@ def manifest_models_hash(manifest_loader: Any) -> Optional[str]:
         return None
 
 
+#: Words carrying no retrieval signal, dropped before scoring.
+#:
+#: Matching is SUBSTRING, not word-boundary, so a two-letter stopword is close to
+#: a wildcard: `no` hits "not", "none", "known", "cannot"; `is` hits "this",
+#: "exists", "analysis". Combined with the field weights — a title hit outranks a
+#: symptom hit — that let a record whose TITLE merely contained "is ... not"
+#: outrank the record whose SYMPTOM matched `class`, `border` and `background`
+#: for the query "class is applied but no border or background".
+#:
+#: Kept deliberately short and closed-class. Anything domain-bearing stays: `id`,
+#: `sql`, `usd`, `vp`, `ttl` are all short and all meaningful here.
+_QUERY_STOPWORDS = frozenset({
+    "is", "it", "in", "on", "at", "to", "of", "or", "and", "but", "no", "not",
+    "the", "a", "an", "as", "by", "be", "if", "so", "do", "my", "we", "you",
+    "for", "was", "are", "has", "had", "with", "that", "this", "then", "than",
+    "from", "into", "when", "what", "why", "how", "does", "did", "will",
+})
+
+
 def score_lessons(
     lessons: Any,
     query: str,
@@ -103,7 +122,14 @@ def score_lessons(
     path an agent named). Deterministic tiebreak on id so results never reorder
     between identical calls.
     """
-    tokens = [t for t in query.lower().split() if len(t) > 1]
+    tokens = [
+        t for t in query.lower().split()
+        if len(t) > 1 and t not in _QUERY_STOPWORDS
+    ]
+    if not tokens:
+        # Every term was a stopword — fall back rather than return nothing, so a
+        # degenerate query still ranks by phrase instead of silently finding zero.
+        tokens = [t for t in query.lower().split() if len(t) > 1]
     if not tokens:
         return []
     phrase = query.lower().strip()
