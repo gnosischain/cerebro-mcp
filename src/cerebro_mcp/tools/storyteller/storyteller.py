@@ -215,6 +215,8 @@ def register_storyteller_tools(mcp, ch=None) -> None:
         record_storyteller_gate_failed,
         record_storyteller_handoff_completed,
         record_storyteller_phase_advanced,
+        list_storyteller_sessions,
+        load_latest_storyteller_snapshot,
         record_storyteller_session_started,
         record_storyteller_state_snapshot,
         record_storyteller_storyboard_recorded,
@@ -335,6 +337,71 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             snap = storyteller_state.snapshot()
             return _ok(snap, "Storyteller status.")
         except Exception as exc:  # pragma: no cover
+            return _err(exc)
+
+    @mcp.tool()
+    def storyteller_resume_session(session_id: str = "") -> CallToolResult:
+        """Recover a storyteller session from durable state.
+
+        Call with no argument to list recoverable sessions; call with a
+        `session_id` to rehydrate one into the live session.
+
+        Why this exists: storyteller state is an in-process singleton, so a
+        restart or a stuck gate used to make finished work unreachable. A
+        pipeline that had passed every gate — storyboard, visual specs, final
+        story, clarity review — was stranded because one boolean could not be
+        recorded, and restarting to clear it would have destroyed the rest.
+        Artifacts are now snapshotted after every mutation; this is the read
+        side of that.
+
+        Args:
+            session_id: The session to restore. Omit to list candidates.
+        """
+        try:
+            if not session_id:
+                sessions = list_storyteller_sessions()
+                if not sessions:
+                    return _ok(
+                        storyteller_state.snapshot(),
+                        "No recoverable storyteller sessions found.",
+                    )
+                lines = [
+                    f"- `{s['session_id']}` ({s['status']})" for s in sessions
+                ]
+                return CallToolResult(
+                    content=[TextContent(
+                        type="text",
+                        text=(
+                            "Recoverable storyteller sessions, most recent "
+                            "first. Re-run with `session_id` to restore:\n"
+                            + "\n".join(lines)
+                        ),
+                    )],
+                    structuredContent={
+                        "sessions": sessions,
+                        "count": len(sessions),
+                    },
+                )
+
+            payload = load_latest_storyteller_snapshot(session_id)
+            if payload is None:
+                raise RuntimeError(
+                    f"No durable snapshot for session '{session_id}'. Call "
+                    "`storyteller_resume_session` with no argument to list "
+                    "what is recoverable."
+                )
+
+            storyteller_state.restore_from_payload(payload)
+            # Adopt the id, or subsequent mutations would snapshot to a NEW
+            # workflow and silently fork the trail we just recovered from.
+            _session["id"] = session_id
+            snap = storyteller_state.snapshot()
+            return _ok(
+                snap,
+                f"Restored storyteller session `{session_id}` at phase "
+                f"'{snap.phase}'.",
+            )
+        except Exception as exc:
             return _err(exc)
 
     # ── Context phase ───────────────────────────────────────────────

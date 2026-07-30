@@ -87,6 +87,15 @@ separate corpus.
   GIP citation arc bowed downward past the y=0 floor and was clipped away; the guard
   had asserted the two signs were opposite, which was true and yet exactly the bug.
 
+## Gates and workflow
+
+- [late-gate-one-gap-at-a-time](late-gate-one-gap-at-a-time.md) `enforced` — the
+  report gate fires only after every chart exists and used to name one unmet
+  requirement per call. A campaign session with 28 queries and 7 charts was told
+  "no dimensional breakdown", abandoned the report and wrote markdown files
+  instead; it actually had TWO gaps, so complying once would have been refused
+  again. A late gate that rations its feedback gets abandoned, not satisfied.
+
 ## Runtime and configuration
 
 - [silenced-write-can-still-block](silenced-write-can-still-block.md) `enforced` —

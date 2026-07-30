@@ -56,6 +56,33 @@ def _format_chart_gate_reason(missing: list[str]) -> str:
     )
 
 
+def _format_report_gate_reason(gaps: list[str]) -> str:
+    """Render all unmet report composition requirements as one message.
+
+    The report tier's requirements are only discoverable at
+    `generate_report` time, once every chart already exists. Returning them
+    one per call meant a caller learned "add a series_field chart" after
+    building seven without one, then learned the next requirement on the
+    following round trip. A real session responded by abandoning the report
+    and delivering markdown files instead.
+
+    Single gap is returned verbatim so existing substring assertions and the
+    original wording survive; multiple gaps are bundled with an explicit next
+    action, because the failure arrives at the point where the caller is most
+    likely to give up rather than iterate.
+    """
+    if len(gaps) == 1:
+        return gaps[0]
+    bullets = "\n".join(f"- {item}" for item in gaps)
+    return (
+        "Report quality gate: several requirements are unmet. Fix ALL of "
+        "them in one pass — add the missing chart(s) with a single "
+        "`generate_charts` batch call and run any missing quer(ies) — then "
+        "retry `generate_report`. Do NOT abandon the report or fall back to "
+        "writing markdown files.\n" + bullets
+    )
+
+
 @dataclass
 class SessionState:
     # Discovery tracking
@@ -496,13 +523,28 @@ class SessionState:
                         ), []
                     return True, "", []
 
+            # Collect EVERY unmet composition requirement, then report them
+            # together — mirroring `_collect_common_chart_gaps_unlocked` /
+            # `_format_chart_gate_reason` on the chart gate.
+            #
+            # These used to return one at a time. That is the worst possible
+            # ordering for the caller: the requirements are only discoverable
+            # at generate_report time, AFTER every chart has been built, so a
+            # session learned "you need a series_field chart" once it had
+            # already produced seven flat time series — and then had to learn
+            # the next requirement on the following round trip. Observed
+            # outcome: a session with 28 queries and 7 charts hit the
+            # dimensional-breakdown rule and abandoned the report entirely,
+            # delivering markdown files instead of a report artifact.
+            gaps: list[str] = []
+
             min_charts = settings.MIN_CHARTS_FOR_REPORT
             if len(chart_registry) < min_charts:
-                return False, (
+                gaps.append(
                     f"Insufficient charts: Generated {len(chart_registry)} "
                     f"chart(s), but the minimum required for a report is "
                     f"{min_charts}."
-                ), []
+                )
 
             if settings.REQUIRE_CHART_DIVERSITY:
                 has_trend = any(
@@ -514,20 +556,20 @@ class SessionState:
                     for v in chart_registry.values()
                 )
                 if not has_trend and not has_breakdown:
-                    return False, (
+                    gaps.append(
                         "Chart diversity lacking: Report must include at "
                         "least one trend chart (line/area) or one breakdown "
                         "chart (bar/pie)."
-                    ), []
+                    )
 
             min_queries = settings.MIN_EXPLORATORY_QUERIES
             if self.execute_query_count < min_queries:
-                return False, (
+                gaps.append(
                     f"Insufficient exploration: Run at least {min_queries} "
                     f"exploratory queries (EDA, distribution checks, "
                     f"dimensional queries) before generating a report. "
                     f"(Currently run: {self.execute_query_count})."
-                ), []
+                )
 
             min_stats = settings.MIN_STATISTICAL_QUERIES
             if self.statistical_query_count < min_stats:
@@ -554,12 +596,12 @@ class SessionState:
                     for v in chart_registry.values()
                 )
                 if not has_dimensional:
-                    return False, (
+                    gaps.append(
                         "No dimensional breakdown: At least one chart must "
                         "use series_field to show data split by a dimension "
                         "(token, action type, segment, etc.), or use a "
                         "pie/treemap/heatmap/sankey chart type."
-                    ), []
+                    )
 
             if settings.REQUIRE_RELATIONAL_CHART:
                 has_relational = any(
@@ -568,12 +610,15 @@ class SessionState:
                 )
                 has_correlation = self.correlation_query_count >= 1
                 if not has_relational and not has_correlation:
-                    return False, (
+                    gaps.append(
                         "No relational analysis: At least one scatter/"
                         "heatmap chart OR one correlation query (corr(), "
                         "covarPop(), simpleLinearRegression()) is required "
                         "for multi-dimensional analysis."
-                    ), []
+                    )
+
+            if gaps:
+                return False, _format_report_gate_reason(gaps), warnings
 
             if self.execute_query_count < 5 and self.generate_chart_count > 0:
                 warnings.append(

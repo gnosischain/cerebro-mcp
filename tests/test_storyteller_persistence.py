@@ -44,12 +44,17 @@ def pipeline(monkeypatch):
     storyteller.register_storyteller_tools(mcp)
     mgr = mcp._tool_manager
 
+    def call_raw(name, args):
+        return asyncio.run(mgr.call_tool(name, args))
+
     def call(name, args):
-        result = asyncio.run(mgr.call_tool(name, args))
+        result = call_raw(name, args)
         # Storyteller tools return isError results rather than raising, so a
         # silent failure here would make the whole test vacuous.
         assert not getattr(result, "isError", False), f"{name} failed: {result}"
         return result
+
+    call.raw = call_raw
 
     yield call, storyteller_state, es
 
@@ -198,6 +203,64 @@ def test_round_trip_is_lossless(pipeline):
     before = state.to_payload()
     state.restore_from_payload(before)
     assert state.to_payload() == before
+
+
+def test_resume_tool_recovers_a_session_end_to_end(pipeline):
+    """The read side. Persistence that only Python can reach is not recovery.
+
+    This is the loop the incident needed: build, lose the process, list what
+    survived, restore it, and continue from the recorded phase.
+    """
+    call, state, es = pipeline
+    _build(call)
+
+    # Lose the in-memory session, as a restart would.
+    state.start_session()
+    assert state.final_story_markdown == ""
+
+    listed = call("storyteller_resume_session", {})
+    sessions = (listed.structuredContent or {}).get("sessions") or []
+    assert sessions, "resume tool listed no recoverable sessions"
+    session_id = sessions[0]["session_id"]
+
+    call("storyteller_resume_session", {"session_id": session_id})
+
+    assert state.final_story_markdown == STORY_MARKDOWN
+    assert state.final_story_title == "Eleven years of Gnosis"
+    assert len(state.visual_specs) == 3
+    assert state.phase == "critique"
+
+
+def test_resume_keeps_writing_to_the_same_session(pipeline):
+    """After restoring, further mutations must extend the SAME trail.
+
+    If the tool did not adopt the session id, the next snapshot would open a
+    second workflow and the recovered history would silently fork.
+    """
+    call, state, es = pipeline
+    _build(call)
+    before = {s["session_id"] for s in es.list_storyteller_sessions()}
+
+    state.start_session()
+    session_id = sorted(before)[0]
+    call("storyteller_resume_session", {"session_id": session_id})
+    call(
+        "storyteller_run_clarity_checks",
+        {"checks": [{"test": "title_only_readthrough", "passed": True}]},
+    )
+
+    after = {s["session_id"] for s in es.list_storyteller_sessions()}
+    assert after == before, f"resume forked the trail: {after - before}"
+
+
+def test_resume_reports_an_unknown_session_as_an_error(pipeline):
+    """A missing session must fail loudly, not hand back an empty session that
+    looks restored."""
+    call, state, es = pipeline
+    result = call.raw(
+        "storyteller_resume_session", {"session_id": "does-not-exist"}
+    )
+    assert getattr(result, "isError", False), "an unknown session must fail loudly"
 
 
 def test_charts_survive_a_restart(pipeline):
