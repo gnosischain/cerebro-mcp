@@ -519,6 +519,54 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
         if docs_index.last_refresh_error:
             lines.append(f"- **Last refresh error:** {docs_index.last_refresh_error}")
 
+        # Semantic layer
+        #
+        # Reported explicitly because its absence is SILENT everywhere else.
+        # SEMANTIC_ENABLED defaults to False, and when it is off
+        # `SemanticLoader.load()` returns None, so every semantic tool answers
+        # "Semantic snapshot unavailable", `search_graph_catalog` returns zero
+        # rows, and the Graph Explorer draws no relationships — with ClickHouse
+        # connected, the manifest loaded and the docs index loaded, because those
+        # use different loaders and are not gated by this flag. A deployment that
+        # merely forgot the env var looks identical to a healthy one in every
+        # other line of this report; that cost a full diagnostic session once.
+        lines.append("\n## Semantic Layer\n")
+        lines.append(f"- **SEMANTIC_ENABLED:** {settings.SEMANTIC_ENABLED}")
+        if not settings.SEMANTIC_ENABLED:
+            lines.append(
+                "- **Snapshot:** DISABLED — metrics discovery, the graph catalog "
+                "and Graph Explorer relationships are all off. Set "
+                "`SEMANTIC_ENABLED=true` to enable."
+            )
+        else:
+            try:
+                from cerebro_mcp.semantic.graph_profiles import current_snapshot
+
+                snap = current_snapshot()
+            except Exception as exc:  # pragma: no cover - defensive
+                snap = None
+                lines.append(f"- **Snapshot import error:** {exc}")
+            if snap is None:
+                lines.append(
+                    "- **Snapshot:** enabled but NOT LOADED — the registry "
+                    "artifact failed to fetch or parse. Check the source below "
+                    "and the loader's last error."
+                )
+            else:
+                lines.append(
+                    f"- **Snapshot:** loaded "
+                    f"({len(getattr(snap, 'models', {}) or {})} models, "
+                    f"{len(getattr(snap, 'metrics', {}) or {})} metrics)"
+                )
+        lines.append(
+            f"- **Registry source:** "
+            f"{settings.SEMANTIC_REGISTRY_URL or settings.SEMANTIC_REGISTRY_PATH or 'none'}"
+        )
+        lines.append(
+            f"- **Graph catalog source:** "
+            f"{settings.SEMANTIC_GRAPH_CATALOG_URL or settings.SEMANTIC_GRAPH_CATALOG_PATH or 'none'}"
+        )
+
         # Config
         lines.append("\n## Config\n")
         lines.append(f"- MAX_ROWS: {settings.MAX_ROWS}")
