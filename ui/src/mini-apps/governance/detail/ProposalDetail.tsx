@@ -11,10 +11,10 @@ import { MarkdownBody } from "../components/MarkdownBody";
 import { QuorumBadge } from "../components/QuorumBadge";
 import { SignalingNote } from "../components/SignalingNote";
 import { VoteChoiceCell } from "../components/VoteChoiceCell";
-import { activityComboOption } from "../model/chartOptions";
+import { UNSUPPORTED_CHOICE, voteTrendOption } from "../model/chartOptions";
 import { pairChoices, type ChoiceEntry } from "../model/choices";
 import { COLUMN_LABELS, hiddenColumnsFor } from "../model/columns";
-import { rowsToObjects } from "../../shared/rowDataset";
+import { finite, rowsToObjects } from "../../shared/rowDataset";
 import { parseActivity, parseLinks } from "../model/parseRows";
 import { shortAddr } from "../../../utils/format";
 import { dataset, firstRow, fmtNum, pickNumber, pickString, useDataset, type GovViewContext } from "../sections/common";
@@ -56,11 +56,27 @@ export function ProposalDetail({ ctx }: { ctx: GovViewContext }) {
     || (identifier ? `${SNAPSHOT_SPACE_URL}${identifier}` : "");
   const links = parseLinks(dataset(ctx, "proposal_forum_links"));
 
+  // Per-choice cumulative VP + the quorum threshold — the two things the
+  // Snapshot proposal page shows. The quorum comes off the trend rows rather
+  // than the detail row so the chart and its threshold are always read from one
+  // query; `quorum_vp` is NULL where the proposal predates quorum being
+  // configured (106 of 253), and no line is drawn for those.
   const voteTrendDs = useDataset(ctx, "proposal_vote_trend");
-  const voteTrendSpec = useMemo(() => activityComboOption(parseActivity(voteTrendDs), [
-    { field: "votes", label: "Votes", type: "bar" },
-    { field: "cumulative_vp", label: "Cumulative VP", type: "line", yAxisIndex: 1 },
-  ], "cumulative VP"), [voteTrendDs]);
+  const voteTrendRows = useMemo(() => parseActivity(voteTrendDs), [voteTrendDs]);
+  const trendQuorum = useMemo(() => {
+    const withQuorum = voteTrendRows.find((r) => finite(r.quorum_vp));
+    return withQuorum ? Number(withQuorum.quorum_vp) : null;
+  }, [voteTrendRows]);
+  const voteTrendSpec = useMemo(
+    () => voteTrendOption(voteTrendRows, { quorumVp: trendQuorum }),
+    [voteTrendRows, trendQuorum],
+  );
+  const unsupportedVotes = useMemo(
+    () => voteTrendRows
+      .filter((r) => String(r.choice) === UNSUPPORTED_CHOICE)
+      .reduce((n, r) => Math.max(n, Number(r.cumulative_votes) || 0), 0),
+    [voteTrendRows],
+  );
 
   return (
     <div className="gov-entity">
@@ -140,6 +156,21 @@ export function ProposalDetail({ ctx }: { ctx: GovViewContext }) {
           sourceModel="governance_db"
           spec={voteTrendSpec}
         />
+        <p className="gov-caption">
+          {trendQuorum === null
+            ? "Cumulative voting power per choice. Quorum unspecified for this proposal — the space had none configured before 2024-01-19, so no threshold is drawn."
+            : "Cumulative voting power per choice, against the quorum threshold. Quorum applies to the total across choices, not to any single one."}
+          {unsupportedVotes > 0 ? (
+            <>
+              {" "}
+              <strong>{fmtNum(unsupportedVotes)}</strong> vote(s) use a choice
+              shape this chart cannot attribute (ranked-choice records an ordered
+              array, not a single selection). They are shown as their own series
+              rather than dropped, and their voting power still counts toward the
+              total.
+            </>
+          ) : null}
+        </p>
       </DatasetPanel>
 
       <DatasetPanel

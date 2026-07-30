@@ -32,6 +32,125 @@ export interface ActivitySeriesDef {
   yAxisIndex?: 0 | 1;
 }
 
+/** Fixed hues for the three choices a Snapshot `basic` proposal always uses, so
+ * For/Against read the same way here as on the proposal page. Fixed rather than
+ * palette-assigned because the direction IS the information — if the hue moved
+ * with legend order, "which way did it go" would need the legend to answer.
+ * Anything else (custom single-choice labels) falls through to the palette. */
+const CHOICE_COLORS: Record<string, string> = {
+  for: "#4ADE80",
+  yes: "#4ADE80",
+  against: "#F87171",
+  no: "#F87171",
+  abstain: "#94A3B8",
+};
+/** The bucket that holds votes whose `choice` shape the SQL could not resolve
+ * (today: the one ranked-choice proposal). Amber, not grey — it is a disclosure,
+ * not a neutral category. Must match the literal in proposal_vote_trend.sql. */
+export const UNSUPPORTED_CHOICE = "unsupported choice shape";
+
+/** Cumulative voting power per choice over the voting window, with the quorum
+ * threshold drawn as a horizontal line.
+ *
+ * This replaced a single votes/cumulative-VP pair that answered neither question
+ * the Snapshot proposal page answers: which way the vote is going, and whether it
+ * has cleared quorum. One line per choice answers the first; the markLine answers
+ * the second.
+ *
+ * `quorumVp` is NULL for 106 of 253 proposals — every one before 2024-01-19, when
+ * the space had no quorum configured. No line is drawn in that case, because a
+ * threshold at zero would assert a bar that every proposal trivially clears. The
+ * caller discloses "unspecified" alongside. */
+export function voteTrendOption(
+  rows: ActivityRow[],
+  opts: { quorumVp?: number | null } = {},
+): EChartsOption {
+  const buckets = [...new Set(rows.map((r) => String(r.bucket)))].sort();
+  const choices = [...new Set(rows.map((r) => String(r.choice ?? "")))]
+    .filter(Boolean)
+    // Unsupported last, so it reads as a footnote rather than a peer.
+    .sort((a, b) =>
+      a === UNSUPPORTED_CHOICE ? 1 : b === UNSUPPORTED_CHOICE ? -1 : a.localeCompare(b),
+    );
+  const at = new Map(rows.map((r) => [`${r.bucket}|${r.choice}`, r]));
+  const quorum = finite(opts.quorumVp) ? Number(opts.quorumVp) : null;
+
+  const series = choices.map((choice) => {
+    const unsupported = choice === UNSUPPORTED_CHOICE;
+    const color = unsupported
+      ? "#FBBF24"
+      : CHOICE_COLORS[choice.toLowerCase()];
+    let carried = 0;
+    return {
+      name: choice,
+      type: "line" as const,
+      showSymbol: false,
+      smooth: false,
+      // Cumulative VP is a step function: it holds flat between votes rather
+      // than sliding, and a smoothed line would invent movement in the gaps.
+      step: "end" as const,
+      // ONE lineStyle. An earlier version set a base `{width: 2}` and then
+      // spread a second `lineStyle` for the unsupported case, which silently
+      // replaced the base rather than merging with it.
+      lineStyle: { width: 2, ...(unsupported ? { type: "dashed" as const } : {}) },
+      ...(color ? { itemStyle: { color } } : {}),
+      data: buckets.map((bucket) => {
+        const row = at.get(`${bucket}|${choice}`);
+        // Carry the last cumulative value across buckets where this choice got
+        // no votes; a gap would render as a drop to zero.
+        if (row && finite(row.cumulative_vp)) carried = Number(row.cumulative_vp);
+        return carried;
+      }),
+    };
+  });
+
+  return {
+    tooltip: { trigger: "axis" },
+    legend: { show: true, textStyle: { fontFamily: LABEL_FONT, fontSize: 11 } },
+    grid: { left: 66, right: 24, top: 42, bottom: 48 },
+    xAxis: {
+      type: "category",
+      data: buckets,
+      name: "per hour",
+      nameTextStyle: { fontFamily: LABEL_FONT, fontSize: 10 },
+      axisLabel: { fontFamily: LABEL_FONT, fontSize: 10 },
+    },
+    yAxis: {
+      type: "value",
+      name: "cumulative VP",
+      nameTextStyle: { fontFamily: LABEL_FONT, fontSize: 10 },
+      axisLabel: { fontFamily: LABEL_FONT, fontSize: 10 },
+    },
+    dataZoom: insideZoom,
+    series: [
+      ...series,
+      // The quorum threshold rides on an empty series so it owns a legend entry
+      // and can be toggled, without adding a data line.
+      ...(quorum !== null
+        ? [{
+            name: "Quorum",
+            type: "line" as const,
+            data: [],
+            itemStyle: { color: "#FBBF24" },
+            markLine: {
+              silent: true,
+              symbol: "none",
+              lineStyle: { color: "#FBBF24", type: "dashed" as const, width: 1.5 },
+              label: {
+                formatter: `Quorum ${Math.round(quorum).toLocaleString()}`,
+                fontFamily: LABEL_FONT,
+                fontSize: 10,
+                position: "insideEndTop" as const,
+              },
+              data: [{ yAxis: quorum }],
+            },
+          }]
+        : []),
+    ],
+    _cerebro_height: "420px",
+  } as EChartsOption;
+}
+
 /** Time-bucketed activity combo (bars + lines). The bucket unit comes from
  * the rows' `bucket_unit` constant column, not from view state. */
 export function activityComboOption(

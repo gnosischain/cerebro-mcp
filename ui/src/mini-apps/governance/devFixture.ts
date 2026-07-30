@@ -338,13 +338,27 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     ),
     proposal_vote_trend: descriptor(
       "proposal_vote_trend",
-      ["bucket", "votes", "vp", "cumulative_votes", "cumulative_vp", "bucket_unit"],
+      // MIRRORS proposal_vote_trend.sql: one row per (bucket, choice), with the
+      // cumulative columns already accumulated PER CHOICE and a constant
+      // quorum_vp. A fixture at the old one-row-per-bucket shape would make the
+      // per-choice chart look correct in dev while the real query returns
+      // something it cannot draw.
+      ["bucket", "choice", "votes", "vp", "cumulative_votes", "cumulative_vp", "quorum_vp", "bucket_unit"],
       [
-        ["2026-05-02T10:00:00", 40, 22000, 40, 22000, "hour"],
-        ["2026-05-02T14:00:00", 60, 31000, 100, 53000, "hour"],
-        ["2026-05-03T09:00:00", 55, 18000, 155, 71000, "hour"],
-        ["2026-05-05T12:00:00", 120, 30000, 275, 101000, "hour"],
-        ["2026-05-08T20:00:00", 137, 19000, 412, 120000, "hour"],
+        ["2026-05-02T10:00:00", "For", 30, 20000, 30, 20000, 75000, "hour"],
+        ["2026-05-02T10:00:00", "Against", 10, 2000, 10, 2000, 75000, "hour"],
+        ["2026-05-02T14:00:00", "For", 45, 28000, 75, 48000, 75000, "hour"],
+        ["2026-05-02T14:00:00", "Against", 15, 3000, 25, 5000, 75000, "hour"],
+        ["2026-05-03T09:00:00", "For", 40, 16000, 115, 64000, 75000, "hour"],
+        ["2026-05-03T09:00:00", "Abstain", 15, 2000, 15, 2000, 75000, "hour"],
+        // Crosses the quorum line here, so the dev view exercises the markLine.
+        ["2026-05-05T12:00:00", "For", 100, 26000, 215, 90000, 75000, "hour"],
+        ["2026-05-05T12:00:00", "Against", 20, 4000, 45, 9000, 75000, "hour"],
+        ["2026-05-08T20:00:00", "For", 120, 17000, 335, 107000, 75000, "hour"],
+        // The unsupported bucket is in the fixture on purpose: it is the one
+        // shape a reader is most likely to break, and it must render as its own
+        // series with a disclosure rather than disappear.
+        ["2026-05-08T20:00:00", "unsupported choice shape", 17, 2000, 17, 2000, 75000, "hour"],
       ],
     ),
   },

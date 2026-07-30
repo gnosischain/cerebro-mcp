@@ -187,17 +187,36 @@ async def _run_case(mcp, case: WorkflowCase, tool_names: set[str]) -> CaseResult
                 )
                 break
 
-    # A successful generate_report must fire the full session reset.
+    # A successful generate_report must NOT wipe the shared session state.
+    #
+    # This assertion used to require the opposite — `state.reset()` fired at the
+    # report boundary, so `search_models_count` had to be 0 here. That reset was
+    # removed deliberately in 91e20d6 and the reason is worth keeping in front of
+    # whoever reads this next: `state` is a module-level singleton shared by EVERY
+    # concurrent client. Under stateless Streamable HTTP the SDK issues no
+    # mcp-session-id and builds a fresh transport per request, so the singleton is
+    # the only thing carrying evidence from call 1 to a gate in call 8 — and
+    # resetting it when one conversation finished a report destroyed the discovery
+    # evidence of every other conversation mid-analysis. Observed signature:
+    # `exclude_all_discovered_except` returning "Excluded 0 / kept 0", after which
+    # that session's report gate could never be satisfied.
+    #
+    # So the check is inverted rather than deleted: it now pins the decision, and
+    # re-introducing `state.reset()` in `create_report_artifact` fails here instead
+    # of silently restoring a cross-session data race. Real per-report isolation
+    # needs a session identity (stateful transport) — a separate decision, and when
+    # it lands this assertion is the thing to revisit.
     if (
         error is None
         and case.steps
         and case.steps[-1].tool == "generate_report"
         and not case.steps[-1].expect_block
-        and state.search_models_count != 0
+        and state.search_models_count == 0
     ):
         error = (
-            "session state not reset after successful generate_report "
-            f"(search_models_count={state.search_models_count})"
+            "session state WAS reset after generate_report — the shared singleton "
+            "must survive the report boundary (see 91e20d6); a reset here wipes "
+            "concurrent conversations' discovery evidence"
         )
 
     executed = len(steps_meta)

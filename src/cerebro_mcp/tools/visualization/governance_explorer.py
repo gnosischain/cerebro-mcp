@@ -1242,9 +1242,16 @@ def _proposal_entity_specs(identifier: str) -> list[QuerySpec]:
 
     proposal_choices = sql_loader.load_sql("governance", "proposal_choices")
 
-    # Vote trend: how votes + voting power accumulated over the proposal's
-    # voting window (cgov-style turnout curve). Hourly buckets; the frontend
-    # draws per-bucket votes as bars and cumulative VP as a line.
+    # Vote trend: cumulative voting power PER CHOICE over the voting window,
+    # plus the quorum threshold — the two questions the Snapshot proposal page
+    # answers. One row per (bucket, choice); the frontend draws a stepped line
+    # per choice and a markLine at quorum.
+    #
+    # The choice index is resolved against the proposal's OWN choices array and
+    # yields NULL for any shape that is not an in-range Int64 (the space's one
+    # ranked-choice proposal), which surfaces as its own disclosed series rather
+    # than being dropped. quorum is NULL, never 0, where unspecified — 106 of
+    # 253 proposals predate the space having one. Full rationale in the .sql.
     proposal_vote_trend = sql_loader.load_sql("governance", "proposal_vote_trend")
 
     proposal_votes = sql_loader.load_sql("governance", "proposal_votes")
@@ -1261,7 +1268,9 @@ def _proposal_entity_specs(identifier: str) -> list[QuerySpec]:
                   dict(params), "all history; NULL score while pending",
                   "snapshot"),
         QuerySpec("proposal_vote_trend", "Vote trend", proposal_vote_trend,
-                  dict(params), "cumulative votes + VP over the voting window (hourly)",
+                  dict(params),
+                  "cumulative VP per choice over the voting window (hourly), "
+                  "against the quorum threshold; quorum NULL where unspecified",
                   "snapshot"),
         QuerySpec("proposal_votes", "Proposal votes", proposal_votes,
                   dict(params), "all history", "snapshot"),

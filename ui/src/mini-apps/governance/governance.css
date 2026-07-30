@@ -114,6 +114,55 @@
 .gov-post-body table{border-collapse:collapse;margin:.6em 0}
 .gov-post-body th,.gov-post-body td{border:1px solid var(--border);padding:4px 9px;font-size:12.5px}
 .gov-post-body a,.gov-link{color:var(--primary);text-decoration:underline;text-underline-offset:2px}
+/* Prose elements. NONE of these had a rule, which is why proposal bodies and
+   forum posts rendered as one undifferentiated wall of text: themes/global.css
+   applies `*{margin:0;padding:0}` and Tailwind's preflight sets
+   `h1..h6{font-size:inherit;font-weight:inherit}` and `ul,ol{list-style:none}`.
+   So every heading was body text with no space above it, and every list lost
+   both its markers and its indent. Sized against this app's 13.5px body rather
+   than reusing .report-html, whose scale is report-sized (h1 2.25rem) and whose
+   h2 carries a counter + ::before section badge that must not appear on a forum
+   post. Covers exactly what model/sanitize.ts allows through. */
+.gov-post-body h1,.gov-post-body h2,.gov-post-body h3,
+.gov-post-body h4,.gov-post-body h5,.gov-post-body h6{
+  margin:1.35em 0 .5em;color:var(--text-primary);font-weight:650;line-height:1.3}
+.gov-post-body>:first-child{margin-top:0}
+.gov-post-body h1{font-size:19px}
+.gov-post-body h2{font-size:17px}
+.gov-post-body h3{font-size:15px}
+/* Discourse commonly emits h4; .report-html has no h4 rule at all. */
+.gov-post-body h4{font-size:13.8px}
+.gov-post-body h5,.gov-post-body h6{
+  font-size:13px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.04em}
+.gov-post-body ul,.gov-post-body ol{margin:.55em 0;padding-left:1.5em}
+.gov-post-body ul{list-style:disc}
+.gov-post-body ol{list-style:decimal}
+.gov-post-body li{margin:.25em 0}
+.gov-post-body li::marker{color:var(--text-muted)}
+/* Nested lists: a second disc level is indistinguishable from the first. */
+.gov-post-body ul ul{list-style:circle}
+.gov-post-body ul ul ul{list-style:square}
+.gov-post-body li>ul,.gov-post-body li>ol{margin:.2em 0}
+.gov-post-body hr{
+  margin:1.1em 0;border:0;border-top:1px solid var(--border)}
+.gov-post-body strong,.gov-post-body b{font-weight:650;color:var(--text-primary)}
+.gov-post-body em,.gov-post-body i{font-style:italic}
+.gov-post-body s{text-decoration:line-through;color:var(--text-muted)}
+.gov-post-body sup,.gov-post-body sub{font-size:.75em;line-height:0}
+.gov-post-body sup{vertical-align:super}
+.gov-post-body sub{vertical-align:sub}
+.gov-post-body small{font-size:11.5px;color:var(--text-secondary)}
+/* Discourse wraps quoted replies in `aside.quote`; the sanitizer keeps both the
+   tag and the class, and neither had any styling. */
+.gov-post-body aside.quote{
+  margin:.7em 0;padding:8px 12px;border-left:3px solid var(--accent-border);
+  border-radius:0 6px 6px 0;background:var(--surface-2);color:var(--text-secondary)}
+.gov-post-body aside.quote>p:first-child{margin-top:0}
+.gov-post-body aside.quote>p:last-child{margin-bottom:0}
+/* The markdown path renders tables without a header rule; give thead weight so a
+   GFM table reads as a table rather than a grid of equal cells. */
+.gov-post-body thead th{background:var(--surface-2);font-weight:650;text-align:left}
+.gov-post-body table{width:auto;max-width:100%;display:block;overflow-x:auto}
 .gov-image-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border:1px dashed var(--border-hover);border-radius:999px;background:var(--surface-2);color:var(--text-secondary);font:11px var(--font-mono);cursor:pointer}
 .gov-image-chip:disabled{cursor:default;opacity:.6}
 
