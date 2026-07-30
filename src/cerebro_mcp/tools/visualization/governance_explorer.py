@@ -824,11 +824,15 @@ def _overview_specs(range_state: dict[str, Any]) -> list[QuerySpec]:
         QuerySpec("gip_pipeline", "Moving toward a GIP", gip_pipeline, {},
                   "phase-2 forum topics that have NOT yet reached a Snapshot "
                   f"vote and were active within {GIP_PIPELINE_IDLE_DAYS} days. "
-                  "phase-2 is the community's pre-vote signalling stage, which "
-                  "is what 'moving toward a GIP' means; phase-1 is the idea "
-                  "stage and is counted in ideas_hidden, not listed. Dormant "
-                  "phase-2 topics are counted in dormant_hidden. Neither is "
-                  "silently dropped. NOT date-scoped",
+                  "The tag vocabulary is exactly phase-1 / phase-2 / phase-3 — "
+                  "there is no phase-0. Measured 2026-07-30, share of each "
+                  "phase's topics that reached a vote: phase-1 5.4% (4/74), "
+                  "phase-2 71.4% (60/84), phase-3 100% (33/33). phase-2 is "
+                  "therefore what 'moving toward a GIP' means: phase-1 is "
+                  "upstream of a vote and phase-3 has already arrived at one. "
+                  "phase-1 is counted in ideas_hidden, dormant phase-2 topics "
+                  "in dormant_hidden. Neither is silently dropped. "
+                  "NOT date-scoped",
                   "forum", 300),
         QuerySpec("proposal_types", "Proposal types", proposal_types,
                   dict(time_params), "voting-window overlap", "snapshot"),
@@ -1168,7 +1172,12 @@ def _treasury_specs(
         ),
         QuerySpec(
             "treasury_coverage", "Data coverage", treasury_coverage, dict(params),
-            "what the plane can and cannot display for the held token set",
+            "what the plane can and cannot display for the held token set. "
+            "usd_price is 0%-known BY CONSTRUCTION, not by measurement: this "
+            "plane carries no price source, and valuation arrives on the client "
+            "from the CoinGecko overlay. Read it as 'no server-side pricing', "
+            "NOT as 'no token is priceable' — the holdings board shows the live "
+            "priced count",
             "treasury", 900,
         ),
         # exact_count=False on all three history datasets. `exact_count` wraps the

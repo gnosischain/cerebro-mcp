@@ -31,6 +31,7 @@ import hashlib
 import json
 import logging
 import threading
+import weakref
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -88,8 +89,37 @@ _BRIDGE_GATE_FIELDS = (
 )
 _BRIDGE_GATE_SUCCESS_TTL_SECONDS = 600.0
 _BRIDGE_GATE_FAILURE_TTL_SECONDS = 30.0
-_bridge_gate_cache: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+#: Gate verdicts, per ClickHouse handle, keyed inside by contract fingerprint.
+#:
+#: A WeakKeyDictionary, NOT a dict keyed on ``id(ch)``. The address is only
+#: unique among LIVE objects: CPython hands a freed address back to the next
+#: allocation, so a manager created after another was collected can be handed
+#: the dead one's cached verdict. Both directions are wrong and both are silent —
+#: a stale ``failed`` disables enrichment on a clean relation (the transfer graph
+#: survives, so the only symptom is edges quietly staying ``transfer``), and a
+#: stale ``ok`` enables it against a relation this process never validated.
+#:
+#: Weak keys also make the entry's lifetime the handle's lifetime, which is what
+#: the TTL was standing in for. Nothing needs to evict on the manager going away.
+_bridge_gate_cache: "weakref.WeakKeyDictionary[Any, dict[str, tuple[float, dict[str, Any]]]]" = (
+    weakref.WeakKeyDictionary()
+)
 _bridge_gate_cache_lock = threading.Lock()
+
+
+
+def _weakref_ok(obj: Any) -> bool:
+    """Whether ``obj`` can be a WeakKeyDictionary key.
+
+    Guarded rather than assumed: a manager defined with ``__slots__`` and no
+    ``__weakref__`` raises on ``weakref.ref``, and that must degrade to "do not
+    cache" rather than take the gate down.
+    """
+    try:
+        weakref.ref(obj)
+    except TypeError:
+        return False
+    return True
 
 
 @dataclass
@@ -147,12 +177,13 @@ def validate_bridge_relation_safety(
     independently sourced transfer graph.
     """
     fingerprint = _bridge_contract_fingerprint(contract)
-    cache_key = (id(ch), fingerprint)
-    use_cache = contract is not None
+    # A handle that cannot be weak-referenced simply does not get cached: losing
+    # a cache is a cost, reusing another object's verdict is a correctness bug.
+    use_cache = contract is not None and _weakref_ok(ch)
     now = time.monotonic()
     if use_cache:
         with _bridge_gate_cache_lock:
-            cached = _bridge_gate_cache.get(cache_key)
+            cached = _bridge_gate_cache.get(ch, {}).get(fingerprint)
             if cached:
                 ttl = (
                     _BRIDGE_GATE_SUCCESS_TTL_SECONDS
@@ -213,7 +244,7 @@ def validate_bridge_relation_safety(
             )
             if use_cache:
                 with _bridge_gate_cache_lock:
-                    _bridge_gate_cache[cache_key] = (
+                    _bridge_gate_cache.setdefault(ch, {})[fingerprint] = (
                         time.monotonic(),
                         dict(base),
                     )
@@ -221,7 +252,7 @@ def validate_bridge_relation_safety(
         base.update({"ok": True, "status": "verified"})
         if use_cache:
             with _bridge_gate_cache_lock:
-                _bridge_gate_cache[cache_key] = (time.monotonic(), dict(base))
+                _bridge_gate_cache.setdefault(ch, {})[fingerprint] = (time.monotonic(), dict(base))
         return base
     except Exception as exc:
         base["error"] = (
@@ -230,7 +261,7 @@ def validate_bridge_relation_safety(
         )
         if use_cache:
             with _bridge_gate_cache_lock:
-                _bridge_gate_cache[cache_key] = (time.monotonic(), dict(base))
+                _bridge_gate_cache.setdefault(ch, {})[fingerprint] = (time.monotonic(), dict(base))
         return base
 
 

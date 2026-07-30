@@ -24,6 +24,17 @@ totals AS (
 SELECT dimension, known, unknown,
        known / nullIf(known + unknown, 0) AS pct_known
 FROM totals
+-- `usd_price` is hardcoded to 0-known BY CONSTRUCTION, and that is not a
+-- measurement: this plane has no price source at all. Valuation arrives on the
+-- CLIENT, from the CoinGecko overlay (tools/visualization/coingecko.py), and is
+-- never written back here.
+--
+-- Naming the dimension anyway is deliberate — silently omitting it would read as
+-- "pricing is not a concern on this plane" when it is the single biggest gap.
+-- But the row must not be read as "0 tokens are priceable": the board two panels
+-- below routinely shows a live figure (62 of 231 held mainnet tokens at the last
+-- measurement). The `basis` string on this dataset says so; without that, the
+-- two panels flatly contradict each other.
 ARRAY JOIN
   ['decimals', 'metadata', 'symbol', 'usd_price'] AS dimension,
   [decimals_known, metadata_known, symbol_known, toUInt64(0)] AS known,

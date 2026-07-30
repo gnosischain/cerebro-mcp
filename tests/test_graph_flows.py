@@ -1395,3 +1395,68 @@ def test_security_classification():
     assert TOOL_RISK_REGISTRY["load_graph_flows"] == frozenset(
         {RiskClass.APP_ONLY}
     )
+
+
+def test_bridge_gate_cache_is_keyed_on_the_handle_not_its_address(flows_snapshot):
+    """A gate verdict must never leak between two different ClickHouse handles.
+
+    The cache used to be a module-level dict keyed on ``(id(ch), fingerprint)``.
+    An address is unique only among LIVE objects — CPython hands a freed address
+    back to the next allocation — so a manager created after another was
+    collected could be served the dead one's verdict. Both directions are silent:
+    a stale ``failed`` disables enrichment on a clean relation (the transfer
+    graph survives, so the only symptom is edges quietly staying ``transfer``),
+    and a stale ``ok`` enables it against a relation this process never checked.
+
+    It is now a WeakKeyDictionary keyed on the handle itself, so the entry's
+    lifetime IS the handle's lifetime and an address cannot alias.
+    """
+    from cerebro_mcp.tools.semantic.graph_explorer import flows
+
+    contract = {"database": "dbt", "relation": "bridges", "columns": ["a"]}
+    bridge = [[SEED, BRIDGE, TOKEN, "GNO", "gnosis-omnibridge", 123456, 4,
+               "2026-06-03", "2026-06-10"]]
+
+    def stub(**kw):
+        return FlowsStubCH(flow_edges=[_edge_row(SEED, BRIDGE, 250)],
+                           bridge_edges=bridge, **kw)
+
+    dirty = stub(bridge_quality={"blank_bridge_name_rows": 7})
+    assert flows.validate_bridge_relation_safety(dirty, contract=contract)["ok"] is False
+    # Same handle -> the verdict is cached and reused.
+    assert flows.validate_bridge_relation_safety(dirty, contract=contract)["ok"] is False
+
+    # A DIFFERENT handle over a clean relation must be judged on its own merits,
+    # whatever address it happens to land on.
+    clean = stub()
+    verdict = flows.validate_bridge_relation_safety(clean, contract=contract)
+    assert verdict["ok"] is True, "a second handle inherited the first's verdict"
+    assert verdict["status"] == "verified"
+
+
+def test_bridge_gate_cache_entry_dies_with_its_handle(flows_snapshot):
+    """Weak keys, so a collected handle cannot leave a verdict behind for an
+    address that gets reused. Without this the TTL is the only thing bounding a
+    stale verdict, and the failure TTL (30s) outlives a whole test run."""
+    import gc
+    from cerebro_mcp.tools.semantic.graph_explorer import flows
+
+    contract = {"database": "dbt", "relation": "bridges", "columns": ["a"]}
+    ch = FlowsStubCH(
+        flow_edges=[_edge_row(SEED, BRIDGE, 250)],
+        bridge_edges=[[SEED, BRIDGE, TOKEN, "GNO", "gnosis-omnibridge", 123456,
+                       4, "2026-06-03", "2026-06-10"]],
+    )
+    flows.validate_bridge_relation_safety(ch, contract=contract)
+    assert ch in flows._bridge_gate_cache
+
+    # Assert on THIS handle, not on the cache's total size: other tests in this
+    # file hold live handles, so a count-based assertion measures them too.
+    import weakref
+    ref = weakref.ref(ch)
+    del ch
+    gc.collect()
+    assert ref() is None, (
+        "the cache holds a STRONG reference to the handle — the verdict outlives "
+        "it, and an address reused by a later manager inherits it"
+    )

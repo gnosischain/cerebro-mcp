@@ -98,21 +98,36 @@ export function TokenBoard({
   defaultSort = "usd",
 }: TokenBoardProps) {
   const [sort, setSort] = useState<TokenSortKey>(defaultSort);
+  // Hide rows with no USD price. DEFAULT OFF, and that is not a preference:
+  // the price overlay is fetched asynchronously, so `usd` is null for EVERY row
+  // until it lands. Defaulting this on would show an empty board on first paint
+  // and look like a load failure. The control also disables itself while no
+  // price source has arrived, so it cannot be turned on into an empty board.
+  const [pricedOnly, setPricedOnly] = useState(false);
 
   // Denominator for the share meter. priceCoverage() is the same total the NAV
   // headline and `concentration()` use, so the meters sum to the figure printed
   // above them instead of to some private subtotal computed here.
-  const { usd: pricedTotal } = useMemo(() => priceCoverage(holdings), [holdings]);
+  const { usd: pricedTotal, priced, total } = useMemo(
+    () => priceCoverage(holdings), [holdings],
+  );
+  const unpriced = total - priced;
+  // No price has landed yet (or none is obtainable) — nothing to filter ON.
+  const pricingReady = priced > 0;
+  const filtered = useMemo(
+    () => (pricedOnly && pricingReady ? holdings.filter((h) => h.usd !== null) : holdings),
+    [holdings, pricedOnly, pricingReady],
+  );
 
   const ranked = useMemo(() => (
-    [...holdings].sort((a, b) => (
+    [...filtered].sort((a, b) => (
       descNullsLast(sortValue(a, sort), sortValue(b, sort))
       // Address last so the order is total: without it, the ~169 unpriced rows
       // all compare equal and the browser's sort may reshuffle them between
       // renders, which reads as data churn.
       || (a.token < b.token ? -1 : a.token > b.token ? 1 : 0)
     ))
-  ), [holdings, sort]);
+  ), [filtered, sort]);
 
   const cap = Number.isFinite(maxRows) && maxRows >= 1 ? Math.floor(maxRows) : DEFAULT_MAX_ROWS;
   const shown = ranked.slice(0, cap);
@@ -137,7 +152,38 @@ export function TokenBoard({
             {option.label}
           </button>
         ))}
+        {/* Its own pill, in the board's OWN strip — not the section toolbar,
+            which holds server-side filters and would cost a round trip. */}
+        <span className="gov-caption">Price</span>
+        <button
+          type="button"
+          className={pricedOnly ? "is-active" : undefined}
+          aria-pressed={pricedOnly}
+          disabled={!pricingReady}
+          title={pricingReady
+            ? `Hide the ${unpriced} holding(s) with no USD price`
+            : "No price data has loaded yet"}
+          onClick={() => setPricedOnly((on) => !on)}
+        >
+          {pricingReady ? `Priced only (${priced}/${total})` : "Priced only"}
+        </button>
       </div>
+      <p className="gov-caption">
+        {pricingReady
+          ? `${priced} of ${total} held tokens priced.`
+          : "No USD prices loaded for this scope."}
+        {" "}
+        Unpriced is <strong>unmeasured, not worthless</strong> — a token with no
+        CoinGecko listing is shown without a value, never as $0.
+        {pricedOnly ? (
+          <>
+            {" "}Hiding {unpriced} unpriced holding(s). Note this also hides the
+            spoofed look-alikes: of the tokens claiming a well-known symbol,
+            nearly all are unpriced, so the filter doubles as a spam filter and
+            you are no longer seeing them.
+          </>
+        ) : null}
+      </p>
 
       <div className="gov-token-board">
         {/* Eight head cells in the same order as every row: the grid template is

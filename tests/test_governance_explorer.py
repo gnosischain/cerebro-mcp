@@ -1766,3 +1766,79 @@ def test_gip_pipeline_exclusion_counts_leave_no_undisclosed_rows():
     # Both counts read from the not-yet-voted population the list is drawn from,
     # so they describe the same universe rather than a wider one.
     assert sql.count("FROM pending") == 3
+
+
+# ---------------------------------------------------------------------------
+# GIP forum phase vocabulary
+# ---------------------------------------------------------------------------
+
+#: The forum's phase tags, exhaustively. Measured against governance_db on
+#: 2026-07-30: `SELECT extract(lower(tags),'phase-[0-9]+') ... GROUP BY` returns
+#: exactly these three, with 74 / 84 / 33 topics.
+GIP_PHASES = ("phase-1", "phase-2", "phase-3")
+
+
+def test_the_gip_phase_vocabulary_is_exactly_three_values():
+    """There is NO `phase-0`.
+
+    It is a plausible-sounding tag that does not exist, and filtering on it
+    would return nothing — silently, since an empty pipeline list looks the same
+    as a quiet week. This pins the vocabulary so that assumption fails loudly
+    instead.
+
+    `phase-3` is the other half of the trap: it reads like a late/defunct stage,
+    but it means the proposal is ALREADY at the vote (100% of phase-3 topics
+    reached one), which is precisely why "moving toward a GIP" excludes it.
+    """
+    sql = sql_code(
+        (
+            governance_explorer.sql_loader.QUERIES_DIR
+            / "governance" / "gip_pipeline.sql"
+        ).read_text(encoding="utf-8")
+    )
+    referenced = set(re.findall(r"phase-\d+", sql))
+    assert referenced, "gip_pipeline.sql references no phase at all"
+    assert referenced <= set(GIP_PHASES), (
+        f"gip_pipeline.sql filters on {sorted(referenced - set(GIP_PHASES))}, "
+        f"which is not in the forum's vocabulary {GIP_PHASES}"
+    )
+    assert "phase-0" not in sql, "there is no phase-0"
+
+
+def test_the_pipeline_lists_phase_2_and_discloses_the_other_two():
+    """phase-1 and phase-3 are both EXCLUDED, for opposite reasons, and neither
+    may vanish: phase-1 is counted into ideas_hidden, and phase-3 is already at
+    a vote so it does not belong in a list of things approaching one."""
+    sql = sql_code(
+        (
+            governance_explorer.sql_loader.QUERIES_DIR
+            / "governance" / "gip_pipeline.sql"
+        ).read_text(encoding="utf-8")
+    )
+    assert "phase = 'phase-2'" in sql, "the listed rows must be phase-2"
+    assert "ideas_hidden" in sql, "phase-1 must be counted, not dropped"
+    assert "dormant_hidden" in sql, "idle phase-2 topics must be counted"
+
+
+def test_the_phase_vocabulary_is_written_down_where_it_is_used():
+    """The persona and the spec description both state the vocabulary, because
+    the analyst reads one and the tool caller reads the other. A rule recorded in
+    only one of them is a rule half the callers never see."""
+    persona = (
+        governance_explorer.__file__.rsplit("/tools/", 1)[0]
+        + "/prompts/agents/dao_governance_analyst.md"
+    )
+    with open(persona, encoding="utf-8") as fh:
+        text = fh.read()
+    assert "no `phase-0`" in text.lower() or "NO `phase-0`" in text
+    for phase in GIP_PHASES:
+        assert phase in text, f"{phase} missing from the persona"
+
+    spec = next(
+        s for s in governance_explorer._overview_specs(
+            governance_explorer._range_state("", ""),
+        )
+        if s.key == "gip_pipeline"
+    )
+    assert "no phase-0" in spec.basis.lower()
+    assert "phase-3" in spec.basis

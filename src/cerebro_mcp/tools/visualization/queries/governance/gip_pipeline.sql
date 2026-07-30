@@ -52,8 +52,20 @@ SELECT topic_id, title, gip, phase, posts_count, participant_count, views,
        (SELECT count() FROM pending
         WHERE phase = 'phase-1' AND days_idle <= @idle_days) AS ideas_hidden
 FROM pending
--- phase-2 ONLY. That is the community's pre-vote signalling stage, which is
--- what "moving toward a GIP" means; phase-1 ideas are disclosed as a count.
+-- phase-2 ONLY, and the numbers are why.
+--
+-- The tag vocabulary is exactly phase-1 / phase-2 / phase-3. There is NO
+-- phase-0 — a plausible-sounding tag that does not exist and must not be
+-- filtered on. Measured 2026-07-30, share of each phase's topics that went on
+-- to reach a Snapshot vote:
+--     phase-1   4/74   5.4%    idea / early discussion
+--     phase-2  60/84  71.4%    pre-vote signalling   <- this list
+--     phase-3  33/33  100%     at or through the vote
+--
+-- So phase-3 is current, not defunct: it means the proposal is ALREADY at the
+-- vote, which is why it is excluded from a list of things moving TOWARD one.
+-- phase-1 is excluded from the other end — 19 in 20 never arrive — and is
+-- disclosed as a count rather than dropped.
 WHERE phase = 'phase-2'
   AND days_idle <= @idle_days
 ORDER BY last_posted_at DESC, topic_id

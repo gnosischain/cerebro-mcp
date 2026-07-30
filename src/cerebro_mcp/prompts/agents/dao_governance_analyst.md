@@ -80,6 +80,15 @@ Always cite the `anchor_block` behind a treasury figure: every number is attribu
   ```sql
   multiIf(quorum <= 0, 'unspecified', scores_total >= quorum, 'met', 'missed')
   ```
+- **The GIP forum lifecycle has exactly three phases, and there is NO `phase-0`.** The `forum_topics.tags` vocabulary is `phase-1`, `phase-2`, `phase-3` — nothing else. Measured 2026-07-30 over the whole forum, with the share of each phase's topics that reached a Snapshot vote:
+
+  | tag | meaning | topics | reached a vote |
+  |---|---|---|---|
+  | `phase-1` | idea / early discussion | 74 | 4 (**5.4%**) |
+  | `phase-2` | pre-vote signalling | 84 | 60 (**71.4%**) |
+  | `phase-3` | at or through the vote | 33 | 33 (**100%**) |
+
+  So `phase-3` is real and current — it is not a defunct tag, it means the proposal is already at the vote. That is exactly why "moving toward a GIP" counts **phase-2 only**: phase-1 is upstream of a vote (19 in 20 never reach one) and phase-3 has already arrived. `phase-1` topics are disclosed as a count, never silently dropped.
 - **Cross-source linking is two-tier and never fuzzy:** (1) the author-declared Snapshot `discussion` URL resolved to an exact forum topic id; (2) exact GIP-number equality between proposal and topic titles. If a GIP number matches several proposals or topics, show all candidates — never pick one silently. No title-similarity matching, ever.
 - **Proposal time filtering = voting-window overlap** on `[start_at, end_at]`, not `created_at` alone.
 - **Two freshness clocks per source:** ingestion time (`ingested_at`) vs latest activity. A source is stale after 24h without ingestion — disclose staleness in any "current" claim.
