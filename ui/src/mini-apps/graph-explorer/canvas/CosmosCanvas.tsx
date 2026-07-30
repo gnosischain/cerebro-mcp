@@ -390,25 +390,30 @@ export function CosmosCanvas({
       reportRendererError(error, phase);
     }
   };
-  /** Single click selects, a second click on the same point within 320ms
-   * expands. Shared by Cosmos's own pick and the CPU fallback below so the two
-   * paths cannot drift. */
+  /**
+   * A point click SELECTS. Expand is a separate `dblclick` path (see the canvas
+   * listeners below) and never inferred from click timing.
+   *
+   * It used to be inferred: "a second click on the same index within 320ms means
+   * expand". That is unsafe here because this stack dispatches the SAME physical
+   * click twice — verified in the browser: two `click` events, identical
+   * offsets, identical timeStamp. Any duplicate or fast repeat then reads as a
+   * double-click, so a single click could expand a node and replace the panel
+   * the user was trying to read. The DOM already reports genuine double-clicks;
+   * inferring them from clicks we know arrive doubled cannot be made reliable.
+   */
   const routePointClick = (index: number) => {
-    const now = Date.now();
-    const last = lastClickRef.current;
     const id = modelRef.current.indexToId[index];
     if (!id) return;
-    if (last.index === index && now - last.t < 320) {
-      cbRef.current.onExpandNode(id);
-      lastClickRef.current = { index: -1, t: 0 };
-      return;
-    }
-    lastClickRef.current = { index, t: now };
     cbRef.current.onSelectNode(id);
   };
 
-  // double-click detection (Cosmos exposes single-click only)
-  const lastClickRef = useRef<{ index: number; t: number }>({ index: -1, t: 0 });
+  /** Expand on a real double-click. Separate from selection so a duplicate
+   * `click` dispatch can never be mistaken for one. */
+  const routePointExpand = (index: number) => {
+    const id = modelRef.current.indexToId[index];
+    if (id) cbRef.current.onExpandNode(id);
+  };
   /**
    * Timestamp of the last click a point-pick claimed, so `onBackgroundClick`
    * can stand down. Cosmos fires its background callback whenever ITS pick
@@ -634,6 +639,8 @@ export function CosmosCanvas({
         pointClaimedClickRef.current = Date.now();
         routePointClick(index);
       }),
+      // Cosmos has no double-click callback; expand is wired to a real
+      // `dblclick` on the canvas below.
       onLinkClick: guardRuntime("edge selection failed", (linkIndex: number) => {
         const id = modelRef.current.linkIds[linkIndex];
         if (id) cbRef.current.onSelectEdge(id);
@@ -674,37 +681,63 @@ export function CosmosCanvas({
     // working (library fix, other hardware) this becomes dead weight rather
     // than a double-selection.
     const PICK_RADIUS_PX = 14;
-    const onCanvasClick = guardRuntime("fallback node pick failed", (event: Event) => {
-      const mouse = event as MouseEvent;
+
+    /** Which point is under this pointer event, or -1. */
+    const pickAt = (event: MouseEvent): number => {
       const g = graphRef.current;
-      if (!g || !modelRef.current.n) return;
-      // Already handled by the native pick for this gesture.
-      if (Date.now() - pointClaimedClickRef.current < 250) return;
-      const x = mouse.offsetX;
-      const y = mouse.offsetY;
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      if (!g || !modelRef.current.n) return -1;
+      const x = event.offsetX;
+      const y = event.offsetY;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return -1;
       const hits = g.getPointsInRect([
         [x - PICK_RADIUS_PX, y - PICK_RADIUS_PX],
         [x + PICK_RADIUS_PX, y + PICK_RADIUS_PX],
       ]);
-      if (!hits || hits.length === 0) return;
+      if (!hits || hits.length === 0) return -1;
       // Several points can share the pick square; take the nearest centre so a
       // click between two nodes resolves the way the user aimed. Positions are
       // fetched ONCE — `getPointPositions()` copies the whole buffer out of the
       // GPU, so calling it per candidate turned a click into O(hits) copies.
       const positions = g.getPointPositions();
-      const nearest = nearestPointToClick(
+      return nearestPointToClick(
         Array.from(hits),
         (index) => g.spaceToScreenPosition([positions[index * 2], positions[index * 2 + 1]]),
         [x, y],
       );
+    };
+
+    // This stack dispatches the same physical click TWICE (verified: identical
+    // offsets AND identical timeStamp), so dedupe on the event's own timeStamp
+    // rather than a wall-clock window — a duplicate shares it, a genuine second
+    // click cannot.
+    let lastHandledStamp = -1;
+
+    const onCanvasClick = guardRuntime("fallback node pick failed", (event: Event) => {
+      const mouse = event as MouseEvent;
+      if (mouse.timeStamp === lastHandledStamp) return;
+      // Already handled by cosmos's own pick for this gesture.
+      if (Date.now() - pointClaimedClickRef.current < 250) return;
+      const nearest = pickAt(mouse);
       if (nearest < 0) return;
+      lastHandledStamp = mouse.timeStamp;
       pointClaimedClickRef.current = Date.now();
       routePointClick(nearest);
     });
+
+    const onCanvasDoubleClick = guardRuntime("node expand failed", (event: Event) => {
+      const mouse = event as MouseEvent;
+      const nearest = pickAt(mouse);
+      if (nearest < 0) return;
+      // Suppress the trailing click of the double-click gesture so the pair
+      // does not also re-select.
+      pointClaimedClickRef.current = Date.now();
+      routePointExpand(nearest);
+    });
+
     // Capture phase: cosmos's own click handling runs on the canvas too, and we
     // must set the claim flag before its background callback can read it.
     container.addEventListener("click", onCanvasClick, true);
+    container.addEventListener("dblclick", onCanvasDoubleClick, true);
 
     // Context loss is dispatched by the canvas rather than thrown through
     // React. Capture it at the renderer container so it follows the same
@@ -716,6 +749,7 @@ export function CosmosCanvas({
     container.addEventListener("webglcontextlost", onContextLost, true);
     return () => {
       container.removeEventListener("click", onCanvasClick, true);
+      container.removeEventListener("dblclick", onCanvasDoubleClick, true);
       container.removeEventListener("webglcontextlost", onContextLost, true);
       const restoreWasPending = cameraRestorePendingRef.current;
       cancelCameraRestoreRef.current?.();

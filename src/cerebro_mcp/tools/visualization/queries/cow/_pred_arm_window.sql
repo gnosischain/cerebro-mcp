@@ -1,0 +1,16 @@
+-- Relative-window predicate for a per-chain UNION arm, against the `ta` CTE.
+--
+-- The anchor is deliberately GLOBAL (max over every in-scope chain), not
+-- per-arm. A stale chain (e.g. mainnet, months behind) must NOT render its own
+-- final days inside an all-networks "last N days" view as if it were current —
+-- with the global anchor its rows predate the window and fall out naturally, and
+-- the exclusion self-heals the moment its indexer catches up. Single-chain
+-- sections pass exactly one chain, where max(a) == that chain's own anchor, so a
+-- stopped indexer still renders its trailing window there.
+--
+-- `max(a)` and not `a`: `ta` is grouped per chain, so it has one row per chain.
+-- The sibling order-anchor CTEs are NOT grouped and take a bare `a` — the two
+-- forms are not interchangeable and nothing enforces the pairing.
+--
+-- ONLY VALID inside a statement that defines `ta`.
+t.block_timestamp>=(SELECT max(a) FROM ta)-toIntervalDay({window_days:UInt32})

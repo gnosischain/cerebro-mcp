@@ -36,9 +36,12 @@ const FROZEN_SECTION_GROUPS: Record<string, Record<string, string[]>> = {
     insights: ["treasury_coverage"],
     history: [
       "treasury_chain_history",
-      "treasury_token_history",
       "treasury_wallet_history",
     ],
+    // treasury_token_history is deliberately alone — it is the app's most
+    // expensive read and grouping it with its siblings delayed them behind the
+    // 3-worker pool.
+    token_history: ["treasury_token_history"],
   },
 };
 

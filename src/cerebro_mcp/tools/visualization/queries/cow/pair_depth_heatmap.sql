@@ -27,9 +27,15 @@ grid AS (
   FROM win
 ),
 grid_step AS (
-  -- Caller resolution when given, else span/60. Floored at @min_step_label and
-  -- coarsened so the grid never exceeds @max_buckets columns — the row budget
-  -- is a hard cap, so a too-fine request is honored as far as it fits.
+  -- Caller resolution when given, else span/60. Floored at the caller's
+  -- _FOOTPRINT_MIN_STEP_S and coarsened so the grid never exceeds
+  -- _FOOTPRINT_MAX_BUCKETS columns — the row budget is a hard cap, so a too-fine
+  -- request is honored as far as it fits.
+  --
+  -- Those two are named in prose, not written with a leading at-sign. Comment-only
+  -- lines are stripped before substitution, so a fragment name that appears ONLY in
+  -- a comment stops being a token and its caller's kwarg becomes an "unused
+  -- fragment" error.
   SELECT w_start, span_s,
          greatest(
            greatest(toUInt32(@min_step_s),

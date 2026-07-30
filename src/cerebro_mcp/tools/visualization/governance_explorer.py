@@ -248,9 +248,14 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
         "insights": ("treasury_coverage",),
         "history": (
             "treasury_chain_history",
-            "treasury_token_history",
             "treasury_wallet_history",
         ),
+        # treasury_token_history is ALONE in its group on purpose. It is the most
+        # expensive read in the app — it scans all history for every held token —
+        # and grouping it with its two siblings meant one slow dataset delayed the
+        # other two behind a worker pool of 3. Its own group lets it fail or lag
+        # without taking the rest of the history view with it.
+        "token_history": ("treasury_token_history",),
     },
 }
 #: Entity drill-down bundles (FROZEN) — loaded by ``_apply_entity_load``
@@ -1091,10 +1096,7 @@ def _treasury_specs(
     # discipline as asof: a global month-end would pin one chain's date onto
     # the other's rows.
     months_cte = sql_loader.load_sql("governance", "_cte_treasury_months_per_chain", src=src, job=TREASURY_JOB)
-    months_join = (
-        "INNER JOIN months AS m "
-        "ON t.chain_id = m.chain_id AND t.snapshot_date = m.month_end"
-    )
+    months_join = sql_loader.load_sql("governance", "_join_treasury_months")
     #: The focus token for the per-wallet history: the selected asset when one
     #: is focused, otherwise GNO — the holding with an unambiguous governance
     #: meaning on both chains.
@@ -1132,7 +1134,11 @@ def _treasury_specs(
     #
     # The client picks its own top-N by USD out of this pool, which also filters
     # the residual spam for free: none of it is priced.
-    treasury_token_history = sql_loader.load_sql("governance", "treasury_token_history", months_cte=months_cte, asof_cte_body=asof_cte[5:], src=src, months_join=months_join, job=TREASURY_JOB, chain_sql=chain_sql, asset_sql=asset_sql, ltd_sql=ltd_sql, gno_picked_sql=gno_sql.replace("t.chain_id", "p_chain"), history_tokens=TREASURY_HISTORY_TOKENS)
+    # The month-end restriction is a tuple IN inside the raw scan, not a JOIN, and
+    # `per_bucket` is referenced ONCE. Both are load-bearing: this spec timed out in
+    # production at 6 effective scans of the view (~2.7s each). See the cost history
+    # at the top of treasury_token_history.sql.
+    treasury_token_history = sql_loader.load_sql("governance", "treasury_token_history", months_cte=months_cte, asof_cte_body=asof_cte[5:], src=src, job=TREASURY_JOB, chain_sql=chain_sql, asset_sql=asset_sql, ltd_sql=ltd_sql, gno_picked_sql=gno_sql.replace("t.chain_id", "chain_id"), history_tokens=TREASURY_HISTORY_TOKENS)
 
     # Per-wallet monthly series for ONE token — the focused asset, else GNO.
     # Same unit throughout, so the stack total is meaningful and folding the
@@ -1165,22 +1171,28 @@ def _treasury_specs(
             "what the plane can and cannot display for the held token set",
             "treasury", 900,
         ),
+        # exact_count=False on all three history datasets. `exact_count` wraps the
+        # query in `count() OVER ()`, which forces the whole result to materialize
+        # before LIMIT — and these are the only treasury datasets that scan all
+        # history rather than one snapshot, so they are the ones that cannot afford
+        # it. Their output is well inside ROW_CAP, so the exact total the wrapper
+        # buys is a number nothing displays.
         QuerySpec(
             "treasury_chain_history", "Treasury over time", treasury_chain_history,
-            dict(params), history_basis, "treasury",
+            dict(params), history_basis, "treasury", exact_count=False,
         ),
         QuerySpec(
             "treasury_token_history", "Holdings over time", treasury_token_history,
             dict(params),
             "candidate pool ranked by how often the position changed (airdropped "
             f"dust never moves); {history_basis}",
-            "treasury",
+            "treasury", exact_count=False,
         ),
         QuerySpec(
             "treasury_wallet_history", "Wallet split over time",
             treasury_wallet_history, dict(params),
             f"one token (focused asset, else GNO), top 5 wallets + other; {history_basis}",
-            "treasury",
+            "treasury", exact_count=False,
         ),
     ]
 

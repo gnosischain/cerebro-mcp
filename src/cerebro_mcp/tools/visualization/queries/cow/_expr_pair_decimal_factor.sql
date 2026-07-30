@@ -1,0 +1,14 @@
+-- Decimal normalisation factor for a base/quote pair: 10^(base_dec - quote_dec).
+--
+-- An EXPRESSION, not a predicate — it scales a raw amount ratio into a human
+-- price. Reads decimals from the `tm` token-metadata CTE, so it is ONLY VALID
+-- inside a statement that defines `tm` (see _cte_token_metadata.sql).
+--
+-- anyOrNull, not any: a token missing from tm must yield NULL so the whole factor
+-- goes NULL and the price is omitted. `any` would return 0 and silently scale the
+-- price by 10^0 — a plausible-looking wrong number.
+--
+-- The second line's indentation is part of the rendered expression. It is
+-- cosmetic to ClickHouse but is pinned byte-exactly by tests.
+pow(10,toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={base:String}))
+                                  -toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={quote:String})))

@@ -331,15 +331,33 @@
   border-color: var(--primary);
 }
 
-/* ---------- KPI grid ---------- */
+/* ---------- KPI grid ----------
+ * Column count ADAPTS; it is not fixed at 4.
+ *
+ * A hard `repeat(4, 1fr)` turned every 5-, 6- or 7-KPI section into 4 + an
+ * orphan row (governance Delegations, Voters, Proposals and Forum all did this),
+ * and on a wide page it stretched each tile to a quarter of the viewport for a
+ * value that is often four characters long.
+ *
+ * `auto-fit` with a CAPPED max fixes both: as many tiles per row as genuinely
+ * fit, each between 168px and 208px, so five tiles sit on one line at any
+ * normal width and none of them is absurdly wide. The trailing space on an
+ * ultra-wide page is deliberate — uniform tiles read better than stretched ones.
+ */
 .ma-kpi-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* The 192px cap is measured, not chosen: the widest section here has SEVEN
+   * KPIs and the grid's inner width at the 1500px content cap is 1424px (the
+   * content column's 20px padding AND `.ma-body`'s 18px both bite), so 7 tiles
+   * plus six 8px gaps fit only at <=196px each. 208 and then 200 each missed by
+   * a few pixels and produced exactly the 6+1 orphan row this rule removes. */
+  grid-template-columns: repeat(auto-fit, minmax(158px, 192px));
   gap: 8px;
   margin-bottom: 14px;
 }
 
 @media (max-width: 720px) {
+  /* Narrow: let the two tiles share the width rather than leaving a gutter. */
   .ma-kpi-grid {
     grid-template-columns: repeat(2, 1fr);
   }

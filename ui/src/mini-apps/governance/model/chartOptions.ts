@@ -715,9 +715,30 @@ function visibleNodes(nodes: GipNode[], degrees: Map<number, GipDegree>, opts?: 
 /** TIMELINE (default). x = real first-seen date, y = lifecycle lane, links = arcs.
  *
  * Arc direction encodes something real: a backward arc (right to left) is the
- * normal case — a newer GIP citing an older one. The 15 forward arcs are drawn
- * on the opposite side so they stand out, because a GIP citing a LATER one only
- * happens when a thread was edited after the fact. */
+ * normal case — a newer GIP citing an older one. A forward citation only happens
+ * when a thread was edited after the fact, so it is tinted and drawn flatter.
+ *
+ * EVERY arc bows UP, and that is a correctness requirement, not a style choice.
+ * ECharts places the quadratic control point at
+ *   cpy = midY - (x2 - x1) * curveness            (pixel space, y grows downward)
+ * so the side an arc falls on depends on the SIGN OF THE CHORD as much as on the
+ * sign of `curveness`. This used to read `curveness: backward ? 0.4 : -0.4` with
+ * `coords: [src, dst]`, and since `backward` is defined by that same src/dst
+ * ordering the two flips cancelled: both families bowed DOWNWARD, and the comment
+ * claiming they were on opposite sides described something that never happened.
+ *
+ * Downward is the one direction that cannot work here. `inbound` is a count, so
+ * the y axis floors at 0 and MOST GIPs sit exactly on it — measured with echarts'
+ * SSR renderer on a 400px canvas, an arc between two y=0 nodes apexed 58.8px
+ * BELOW the grid's bottom edge, where a cartesian series clips it away. Those are
+ * the edges that "cross the 0 level and are never seen".
+ *
+ * So the sign is taken from the chord, not from the citation direction, which
+ * keeps the arc inside the plot however the two nodes are ordered in time. The
+ * forward/backward distinction moves to colour plus curvature MAGNITUDE, which
+ * survives both arcs being on the same side. `clip: false` is belt-and-braces:
+ * an arc between two nodes near the axis MAX would otherwise vanish the same way,
+ * and an edge silently disappearing is exactly the failure being fixed. */
 export function gipTimelineOption(
   nodes: GipNode[],
   edges: GipEdge[],
@@ -791,21 +812,30 @@ export function gipTimelineOption(
         coordinateSystem: "cartesian2d",
         polyline: false,
         silent: false,
+        // Never clip an edge out of existence — see the header note.
+        clip: false,
         data: links.map((e) => {
           const backward = e.dst < e.src;
           const touchesFocus = focus !== null && (e.src === focus || e.dst === focus);
+          const from = at.get(e.src);
+          const to = at.get(e.dst);
+          // Sign from the CHORD so the arc bows up (into the plot) either way.
+          // Equal timestamps leave the chord vertical, where curveness only
+          // shifts the arc sideways and no sign is more correct than the other.
+          const rightward = to !== undefined && from !== undefined
+            ? Date.parse(to[0]) >= Date.parse(from[0])
+            : true;
+          // Magnitude, not side, is what separates the two families now.
+          const bow = backward ? 0.4 : 0.16;
           return {
-            coords: [at.get(e.src), at.get(e.dst)],
+            coords: [from, to],
             srcGip: e.src,
             dstGip: e.dst,
             weight: e.weight,
             firstMention: e.firstMention,
             lastMention: e.lastMention,
             lineStyle: {
-              // Sign flips the arc to the other side, so the 15 forward
-              // citations read differently from the 141 backward ones rather
-              // than blending in.
-              curveness: backward ? 0.4 : -0.4,
+              curveness: rightward ? bow : -bow,
               width: Math.min(5, 0.5 + Math.log2(e.weight + 1)),
               opacity: focus === null ? 0.34 : touchesFocus ? 0.9 : 0.05,
               color: backward ? ARC_COLOR : ARC_FORWARD_COLOR,

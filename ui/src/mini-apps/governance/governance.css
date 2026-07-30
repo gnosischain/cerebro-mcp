@@ -315,21 +315,29 @@
    --------------------------------------------------------------------------- */
 .gov-livenow {
   display: grid;
-  /* minmax(0, 1fr), NOT 1fr: the default `auto` minimum lets a long unbroken
-     proposal title expand its own column and crush the sibling to nothing. */
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  /* minmax(0, …), NOT 1fr: the default `auto` minimum lets a long unbroken
+     proposal title expand its own column and crush the sibling to nothing.
+     ASYMMETRIC on purpose — the two columns do not carry comparable content.
+     "Open votes" is usually a single sentence (every proposal is closed most of
+     the time), while the pipeline column carries a list plus its exclusion
+     disclosure. A 50/50 split gave the sentence 704px and left it stretched to
+     the sibling's 340px height, which read as a broken empty panel. */
+  grid-template-columns: minmax(0, 0.72fr) minmax(0, 1fr);
+  /* start, not stretch: the shorter card keeps its own height instead of
+     becoming a tall box with one line in it. */
+  align-items: start;
   gap: 16px;
   margin-bottom: 16px;
 }
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .gov-livenow { grid-template-columns: 1fr; }
 }
 .gov-livenow__col {
   min-width: 0;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 14px 16px;
-  background: var(--surface-raised);
+  background: var(--surface-2);
 }
 .gov-livenow__head {
   display: flex;
@@ -347,13 +355,26 @@
   padding: 1px 7px;
   border-radius: 999px;
   background: var(--accent-soft);
-  color: var(--accent);
+  /* --accent-text, not --primary: the lighter tint is what stays legible on the
+     soft accent background. */
+  color: var(--accent-text);
 }
 .gov-livenow__empty {
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-secondary);
+}
+/* The exclusion disclosure must stay (nothing is silently dropped), but at body
+   size it was 110px of a 294px card and outweighed the three rows it qualifies.
+   Muted, smaller, and separated by a rule so it reads as a footnote. */
+.gov-livenow__col .gov-caption {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 .gov-livenow__list {
   list-style: none;
@@ -369,7 +390,7 @@
   flex-direction: column;
   gap: 2px;
   padding: 7px 0;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border);
 }
 .gov-livenow__row:last-child { border-bottom: none; }
 .gov-livenow__main {
@@ -402,19 +423,19 @@
   font-size: 11px;
   color: var(--text-secondary);
 }
-.gov-livenow__clock { color: var(--accent); }
+.gov-livenow__clock { color: var(--primary); }
 .gov-livenow__idle { color: var(--text-secondary); font-style: italic; }
 .gov-phase {
   font-family: var(--font-mono);
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 4px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border);
   color: var(--text-secondary);
   flex: none;
 }
 /* phase-2 is the pre-vote stage — the one worth noticing. */
-.gov-phase--phase-2 { color: var(--accent); border-color: var(--accent); }
+.gov-phase--phase-2 { color: var(--primary); border-color: var(--primary); }
 
 /* GIP and phase chips must never absorb the shrink that the title needs — the
    title is what elides, the chips are fixed identity. */
@@ -428,12 +449,12 @@
   font: 11px var(--font-mono);
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid var(--border-subtle);
-  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
   color: var(--text-primary);
   cursor: pointer;
 }
-.gov-graph-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.gov-graph-actions button:hover { border-color: var(--primary); color: var(--primary); }
 
 /* Graph legend / stage filter chips */
 .gov-graph-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -441,8 +462,8 @@
   display: inline-flex; align-items: center; gap: 5px;
   font: 10px var(--font-mono);
   padding: 3px 8px; border-radius: 999px;
-  border: 1px solid var(--border-subtle);
-  background: var(--surface-raised); color: var(--text-primary); cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text-primary); cursor: pointer;
 }
 /* Deselected reads as "filtered out", not as "disabled" — it is still clickable. */
 .gov-graph-chip--off { opacity: 0.4; }
@@ -463,7 +484,7 @@
   display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0;
   background: none; border: none; padding: 4px 0; text-align: left; cursor: pointer;
   color: var(--text-primary); font-size: 12px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border);
 }
 .gov-cites__list button:hover .gov-cites__title { text-decoration: underline; }
 .gov-cites__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -474,8 +495,8 @@
   font: 10px var(--font-mono);
   padding: 1px 5px;
   border-radius: 4px;
-  border: 1px solid var(--border-subtle);
-  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
 }
 
 /* ---------------------------------------------------------------------------
@@ -513,9 +534,9 @@
   position: relative;
   min-width: 0;
   min-height: 0;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--surface-raised);
+  background: var(--surface-2);
   overflow: hidden;
 }
 /* Provenance on demand, over the chart instead of above or below it — the graph
@@ -550,9 +571,9 @@
 }
 .gov-graph-side {
   min-width: 0;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--surface-raised);
+  background: var(--surface-2);
   padding: 12px 14px;
   /* NO height declaration. Grid `stretch` matches it to the chart column, which
      is how `.ge-details` does it in graph-explorer; `min-height: 0` is what lets
@@ -578,7 +599,7 @@
   cursor: pointer;
   padding: 0;
 }
-.gov-graph-side__clear:hover { color: var(--accent); }
+.gov-graph-side__clear:hover { color: var(--primary); }
 .gov-graph-facts {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -608,7 +629,7 @@
    flex-column and its stage claims the remainder from there. `min-height: 0` so
    `.ge-canvas`'s own 360px floor cannot push the row past the fold. */
 .gov-graph-canvas {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border);
   border-radius: 10px;
   min-width: 0;
   min-height: 0;

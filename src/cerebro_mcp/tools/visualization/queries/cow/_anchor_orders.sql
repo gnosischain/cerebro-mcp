@@ -1,0 +1,18 @@
+-- Latest order creation_date, as a scalar anchor for a relative window.
+--
+-- THE `FINAL` HERE IS PRESERVED AS-FOUND, NOT ENDORSED. Two things are true:
+--
+--   * `ch-final-three-way-rule` branch 3 names `cow_db.orders` BY NAME as a table
+--     where FINAL is forbidden — it reached ~12M rows and FINAL blew the memory
+--     budget at all-networks scope. This anchor is only ever built single-chain,
+--     which is why it has not blown up, but it is on the wrong side of that rule.
+--   * FINAL is not even needed for correctness: `max()` over duplicate
+--     ReplacingMergeTree versions is identical to `max()` over the deduped rows,
+--     and creation_date is immutable per order_uid. This is the same argument
+--     `_anchor_trades.sql` uses to justify reading the BASE table.
+--
+-- So dropping FINAL is very likely both correct and cheaper. It is left in place
+-- because the change that created this file was required to be byte-preserving,
+-- and removing it changes the query plan — that needs its own measurement, not a
+-- drive-by edit. Do not "clean it up" without one.
+SELECT max(creation_date) FROM cow_db.orders FINAL WHERE @scope

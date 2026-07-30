@@ -51,16 +51,65 @@ class SqlTemplateError(ValueError):
     """
 
 
+def is_fragment(name: str) -> bool:
+    """A leading underscore marks a FRAGMENT — a file substituted into another
+    query rather than executed on its own (``_cte_``, ``_pred_``, ``_join_``,
+    ``_anchor_``, ``_expr_``)."""
+    return name.startswith("_")
+
+
+def _strip_comment_lines(text: str) -> str:
+    """Drop lines that are entirely a ``--`` comment.
+
+    Applied to EVERY template. This is what makes Rule 0 workable: a ``.sql`` file
+    can carry its full rationale — the whole point of moving the SQL out of Python
+    — while still rendering exactly the string the old literal rendered.
+
+    For a FRAGMENT the argument is obvious: it is substituted into the middle of
+    another statement, so a header would land mid-expression. ``... AND @pred``
+    becomes ``... AND -- why this predicate exists`` and the ``--`` swallows the
+    rest of that line. It survives only because the fragment's SQL is on a later
+    line, and it is one edit away from silently commenting out a filter.
+
+    For a WHOLE QUERY the header lands harmlessly at the top, and an earlier
+    version of this function kept it there on the theory that it would show up
+    usefully in ``system.query_log``. That was wrong, and measurably so:
+
+    * ``settings.MAX_QUERY_LENGTH`` is 10,000 characters and
+      ``clients/clickhouse.py`` rejects anything longer. Inlining the headers took
+      the longest rendered cow statement from 9,523 to 9,852 characters — 148 to
+      spare. One more chain in ``COW_CHAINS`` would have failed ``trader_activity``
+      outright, at all-networks scope only, as a validation error rather than
+      anything that points at a comment.
+    * the ``query_log`` benefit is speculative; the length budget is not. A header
+      is written for whoever opens the file, and stripping it does not take it away
+      from them.
+    * with nothing inlined, a behaviour-preserving refactor renders byte-identical
+      output, so it can be verified by comparing bytes rather than by arguing about
+      which differences are "only" comments.
+
+    Only comment-ONLY lines go. A trailing comment after code (``x = 1 -- why``)
+    is left alone, because removing it would require knowing whether the ``--`` is
+    inside a string literal.
+    """
+    kept = [line for line in text.split("\n") if not line.lstrip().startswith("--")]
+    return "\n".join(kept)
+
+
 @lru_cache(maxsize=None)
 def _read(app: str, name: str) -> str:
-    """Raw template text, cached. Strips exactly one trailing newline — the one
-    every editor adds — so a file ending ``...ORDER BY x\\n`` renders the same
-    string the f-string did."""
+    """Raw template text, cached. Comment-only lines are dropped, then exactly one
+    trailing newline — the one every editor adds — so a file ending
+    ``...ORDER BY x\\n`` renders the same string the f-string did. See
+    ``_strip_comment_lines`` for why the comments go."""
     path = QUERIES_DIR / app / f"{name}.sql"
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:  # pragma: no cover - exercised by the registry test
         raise SqlTemplateError(f"no such query template: {app}/{name}.sql") from None
+    # Comments first, THEN the trailing-newline strip: dropping the header must not
+    # change whether the file ends in a newline.
+    text = _strip_comment_lines(text)
     return text[:-1] if text.endswith("\n") else text
 
 
@@ -105,8 +154,15 @@ def load_sql(app: str, name: str, /, **fragments: object) -> str:
 
 
 def available(app: str) -> list[str]:
-    """Every template name shipped for an app, sorted. Used by the registry
-    test that asserts no ``.sql`` file is orphaned."""
+    """Every template name shipped for an app, sorted.
+
+    Used by ``tests/test_sql_loader.py::test_no_shipped_template_is_orphaned``,
+    which asserts every shipped ``.sql`` is loaded by name somewhere. This
+    docstring claimed that test existed for a long time before it did — and while
+    it did not, ``queries/cow/activity.sql`` sat unreferenced for three commits
+    with the Python it was meant to replace still in place. See
+    ``orphaned-sql-template-never-wired``.
+    """
     directory = QUERIES_DIR / app
     if not directory.is_dir():
         return []

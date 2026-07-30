@@ -1,0 +1,13 @@
+-- Per-arm reorg-safety checkpoint for ONE chain: the highest block the RPC
+-- indexer has confirmed. Parenthesised for inline use.
+--
+-- argMax(block_number, updated_at), not max(block_number): indexing_checkpoints
+-- is a raw ReplacingMergeTree, so the LATEST row per chain is the authority and
+-- an older row may legitimately carry a higher block after a rollback.
+--
+-- source='rpc' is load-bearing — other sources write to this table at different
+-- confirmation depths.
+--
+-- @chain_id is substituted, not bound: one statement per chain arm. See
+-- _anchor_chain_trades.sql.
+(SELECT argMax(block_number,updated_at) FROM cow_db.indexing_checkpoints WHERE environment={env:String} AND chain_id=@chain_id AND source='rpc')

@@ -137,7 +137,7 @@ button.cow-live-chip:hover{border-color:var(--border-hover)}
 .cow-depth-rescue__label{color:var(--text-secondary);font-size:12px;max-width:560px}
 .cow-depth-rescue__chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
 .cow-depth-rescue__chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border:1px solid var(--border);border-radius:999px;background:var(--surface-raised,transparent);color:var(--text-primary);font:11px var(--font-mono);cursor:pointer}
-.cow-depth-rescue__chip:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.cow-depth-rescue__chip:hover:not(:disabled){border-color:var(--primary);color:var(--primary)}
 .cow-depth-rescue__chip:disabled{cursor:default;opacity:.7}
 .cow-depth-rescue__count{color:var(--text-muted)}
 .cow-depth-mid{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:2px 0 10px}

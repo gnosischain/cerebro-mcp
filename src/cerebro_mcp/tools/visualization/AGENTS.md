@@ -4,6 +4,33 @@
 Run `get_cerebro_change_context(paths="src/cerebro_mcp/tools/visualization")` for the
 live hazard list.
 
+## No SQL in this file — a spec builder composes, it does not write SQL
+
+Every query and every reusable fragment lives in `queries/<app>/*.sql` and is
+rendered with `sql_loader.load_sql`. A builder here supplies **parameters and named
+fragments**; it must not contain a statement or a clause block. Fragment files carry
+a kind prefix — `_cte_`, `_pred_`, `_join_`, `_anchor_`, `_expr_`. Full rationale in
+[`queries/AGENTS.md`](queries/AGENTS.md) Rule 0; enforced by
+`tests/test_sql_lives_in_files.py`.
+
+`governance_explorer.py` and `cow_explorer.py` are both clean and test-pinned as
+such. `metric_lab.py` (a runtime query compiler) and `mini_apps.py` (the generic
+`count() OVER ()` result envelope) are exempt, with reasons recorded in the test.
+
+`cow_explorer.py` was the debt this rule was written against: 32 SQL-bearing
+literals — anchor sub-selects, three copies of a UNION-arm envelope, two search
+probes, and a projection list that was post-processed with
+`.replace("SELECT ", "", 1)`. All 32 are now in 18 `.sql` files. The one literal
+left is a single named `UNION_ALL_ARM` separator; the test's `SEPARATOR_ONLY`
+carve-out admits whitespace plus `UNION ALL` and nothing else.
+
+The concrete cost of the Python-side version: the treasury month-end restriction sat
+here as two concatenated string literals, so the reason it joined on **both**
+`chain_id` and `snapshot_date` — chains publish independently and are months apart,
+so matching the date alone sums two chains' different dates into one bucket — was
+recorded nowhere. It is now `queries/governance/_join_treasury_months.sql`, with
+that paragraph in it.
+
 ## Dataset contract
 
 - **A dataset that fails must render a visible stub**, never vanish. A missing panel

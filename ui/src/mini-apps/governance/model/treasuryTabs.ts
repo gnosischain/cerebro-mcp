@@ -26,9 +26,13 @@ export const TREASURY_TABS: readonly TreasuryTab[] = [
   // Portfolio is first and default: it answers "how much is there", and it is
   // the only tab that needs nothing beyond `core`.
   { id: "portfolio", label: "Portfolio", groups: ["core"] },
-  { id: "tokens", label: "Tokens", groups: ["core", "insights", "history"] },
+  // `token_history` is a group of its own because treasury_token_history is the
+  // most expensive read in the app and used to hold its two siblings up behind
+  // the 3-worker pool. Only the two tabs that actually read it name it: Tokens
+  // for the per-row sparklines, History for the holdings-over-time chart.
+  { id: "tokens", label: "Tokens", groups: ["core", "insights", "token_history"] },
   { id: "wallets", label: "Wallets", groups: ["core", "history"] },
-  { id: "history", label: "History", groups: ["history"] },
+  { id: "history", label: "History", groups: ["history", "token_history"] },
 ];
 
 export function isTreasuryTab(value: unknown): value is TreasuryTabId {

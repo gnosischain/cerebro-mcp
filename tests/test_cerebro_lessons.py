@@ -184,6 +184,7 @@ RETRIEVAL_CASES = [
     ("model frozen days behind chain head", "dbt-sqlx-silently-not-compiled"),
     ("wrong column label positional row", "dataset-column-order-is-a-contract"),
     ("sql edit has no effect", "sql-loader-cache-needs-restart"),
+    ("class is applied but no border or background", "css-undefined-token-drops-rule"),
 ]
 
 

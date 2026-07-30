@@ -85,6 +85,24 @@ make dev                                  # serves LIVE source, not the bundles
   lesson. It is **advisory** — it asks, never denies. Tests and CI are the
   authority.
 
+## Rules
+
+- **SQL lives in a `.sql` file, never in Python.** Every query and every reusable
+  fragment in the mini-app query planes is its own file under
+  `src/cerebro_mcp/tools/visualization/queries/<app>/`; Python composes named
+  fragments and passes parameters. Fragments are files too, prefixed by kind:
+  `_cte_*`, `_pred_*`, `_join_*`, `_anchor_*`, `_expr_*`. A fragment's comment
+  header is stripped before substitution so it can carry its rationale without
+  landing inside the rendered statement. Rationale and the one carve-out are in
+  `queries/AGENTS.md`; enforced by `tests/test_sql_lives_in_files.py`.
+  **Scope note:** this is enforced for the mini-app planes only. Elsewhere in the
+  repo SQL is still built in Python — the semantic layer's `sql_compiler.py` /
+  `flow_queries.py` / `graph_profiles.py` emit SQL by design, and
+  `workflow/event_store.py` carries embedded SQLite DDL. Do not "fix" those to
+  satisfy this rule without asking; do not add new inline SQL to the planes that
+  are clean.
+- **The user commits their own work.** Never `git commit`, `git push`, or stage.
+
 ## Cross-cutting traps
 
 Full records in the lessons index; the short version:

@@ -442,9 +442,8 @@ def _token_metadata_cte_multi(scope: str, chain: ChainInfo | None = None) -> str
 
 
 def _trade_anchor(chain: ChainInfo | None) -> str:
-    return (
-        "SELECT max(block_timestamp) FROM cow_db.trades "
-        f"WHERE {_scope_predicate(chain)} AND block_timestamp IS NOT NULL"
+    return sql_loader.load_sql(
+        "cow", "_anchor_trades", scope=_scope_predicate(chain)
     )
 
 
@@ -494,10 +493,13 @@ def _settlement_time_bound(range_state: dict[str, Any]) -> str:
     ClickHouse instance over its 10.8 GiB ceiling (code 241). Bounding to the
     query window shrinks the build to the window's settlements (e.g. ~44k for
     30 days on Gnosis). Reuses the caller's already-bound window_days/start_at/
-    end_at params (settlements share block_timestamp semantics with trades)."""
-    anchor = (
-        "SELECT max(block_timestamp) FROM cow_db.settlements "
-        "WHERE environment={env:String} AND chain_id={chain_id:UInt64}"
+    end_at params (settlements share block_timestamp semantics with trades).
+
+    The anchor statement and the full rationale live in
+    ``queries/cow/_anchor_settlements.sql``."""
+    anchor = sql_loader.load_sql(
+        "cow", "_anchor_settlements",
+        scope="environment={env:String} AND chain_id={chain_id:UInt64}",
     )
     pred, _ = _time_predicate("block_timestamp", range_state, anchor)
     return pred
@@ -549,21 +551,13 @@ def _per_chain_time(range_state: dict[str, Any]):
 
 
 def _chain_trade_anchor(cid: int) -> str:
-    # Anchor on the BASE trades table: max() over duplicate RMT versions is
-    # identical to max() over the deduped view, and skipping the canonical
-    # view's chain_blocks join keeps the scalar subquery cheap.
-    return (
-        "(SELECT max(block_timestamp) FROM cow_db.trades "
-        f"WHERE environment={{env:String}} AND chain_id={cid})"
-    )
+    """Per-arm trade anchor for one chain. Base-table rationale is in the .sql."""
+    return sql_loader.load_sql("cow", "_anchor_chain_trades", chain_id=cid)
 
 
 def _chain_checkpoint(cid: int) -> str:
     """Committed-checkpoint scalar for one chain (bounds base-table scans)."""
-    return (
-        "(SELECT argMax(block_number,updated_at) FROM cow_db.indexing_checkpoints "
-        f"WHERE environment={{env:String}} AND chain_id={cid} AND source='rpc')"
-    )
+    return sql_loader.load_sql("cow", "_anchor_chain_checkpoint", chain_id=cid)
 
 
 #: Aggregate scans over many chains use the BASE trades table with
@@ -580,6 +574,27 @@ TRADE_KEY = "(tx_hash,log_index,order_uid)"
 BASE_DEDUP_MODE = "checkpoint_bounded_base_dedup"
 
 
+#: Separator between per-chain UNION arms.
+#:
+#: This is the one piece of SQL syntax deliberately NOT in a .sql file, and the
+#: reason is that none of Rule 0's three purposes apply to it: there is nothing to
+#: paste into a client, no bound parameter whose braces could be mangled, and no
+#: rationale to record. A file containing only `UNION ALL` would make the code
+#: harder to follow, not easier. The arms themselves — the parts that carry real
+#: SQL — each come from their own .sql file, and so does the envelope that wraps
+#: them (activity.sql).
+#:
+#: tests/test_sql_lives_in_files.py encodes exactly this carve-out and asserts it
+#: stays narrow: a literal that is nothing but whitespace plus UNION ALL is glue,
+#: anything with a relation, projection or expression in it is a statement.
+UNION_ALL_ARM = "\nUNION ALL\n"
+
+
+def _union_arms(parts: list[str]) -> str:
+    """Join per-chain UNION arms into one statement body."""
+    return UNION_ALL_ARM.join(parts)
+
+
 def _shared_arm_ctes(ids: str) -> str:
     """Shared per-chain scalar lookups for multi-arm statements.
 
@@ -592,7 +607,7 @@ def _shared_arm_ctes(ids: str) -> str:
 
 
 def _arm_checkpoint(cid: int) -> str:
-    return f"t.block_number<=(SELECT b FROM cp WHERE cp.chain_id={cid})"
+    return sql_loader.load_sql("cow", "_pred_arm_checkpoint", chain_id=cid)
 
 
 def _arm_window(cid: int, range_state: dict[str, Any]) -> str:
@@ -611,10 +626,7 @@ def _arm_window(cid: int, range_state: dict[str, Any]) -> str:
     # sections pass exactly one chain, where max(a) == that chain's own
     # anchor, so a stopped indexer still renders its trailing window there.
     del cid  # anchor is deliberately scope-global, not per-arm
-    return (
-        "t.block_timestamp>=(SELECT max(a) FROM ta)"
-        "-toIntervalDay({window_days:UInt32})"
-    )
+    return sql_loader.load_sql("cow", "_pred_arm_window")
 
 
 def _overview_specs(
@@ -648,9 +660,11 @@ def _overview_specs(
             )
         # Global anchor — same stale-chain semantics as _arm_window.
         del cid
-        return (
-            "creation_date>=(SELECT max(a) FROM oa)"
-            "-toIntervalDay({window_days:UInt32})"
+        # `oa` here is order_anchor_cte.sql, which IS grouped by chain_id, so the
+        # aggregate spelling is required. See _pred_order_window.sql.
+        return sql_loader.load_sql(
+            "cow", "_pred_order_window",
+            column="creation_date", anchor_expr="max(a)", anchor_cte="oa",
         )
 
     competitions_cte = sql_loader.load_sql("cow", "competitions_cte", ids=ids)
@@ -694,18 +708,16 @@ def _overview_specs(
         # hog; observed_at is the honest basis for API-sourced fee rows.
         fee_window = per_chain_time(
             "f.observed_at",
-            "(SELECT max(observed_at) FROM cow_db.protocol_fees "
-            f"WHERE environment={{env:String}} AND chain_id={cid})",
+            sql_loader.load_sql("cow", "_anchor_protocol_fees", chain_id=cid),
         )
         fee_parts.append(sql_loader.load_sql("cow", "fee_policy_arm", cid=cid, fee_window=fee_window))
-    activity = (
-        f"WITH {shared_ctes}\n"
-        "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
-        + "\n) ORDER BY bucket,chain_id"
+    activity = sql_loader.load_sql(
+        "cow", "activity",
+        shared_ctes=shared_ctes, activity_union=_union_arms(activity_parts),
     )
-    pair_union = "\nUNION ALL\n".join(pair_parts)
+    pair_union = _union_arms(pair_parts)
     top_pairs = sql_loader.load_sql("cow", "top_pairs", shared_ctes=shared_ctes, tmx=tmx, pair_union=pair_union)
-    fee_union = "\nUNION ALL\n".join(fee_parts)
+    fee_union = _union_arms(fee_parts)
     fees = sql_loader.load_sql("cow", "fees", tmx=tmx, fee_union=fee_union)
     # ---- Protocol-wide aggregates (Dune-style KPI tiles, pies, share) ----
     # Volume valuation: cow_db has NO historical price source (native_prices
@@ -720,7 +732,7 @@ def _overview_specs(
     )
     if volume_ok:
         np_cte = sql_loader.load_sql("cow", "np_cte", ids=ids)
-        np_join = "  LEFT JOIN np ON np.chain_id=t.chain_id AND np.token=t.sell_token\n"
+        np_join = sql_loader.load_sql("cow", "_join_native_price")
         vol_expr = (
             "sumIf(toFloat64(t.sell_amount)*toFloat64OrZero(np.native_price)/1e36,"
             "np.token!='') AS approx_native_volume"
@@ -734,8 +746,12 @@ def _overview_specs(
         f" AND t.block_number<=cp.b AND t.block_timestamp IS NOT NULL"
         f" AND {_arm_window(0, range_state)}"
     )
-    kpi_select = sql_loader.load_sql("cow", "kpi_select", trade_key=TRADE_KEY, vol_expr=vol_expr, np_join=np_join, kpi_where=kpi_where)
-    protocol_kpis = sql_loader.load_sql("cow", "protocol_kpis", shared_ctes=shared_ctes, np_cte=np_cte, kpi_body=kpi_select.replace("SELECT ", "", 1))
+    # The projection arrives WITHOUT a leading SELECT — protocol_kpis.sql supplies
+    # one per arm. It used to come from kpi_select.sql and get post-processed with
+    # `.replace("SELECT ", "", 1)`, which would have silently mangled the query the
+    # moment any earlier `SELECT ` appeared in the rendered text.
+    kpi_body = sql_loader.load_sql("cow", "_expr_kpi_body", trade_key=TRADE_KEY, vol_expr=vol_expr, np_join=np_join, kpi_where=kpi_where)
+    protocol_kpis = sql_loader.load_sql("cow", "protocol_kpis", shared_ctes=shared_ctes, np_cte=np_cte, kpi_body=kpi_body)
     # All-time totals feed the distribution pies. Deliberately ignores the
     # global window (always all indexed history — disclosed) and deliberately
     # KEEPS NULL-timestamp rows (BNB) in the counts: an all-time count needs
@@ -812,11 +828,7 @@ def _pair_time_predicate(
     # max() needs no dedup and no reorg filtering — read the base table
     # directly instead of paying the canonical view's FINAL + chain_blocks
     # join on every market query.
-    anchor = """SELECT max(block_timestamp) FROM cow_db.trades
-WHERE environment={env:String} AND chain_id={chain_id:UInt64}
-  AND ((sell_token={base:String} AND buy_token={quote:String})
-       OR (sell_token={quote:String} AND buy_token={base:String}))
-  AND block_timestamp IS NOT NULL"""
+    anchor = sql_loader.load_sql("cow", "_anchor_trades_pair")
     return _time_predicate("t.block_timestamp", range_state, anchor)
 
 
@@ -1114,7 +1126,7 @@ def _pair_depth_heatmap_specs(
     }
     # Grid derivation is split across CTEs so each expression references only a
     # PRIOR CTE alias (ClickHouse same-SELECT sibling-alias refs are fragile).
-    heatmap_sql = sql_loader.load_sql("cow", "pair_depth_heatmap", token_cte=token_cte, min_step_label=f"{_FOOTPRINT_MIN_STEP_S}s", min_step_s=_FOOTPRINT_MIN_STEP_S, max_buckets=_FOOTPRINT_MAX_BUCKETS, max_buckets_f=float(_FOOTPRINT_MAX_BUCKETS), rel_bin_scale=100.0 / _FOOTPRINT_REL_STEP, rel_bin_step=1.0 / _FOOTPRINT_REL_STEP, rel_clamp=_FOOTPRINT_REL_PCT / 100.0)
+    heatmap_sql = sql_loader.load_sql("cow", "pair_depth_heatmap", token_cte=token_cte, min_step_s=_FOOTPRINT_MIN_STEP_S, max_buckets=_FOOTPRINT_MAX_BUCKETS, max_buckets_f=float(_FOOTPRINT_MAX_BUCKETS), rel_bin_scale=100.0 / _FOOTPRINT_REL_STEP, rel_bin_step=1.0 / _FOOTPRINT_REL_STEP, rel_clamp=_FOOTPRINT_REL_PCT / 100.0)
     return [
         QuerySpec(
             "pair_depth_heatmap", "Order-book depth over time", heatmap_sql,
@@ -1131,8 +1143,7 @@ def _native_reference_sql(
     range_state: dict[str, Any],
 ) -> str:
     token_cte = _token_metadata_cte()
-    decimal_factor = """pow(10,toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={base:String}))
-                                  -toFloat64((SELECT anyOrNull(decimals) FROM tm WHERE token={quote:String})))"""
+    decimal_factor = sql_loader.load_sql("cow", "_expr_pair_decimal_factor")
     if range_state["kind"] == "all":
         native_time = "1"
     elif range_state["kind"] == "absolute":
@@ -1192,12 +1203,11 @@ def _trade_specs(
         )
         activity_parts.append(sql_loader.load_sql("cow", "trade_activity_arm", cid=cid, trade_key=TRADE_KEY, arm_where=arm_where))
         pair_parts.append(sql_loader.load_sql("cow", "trade_pair_arm", cid=cid, trade_key=TRADE_KEY, arm_where=arm_where))
-    activity = (
-        f"WITH {shared_ctes}\n"
-        "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
-        + "\n) ORDER BY bucket,chain_id"
+    activity = sql_loader.load_sql(
+        "cow", "activity",
+        shared_ctes=shared_ctes, activity_union=_union_arms(activity_parts),
     )
-    pair_union = "\nUNION ALL\n".join(pair_parts)
+    pair_union = _union_arms(pair_parts)
     breakdown = sql_loader.load_sql("cow", "trade_pair_breakdown", shared_ctes=shared_ctes, tmx=tmx, pair_union=pair_union)
     # Top-N-first tape: ONE plain scan over the base table with a bounded
     # heap sort (PartialSorting) — constant memory even at all-history across
@@ -1268,12 +1278,11 @@ def _traders_specs(
         )
         leader_parts.append(sql_loader.load_sql("cow", "trader_leaderboard_arm", cid=cid, trade_key=TRADE_KEY, arm_where=arm_where))
         activity_parts.append(sql_loader.load_sql("cow", "trader_activity_arm", cid=cid, trade_key=TRADE_KEY, arm_where=arm_where))
-    leader_union = "\nUNION ALL\n".join(leader_parts)
+    leader_union = _union_arms(leader_parts)
     leaderboard = sql_loader.load_sql("cow", "trader_leaderboard", shared_ctes=shared_ctes, leader_union=leader_union)
-    activity = (
-        f"WITH {shared_ctes},{firsts_cte}\n"
-        "SELECT * FROM (\n" + "\nUNION ALL\n".join(activity_parts)
-        + "\n) ORDER BY bucket,chain_id"
+    activity = sql_loader.load_sql(
+        "cow", "activity",
+        shared_ctes=f"{shared_ctes},{firsts_cte}", activity_union=_union_arms(activity_parts),
     )
     # ---- Growth accounting + retention (fixed trailing window) ----
     # Deliberately IGNORES the global window (the _capped_analytical_range
@@ -1327,7 +1336,11 @@ def _order_multi_core_specs(
             "creation_date<=parseDateTime64BestEffort({end_at:String})"
         )
     else:
-        window = "creation_date>=(SELECT a FROM oa)-toIntervalDay({window_days:UInt32})"
+        # `oa` here is order_multi_anchor_cte.sql — NOT grouped, one row, bare `a`.
+        window = sql_loader.load_sql(
+            "cow", "_pred_order_window",
+            column="creation_date", anchor_expr="a", anchor_cte="oa",
+        )
     # creation_date window pushed INTO the dedup (immutable → filtering raw ==
     # filtering deduped), bounding the argMax hash to the window rather than the
     # whole backfilled orders table. status/owner filters stay OUTER: they match
@@ -1368,7 +1381,11 @@ def _order_type_specs(
                 f"{column}>=parseDateTime64BestEffort({{start_at:String}}) AND "
                 f"{column}<=parseDateTime64BestEffort({{end_at:String}})"
             )
-        return f"{column}>=(SELECT a FROM oa)-toIntervalDay({{window_days:UInt32}})"
+        # order_type_anchor_cte.sql — NOT grouped, so bare `a`.
+        return sql_loader.load_sql(
+            "cow", "_pred_order_window",
+            column=column, anchor_expr="a", anchor_cte="oa",
+        )
 
     # The creation_date window is pushed INTO the dedup (creation_date is
     # immutable per order_uid, so filtering the raw rows is equivalent to
@@ -1392,8 +1409,9 @@ def _order_type_specs(
             f"{event_ts}<=parseDateTime64BestEffort({{end_at:String}})"
         )
     else:
-        event_window = (
-            f"{event_ts}>=(SELECT a FROM oea)-toIntervalDay({{window_days:UInt32}})"
+        event_window = sql_loader.load_sql(
+            "cow", "_pred_order_window",
+            column=event_ts, anchor_expr="a", anchor_cte="oea",
         )
     conditional_activity = sql_loader.load_sql("cow", "conditional_activity", oea_cte=oea_cte, event_ts=event_ts, ids=ids, event_window=event_window)
     # App-data orderClass tags (the ONLY honest TWAP signal: TWAP children
@@ -1432,9 +1450,11 @@ def _order_specs(
         return [*_order_multi_core_specs(scope, chains, range_state, filters), *type_specs]
     base, quote = pair
     params = _scope_parameters(chain.environment, chain)
-    anchor = (
-        "SELECT max(creation_date) FROM cow_db.orders FINAL "
-        "WHERE environment={env:String} AND chain_id={chain_id:UInt64}"
+    # `chain` is non-None past the guard above, so _scope_predicate emits the
+    # single-chain form. Composed rather than written out again: a second copy of
+    # the predicate is a second thing to keep in step with the bound parameters.
+    anchor = sql_loader.load_sql(
+        "cow", "_anchor_orders", scope=_scope_predicate(chain)
     )
     time_pred, time_params = _time_predicate("o.creation_date", range_state, anchor)
     params.update(time_params)
@@ -1586,19 +1606,16 @@ def _solver_specs(
     anchor = sql_loader.load_sql("cow", "solver_anchor", ids=ids)
     time_pred, time_params = _time_predicate("b.block_timestamp", range_state, anchor)
     params.update(time_params)
-    common_joins = """FROM cow_db.competition_solutions AS s FINAL
-INNER JOIN cow_db.solver_competitions AS c FINAL
-  ON s.environment=c.environment AND s.chain_id=c.chain_id AND s.auction_id=c.auction_id
-LEFT JOIN blk AS b
-  ON b.chain_id=c.chain_id AND b.block_number=c.auction_block"""
+    common_joins = sql_loader.load_sql("cow", "_join_solver_competition")
     common_where = f"WHERE {scope_s} AND b.block_number!=0 AND {time_pred}{competition_filter}"
     common = f"{common_joins}\n{common_where}"
     if range_state["kind"] == "relative":
-        settlement_time = (
-            "block_timestamp IS NOT NULL AND block_timestamp >= ("
-            "SELECT max(block_timestamp) FROM cow_db.settlements "
-            f"WHERE environment={{env:String}} AND chain_id IN ({ids})"
-            ") - toIntervalDay({window_days:UInt32})"
+        settlement_time = sql_loader.load_sql(
+            "cow", "_pred_settlement_window",
+            anchor=sql_loader.load_sql(
+                "cow", "_anchor_settlements",
+                scope=f"environment={{env:String}} AND chain_id IN ({ids})",
+            ),
         )
     elif range_state["kind"] == "absolute":
         settlement_time = (
@@ -2295,16 +2312,11 @@ def _search_candidates(
         identifier = q
     elif INTEGER_RE.fullmatch(q):
         params["auction_id"] = int(q)
-        sql = f"""SELECT chain_id,'auction' AS entity_type,'auction' AS role,count() AS evidence_count
-FROM cow_db.solver_competitions FINAL WHERE {where} AND auction_id={{auction_id:UInt64}}
-GROUP BY chain_id ORDER BY chain_id"""
+        sql = sql_loader.load_sql("cow", "search_auction_id", where=where)
         identifier = q
     else:
         params["symbol"] = query.strip()
-        sql = f"""SELECT chain_id,token AS identifier,'token' AS entity_type,'token_symbol' AS role,count() AS evidence_count
-FROM cow_db.token_metadata FINAL
-WHERE {where} AND lower(symbol)=lower({{symbol:String}})
-GROUP BY chain_id,token ORDER BY chain_id,token"""
+        sql = sql_loader.load_sql("cow", "search_token_symbol", where=where)
         identifier = ""
     result = mini_apps.run_structured_query(
         ch, sql, COW_DB, params, requested_max_rows=100,

@@ -1,0 +1,14 @@
+-- Latest indexed settlement timestamp, as a scalar anchor for a relative window.
+--
+-- WHY THIS EXISTS RATHER THAN AGGREGATING THE WHOLE TABLE: the `exec` CTE
+-- (settlement executor per tx) and similar joins previously aggregated the
+-- ENTIRE per-chain settlements table (~2M rows) as the hash-join build side —
+-- two of those concurrent tipped the shared ClickHouse instance over its
+-- 10.8 GiB ceiling (code 241). Bounding to the query window shrinks the build to
+-- the window's settlements (e.g. ~44k for 30 days on Gnosis). Settlements share
+-- block_timestamp semantics with trades, so the caller's already-bound
+-- window_days / start_at / end_at params are reused as-is.
+--
+-- @scope is a predicate expression from Python: `chain_id={chain_id:UInt64}` for
+-- the single-chain callers, `chain_id IN (…)` for the all-networks solver view.
+SELECT max(block_timestamp) FROM cow_db.settlements WHERE @scope

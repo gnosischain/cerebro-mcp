@@ -45,9 +45,12 @@ export const SECTION_GROUPS: Record<string, Record<string, readonly string[]>> =
     insights: ["treasury_coverage"],
     history: [
       "treasury_chain_history",
-      "treasury_token_history",
       "treasury_wallet_history",
     ],
+    // treasury_token_history is ALONE on purpose — the most expensive read in the
+    // app, and grouping it with its siblings delayed them behind a 3-worker pool.
+    // Mirrors the backend comment in governance_explorer.py.
+    token_history: ["treasury_token_history"],
   },
 };
 

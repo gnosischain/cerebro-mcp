@@ -27,7 +27,11 @@ function edge(src: number, dst: number, weight = 1): GipEdge {
            firstMention: "2025-01-01 00:00:00", lastMention: "2025-06-01 00:00:00" };
 }
 
-type Series = { data: Array<Record<string, unknown>>; links: Array<Record<string, unknown>> };
+type Series = {
+  data: Array<Record<string, unknown>>;
+  links: Array<Record<string, unknown>>;
+  clip?: boolean;
+};
 /** The timeline is two series — arcs (`lines`) then nodes (`scatter`) — because
  * a `graph` series on a cartesian system emits no click events. These helpers
  * keep the assertions readable across that split. */
@@ -103,21 +107,58 @@ describe("gipTimelineOption", () => {
     expect(colors[1]).toBe(GIP_STAGE_COLOR("unstaged"));
   });
 
-  it("arcs a forward citation to the opposite side and tints it", () => {
+  it("tints a forward citation and separates it by curvature, not by side", () => {
     // 141 of 156 citations point backward (newer cites older). The 15 forward
     // ones only happen when a thread was edited after the fact, so they must
     // not blend in with the normal case.
+    //
+    // This used to assert opposite SIGNS, which sounded like opposite sides and
+    // was not: `coords` is [src, dst] and `backward` is defined by that same
+    // ordering, so flipping both cancelled out and every arc bowed downward.
+    // The distinction is colour plus magnitude now; `bows up` below is the test
+    // that actually pins the side.
     const o = gipTimelineOption([node(10), node(20)], [edge(20, 10), edge(10, 20)]);
     const [backward, forward] = linkSeries(o).data.map(
       (l) => l.lineStyle as Record<string, unknown>);
-    expect(Number(backward.curveness)).toBeGreaterThan(0);
-    expect(Number(forward.curveness)).toBeLessThan(0);
+    expect(Math.abs(Number(backward.curveness)))
+      .toBeGreaterThan(Math.abs(Number(forward.curveness)));
     // Both explicit: an undefined lineStyle.color on a `lines` series falls
     // back to the PALETTE, which painted every arc the same green as a voted
     // node and made the chart read as one connected blob.
     expect(backward.color).toBeTruthy();
     expect(forward.color).toBeTruthy();
     expect(backward.color).not.toBe(forward.color);
+  });
+
+  it("bows every arc UP, so an edge between two 0-citation GIPs stays visible", () => {
+    // The reported bug: "there are edges that cross the 0 level and we never see
+    // them". `inbound` is a count so the y axis floors at 0 and most GIPs sit on
+    // it; a downward arc between two of them apexes below the grid and a
+    // cartesian series clips it away. Measured before the fix: 58.8px below the
+    // grid's bottom edge on a 400px canvas.
+    //
+    // Asserted on the ECharts control-point formula rather than on a rendered
+    // pixel, because the sign is the whole bug and it depends on the chord as
+    // much as on `curveness`:
+    //   cpy = midY - (x2 - x1) * curveness      (pixel y grows downward)
+    // so the arc bows UP exactly when (x2 - x1) and curveness share a sign.
+    const o = gipTimelineOption(
+      [node(10, { firstSeen: "2022-01-01 00:00:00" }),
+       node(20, { firstSeen: "2025-01-01 00:00:00" })],
+      [edge(20, 10), edge(10, 20)],
+    );
+    const series = linkSeries(o);
+    expect(series.data.length).toBe(2);
+    for (const link of series.data) {
+      const coords = link.coords as Array<[string, number]>;
+      const dx = Date.parse(coords[1][0]) - Date.parse(coords[0][0]);
+      const curveness = Number((link.lineStyle as Record<string, unknown>).curveness);
+      expect(curveness).not.toBe(0);
+      expect(Math.sign(dx) * Math.sign(curveness)).toBe(1);
+    }
+    // An arc near the axis MAX would clip the same way upward, so nothing is
+    // clipped at all.
+    expect(series.clip).toBe(false);
   });
 
   it("sizes a node by how much was SAID — influence already has the y-axis", () => {

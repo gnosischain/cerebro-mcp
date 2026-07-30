@@ -12,6 +12,7 @@ from cerebro_mcp.clients.clickhouse import INTERACTIVE_QUERY_BUDGET, ExecutedQue
 from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
 from cerebro_mcp.security import RiskClass, TOOL_RISK_REGISTRY
 from cerebro_mcp.tools.visualization import coingecko, cow_explorer, mini_apps, web_apps
+from tests.sql_text import sql_code
 
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
@@ -424,7 +425,10 @@ def test_generated_spec_sql_never_glues_tokens_to_set_operators():
             )
             assert specs
             for spec in specs:
-                match = glued.search(spec.sql)
+                # Comments stripped FIRST. A .sql file's rationale header is part
+                # of the rendered SQL now, and prose ending "...joined with UNION
+                # ALL." reads to this regex as a glued keyword. See tests/sql_text.
+                match = glued.search(sql_code(spec.sql))
                 assert match is None, (
                     f"{section}/{spec.key}: glued set-op keyword "
                     f"{match.group(0)!r} in generated SQL"

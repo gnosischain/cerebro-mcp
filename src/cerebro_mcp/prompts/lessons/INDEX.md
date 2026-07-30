@@ -53,6 +53,20 @@ separate corpus.
 - [ch-alias-in-where-illegal-aggregation](ch-alias-in-where-illegal-aggregation.md)
   `enforced` — an aggregate alias beside a same-level `WHERE` raises code 184, and
   only on the widest scope arm.
+- [sql-guard-counts-comments-as-code](sql-guard-counts-comments-as-code.md)
+  `enforced` — a textual SQL guard reads the file's comment header as code: prose
+  saying "the FINAL SELECT" tripped a `no FINAL` assert, and five prose mentions of
+  a CTE scored as five extra scans — which is also why the reference ceiling had
+  been set to 2. The false-negative direction is worse: documenting a fix passes the
+  test for having made it.
+
+## Verification method
+
+- [live-table-invalidates-cross-query-diff](live-table-invalidates-cross-query-diff.md)
+  `remediated` — a before/after diff run as two separate queries against a
+  continuously written table measures the write, not the change. The same query
+  returned 1118 then 1119 rows minutes apart. Put both forms in ONE query, or prove
+  each changed piece separately.
 
 ## Mini-app UI
 
@@ -60,9 +74,18 @@ separate corpus.
   `enforced` — two unscoped rules in a 4,000-line shared stylesheet misaligned chart
   grids in a different app two tabs away; the follow-on mistake was adding a JS
   height hook to compensate for the broken cascade.
+- [css-undefined-token-drops-rule](css-undefined-token-drops-rule.md) `enforced` —
+  `var()` on a token that was never assigned discards the WHOLE declaration with no
+  console warning; the governance Overview's top cards rendered as bare prose
+  because three invented tokens silently dropped their border and background.
 - [failed-dataset-must-stay-visible](failed-dataset-must-stay-visible.md) `observed` —
   a panel dropped on error reads as "no data" rather than "this failed". Three sites
   state the rule, none test it.
+- [echarts-curveness-sign-is-relative-to-the-chord](echarts-curveness-sign-is-relative-to-the-chord.md)
+  `enforced` — an arc's side is set by `curveness` times the sign of the chord, so
+  deriving the sign from the same property that orders `coords` cancels out. Every
+  GIP citation arc bowed downward past the y=0 floor and was clipped away; the guard
+  had asserted the two signs were opposite, which was true and yet exactly the bug.
 
 ## Build, deploy and gates
 
@@ -70,6 +93,11 @@ separate corpus.
   mini-apps are served from git-tracked prebuilt bundles, so a source edit changes
   nothing until `make build-ui-<app>`; and a served-bundle bug cannot reproduce under
   `make dev`.
+- [orphaned-sql-template-never-wired](orphaned-sql-template-never-wired.md)
+  `enforced` — moving SQL into a .sql file is TWO changes; `activity.sql` was written
+  and the three call sites kept building the same envelope in Python for three
+  commits. Nothing caught it, and `available()`'s docstring claimed a registry test
+  that did not exist — a comment asserting a guard stops the next person looking.
 - [sql-loader-cache-needs-restart](sql-loader-cache-needs-restart.md) `observed` —
   a `.sql` edit does nothing until the server restarts, so a correct query looks
   wrong; pairs with the bundle trap above into "rebuild or restart, and the symptom

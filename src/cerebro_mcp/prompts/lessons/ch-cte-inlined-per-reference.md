@@ -39,10 +39,19 @@ and reaching for a CTE as a "compute this once" device.
 
 ## Detection
 
-Count references per CTE name in the emitted SQL. Note the guard for this had a
-bug of its own worth copying carefully: a line-initial regex skipped the first CTE
-of every spec, so the check silently verified nothing. Match the name anywhere,
-not just at the start of a line.
+Count references per CTE name in the emitted SQL. The guard for this has now had
+**two** bugs of its own, both worth copying carefully:
+
+1. A line-initial regex skipped the first CTE of every spec, so the check silently
+   verified nothing. Match the name anywhere, not just at the start of a line.
+2. It counted occurrences in the rendered template **including comments**, so prose
+   naming a CTE scored as extra scans. That inflation is why the ceiling had been
+   set to `<= 2`: it looked like real specs needed the slack. Comments stripped, all
+   seven treasury specs reference every CTE exactly once. See
+   [sql-guard-counts-comments-as-code](sql-guard-counts-comments-as-code.md).
+
+Also assert the sweep found something (`seen >= 10`), or the whole check passes
+vacuously the day the `WITH` spelling changes.
 
 ## Safe remediation
 
@@ -52,6 +61,14 @@ with conditional aggregation (`sumIf`, `argMax`) instead of several references.
 
 ## Enforcement
 
-`tests/test_governance_explorer.py` asserts one reference per CTE for both the
-treasury specs and the entity specs. Every other SQL-emitting module is currently
-**unguarded** — extending that assertion is the obvious next step.
+`tests/test_governance_explorer.py` asserts **exactly one** reference per CTE for
+both the treasury specs and the entity specs, over comment-stripped SQL, with a
+non-vacuity floor. Every other SQL-emitting module is currently **unguarded** —
+extending that assertion is the obvious next step.
+
+Cost of getting this wrong, measured: `treasury_token_history` referenced
+`per_bucket` twice, which doubled both its own scan and the `months` scan nested
+inside it. At ~2.7s per scan of `v_treasury_balances` that was 6 effective scans,
+and the dataset failed the 20s interactive budget in production (code 159).
+Referencing it once — the second pass became a window function — took it to 3 scans
+and 8.5-10.7s.

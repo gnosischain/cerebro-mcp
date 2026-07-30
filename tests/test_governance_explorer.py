@@ -16,6 +16,7 @@ from cerebro_mcp.runtime.mini_app_cache import CachedDataset, reset_cache_for_te
 from cerebro_mcp.security import RiskClass, TOOL_RISK_REGISTRY
 from cerebro_mcp.tools.tool_meta import TOOL_META
 from cerebro_mcp.tools.visualization import governance_explorer, mini_apps, web_apps
+from tests.sql_text import sql_code
 
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
@@ -28,6 +29,25 @@ GOV_TOOLS = (
     "search_governance", "load_governance_entity", "load_governance_overlays",
 )
 APP_ONLY_TOOLS = frozenset(GOV_TOOLS) - {"open_governance"}
+
+
+def test_sql_code_strips_comments_and_keeps_code():
+    """The helper above is load-bearing for several guards, so it is itself
+    tested — an assertion helper that quietly stops working takes every guard
+    that depends on it down with it, silently."""
+    assert sql_code("SELECT 1 -- FINAL\n-- months months\nFROM t") == (
+        "SELECT 1 \n\nFROM t"
+    )
+    assert "FINAL" not in sql_code("-- and in the FINAL select")
+    # A string literal containing `--` would be mangled; assert none exists on
+    # this plane, so the simple splitter stays correct.
+    for spec in governance_explorer._treasury_specs(
+        governance_explorer._range_state("", ""),
+        governance_explorer._default_filters(),
+    ):
+        for line in spec.sql.splitlines():
+            head, _, tail = line.partition("--")
+            assert head.count("'") % 2 == 0, f"{spec.key}: `--` inside a literal"
 
 
 class StubCH:
@@ -1228,12 +1248,13 @@ def test_treasury_specs_always_pin_the_job_and_never_use_final():
     assert specs
     job_pin = f"job_name = '{governance_explorer.TREASURY_JOB}'"
     for spec in specs:
-        assert job_pin in spec.sql, spec.key
+        code = sql_code(spec.sql)
+        assert job_pin in code, spec.key
         # v_treasury_balances resolves ReplacingMergeTree dedup internally.
-        assert "FINAL" not in spec.sql.upper(), spec.key
+        assert "FINAL" not in code.upper(), spec.key
         # As-of is resolved per chain; a global max would blend one chain's
         # current snapshot with another's stale one.
-        assert "GROUP BY chain_id" in spec.sql, spec.key
+        assert "GROUP BY chain_id" in code, spec.key
 
 
 def test_treasury_usd_stays_a_typed_null_until_the_price_plane_is_wired():
@@ -1340,9 +1361,25 @@ def test_treasury_history_ranks_by_position_changes_not_longevity():
         )
         if s.key == "treasury_token_history"
     )
-    assert "uniqExact(b.balance_raw_sum) AS changes" in spec.sql
-    assert "changes DESC" in spec.sql
-    assert f"LIMIT {governance_explorer.TREASURY_HISTORY_TOKENS} BY p_chain" in spec.sql
+    code = sql_code(spec.sql)
+    # `changes` is a WINDOW, not a second GROUP BY pass — that second pass was
+    # what referenced `per_bucket` twice and doubled the scan. Both forms were
+    # verified equal on live data (309 tokens, 0 disagreements, identical
+    # checksum), so this asserts the cheap one is the one that shipped.
+    assert (
+        "uniqExact(b.balance_raw_sum) OVER (PARTITION BY b.chain_id, b.token_address)"
+        in code
+    )
+    assert "changes DESC" in code
+    # Selection is dense_rank, not `LIMIT n BY`. dense_rank ranks DISTINCT
+    # ordering-key values and the key ends in `token_address`, so one rank is
+    # one token however many buckets it spans. Proven to pick the same set as
+    # the old `LIMIT 24 BY` (0 divergent tokens).
+    assert "dense_rank() OVER (" in code
+    assert f"rnk <= {governance_explorer.TREASURY_HISTORY_TOKENS}" in code
+    # The tie-break must stay TOTAL. Most candidates tie at changes=1, so
+    # without a unique final key the selected set follows the query plan.
+    assert "changes DESC, token_address" in code
 
 
 def test_treasury_wallet_history_follows_the_focused_asset():
@@ -1433,24 +1470,43 @@ def test_treasury_specs_reference_each_cte_once():
     2 GiB per-query cap at ~390 and took the whole panel down with a code 241.
     It now aggregates once and pivots with ARRAY JOIN.
 
-    Any treasury CTE referenced more than twice is the same trap re-set.
+    Any treasury CTE referenced more than ONCE is the same trap re-set.
+
+    The threshold used to be 2, which let `treasury_token_history` reference
+    `per_bucket` twice and time out in production at 6 effective scans of the
+    view (code 159, 20s interactive budget). The 2 was never a considered
+    allowance either: the counter ran over the raw template, so the cost-history
+    comments naming `months` inflated the count and the real code references
+    were never isolated. Comments stripped, all seven specs reference every CTE
+    exactly once — so 1 is the enforceable number, not a stretch goal.
+
+    A spec that genuinely needs two references should say so here with its
+    measured cost, not relax the bound silently.
     """
     specs = governance_explorer._treasury_specs(
         governance_explorer._range_state("", ""),
         governance_explorer._default_filters(),
     )
+    seen = 0
     for spec in specs:
+        # Comments stripped FIRST — see sql_code(). A prose mention of a CTE is
+        # not a scan, and this counter cannot tell the difference.
+        code = sql_code(spec.sql)
         # Both spellings: a leading `WITH foo AS (` and a continuation
         # `,\nfoo AS (`. The original pattern only matched line-initial
         # names, so the FIRST CTE of every spec went unchecked.
-        names = re.findall(r"(?:^|\bWITH\s+)(\w+) AS \(", spec.sql, re.MULTILINE)
+        names = re.findall(r"(?:^|\bWITH\s+)(\w+) AS \(", code, re.MULTILINE)
         for name in names:
             # `<name> AS (` is the definition; every other bare mention reads it.
-            uses = len(re.findall(rf"\b{name}\b", spec.sql)) - 1
-            assert uses <= 2, (
+            uses = len(re.findall(rf"\b{name}\b", code)) - 1
+            assert uses <= 1, (
                 f"{spec.key}: CTE `{name}` is referenced {uses}x — ClickHouse "
-                "will re-scan it that many times"
+                f"inlines it per reference, so that is {uses} scans of its source"
             )
+            seen += 1
+    # The loop must actually have found CTEs. Without this the whole test passes
+    # vacuously the day the `WITH` spelling changes.
+    assert seen >= 10, f"CTE guard matched only {seen} CTEs — regex has drifted"
 
 
 # ---------------------------------------------------------------------------

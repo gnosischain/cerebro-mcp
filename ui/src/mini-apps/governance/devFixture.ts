@@ -373,6 +373,7 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
       "forum.core": false, "forum.insights": false,
       "delegations.core": false, "delegations.insights": false,
       "treasury.core": false, "treasury.insights": false, "treasury.history": false,
+      "treasury.token_history": false,
       "graph.core": false,
     },
     section_fingerprints: { overview: "dev" },

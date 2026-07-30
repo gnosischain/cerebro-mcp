@@ -48,6 +48,26 @@ profiles:
           sql_loader is lru_cached, so editing a .sql needs a SERVER RESTART to
           take effect. A rebuilt UI bundle does not.
         lesson: sql-loader-cache-needs-restart
+      - text: >-
+          Adding a .sql file is TWO changes — write it AND repoint the caller. An
+          orphaned template is never read, so editing it changes nothing and the
+          Python it was meant to replace keeps running.
+        lesson: orphaned-sql-template-never-wired
+      - text: >-
+          RULE 0 — every query and every reusable fragment is its OWN .sql file.
+          Python composes named fragments and passes parameters; it never contains
+          a statement. Fragments are files too, prefixed by kind: _cte_, _pred_,
+          _join_, _anchor_, _expr_ — and a fragment's comment header is STRIPPED
+          before substitution, so it can carry its rationale safely.
+      - text: >-
+          Assert on comment-STRIPPED SQL. A guard that greps the rendered template
+          reads the file's explanatory header as code, and a comment mentioning a
+          construct can satisfy an assertion that it is present.
+        lesson: sql-guard-counts-comments-as-code
+      - text: >-
+          These views are written continuously. Prove a rewrite equivalent with
+          BOTH forms inside ONE query — two separate runs measure the write.
+        lesson: live-table-invalidates-cross-query-diff
     hazards:
       - ch-final-three-way-rule
       - ch-cte-inlined-per-reference
@@ -56,6 +76,9 @@ profiles:
       - ch-bare-limit-nondeterministic
       - versioned-payload-positional-index
       - sql-loader-cache-needs-restart
+      - sql-guard-counts-comments-as-code
+      - live-table-invalidates-cross-query-diff
+      - orphaned-sql-template-never-wired
     validation:
       - .venv/bin/python -m pytest tests/test_sql_loader.py -q
     guide: src/cerebro_mcp/tools/visualization/queries/AGENTS.md
@@ -98,10 +121,19 @@ profiles:
       - text: >-
           The devFixture must MIRROR the SQL it stands in for. A fixture row the
           query can never return produces a dev loop that validates nothing.
+      - text: >-
+          No SQL statement in Python here — render it from queries/<app>/*.sql via
+          sql_loader. governance_explorer.py and cow_explorer.py are both clean and
+          test-pinned. Enforced by tests/test_sql_lives_in_files.py, whose shrink-only
+          allowlist now holds only metric_lab (a runtime compiler) and mini_apps (the
+          generic result envelope).
     hazards:
       - failed-dataset-must-stay-visible
       - dataset-column-order-is-a-contract
       - ch-final-three-way-rule
+      - sql-guard-counts-comments-as-code
+      - live-table-invalidates-cross-query-diff
+      - orphaned-sql-template-never-wired
     guide: src/cerebro_mcp/tools/visualization/AGENTS.md
 
   - name: miniapp_ui
@@ -123,10 +155,23 @@ profiles:
           An ECharts `graph` series on `coordinateSystem: cartesian2d` emits NO
           click events — use `scatter` + `lines`. A `lines` series with no
           explicit lineStyle.color falls back to the palette.
+      - text: >-
+          An arc's side comes from `curveness` TIMES the sign of the chord, so
+          deriving the sign from the same property that orders `coords` cancels
+          out and clips every arc against the near axis. Measure the rendered apex
+          with echarts SSR (`ssr: true` + renderToSVGString), do not reason.
+        lesson: echarts-curveness-sign-is-relative-to-the-chord
+      - text: >-
+          A `var(--token)` that was never assigned drops the WHOLE declaration
+          silently. Confirm the token exists; plausible names like --border-subtle
+          / --surface-raised / --accent are NOT in the palette.
+        lesson: css-undefined-token-drops-rule
     hazards:
       - stale-prebuilt-miniapp-bundle
       - shared-stylesheet-unscoped-selectors
       - failed-dataset-must-stay-visible
+      - css-undefined-token-drops-rule
+      - echarts-curveness-sign-is-relative-to-the-chord
     validation:
       - npm test --prefix ui
     guide: ui/src/mini-apps/AGENTS.md

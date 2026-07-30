@@ -1,0 +1,28 @@
+-- Relative-window predicate against an order/event anchor CTE.
+--
+-- WHY THE WINDOW MATTERS: it is pushed INTO the dedup. creation_date is immutable
+-- per order_uid, so filtering the raw rows is equivalent to filtering deduped
+-- rows, and that keeps the argMax GROUP BY hash bounded by the WINDOW rather than
+-- the whole (multi-million-row, backfilled) orders table — the default 30d view
+-- dedups ~300k rows / 0.7s instead of ~4M / 12s. "All history" is unbounded by
+-- design and remains the heaviest selection.
+--
+-- THE ANCHOR SHAPE IS NOT INTERCHANGEABLE. Two spellings exist and each belongs
+-- to a specific CTE:
+--   * bare `a`      — order_multi_anchor_cte.sql / order_type_anchor_cte.sql,
+--                     which are NOT grouped, so the CTE holds exactly one row.
+--   * `max(a)`      — order_anchor_cte.sql, which IS `GROUP BY chain_id`, so it
+--                     holds one row per chain and needs the aggregate.
+-- Using the bare form against the grouped CTE feeds a multi-row scalar subquery;
+-- using max() against the ungrouped one is merely redundant. Nothing enforces the
+-- pairing, so the caller passes the aggregate spelling explicitly.
+--
+-- THE TRAP RUNS THE OTHER WAY TOO, and it is silent. Adding `GROUP BY chain_id` to
+-- order_multi_anchor_cte.sql or order_type_anchor_cte.sql — an obvious-looking
+-- symmetry fix toward order_anchor_cte.sql, which HAS it — would turn every
+-- `SELECT a FROM oa` reading of it into ONE ARBITRARY chain's anchor. No error, no
+-- failing test, and a window that is silently wrong for every other chain. If you
+-- group one of those CTEs you MUST change its readers to max(a) in the same edit.
+--
+-- ONLY VALID inside a statement that defines the named anchor CTE.
+@column>=(SELECT @anchor_expr FROM @anchor_cte)-toIntervalDay({window_days:UInt32})
