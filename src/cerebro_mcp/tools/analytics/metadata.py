@@ -567,6 +567,50 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
             f"{settings.SEMANTIC_GRAPH_CATALOG_URL or settings.SEMANTIC_GRAPH_CATALOG_PATH or 'none'}"
         )
 
+        # Event store — backs the storyteller and research workflow tools.
+        # A wedged or unwritable store used to be indistinguishable from a
+        # healthy one: writes are deliberately silenced so observability never
+        # breaks a tool, which also meant nothing ever surfaced the failure.
+        lines.append("\n## Event Store\n")
+        try:
+            from cerebro_mcp.workflow.event_store_sync import (
+                event_store_stats,
+                probe_event_store_writable,
+            )
+
+            es_stats = event_store_stats()
+            writable, probe_error = probe_event_store_writable()
+            lines.append(f"- **Path:** {es_stats['path']}")
+            if not writable:
+                lines.append(
+                    f"- **Writable:** NO — {probe_error}. Workflow tools will "
+                    f"run with event logging degraded; override "
+                    f"`EVENT_STORE_PATH` to a writable location."
+                )
+            else:
+                lines.append("- **Writable:** yes")
+            if es_stats["degraded"]:
+                lines.append(
+                    f"- **State:** DEGRADED — writes paused after a timeout. "
+                    f"{es_stats['last_error']}"
+                )
+            else:
+                lines.append("- **State:** healthy")
+            latency = es_stats["last_write_latency_ms"]
+            lines.append(
+                "- **Last write:** "
+                + (f"{latency:.1f} ms" if latency is not None else "none yet")
+            )
+            lines.append(
+                f"- **Timeouts:** {es_stats['timeouts']} "
+                f"(deadline {es_stats['write_timeout_seconds']}s, "
+                f"{es_stats['skipped_while_degraded']} writes skipped)"
+            )
+            if es_stats["last_error"] and not es_stats["degraded"]:
+                lines.append(f"- **Last error:** {es_stats['last_error']}")
+        except Exception as exc:  # pragma: no cover - defensive
+            lines.append(f"- **Status unavailable:** {exc}")
+
         # Config
         lines.append("\n## Config\n")
         lines.append(f"- MAX_ROWS: {settings.MAX_ROWS}")

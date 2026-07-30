@@ -89,6 +89,13 @@ separate corpus.
 
 ## Runtime and configuration
 
+- [silenced-write-can-still-block](silenced-write-can-still-block.md) `enforced` —
+  a `try/except` around every writer handles the wrong half: a write that BLOCKS is
+  not an exception. `sqlite3.connect(timeout=...)` bounds only the BUSY handler, not
+  `mkdir`/`open`/fsync/WAL, and the offload layer shields the thread — so one event
+  write stranded a storyteller pipeline that had passed every gate, while a read-only
+  tool on the same lock stayed instant. The fix's own traps: a `ThreadPoolExecutor`
+  worker blocks interpreter exit, and the owner contextvar does not cross a thread.
 - [default-off-flag-fails-silently](default-off-flag-fails-silently.md)
   `enforced` — a subsystem behind a default-off flag reads as healthy when it is
   simply not running. `SEMANTIC_ENABLED` defaults False, so the deployed remote

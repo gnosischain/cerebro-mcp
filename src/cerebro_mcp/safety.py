@@ -80,6 +80,35 @@ def register_internal_only_tables(names) -> None:
             INTERNAL_ONLY_TABLES.add(str(name))
 
 
+#: What to do INSTEAD, per blocked keyword.
+#:
+#: "Forbidden keyword detected: SYSTEM" is the single most common error on the
+#: deployed platform — 14 occurrences across the last 6 sessions. Measured cost in
+#: one live session: the caller queried `system.tables`, got the bare refusal,
+#: retried `system.tables` with a different WHERE, tried `information_schema`
+#: (also blocked), tried an unqualified table name (UNKNOWN_TABLE), and only then
+#: found `list_tables`. Four wasted round-trips to rediscover a tool the server
+#: already exposes.
+#:
+#: A refusal that does not say what to do instead invites the retry. SYSTEM is the
+#: only entry because it is the only forbidden keyword a caller reaches for when
+#: they want SCHEMA rather than to write — every other one (INSERT, DROP, GRANT,
+#: KILL …) is a genuine write with no read-only alternative to point at. `SHOW` is
+#: deliberately absent: it is an ALLOWED prefix, not a forbidden keyword, so an
+#: entry for it could never fire.
+_KEYWORD_ALTERNATIVES = {
+    "SYSTEM": (
+        " — the `system` database is not queryable. For schema use the tools: "
+        "`list_tables(database=...)` for tables, `describe_table(database=..., "
+        "table=...)` for columns, `search_models(query=...)` to find a model."
+    ),
+}
+
+
+def _keyword_hint(keyword: str) -> str:
+    return _KEYWORD_ALTERNATIVES.get(keyword.upper(), "")
+
+
 def validate_query(sql: str, max_length: int = 10000) -> Tuple[bool, str]:
     """Validate a SQL query for safety.
 
@@ -122,7 +151,7 @@ def validate_query(sql: str, max_length: int = 10000) -> Tuple[bool, str]:
         # Match as whole word(s) to avoid false positives
         pattern = r"\b" + r"\s+".join(keyword.split()) + r"\b"
         if re.search(pattern, clean_upper):
-            return False, f"Forbidden keyword detected: {keyword}"
+            return False, f"Forbidden keyword detected: {keyword}{_keyword_hint(keyword)}"
 
     for pattern in FORBIDDEN_PATTERNS:
         if re.search(pattern, clean_sql, flags=re.IGNORECASE):

@@ -99,7 +99,76 @@ def test_the_other_health_sections_still_render(status_text):
     without failing anything else."""
     out = status_text(False)
     for section in ("## ClickHouse Connectivity", "## Manifest", "## Docs Index",
-                    "## Semantic Layer", "## Config"):
+                    "## Semantic Layer", "## Event Store", "## Config"):
         assert section in out, f"{section} missing from the status report"
     assert out.index("## Docs Index") < out.index("## Semantic Layer")
-    assert out.index("## Semantic Layer") < out.index("## Config")
+    assert out.index("## Semantic Layer") < out.index("## Event Store")
+    assert out.index("## Event Store") < out.index("## Config")
+
+
+# --- Event store ---------------------------------------------------------
+#
+# Same failure class as the semantic flag, one layer down. Event-log writes are
+# deliberately silenced so observability never breaks a tool — which also meant
+# a wedged or unwritable store looked exactly like a healthy one. It stranded a
+# storyteller pipeline that had passed every gate; see
+# tests/test_event_store_write_deadline.py.
+
+
+def test_status_reports_a_healthy_event_store(status_text, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        settings, "EVENT_STORE_PATH", str(tmp_path / "state.db"), raising=False
+    )
+    from cerebro_mcp.workflow import event_store_sync as es
+
+    es._reset_write_state()
+    out = status_text(False)
+    assert "## Event Store" in out
+    assert "**Writable:** yes" in out
+    assert "**State:** healthy" in out
+
+
+def test_status_reports_an_unwritable_event_store_path(status_text, monkeypatch):
+    """Must name the variable, like the semantic branch does — the reader is
+    holding a broken deployment, not browsing."""
+    monkeypatch.setattr(
+        settings,
+        "EVENT_STORE_PATH",
+        "/proc/definitely-not-writable/state.db",
+        raising=False,
+    )
+    from cerebro_mcp.workflow import event_store_sync as es
+
+    es._reset_write_state()
+    out = status_text(False)
+    assert "**Writable:** NO" in out
+    assert "EVENT_STORE_PATH" in out
+
+
+def test_status_reports_a_degraded_event_store(status_text, tmp_path, monkeypatch):
+    """A store that timed out and paused writes must say so. This is the state
+    the stranded pipeline was in, with nothing anywhere reporting it."""
+    import time
+
+    monkeypatch.setattr(
+        settings, "EVENT_STORE_PATH", str(tmp_path / "state.db"), raising=False
+    )
+    monkeypatch.setattr(
+        settings, "EVENT_STORE_WRITE_TIMEOUT_SECONDS", 0.2, raising=False
+    )
+    monkeypatch.setattr(
+        settings, "EVENT_STORE_DEGRADED_COOLDOWN_SECONDS", 30.0, raising=False
+    )
+    from cerebro_mcp.workflow import event_store_sync as es
+
+    es._reset_write_state()
+    es._reset_bootstrap_cache()
+    es.create_workflow_safe("wf", "storyteller")
+    monkeypatch.setattr(es, "_connect", lambda: time.sleep(30))
+    es.append_event_safe("wf", "phase_advanced", {})
+
+    out = status_text(False)
+    assert "**State:** DEGRADED" in out
+    assert "deadline" in out
+
+    es._reset_write_state()

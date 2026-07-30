@@ -324,6 +324,70 @@ class StorytellerState:
                 "`storyteller_start_session` to begin."
             )
 
+    # ── Durability ──────────────────────────────────────────────────
+    #
+    # This state is in-process and volatile. The existing
+    # `record_storyteller_*_recorded` events are resume HINTS, not artifacts:
+    # `storyboard_recorded` carries a scene COUNT, `visual_spec_recorded` a
+    # chart family, and `final_story_recorded` a content LENGTH — the story
+    # markdown itself was never written anywhere. So a pipeline that had
+    # passed every gate could not be reconstructed after a restart, and a
+    # single stuck gate made the finished work unreachable.
+    #
+    # These two methods carry the artifacts themselves. Payloads above
+    # EVENT_PAYLOAD_COMPRESSION_THRESHOLD_BYTES are gzipped by the event
+    # store, which is what keeps a long story cheap to persist.
+
+    def to_payload(self) -> dict:
+        """Full serializable snapshot, artifacts included."""
+        with self.lock:
+            return self._to_payload_unlocked()
+
+    def _to_payload_unlocked(self) -> dict:
+        def dump(model):
+            return model.model_dump(mode="json") if model is not None else None
+
+        return {
+            "active": self.active,
+            "phase": self.phase,
+            "context_brief": dump(self.context_brief),
+            "insight_slate_notes": self.insight_slate_notes,
+            "big_idea": dump(self.big_idea),
+            "storyboard": dump(self.storyboard),
+            "visual_specs": [dump(v) for v in self.visual_specs],
+            "final_story_title": self.final_story_title,
+            "final_story_markdown": self.final_story_markdown,
+            "review_report": dump(self.review_report),
+            "accessibility_passed": self.accessibility_passed,
+        }
+
+    def restore_from_payload(self, payload: dict) -> None:
+        """Rehydrate from `to_payload`. Replaces all current state."""
+        with self.lock:
+            self.active = bool(payload.get("active", False))
+            self.phase = payload.get("phase", "idle")
+            self.insight_slate_notes = payload.get("insight_slate_notes", "") or ""
+            self.final_story_title = payload.get("final_story_title", "") or ""
+            self.final_story_markdown = (
+                payload.get("final_story_markdown", "") or ""
+            )
+            self.accessibility_passed = bool(
+                payload.get("accessibility_passed", False)
+            )
+
+            def load(model_cls, raw):
+                return model_cls.model_validate(raw) if raw else None
+
+            self.context_brief = load(ContextBrief, payload.get("context_brief"))
+            self.big_idea = load(BigIdea, payload.get("big_idea"))
+            self.storyboard = load(Storyboard, payload.get("storyboard"))
+            self.review_report = load(ReviewReport, payload.get("review_report"))
+            self.visual_specs = [
+                VisualSpec.model_validate(v)
+                for v in (payload.get("visual_specs") or [])
+                if v
+            ]
+
 
 def _default_next_step(phase: StorytellerPhase) -> str:
     return {

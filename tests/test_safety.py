@@ -270,3 +270,57 @@ class TestInternalOnlyTables:
             "LIMIT 10"
         )
         assert valid
+
+
+def test_the_system_refusal_names_the_tools_that_do_the_job():
+    """"Forbidden keyword detected: SYSTEM" is the platform's most common error —
+    14 occurrences across the last 6 deployed sessions.
+
+    Measured in one live Desktop session: the caller queried `system.tables`, got
+    the bare refusal, retried `system.tables` with a different WHERE, tried
+    `information_schema` (also blocked), tried an unqualified table name
+    (UNKNOWN_TABLE), and only then reached `list_tables`. Four wasted round-trips
+    rediscovering a tool the server already exposes.
+
+    A refusal that does not say what to do instead invites exactly that retry
+    loop, so the message must carry the alternative.
+    """
+    ok, message = validate_query("SELECT name FROM system.tables", 10000)
+    assert ok is False
+    assert "SYSTEM" in message
+    for tool in ("list_tables", "describe_table", "search_models"):
+        assert tool in message, f"the refusal should point at {tool}"
+
+
+def test_only_reachable_keywords_carry_a_hint():
+    """An entry for a keyword that is not actually forbidden can never fire, and
+    reads as guidance that exists when it does not. `SHOW` was exactly that — it
+    is an ALLOWED prefix, so a hint keyed on it was dead the moment it was
+    written."""
+    from cerebro_mcp.safety import (
+        ALLOWED_PREFIXES,
+        FORBIDDEN_KEYWORDS,
+        _KEYWORD_ALTERNATIVES,
+    )
+
+    unreachable = [k for k in _KEYWORD_ALTERNATIVES if k not in FORBIDDEN_KEYWORDS]
+    assert unreachable == [], f"{unreachable} can never be emitted"
+    for keyword in _KEYWORD_ALTERNATIVES:
+        assert keyword not in ALLOWED_PREFIXES
+
+
+def test_a_write_keyword_gets_no_alternative():
+    """Only SYSTEM redirects. INSERT/DROP/GRANT are genuine writes with no
+    read-only equivalent, and inventing one would be misleading."""
+    for sql in ("WITH x AS (SELECT 1) SELECT * FROM x WHERE 1 IN (SELECT 1) /* DROP */",):
+        pass
+    ok, message = validate_query("SELECT 1 UNION ALL SELECT 1 FROM t GRANT", 10000)
+    assert ok is False
+    assert "list_tables" not in message
+
+
+def test_a_clean_query_is_still_allowed():
+    ok, message = validate_query(
+        "SELECT * FROM dbt.api_execution_transactions_total", 10000
+    )
+    assert ok is True and message == ""

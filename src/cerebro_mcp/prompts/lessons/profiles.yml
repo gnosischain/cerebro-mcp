@@ -32,8 +32,15 @@ global:
         env var is indistinguishable from a healthy one, and "the probes are
         green" stops meaning anything.
       lesson: default-off-flag-fails-silently
+    - text: >-
+        Catching every exception does not make a call non-blocking. A write that
+        BLOCKS reaches no `except`, and a documented timeout usually covers
+        something narrower than the filesystem — bound it with a real deadline on
+        a DAEMON worker, and carry the caller's contextvars across.
+      lesson: silenced-write-can-still-block
   hazards:
     - default-off-flag-fails-silently
+    - silenced-write-can-still-block
   guide: AGENTS.md
 
 profiles:

@@ -4,6 +4,8 @@ import base64
 import json
 import uuid
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 from cerebro_mcp.clients.clickhouse import ClickHouseManager
 from cerebro_mcp.config import settings
 from cerebro_mcp.models.research import (
@@ -253,16 +255,20 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
             # event-log writes are observability, not correctness.
             record_research_started(project.project_id, hypothesis, scope)
             return _project_summary(store, project.project_id)
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def get_research_project(project_id: str) -> ResearchProjectSummary | str:
         """Return a compact summary of a research project's state."""
         try:
             return _project_summary(store, project_id)
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def plan_research_phase(
@@ -282,8 +288,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
             # the event log is consistent with the on-disk state.
             record_research_phase_planned(project_id, phase, plan_markdown)
             return build_phase_detail(project, phase)
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def execute_research_phase(
@@ -312,8 +320,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 project_id, phase, advanced_to=project.current_phase,
             )
             return build_phase_detail(project, phase)
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def get_research_memory(
@@ -338,8 +348,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 next_page_token=next_token,
                 summary_markdown=_build_memory_summary(project_id, page_items),
             )
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def get_research_evidence(
@@ -373,8 +385,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 next_page_token=next_token,
                 summary_markdown=_build_evidence_summary(project_id, page_items),
             )
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def get_research_findings(
@@ -399,8 +413,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 next_page_token=next_token,
                 summary_markdown=_build_findings_summary(project_id, page_items),
             )
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def attach_research_evidence(
@@ -441,8 +457,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 phase=str(phase), title=evidence.title,
             )
             return evidence
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def capture_schema_snapshot(
@@ -482,8 +500,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 phase=str(phase), title=evidence.title,
             )
             return evidence
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def record_research_memory(
@@ -520,8 +540,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 statement=entry.statement, confidence=entry.confidence,
             )
             return entry
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def record_research_finding(
@@ -553,8 +575,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 evidence_count=len(finding.evidence_refs),
             )
             return finding
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def verify_research_phase(project_id: str) -> VerificationResult | str:
@@ -662,8 +686,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 overall_status=overall_status,
                 summary_markdown=summary,
             )
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def prepare_peer_review(project_id: str) -> PeerReviewPacket | str:
@@ -688,8 +714,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 unresolved_assumptions=unresolved_assumptions,
                 verification_summary=verification_summary,
             )
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def record_peer_review(
@@ -721,8 +749,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 summary=getattr(result, "summary", "") or "",
             )
             return result
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e
 
     @mcp.tool()
     def publish_research_report(
@@ -774,5 +804,7 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 file_uri=report["file_uri"],
                 summary_markdown=summary,
             )
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: {e}"
+            raise ToolError(str(e)) from e

@@ -180,6 +180,83 @@ def _prune_chart_registry() -> None:
         del _chart_registry[k]
 
 
+# --- Chart durability ------------------------------------------------------
+#
+# The registry above is a process-global dict with a 2h TTL, so a restart or a
+# pod move destroyed every chart a session had built. That is half of why a
+# stranded storyteller pipeline could not be rescued: even with the narrative
+# recovered, the charts it references were gone, and `{{chart:ID}}` resolves
+# against this dict.
+#
+# The event store is the durable tier. Charts are written under one synthetic
+# workflow so no schema change is needed, and the ECharts option (which embeds
+# the data) is gzipped by `append_event_safe` above the compression threshold.
+# Writes ride the store's deadline, so a wedged filesystem loses durability,
+# never the chart itself.
+
+def _persist_chart(chart_id: str, entry: dict) -> None:
+    """Best-effort durable copy of one chart record."""
+    try:
+        from cerebro_mcp.workflow.event_store_sync import record_chart
+
+        payload = dict(entry)
+        created = payload.get("created_at")
+        payload["created_at"] = (
+            created.isoformat() if hasattr(created, "isoformat") else None
+        )
+        payload["chart_id"] = chart_id
+        record_chart(payload)
+    except Exception:  # pragma: no cover - durability is never load-bearing
+        logger.debug("chart persistence skipped for %s", chart_id, exc_info=True)
+
+
+def restore_chart_registry(chart_ids: list[str] | None = None) -> int:
+    """Reload persisted charts into the in-memory registry.
+
+    Returns the number restored. Rehydrating the dict rather than teaching each
+    read site about the store keeps every existing `_chart_registry` access —
+    there are a dozen — working unchanged.
+
+    `created_at` is refreshed to now on purpose: the TTL exists to bound memory,
+    and a caller explicitly recovering a session would otherwise get entries
+    that the next prune immediately discards.
+    """
+    try:
+        from cerebro_mcp.workflow.event_store_sync import load_chart_records
+
+        records = load_chart_records()
+    except Exception:
+        logger.exception("chart registry restore failed")
+        return 0
+
+    wanted = set(chart_ids) if chart_ids else None
+    restored: dict[str, dict] = {}
+    for payload in records:
+        cid = payload.get("chart_id")
+        if not cid or (wanted is not None and cid not in wanted):
+            continue
+        payload.pop("chart_id", None)
+        payload["created_at"] = datetime.now()
+        restored[cid] = payload  # later seq wins
+
+    if not restored:
+        return 0
+
+    global _chart_counter
+    with _chart_lock:
+        _chart_registry.update(restored)
+        # Keep the counter ahead of every restored id, or the next chart
+        # generated would reuse an id and silently overwrite a recovered one.
+        highest = 0
+        for cid in _chart_registry:
+            try:
+                highest = max(highest, int(str(cid).rsplit("_", 1)[-1]))
+            except (ValueError, IndexError):
+                continue
+        _chart_counter = max(_chart_counter, highest)
+    return len(restored)
+
+
 # --- Report Cache ---
 _REPORT_CACHE: dict[str, dict] = {}
 _REPORT_LOCK = threading.Lock()
@@ -3125,6 +3202,8 @@ def _register_chart_from_dataset(
                 "source_model": _single_source_model(sql),
                 "rationale": rationale,
             }
+            entry_for_disk = dict(_chart_registry[chart_id])
+        _persist_chart(chart_id, entry_for_disk)
 
         # Metadata-only mode: compact single line for batch tool
         if return_metadata_only:

@@ -15,6 +15,7 @@ Standard-mode users should never need any of these tools.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -31,6 +32,8 @@ from cerebro_mcp.models.storyteller import (
     VisualSpec,
 )
 from cerebro_mcp.storyteller.state import storyteller_state
+
+logger = logging.getLogger(__name__)
 
 
 def _research_metadata_from_snapshot(snap: StorytellerSnapshot) -> dict[str, Any]:
@@ -213,6 +216,7 @@ def register_storyteller_tools(mcp, ch=None) -> None:
         record_storyteller_handoff_completed,
         record_storyteller_phase_advanced,
         record_storyteller_session_started,
+        record_storyteller_state_snapshot,
         record_storyteller_storyboard_recorded,
         record_storyteller_visual_spec_recorded,
     )
@@ -220,6 +224,26 @@ def register_storyteller_tools(mcp, ch=None) -> None:
     # Closure-local mutable holder so the inner event helpers all see
     # the same active session_id without passing it explicitly.
     _session = {"id": None}
+
+    def _persist_state() -> None:
+        """Write the full state after a mutation so it survives a restart.
+
+        Separate from `_emit_phase_event_if_changed`, which fires only on a
+        phase CHANGE: recording visual spec 3 of 8 does not advance the phase,
+        yet it is exactly the work that must not be lost. This runs after every
+        successful mutation instead.
+
+        Best-effort by construction — `record_storyteller_state_snapshot` goes
+        through the event store's write deadline, so a wedged filesystem drops
+        the snapshot rather than blocking the tool.
+        """
+        sid = _session["id"]
+        if sid is None:
+            return
+        try:
+            record_storyteller_state_snapshot(sid, storyteller_state.to_payload())
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("storyteller state snapshot failed")
 
     def _emit_phase_event_if_changed(
         before: str, gate_name: str | None = None,
@@ -362,6 +386,7 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             before = storyteller_state.phase
             snap = storyteller_state.record_context_brief(brief)
             _emit_phase_event_if_changed(before)
+            _persist_state()
             # Step 1 content event — capture the brief's key signals so
             # resume sees audience / mechanism / required_action.
             sid = _session["id"]
@@ -402,6 +427,7 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             before = storyteller_state.phase
             snap = storyteller_state.record_big_idea(idea)
             _emit_phase_event_if_changed(before)
+            _persist_state()
             sid = _session["id"]
             if sid is not None:
                 record_storyteller_big_idea_recorded(
@@ -449,6 +475,7 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             before = storyteller_state.phase
             snap = storyteller_state.record_storyboard(storyboard)
             _emit_phase_event_if_changed(before)
+            _persist_state()
             sid = _session["id"]
             if sid is not None:
                 record_storyteller_storyboard_recorded(
@@ -518,6 +545,7 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             # Visual specs are incremental: phase only advances once all
             # scenes are filled. Helper no-ops on equal phases.
             _emit_phase_event_if_changed(before)
+            _persist_state()
             sid = _session["id"]
             if sid is not None:
                 record_storyteller_visual_spec_recorded(
@@ -559,6 +587,7 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             before = storyteller_state.phase
             snap = storyteller_state.record_final_story(title, content_markdown)
             _emit_phase_event_if_changed(before)
+            _persist_state()
             sid = _session["id"]
             if sid is not None:
                 record_storyteller_final_story_recorded(
@@ -625,6 +654,7 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             # back to the earliest failing phase. The helper emits the
             # appropriate phase_advanced or gate_failed event.
             _emit_phase_event_if_changed(before, gate_name="clarity_review")
+            _persist_state()
             heading = (
                 "Clarity review passed."
                 if report.ready_for_handoff
@@ -657,6 +687,7 @@ def register_storyteller_tools(mcp, ch=None) -> None:
             snap = storyteller_state.record_accessibility_pass(passed, notes)
             # Accessibility: PASS → handoff, FAIL → back to write.
             _emit_phase_event_if_changed(before, gate_name="accessibility")
+            _persist_state()
             heading = (
                 "Accessibility passed."
                 if passed

@@ -301,6 +301,28 @@ class Settings(BaseSettings):
     # Compress event payloads larger than this with gzip before insert.
     # LLM message-history payloads can be 10-100 KB per turn.
     EVENT_PAYLOAD_COMPRESSION_THRESHOLD_BYTES: int = 4096
+    # Hard deadline on a single event-store write.
+    #
+    # The module contract is that event-log writes are observability and
+    # must never break a tool. Catching exceptions delivers half of that:
+    # a write that BLOCKS is not an exception, and nothing else in the
+    # path bounds it. `sqlite3.connect(timeout=...)` governs only
+    # SQLite's BUSY handler (lock contention) — not mkdir/stat/open,
+    # fsync, WAL/-shm setup, or the checkpoint SQLite runs when the last
+    # connection to a WAL database closes. On a wedged or full
+    # filesystem those block indefinitely, and `runtime/offload.py` adds
+    # no timeout either (anyio shields the worker thread, so a client
+    # disconnect does not abort it).
+    #
+    # Observed: a storyteller pipeline that had passed every gate was
+    # stranded because `storyteller_record_accessibility_pass` — a bool
+    # assignment plus one event write — never returned, while
+    # `storyteller_status` (zero filesystem calls) stayed instant.
+    EVENT_STORE_WRITE_TIMEOUT_SECONDS: float = 2.0
+    # After a write times out, skip writes for this long instead of
+    # paying the deadline on every subsequent call. A wedged filesystem
+    # degrades observability; it must not tax every tool call.
+    EVENT_STORE_DEGRADED_COOLDOWN_SECONDS: float = 60.0
     # Cap on workers in the parallel fan-out runner (analyst sub-tasks).
     WORKFLOW_MAX_PARALLEL: int = 8
 

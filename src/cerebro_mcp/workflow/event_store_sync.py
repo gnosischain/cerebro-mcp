@@ -23,10 +23,14 @@ Design choices:
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import gzip
 import json
 import logging
+import queue
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -106,6 +110,11 @@ CREATE TABLE IF NOT EXISTS gates (
 # When the path changes (tests / db deletion), the cache miss re-runs DDL.
 _bootstrapped_for_path: str | None = None
 
+#: Per-thread sqlite3 connection. sqlite3 connections are thread-affine, and
+#: writes are funnelled through one executor thread, so this is effectively a
+#: single long-lived connection rather than one per write.
+_conn_cache = threading.local()
+
 
 def _safe_path() -> Path:
     return Path(settings.EVENT_STORE_PATH)
@@ -125,13 +134,36 @@ def _connect() -> sqlite3.Connection:
     """
     global _bootstrapped_for_path
     p = _safe_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    path_str = str(p)
+
+    # Reuse this thread's connection. Writes are funnelled through a single
+    # executor thread (see the write-deadline section), so in practice this is
+    # one long-lived connection. sqlite3 connections are thread-affine, hence
+    # thread-local rather than a module global.
+    #
+    # Reopening per call was not free: the connection was never explicitly
+    # closed — `with conn:` manages a TRANSACTION, not closure — so every write
+    # left a connection for the GC to finalize, and closing the last connection
+    # to a WAL database triggers a checkpoint.
+    cached = getattr(_conn_cache, "conn", None)
+    cached_path = getattr(_conn_cache, "path", None)
+    file_missing = not p.exists()
+    if cached is not None and (cached_path != path_str or file_missing):
+        try:
+            cached.close()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        cached = None
+        _conn_cache.conn = None
 
     # If the file was deleted out from under us, force a re-bootstrap.
-    path_str = str(p)
-    if not p.exists():
+    if file_missing:
         _bootstrapped_for_path = None
 
+    if cached is not None:
+        return cached
+
+    p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path_str, isolation_level=None, timeout=30.0)
     # Match EventStore async pragmas: WAL journal + NORMAL synchronous.
     # journal_mode=WAL persists at the database level; synchronous is
@@ -146,6 +178,8 @@ def _connect() -> sqlite3.Connection:
         conn.executescript(_SCHEMA_DDL)
         _bootstrapped_for_path = path_str
 
+    _conn_cache.conn = conn
+    _conn_cache.path = path_str
     return conn
 
 
@@ -154,8 +188,236 @@ def _reset_bootstrap_cache() -> None:
     `EVENT_STORE_PATH` between runs."""
     global _bootstrapped_for_path
     _bootstrapped_for_path = None
+    cached = getattr(_conn_cache, "conn", None)
+    if cached is not None:
+        try:
+            cached.close()
+        except Exception:  # pragma: no cover - defensive
+            pass
+    _conn_cache.conn = None
+    _conn_cache.path = None
 
 
+# ---------------------------------------------------------------------------
+# Write deadline
+#
+# "Failures NEVER raise" (module docstring) covers exceptions but not the
+# failure mode that actually stranded a pipeline: a write that BLOCKS. See
+# `EVENT_STORE_WRITE_TIMEOUT_SECONDS` in config.py for the full account of
+# why nothing else in the path bounds it.
+#
+# Every write runs on a dedicated worker so the calling tool thread can walk
+# away from it. A thread wedged in a syscall cannot be killed in Python, so on
+# timeout the worker is ABANDONED and replaced: the stuck thread leaks (one
+# thread, once) but a healed filesystem recovers on the next attempt rather
+# than queueing behind a corpse forever.
+#
+# The worker is a DAEMON thread, not a ThreadPoolExecutor. `concurrent.futures`
+# registers an atexit hook that JOINS its workers, so a wedged pool thread
+# blocks interpreter exit even after `shutdown(wait=False)` — measured at 8s
+# for an 8s stall. That would convert a tool hang into a shutdown hang: SIGTERM
+# ignored until the pod's grace period expires, which with a ReadWriteOnce PVC
+# and `strategy = "Recreate"` stalls the whole rollout. A daemon thread is
+# abandoned at exit instead.
+#
+# One long-lived worker also keeps `_connect`'s thread-local connection warm,
+# so the steady state is a single reused connection.
+# ---------------------------------------------------------------------------
+
+_write_state_lock = threading.Lock()
+_degraded_until: float = 0.0
+_last_write_error: str | None = None
+_last_write_latency_ms: float | None = None
+_write_timeouts: int = 0
+_writes_skipped: int = 0
+
+
+class _Worker:
+    """Single daemon thread draining a job queue."""
+
+    def __init__(self) -> None:
+        self.queue: "queue.Queue[Any]" = queue.Queue()
+        self.thread = threading.Thread(
+            target=self._loop, name="cerebro-event-store", daemon=True
+        )
+        self.thread.start()
+
+    def _loop(self) -> None:
+        while True:
+            job = self.queue.get()
+            if job is None:
+                return
+            ctx, fn, args, kwargs, box, done = job
+            try:
+                # Run inside the CALLER's context. `create_workflow_safe`
+                # resolves its owner from a contextvar
+                # (`runtime.identity.get_current_owner`), and contextvars do
+                # not cross threads — without this every workflow row would
+                # silently lose its owner.
+                box.append(("ok", ctx.run(fn, *args, **kwargs)))
+            except BaseException as exc:  # noqa: BLE001 - relayed to caller
+                box.append(("err", exc))
+            finally:
+                done.set()
+
+    def submit(self, ctx, fn, args, kwargs):
+        box: list[tuple[str, Any]] = []
+        done = threading.Event()
+        self.queue.put((ctx, fn, args, kwargs, box, done))
+        return box, done
+
+
+_worker: _Worker | None = None
+
+
+def _get_worker_unlocked() -> _Worker:
+    global _worker
+    if _worker is None:
+        _worker = _Worker()
+    return _worker
+
+
+def _abandon_executor_unlocked() -> None:
+    """Drop the worker without waiting for its wedged thread.
+
+    The thread is a daemon, so leaving it stuck costs one thread and never
+    delays process exit.
+    """
+    global _worker
+    stale = _worker
+    _worker = None
+    if stale is not None:
+        try:
+            stale.queue.put(None)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+
+def _bounded(default: Any):
+    """Run the wrapped writer on a worker thread under a hard deadline.
+
+    Returns `default` when the store is degraded, the deadline expires, or
+    the write raises. Never propagates.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            global _degraded_until, _last_write_error
+            global _last_write_latency_ms, _write_timeouts, _writes_skipped
+
+            now = time.monotonic()
+            with _write_state_lock:
+                if now < _degraded_until:
+                    _writes_skipped += 1
+                    return default
+                worker = _get_worker_unlocked()
+
+            timeout = float(
+                getattr(settings, "EVENT_STORE_WRITE_TIMEOUT_SECONDS", 2.0)
+            )
+            started = time.monotonic()
+            box, done = worker.submit(
+                contextvars.copy_context(), fn, args, kwargs
+            )
+
+            if not done.wait(timeout):
+                cooldown = float(
+                    getattr(
+                        settings,
+                        "EVENT_STORE_DEGRADED_COOLDOWN_SECONDS",
+                        60.0,
+                    )
+                )
+                with _write_state_lock:
+                    _write_timeouts += 1
+                    _degraded_until = time.monotonic() + cooldown
+                    _last_write_error = (
+                        f"{fn.__name__} exceeded {timeout}s deadline "
+                        f"(path={settings.EVENT_STORE_PATH}); event dropped, "
+                        f"writes paused {cooldown:.0f}s"
+                    )
+                    _abandon_executor_unlocked()
+                logger.warning(
+                    "event-log write timed out after %.1fs (%s); dropping the "
+                    "event and pausing writes for %.0fs. The tool call "
+                    "continues — observability must not block it.",
+                    timeout, fn.__name__, cooldown,
+                )
+                return default
+
+            status, value = box[0]
+            if status == "err":
+                with _write_state_lock:
+                    _last_write_error = f"{fn.__name__}: {value}"
+                logger.error(
+                    "event-log write failed (%s): %s", fn.__name__, value
+                )
+                return default
+
+            with _write_state_lock:
+                _last_write_latency_ms = (time.monotonic() - started) * 1000.0
+                _last_write_error = None
+            return value
+
+        return wrapper
+
+    return decorate
+
+
+def event_store_stats() -> dict[str, Any]:
+    """Health snapshot for `system_status`.
+
+    A capability that can silently stop working must report its state —
+    see the `default-off-flag-fails-silently` lesson. Before this existed,
+    a wedged event store was indistinguishable from a healthy one.
+    """
+    with _write_state_lock:
+        degraded = time.monotonic() < _degraded_until
+        return {
+            "path": str(_safe_path()),
+            "degraded": degraded,
+            "timeouts": _write_timeouts,
+            "skipped_while_degraded": _writes_skipped,
+            "last_write_latency_ms": _last_write_latency_ms,
+            "last_error": _last_write_error,
+            "write_timeout_seconds": float(
+                getattr(settings, "EVENT_STORE_WRITE_TIMEOUT_SECONDS", 2.0)
+            ),
+        }
+
+
+def _reset_write_state() -> None:
+    """Tests use this to clear degraded state between cases."""
+    global _degraded_until, _last_write_error, _last_write_latency_ms
+    global _write_timeouts, _writes_skipped
+    with _write_state_lock:
+        _degraded_until = 0.0
+        _last_write_error = None
+        _last_write_latency_ms = None
+        _write_timeouts = 0
+        _writes_skipped = 0
+        _abandon_executor_unlocked()
+
+
+def probe_event_store_writable() -> tuple[bool, str]:
+    """Boot-time writability check for `EVENT_STORE_PATH`'s directory.
+
+    `bootstrap.ensure_writable_dir` covers only RESEARCH_DIR, so a bad
+    event-store path used to surface as a hang on the first storyteller or
+    research write rather than as a startup error.
+    """
+    try:
+        p = _safe_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        probe = p.parent / ".write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+@_bounded(False)
 def create_workflow_safe(
     workflow_id: str,
     kind: str,
@@ -208,6 +470,7 @@ def create_workflow_safe(
         return False
 
 
+@_bounded(False)
 def mark_workflow_status_safe(workflow_id: str, status: str) -> bool:
     """Update workflow status. Returns True on success, False on failure."""
     if status not in _VALID_WORKFLOW_STATUSES:
@@ -228,6 +491,7 @@ def mark_workflow_status_safe(workflow_id: str, status: str) -> bool:
         return False
 
 
+@_bounded(None)
 def append_event_safe(
     workflow_id: str,
     kind: str,
@@ -284,6 +548,7 @@ def append_event_safe(
         return None
 
 
+@_bounded(False)
 def set_gate_safe(
     workflow_id: str,
     gate_name: str,
@@ -551,6 +816,132 @@ def record_research_evidence_attached(
 
 def workflow_id_for_storyteller(session_id: str) -> str:
     return f"storyteller_{session_id}"
+
+
+#: Event kind carrying the FULL storyteller state, artifacts included.
+#:
+#: The `record_storyteller_*_recorded` helpers below are resume HINTS and
+#: deliberately truncated — `storyboard_recorded` carries a scene count,
+#: `visual_spec_recorded` a chart family, `final_story_recorded` a content
+#: LENGTH. They tell a resuming agent WHERE it was, never WHAT it made, so a
+#: finished pipeline could not be reconstructed after a restart.
+#:
+#: This kind is the artifact of record. It is written last-wins per session;
+#: `load_latest_storyteller_snapshot` reads the highest seq. Payloads over
+#: EVENT_PAYLOAD_COMPRESSION_THRESHOLD_BYTES are gzipped by `append_event_safe`,
+#: which is what keeps a long story markdown cheap to store.
+STORYTELLER_STATE_SNAPSHOT = "storyteller_state_snapshot"
+
+
+def record_storyteller_state_snapshot(session_id: str, payload: dict) -> None:
+    """Persist the full storyteller state so it survives a restart."""
+    append_event_safe(
+        workflow_id_for_storyteller(session_id),
+        STORYTELLER_STATE_SNAPSHOT,
+        payload,
+    )
+
+
+def load_latest_storyteller_snapshot(session_id: str) -> dict | None:
+    """Most recent full-state snapshot for a session, or None.
+
+    Reads are NOT routed through the write deadline: the caller is explicitly
+    asking for the data and a read that fails should say so rather than return
+    a silent empty.
+    """
+    wid = workflow_id_for_storyteller(session_id)
+    try:
+        conn = _connect()
+        cur = conn.execute(
+            "SELECT payload_json, payload_compressed FROM events "
+            "WHERE workflow_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1",
+            (wid, STORYTELLER_STATE_SNAPSHOT),
+        )
+        row = cur.fetchone()
+    except Exception:
+        logger.exception(
+            "event-log snapshot read failed (session_id=%s)", session_id
+        )
+        return None
+    if not row:
+        return None
+    body, compressed = row[0], row[1]
+    try:
+        if compressed:
+            body = gzip.decompress(body)
+        return json.loads(body)
+    except Exception:
+        logger.exception(
+            "event-log snapshot decode failed (session_id=%s)", session_id
+        )
+        return None
+
+
+CHART_REGISTRY_WORKFLOW = "chart_registry"
+CHART_RECORDED = "chart_recorded"
+
+
+def load_chart_records() -> list[dict[str, Any]]:
+    """Every persisted chart record, oldest first (later entries win).
+
+    Lives here rather than in `tools/visualization/charts.py` so the event
+    schema stays behind this module — charts.py has no business knowing the
+    events table, and the repo's no-SQL-in-Python guard covers that file.
+    """
+    try:
+        conn = _connect()
+        rows = conn.execute(
+            "SELECT payload_json, payload_compressed FROM events "
+            "WHERE workflow_id = ? AND kind = ? ORDER BY seq",
+            (CHART_REGISTRY_WORKFLOW, CHART_RECORDED),
+        ).fetchall()
+    except Exception:
+        logger.exception("event-log chart record read failed")
+        return []
+
+    out: list[dict[str, Any]] = []
+    for body, compressed in rows:
+        try:
+            if compressed:
+                body = gzip.decompress(body)
+            out.append(json.loads(body))
+        except Exception:
+            continue
+    return out
+
+
+def record_chart(payload: dict[str, Any]) -> None:
+    """Durable copy of one chart registry entry."""
+    create_workflow_safe(CHART_REGISTRY_WORKFLOW, "chart_registry")
+    append_event_safe(CHART_REGISTRY_WORKFLOW, CHART_RECORDED, payload)
+
+
+def list_storyteller_sessions(limit: int = 20) -> list[dict[str, Any]]:
+    """Recent storyteller sessions that have a recoverable snapshot."""
+    try:
+        conn = _connect()
+        cur = conn.execute(
+            "SELECT w.id, w.status, w.updated_at, MAX(e.seq) "
+            "FROM workflows w JOIN events e ON e.workflow_id = w.id "
+            "WHERE w.kind = ? AND e.kind = ? "
+            "GROUP BY w.id, w.status, w.updated_at "
+            "ORDER BY w.updated_at DESC LIMIT ?",
+            ("storyteller_session", STORYTELLER_STATE_SNAPSHOT, int(limit)),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        logger.exception("event-log session list failed")
+        return []
+    out = []
+    for wid, status, updated_at, _seq in rows:
+        out.append(
+            {
+                "session_id": str(wid).replace("storyteller_", "", 1),
+                "status": status,
+                "updated_at": updated_at,
+            }
+        )
+    return out
 
 
 def record_storyteller_session_started(session_id: str) -> None:

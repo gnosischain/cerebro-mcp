@@ -586,6 +586,26 @@ def main():
     # without a registered handler fall back to `orphaned`. Non-fatal —
     # log and continue if the SQLite db can't be opened, since most tools
     # don't depend on it.
+    # Probe EVENT_STORE_PATH's directory before anything writes to it.
+    # `ensure_writable_dir` above covers only RESEARCH_DIR, so an unwritable
+    # event-store path used to surface as a HANG on the first storyteller or
+    # research write rather than as a startup error — see
+    # tests/test_event_store_write_deadline.py for the incident this came from.
+    try:
+        from cerebro_mcp.workflow.event_store_sync import (
+            probe_event_store_writable,
+        )
+        writable, probe_error = probe_event_store_writable()
+        if not writable:
+            logger.error(
+                "EVENT_STORE_PATH is NOT writable (%s): %s. Workflow tools "
+                "(storyteller, research) will run with event logging "
+                "degraded. Override EVENT_STORE_PATH to a writable location.",
+                settings.EVENT_STORE_PATH, probe_error,
+            )
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("event store writability probe failed (non-fatal)")
+
     try:
         counts = init_event_store_sync()
         if isinstance(counts, dict) and any(counts.values()):
