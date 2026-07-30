@@ -81,10 +81,15 @@ def register_workflow_resume_tools(mcp):
             return f"Error: {e}"
 
         if not entries:
-            return (
-                "No resumable workflows found "
-                f"(checked workflows older than {max_age_seconds}s)."
-            )
+            # `max_age_seconds` is the CALLEE's parameter name; this scope only
+            # has `min_idle_seconds`, so the old f-string raised NameError on
+            # the empty result — i.e. the common case.
+            if min_idle_seconds > 0:
+                return (
+                    "No resumable workflows found "
+                    f"(checked workflows idle for more than {min_idle_seconds}s)."
+                )
+            return "No resumable workflows found."
 
         lines = [f"Found {len(entries)} resumable workflow(s):\n"]
         for ent in entries:

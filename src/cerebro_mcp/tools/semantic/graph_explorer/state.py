@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import threading
+# Module scope, not inside timeline_bucket_range: the function's own signature
+# annotates `today: "date | None"`, which is resolved against module globals by
+# anything calling get_type_hints() or building a schema from it.
+from datetime import date, timedelta
 from typing import Any
 
 from cerebro_mcp.chains import (
@@ -184,8 +188,6 @@ def timeline_bucket_range(
     in-range one (half-open contract); ``count`` is the number of buckets in
     ``[range_start, range_end_exclusive)``.
     """
-    from datetime import date, timedelta
-
     anchor = today or date.today()
     raw_start = anchor - timedelta(days=max(1, int(range_days)))
 

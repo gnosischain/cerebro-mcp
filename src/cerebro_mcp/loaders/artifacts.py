@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 import requests
 
+from cerebro_mcp.config import settings
 from cerebro_mcp.runtime.observability import log_event
 
 
@@ -230,14 +231,22 @@ class ArtifactLoader:
                         source=self._url,
                     )
                 error = f"Failed to fetch {self._label}: HTTP {response.status_code}"
+                # Recorded on BOTH paths, not just the conditional one. The
+                # initial (non-conditional) load is the startup fetch — the one
+                # that decides whether this artifact exists at all — and it
+                # previously left `_last_refresh_error` as None, so a failure
+                # was a log line and nothing else. That is how a NameError in
+                # this function silently disabled the semantic registry,
+                # catalog, docs index and graph catalog in production while
+                # every status surface and health probe stayed green.
+                self._last_refresh_error = error
                 if conditional:
-                    self._last_refresh_error = error
                     return None
                 logger.warning(error)
             except Exception as exc:
                 error = f"Error fetching {self._label}: {exc}"
+                self._last_refresh_error = error
                 if conditional:
-                    self._last_refresh_error = error
                     return None
                 logger.warning(error)
 

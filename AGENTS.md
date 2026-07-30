@@ -73,9 +73,19 @@ make dev                                  # serves LIVE source, not the bundles
   `pytest tests/` plus the search/workflows/semantic suites (never latency, which is
   machine-dependent). `.github/workflows/benchmarks.yml` runs it on every PR and
   push to main, so anything in `tests/` is CI-enforced. See `benchmarks/README.md`.
-- **There is no lint gate.** `ruff` is not in the dev dependencies and not wired into
-  `make` or CI; running it with defaults reports ~29 findings on untouched files.
+- **There is no *style* lint gate, with one exception.** `ruff` is not in the dev
+  dependencies, and running it with defaults reports ~29 findings on untouched files.
   Match the surrounding style rather than reformatting to satisfy it.
+  The exception is **`make lint-undefined`** (`ruff check --select F821`, run via
+  `uvx`), which `bench-check` depends on so it gates CI and pre-push. F821 alone is
+  clean on this repo, so it costs nothing and catches a class the test suite
+  structurally cannot: a name that only resolves when a rarely-exercised branch runs.
+  It was added after `settings` was used in `loaders/artifacts.py` without being
+  imported — the broad `except Exception` around the fetch turned the `NameError`
+  into a log warning, so the semantic registry, catalog, docs index and graph
+  catalog all silently failed to load in production while the full suite passed and
+  every health probe stayed green. Do not widen the rule selection without a
+  separate decision; the value here is that it is zero-noise.
 - **`.githooks/pre-push` runs it, but is opt-in.** Enable with
   `git config core.hooksPath .githooks`. Nothing enables it for you.
 - `tests/test_cerebro_lessons.py` validates the lesson corpus (id/filename, status

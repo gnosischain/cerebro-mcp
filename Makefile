@@ -110,7 +110,21 @@ test:
 
 # ---- benchmarks (run via python -m, NEVER pytest — see benchmarks/README.md) ----
 
-bench-check:              ## regression gate: pytest + deterministic correctness suites (no ClickHouse). The CI + pre-push gate.
+lint-undefined:           ## undefined-name check ONLY (ruff F821). Zero-noise; part of bench-check.
+	# Deliberately F821 and nothing else. This repo has no general lint gate
+	# because default ruff reports ~29 findings on untouched files (see
+	# AGENTS.md) — but F821 alone is clean and catches a class the test suite
+	# structurally cannot: a name that only resolves when a rarely-exercised
+	# branch runs.
+	#
+	# Added after `settings` was referenced in loaders/artifacts.py without
+	# being imported. The broad `except Exception` around the fetch turned the
+	# NameError into a log warning, so the semantic registry, catalog, docs
+	# index and graph catalog all silently failed to load in production while
+	# 2171 tests passed and every health probe stayed green.
+	uvx ruff check --select F821 src/ tests/ benchmarks/
+
+bench-check: lint-undefined  ## regression gate: pytest + deterministic correctness suites (no ClickHouse). The CI + pre-push gate.
 	uv run pytest tests/ -q
 	uv run python -m benchmarks.run --suite search
 	uv run python -m benchmarks.run --suite workflows
