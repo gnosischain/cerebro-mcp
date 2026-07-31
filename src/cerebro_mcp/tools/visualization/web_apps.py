@@ -284,13 +284,27 @@ def _inject_payload(
 
 
 def _check_auth(request: Request) -> JSONResponse | None:
-    """Mirror the /reports auth: optional bearer header or ?token= param."""
+    """Browser-plane auth for the standalone /app/* routes.
+
+    Constant-time comparisons only (a plain == on a shared secret over an
+    internet-adjacent route is a timing oracle). This plane is entirely
+    absent unless MINI_APP_BROWSER_ENABLED opts it in — see
+    register_web_app_routes — and the connector profile never registers it.
+    """
+    import hmac as _hmac
+
     auth_token = os.environ.get("MCP_AUTH_TOKEN")
     if not auth_token:
         return None
     auth_header = request.headers.get("Authorization", "")
     query_token = request.query_params.get("token", "")
-    if auth_header == f"Bearer {auth_token}" or query_token == auth_token:
+    if _hmac.compare_digest(
+        auth_header.encode("latin-1", "ignore"),
+        f"Bearer {auth_token}".encode("latin-1"),
+    ) or _hmac.compare_digest(
+        query_token.encode("latin-1", "ignore"),
+        auth_token.encode("latin-1"),
+    ):
         return None
     return JSONResponse({"error": "unauthorized"}, status_code=401)
 
@@ -667,12 +681,34 @@ async def serve_app_catalog(request: Request) -> Response:
 
 
 def register_web_app_routes(mcp) -> None:
-    """Register the web-app routes on the FastMCP Starlette app."""
+    """Register the web-app routes on the FastMCP Starlette app.
+
+    The interactive plane (``/app/{id}``, its tool dispatch, and the ``/``
+    + ``/apps`` catalog) is an OPT-IN behind ``MINI_APP_BROWSER_ENABLED``
+    (default OFF — connector plan R10 §6): ``serve_app`` echoes the caller
+    credential into ``window.__MINI_APP_TOKEN__`` and the dispatch route
+    executes ``run_metric_lab_sql`` / ``delete_report_archive_entry`` on
+    it, so this is not a link but an interactive session smearing a
+    credential across browser history. When the flag is off, none of these
+    routes EXIST — a request 404s at the router rather than reaching an
+    auth check. The mini-apps stay reachable through their ``ui://`` MCP
+    resources. Only the static asset + health routes register
+    unconditionally (deliberately public, code-only, no credential).
+    """
+    from cerebro_mcp.config import settings
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
     # Assets first (more specific) so it wins over the bare /app/{app_id} route.
     mcp.custom_route(
         "/app/{app_id}/assets/{path:path}", methods=["GET"]
     )(serve_app_asset)
     mcp.custom_route("/app/{app_id}/health", methods=["GET"])(serve_app_health)
+    if connector_profile_active() or not settings.MINI_APP_BROWSER_ENABLED:
+        # Under the connector profile this plane never exists, regardless of
+        # the flag: dispatch_app_tool executes an app's allowed_tools list
+        # (arbitrary SELECT, report delete) on the credential the page was
+        # served with, entirely outside the 44-tool policy.
+        return
     mcp.custom_route("/app/{app_id}", methods=["GET"])(serve_app)
     mcp.custom_route(
         "/app/{app_id}/api/tool/{tool_name}", methods=["POST"]

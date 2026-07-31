@@ -411,3 +411,36 @@ def test_openai_nonpublic_method_denied_even_authenticated():
         headers={"Authorization": f"Bearer {tok}"},
     )
     assert r.status_code == 403
+
+
+def test_capability_filter_handles_both_wire_formats():
+    """The capability rewrite must work for JSON *and* SSE bodies, and DENY
+    on anything it cannot parse — passing an unverified body through
+    re-advertised resources/prompts the endpoint refuses to serve."""
+    from cerebro_mcp.auth.asgi import _CapabilityFilter
+
+    strip = _CapabilityFilter._strip_capabilities
+    payload = {
+        "jsonrpc": "2.0", "id": 1,
+        "result": {"capabilities": {"tools": {}, "resources": {}, "prompts": {}}},
+    }
+    plain = strip(json.dumps(payload).encode())
+    caps = json.loads(plain)["result"]["capabilities"]
+    assert "tools" in caps and "resources" not in caps and "prompts" not in caps
+
+    sse = f"event: message\ndata: {json.dumps(payload)}\n\n".encode()
+    framed = strip(sse)
+    assert framed is not None, "SSE-framed initialize was not rewritten"
+    assert b"resources" not in framed and b"prompts" not in framed
+    assert framed.startswith(b"event: message")
+
+    assert strip(b"<html>not json</html>") is None
+    assert strip(b"data: {not json}\n\n") is None
+
+
+def test_get_requires_baseline_scope():
+    """A valid token granted NOTHING must not open a stream."""
+    tok = mint(scope="")
+    r = _client("/mcp").get("/mcp", headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 403
+    assert 'scope="cerebro:discover"' in r.headers["WWW-Authenticate"]

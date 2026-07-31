@@ -2005,15 +2005,37 @@ class TestResearchReport:
 class TestReportDownloadUrl:
     """A1: report links must resolve (auth token + public base, no dead loopback)."""
 
-    def test_base_url_appends_auth_token(self, monkeypatch):
+    def test_base_url_appends_signed_capability(self, monkeypatch, tmp_path):
+        """The shared token NEVER rides in report URLs anymore (GDPR H4):
+        links carry a signed one-report capability minted from the authz
+        row's auth_id, or nothing at all."""
+        from cerebro_mcp.workflow import authz_store as authz_mod
+
         monkeypatch.setattr(
             session_state_mod.settings,
             "REPORT_BASE_URL",
             "https://mcp.example.com/reports",
         )
         monkeypatch.setenv("MCP_AUTH_TOKEN", "secret-123")
-        url = viz._get_report_download_url("abcd1234")
-        assert url == "https://mcp.example.com/reports/abcd1234?token=secret-123"
+        monkeypatch.setenv("CEREBRO_SIGNING_KEY", "s" * 32)
+        monkeypatch.setattr(
+            session_state_mod.settings,
+            "CEREBRO_AUTHZ_DB_PATH",
+            str(tmp_path / "authz.db"),
+        )
+        authz_mod.reset_authz_store_for_tests()
+        store = authz_mod.get_authz_store()
+        store.begin_publication(
+            report_id="abcd1234", owner_hash=None,
+            filename="abcd1234.html", kind="report",
+        )
+        store.mark_ready("abcd1234")
+        try:
+            url = viz._get_report_download_url("abcd1234")
+            assert url.startswith("https://mcp.example.com/reports/abcd1234?cap=v1.")
+            assert "token=" not in url, "shared token leaked into a report URL"
+        finally:
+            authz_mod.reset_authz_store_for_tests()
 
     def test_base_url_without_token_has_no_query(self, monkeypatch):
         monkeypatch.setattr(
@@ -2022,9 +2044,10 @@ class TestReportDownloadUrl:
             "https://mcp.example.com/reports",
         )
         monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
-        url = viz._get_report_download_url("abcd1234")
-        assert url == "https://mcp.example.com/reports/abcd1234"
-        assert "token=" not in url
+        # No authz row -> no capability can be minted -> NO http link.
+        # Emitting the bare URL would hand the user a link the route
+        # denies forever; None makes the caller fall back to file://.
+        assert viz._get_report_download_url("abcd1234") is None
 
     def test_sse_loopback_without_base_returns_none(self, monkeypatch):
         # Loopback bind host + no public base -> emit no dead http link; the
@@ -2035,14 +2058,26 @@ class TestReportDownloadUrl:
         monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
         assert viz._get_report_download_url("abcd1234") is None
 
-    def test_sse_public_host_gets_token(self, monkeypatch):
+    def test_sse_public_host_never_gets_shared_token(self, monkeypatch, tmp_path):
+        from cerebro_mcp.workflow import authz_store as authz_mod
+
         monkeypatch.setattr(session_state_mod.settings, "REPORT_BASE_URL", "")
         monkeypatch.setenv("CEREBRO_TRANSPORT", "sse")
         monkeypatch.setenv("FASTMCP_HOST", "reports.example.com")
         monkeypatch.setenv("FASTMCP_PORT", "9000")
         monkeypatch.setenv("MCP_AUTH_TOKEN", "tok")
-        url = viz._get_report_download_url("abcd1234")
-        assert url == "http://reports.example.com:9000/reports/abcd1234?token=tok"
+        monkeypatch.setattr(
+            session_state_mod.settings,
+            "CEREBRO_AUTHZ_DB_PATH",
+            str(tmp_path / "authz.db"),
+        )
+        authz_mod.reset_authz_store_for_tests()
+        try:
+            # No authz row and no signing key: NO link at all (never an
+            # unsigned one, and never the shared token).
+            assert viz._get_report_download_url("abcd1234") is None
+        finally:
+            authz_mod.reset_authz_store_for_tests()
 
 
 class TestRewrapReportHtml:

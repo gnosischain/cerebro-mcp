@@ -235,10 +235,25 @@ def test_surface_profile_boot_validation(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "MCP_SURFACE_PROFILE", "internal_full")
     validate_surface_profile("streamable-http")
 
-    # connector profile: LEAN_CORE conflict
+    # connector profile: transport, stateless and scan-plane guards first
     monkeypatch.setattr(
         settings, "MCP_SURFACE_PROFILE", tool_policy.PROFILE_TEAM_ANALYTICS_V1
     )
+    # the profile exists ONLY on Streamable HTTP — --sse would boot the
+    # shared-token app with no OAuth, scope gate or revocation check
+    with pytest.raises(RuntimeError, match="Streamable HTTP"):
+        validate_surface_profile("sse")
+    # a retained session pins every call's owner to the session creator
+    monkeypatch.setattr(settings, "STREAMABLE_HTTP_STATELESS", False)
+    with pytest.raises(RuntimeError, match="STATELESS"):
+        validate_surface_profile("streamable-http")
+    monkeypatch.setattr(settings, "STREAMABLE_HTTP_STATELESS", True)
+    # the scan plane connects with the BROAD ClickHouse credentials
+    monkeypatch.setattr(settings, "RPC_SCAN_ENABLED", True)
+    with pytest.raises(RuntimeError, match="RPC_SCAN_ENABLED"):
+        validate_surface_profile("streamable-http")
+    monkeypatch.setattr(settings, "RPC_SCAN_ENABLED", False)
+
     monkeypatch.setattr(settings, "LEAN_CORE_ENABLED", True)
     with pytest.raises(RuntimeError, match="LEAN_CORE_ENABLED"):
         validate_surface_profile("streamable-http")
@@ -273,6 +288,13 @@ def test_surface_profile_boot_validation(monkeypatch, tmp_path):
         validate_surface_profile("streamable-http")
     monkeypatch.setenv("CEREBRO_OWNER_KEY_V1", "k" * 32)
     identity.reset_owner_key_cache_for_tests()
+
+    # report links are signed capabilities: a missing key would 401 every
+    # link, so it is proven usable at boot rather than at first click
+    monkeypatch.delenv("CEREBRO_SIGNING_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="CEREBRO_SIGNING_KEY"):
+        validate_surface_profile("streamable-http")
+    monkeypatch.setenv("CEREBRO_SIGNING_KEY", "s" * 32)
 
     validate_surface_profile("streamable-http")
 

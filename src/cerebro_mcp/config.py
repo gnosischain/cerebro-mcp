@@ -228,7 +228,16 @@ class Settings(BaseSettings):
     # dropped write there loses telemetry, a dropped write here is an
     # authorization hole. Opened fail-closed at HTTP boot under any
     # recognized surface profile; reports/tombstones/watermarks live here.
-    CEREBRO_AUTHZ_DB_PATH: str = ".cerebro/cerebro_authz.db"
+    # Anchored under the home directory, NOT cwd-relative: reports live at
+    # ~/.cerebro/reports, and a cwd-relative DB would drift away from them
+    # whenever the server is started from a different directory (and fail
+    # outright from a read-only cwd).
+    CEREBRO_AUTHZ_DB_PATH: str = "~/.cerebro/cerebro_authz.db"
+
+    # Owner hashes permitted to see legacy (owner_hash IS NULL) reports on
+    # the connector profile. Empty = only a local stdio caller (no
+    # principal) can see them. See charts.report_visible_to_caller.
+    REPORT_ADMIN_OWNER_HASHES: list[str] = []
 
     # Custom tools (MCP Toolbox pattern)
     CUSTOM_TOOLS_ENABLED: bool = False
@@ -426,10 +435,19 @@ class Settings(BaseSettings):
     # registry are process-global with no per-user owner, so report
     # delete/rename, the composer, AND chart-record reads
     # (list_session_charts / get_session_chart / session_charts embedding)
-    # are a trusted single-user/local feature. Shared SSE deployments should
-    # set this to false: the gated tools then return a structured
-    # "disabled on this server" error and the UI hides those surfaces.
-    REPORT_STUDIO_ALLOW_MUTATIONS: bool = True
+    # are a trusted single-user/local feature.
+    # DEFAULT FLIPPED False (connector plan R10): the old default-True made
+    # delete_report_archive_entry browser-reachable on the shared credential
+    # — fail closed, and let a trusted single-user stdio deployment opt IN.
+    REPORT_STUDIO_ALLOW_MUTATIONS: bool = False
+
+    # The standalone browser mini-app plane (/app/{id}, its POST tool
+    # dispatch, and the / + /apps catalog). Default OFF (connector plan R10
+    # §6): serve_app echoes the caller credential into the page and the
+    # dispatch route executes arbitrary-SELECT and report-delete tools on
+    # it. When off the routes are never registered; ui:// MCP resources
+    # keep the mini-apps reachable in-host.
+    MINI_APP_BROWSER_ENABLED: bool = False
     # Auto-open every rendered visualization/report in the default browser.
     # OPT-IN (default off): "all plots/reports in-app unless asked". When
     # enabled it applies on local stdio only (never SSE — the browser would

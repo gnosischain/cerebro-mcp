@@ -238,6 +238,40 @@ def test_mint_annotate_require_roundtrip(connector_profile):
         reset_current_owner(otoken)
 
 
+def test_annotate_preserves_sdk_return_shapes():
+    """The SDK dispatches on the RETURN TYPE of call_tool (2-tuple ->
+    structured+unstructured, dict -> structured-only, iterable -> content).
+    Annotating must stay INSIDE the shape.
+
+    Regression: an earlier version did `list(result) + [TextContent(...)]`,
+    which flattened the 2-tuple into a 3-element list — the structured half
+    was lost and every outputSchema-bearing tool (find included) failed with
+    "outputSchema defined but no structured output returned".
+    """
+    from mcp.types import TextContent
+
+    from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
+
+    ann = CerebroFastMCP._annotate_analysis_id
+
+    # 2-tuple: shape preserved, structured half annotated, content untouched
+    content = [TextContent(type="text", text="body")]
+    out = ann((content, {"route": "semantic"}), "h" * 32)
+    assert isinstance(out, tuple) and len(out) == 2
+    assert out[0] is content
+    assert out[1] == {"route": "semantic", "analysis_id": "h" * 32}
+
+    # dict: still a dict (NOT wrapped in a list)
+    out = ann({"route": "raw"}, "h" * 32)
+    assert isinstance(out, dict)
+    assert out["analysis_id"] == "h" * 32
+
+    # bare content list: id appended as a text block
+    out = ann(content, "h" * 32)
+    assert isinstance(out, list) and len(out) == 2
+    assert "analysis_id" in out[-1].text
+
+
 def test_off_profile_behavior_unchanged():
     server = _server()
     tools = _wire_tools(server)

@@ -82,9 +82,19 @@ def build_connector_app(mcp) -> Starlette:
     mcp.settings.stateless_http = settings.STREAMABLE_HTTP_STATELESS
     mcp.settings.json_response = settings.STREAMABLE_HTTP_JSON_RESPONSE
     mcp.streamable_http_app()  # instantiates mcp.session_manager
-    from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
 
-    session_app = StreamableHTTPASGIApp(mcp.session_manager)
+    async def session_app(scope, receive, send):
+        """Minimal ASGI adapter over the session manager.
+
+        Deliberately NOT `StreamableHTTPASGIApp`: that class lives in
+        `mcp.server.fastmcp.server` (not the manager module) and is an
+        unexported internal, so importing it couples this file to a symbol
+        the `mcp[cli]>=1.26,<2` pin lets move on any minor bump — the same
+        class of breakage the pin comment already records. `handle_request`
+        is the session manager's documented ASGI entry point and is all the
+        wrapper needs.
+        """
+        await mcp.session_manager.handle_request(scope, receive, send)
 
     from cerebro_mcp.auth.asgi import OpenAIAuthGate, TransportAuthGate
 
@@ -105,9 +115,6 @@ def build_connector_app(mcp) -> Starlette:
         session_app, policies["/openai/mcp"], _verifier("/openai/mcp")
     )
 
-    async def health(request):  # noqa: ANN001
-        return JSONResponse({"status": "ok"})
-
     routes = [
         Route("/mcp", claude_gate, methods=["POST", "GET", "DELETE", "OPTIONS"]),
         Route("/openai/mcp", openai_gate, methods=["POST", "GET", "DELETE", "OPTIONS"]),
@@ -123,9 +130,36 @@ def build_connector_app(mcp) -> Starlette:
             ),
             methods=["GET"],
         ),
-        Route("/livez", health, methods=["GET"]),
-        Route("/health", health, methods=["GET"]),
     ]
+
+    # Carry over the REAL custom routes rather than re-implementing them.
+    # Building a fresh Starlette discarded the FastMCP router entirely,
+    # which (a) made /reports/{id} unreachable — the whole signed-capability
+    # plane was dead code under the profile — and (b) replaced the genuine
+    # ClickHouse-probing /health with a static 200 that would report a
+    # healthy pod during a database outage. Allowlisted by path so the
+    # browser mini-app plane cannot ride along.
+    _CARRY_OVER = {"/reports/{report_id}", "/health", "/livez"}
+    carried = {
+        getattr(r, "path", None)
+        for r in mcp._custom_starlette_routes
+        if getattr(r, "path", None) in _CARRY_OVER
+    }
+    routes.extend(
+        r for r in mcp._custom_starlette_routes
+        if getattr(r, "path", None) in _CARRY_OVER
+    )
+    missing = _CARRY_OVER - carried
+    if missing:
+        # A renamed/removed custom route must not silently vanish from the
+        # connector surface.
+        raise RuntimeError(
+            f"connector app expected custom route(s) {sorted(missing)} on the "
+            "FastMCP app but they are not registered"
+        )
+    # /metrics is DELIBERATELY absent: it is unauthenticated (GDPR H4) and
+    # the ALB does not forward it publicly. Scrape it on the internal
+    # listener, never through the connector host.
 
     @contextlib.asynccontextmanager
     async def lifespan(app):  # noqa: ANN001

@@ -188,18 +188,33 @@ class CerebroFastMCP(FastMCP):
 
     @staticmethod
     def _annotate_analysis_id(result, handle: str):
-        """Attach the minted/reused id to a find/preflight result so the
-        caller can echo it into subsequent stateful calls."""
-        if isinstance(result, dict):
-            result.setdefault("analysis_id", handle)
-            return result
-        try:
-            from mcp.types import TextContent
+        """Attach the minted/reused id to a find/preflight result.
 
+        MUST preserve the SDK's return SHAPE. ``FastMCP.call_tool`` returns
+        one of three things and the low-level handler dispatches on type
+        (``lowlevel/server.py``): a 2-tuple ``(unstructured, structured)``
+        when the tool declares an outputSchema, a plain dict for
+        structured-only, or an iterable of content blocks. An earlier
+        version did ``list(result) + [TextContent(...)]``, which flattened
+        the 2-tuple into a 3-element list — the structured half was lost and
+        every outputSchema-bearing tool (``find`` included) failed with
+        "outputSchema defined but no structured output returned". Annotate
+        WITHIN the shape, never across it.
+        """
+        from mcp.types import TextContent
+
+        if isinstance(result, tuple) and len(result) == 2:
+            unstructured, structured = result
+            if isinstance(structured, dict):
+                structured = {**structured, "analysis_id": handle}
+            return unstructured, structured
+        if isinstance(result, dict):
+            return {**result, "analysis_id": handle}
+        try:
             return list(result) + [
                 TextContent(type="text", text=f"analysis_id: {handle}")
             ]
-        except Exception:  # pragma: no cover — never break the tool result
+        except TypeError:  # pragma: no cover — non-iterable: leave untouched
             return result
 
     async def list_resources(self) -> list[MCPResource]:

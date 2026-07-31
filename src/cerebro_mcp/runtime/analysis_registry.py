@@ -79,6 +79,10 @@ _current_handle: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _lock = threading.Lock()
 _cycles: dict[tuple[str | None, str], AnalysisCycle] = {}
 
+#: Sentinel for "not owner-scoped". Distinct from None, which is a real
+#: owner key (stdio / no principal).
+_GLOBAL = object()
+
 
 def _now() -> float:
     return time.time()
@@ -133,7 +137,7 @@ def mint_or_reuse(owner: str | None, handle: str | None) -> tuple[str, bool]:
                     "this caller and all are active — finish or reuse one"
                 )
         if len(_cycles) >= MAX_HANDLES_GLOBAL:
-            if not _evict_one_idle_locked(None, now):
+            if not _evict_one_idle_locked(_GLOBAL, now):
                 raise AnalysisCapacityError(
                     "global analysis-cycle capacity reached with no idle "
                     "cycle to evict"
@@ -151,13 +155,19 @@ def _evict_expired_locked(now: float) -> None:
         del _cycles[k]
 
 
-def _evict_one_idle_locked(owner: str | None, now: float) -> bool:
-    """Evict the oldest-idle cycle (owner-scoped when owner is given).
-    Never touches refcount > 0."""
+def _evict_one_idle_locked(owner, now: float) -> bool:
+    """Evict the oldest-idle cycle. Never touches refcount > 0.
+
+    ``owner`` is either an owner key (scoped eviction) or the ``_GLOBAL``
+    sentinel (unscoped). A plain ``None`` cannot mean "unscoped" here:
+    ``None`` is a LEGITIMATE owner key (stdio / no principal), so
+    conflating them let a None-owner caller evict other owners' cycles and
+    slip past its own per-owner cap.
+    """
     candidates = [
         (c.last_used, k)
         for k, c in _cycles.items()
-        if c.refcount == 0 and (owner is None or k[0] == owner)
+        if c.refcount == 0 and (owner is _GLOBAL or k[0] == owner)
     ]
     if not candidates:
         return False

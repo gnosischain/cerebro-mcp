@@ -204,6 +204,18 @@ def register_resources(mcp):
     @mcp.resource("gnosis://source-tables/{database}")
     def source_tables(database: str) -> str:
         """Raw source table schemas for a given database from dbt source definitions."""
+        # The connector profile drops this TEMPLATE from the surface
+        # (tool_policy: with only dbt reachable it is pointless), and
+        # read_resource already rejects it there — this in-handler check is
+        # defence in depth for any future direct-call path, validating the
+        # {database} BEFORE touching the manifest.
+        from cerebro_mcp.safety import validate_relation_access
+        from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+        if connector_profile_active():
+            allowed, err = validate_relation_access(database, "_schema_listing")
+            if not allowed:
+                return f"Not available on this profile: {err}"
         if not manifest.is_loaded:
             return "dbt manifest not loaded."
 

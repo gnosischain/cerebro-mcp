@@ -10,14 +10,14 @@
 #   (mixpanel_ga.*, forum tables, ipinfo, gpay wallet lists) must NEVER be
 #   approved; the dependent models stay unreachable on this profile instead.
 #
-# approved_passthrough_views: dbt model NAMES reviewed as non-narrowing
-#   (no row filter / column drop relative to their parents). Views execute
-#   as invoker, so granting a view's parents lets the caller bypass any
-#   narrowing the view performs — that is what this review exists to catch.
+# NOTE on narrowing views: an invoker-executed view cannot read what the
+#   caller cannot, so a granted model's closure necessarily grants its
+#   parents too — a caller can therefore query a wider parent directly and
+#   bypass a narrowing view. Where that is unacceptable, introduce a
+#   reviewed `SQL SECURITY DEFINER` connector view or a connector-safe
+#   materialization; there is no per-view flag that can express it.
 #
 # Every addition needs a reviewer and date in the comment beside it.
 
 approved_sources:
   - consensus.specs   # public chain constants; backs gnosis://chain-parameters (plan R10, 2026-07-31)
-
-approved_passthrough_views: []

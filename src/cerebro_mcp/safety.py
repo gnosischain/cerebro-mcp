@@ -1,5 +1,8 @@
+import logging
 import re
 from typing import Tuple
+
+logger = logging.getLogger(__name__)
 
 
 # SQL keywords that indicate write/DDL operations
@@ -52,21 +55,32 @@ TABLE_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
 
 
 def _strip_comments_and_strings(sql: str) -> str:
-    """Remove string literals and comments to avoid false positives on keyword detection."""
-    # Remove single-line comments
+    """Remove string literals/comments and NORMALIZE quoted identifiers.
+
+    Order is load-bearing:
+
+    1. comments out first;
+    2. single-quoted STRING LITERALS out next — a literal may contain a
+       double quote or a backtick, and normalizing identifiers first would
+       let its contents masquerade as one;
+    3. backtick- and double-quoted IDENTIFIERS normalized to bare form.
+
+    Step 3 must NORMALIZE, never erase. It previously replaced ``"x"`` with
+    ``""``, which deleted the identifier outright: ``FROM "mixpanel_ga"."e"``
+    became ``FROM ""."" `` so ``extract_table_names`` returned nothing and
+    every relation check — internal-only deny list, ALLOWED_DATABASES,
+    connector narrowing — iterated an empty list and passed. Backticks were
+    already normalized; double quotes (ClickHouse's other identifier
+    quoting) were not.
+    """
+    # Comments.
     sql = re.sub(r"--[^\n]*", " ", sql)
-    # Remove multi-line comments
     sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
-    # Normalize backtick-quoted identifiers (`db`.`tbl`) to bare form. Without
-    # this, ClickHouse/MySQL backtick quoting bypasses both keyword detection
-    # and table-name extraction — e.g. `dbt`.`int_..._bridge` would never match
-    # the internal-only deny list. Done before quote removal so the bare
-    # identifiers survive into the cleaned SQL.
+    # String literals (before identifier normalization — see docstring).
+    sql = re.sub(r"'(?:[^']|'')*'", "''", sql)
+    # Quoted identifiers -> bare, so downstream matching sees the real name.
     sql = re.sub(r"`([^`]*)`", r"\1", sql)
-    # Remove single-quoted strings
-    sql = re.sub(r"'[^']*'", "''", sql)
-    # Remove double-quoted identifiers
-    sql = re.sub(r'"[^"]*"', '""', sql)
+    sql = re.sub(r'"([^"]*)"', r"\1", sql)
     return sql
 
 
@@ -283,25 +297,72 @@ _TABLE_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Any `db.table` pair anywhere in the statement. This is the RESIDUAL
+#: sweep: it over-collects (it will pick up `dict.get`-shaped text), which
+#: is the correct bias for an allowlist — an extra candidate can only cause
+#: a denial, a missed one causes an unauthorized read.
+_QUALIFIED_ANYWHERE_RE = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
+
+
+class UnparseableQuery(ValueError):
+    """SQL that cannot be parsed for relation extraction — deny, never allow."""
+
 
 def extract_table_names(sql: str) -> list[str]:
-    """Best-effort extraction of table names from a read-only SQL query.
+    """Every relation the statement reads, deduplicated, encounter order.
 
-    Returns deduplicated names in encounter order.
-    Covers FROM and JOIN clauses, which is sufficient for the read-only
-    SELECT queries allowed through ``validate_query()``.
+    Uses the sqlglot AST (already a dependency) and UNIONS it with a
+    residual `db.table` regex sweep. Two independent extractors because
+    each misses different things and this list is an authorization input:
+
+    - the old FROM/JOIN regex captured only the FIRST relation after each
+      keyword, so ``FROM dbt.a, mixpanel_ga.raw_events`` yielded just
+      ``dbt.a`` and the cross-joined table was never checked;
+    - a pure-AST reading can miss relations inside dialect-specific syntax
+      the parser tolerates but does not model as a table.
+
+    Over-collection is the intended bias: a spurious candidate can only
+    produce a denial, a missing one produces an unauthorized read.
     """
     cleaned = _strip_comments_and_strings(sql)
     seen: set[str] = set()
     tables: list[str] = []
-    for match in _TABLE_REF_RE.finditer(cleaned):
-        db_part, table = match.group(1), match.group(2)
-        if table.startswith("_cerebro"):
-            continue
+
+    def _add(db_part: str | None, table: str) -> None:
+        if not table or table.startswith("_cerebro"):
+            return
         qualified = f"{db_part}.{table}" if db_part else table
         if qualified not in seen:
             seen.add(qualified)
             tables.append(qualified)
+
+    # PRIMARY: the AST. It models commas, subqueries, CTE bodies, UNION
+    # arms and IN(...) as tables, and — critically — it does NOT mistake
+    # `alias.column` for `database.table`, which a regex cannot tell apart.
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        parsed = sqlglot.parse(cleaned, read="clickhouse")
+        if not any(s is not None for s in parsed):
+            raise ValueError("no parseable statement")
+        for statement in parsed:
+            if statement is None:
+                continue
+            for node in statement.find_all(exp.Table):
+                _add(node.text("db") or None, node.text("this"))
+        return tables
+    except Exception as exc:  # noqa: BLE001 — never a silent pass
+        logger.debug("sqlglot parse failed; using regex fallback: %s", exc)
+
+    # FALLBACK (parser could not read the statement): sweep with BOTH
+    # regexes and over-collect deliberately. Unparseable SQL is exactly
+    # where an allowlist must be most suspicious — a spurious candidate
+    # can only cause a denial, a missed one an unauthorized read.
+    for match in _TABLE_REF_RE.finditer(cleaned):
+        _add(match.group(1), match.group(2))
+    for match in _QUALIFIED_ANYWHERE_RE.finditer(cleaned):
+        _add(match.group(1), match.group(2))
     return tables
 
 

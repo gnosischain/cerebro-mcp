@@ -1,3 +1,4 @@
+import hmac
 import logging
 import os
 import time
@@ -554,39 +555,49 @@ async def metrics(request: Request) -> Response:
 
 @mcp.custom_route("/reports/{report_id}", methods=["GET"])
 async def download_report(request: Request) -> JSONResponse | HTMLResponse:
-    """Serve a report HTML file by ID (full UUID or 8-char prefix)."""
+    """Serve a report by FULL id, authorized by a signed capability.
+
+    Replaces the shared-token scheme (Bearer/?token= of MCP_AUTH_TOKEN):
+    that baked the whole-server credential into every report URL (GDPR H4).
+    Authorization is now ``?cap=`` — a signed, expiring, single-report
+    grant bound to the authz row's immutable ``auth_id``, verified
+    constant-time; the row must still be ``ready`` at serve time (a
+    reconciled-away or re-created report invalidates old links). Deliberate
+    contract (R10 §6): the capability is TRANSFERABLE — any holder views
+    this one report until expiry. Prefix resolution is not offered here:
+    URL ids are full ids, and enumeration questions go through the
+    owner-scoped list_reports tool.
+    """
+    from cerebro_mcp.auth.signing import CapabilityError, verify_report_capability
     from cerebro_mcp.tools.visualization.charts import _resolve_report
+    from cerebro_mcp.workflow.authz_store import AuthzUnavailable, get_authz_store
 
     report_id = request.path_params["report_id"]
+    cap = request.query_params.get("cap", "")
 
-    # Auth: accept Bearer header or ?token= query param
-    auth_token = os.environ.get("MCP_AUTH_TOKEN")
-    if auth_token:
-        auth_header = request.headers.get("Authorization", "")
-        query_token = request.query_params.get("token", "")
-
-        if auth_header == f"Bearer {auth_token}":
-            auth_method = "bearer"
-            auth_success = True
-        elif query_token == auth_token:
-            auth_method = "query_token"
-            auth_success = True
-        else:
-            auth_method = "none"
-            auth_success = False
-
+    try:
+        row = get_authz_store().get_report(report_id)
+    except AuthzUnavailable:
+        row = None  # fail closed below
+    if row is None or row.status != "ready":
+        observe_report_token_auth(status="denied")
+        # 404, not 401: an unauthorized id must appear nonexistent.
+        return JSONResponse(
+            {"error": f"Report '{report_id}' not found"}, status_code=404
+        )
+    try:
+        verify_report_capability(cap, report_id, row.auth_id)
+    except CapabilityError as exc:
         log_event(
             logger,
-            "report_token_auth",
+            "report_capability_denied",
             report_id=report_id,
-            auth_method=auth_method,
-            success=auth_success,
+            reason=str(exc),
         )
-        observe_report_token_auth(status="success" if auth_success else "denied")
+        observe_report_token_auth(status="denied")
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-        if not auth_success:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-
+    observe_report_token_auth(status="success")
     try:
         html, resolved_id, _ = _resolve_report(report_id)
     except ValueError as exc:
@@ -598,7 +609,16 @@ async def download_report(request: Request) -> JSONResponse | HTMLResponse:
             status_code=404,
         )
 
-    return HTMLResponse(content=html)
+    return HTMLResponse(
+        content=html,
+        headers={
+            # The page makes zero outbound requests (data is embedded), so
+            # these are belt-and-braces: never referred onward, never cached
+            # by an intermediary.
+            "Referrer-Policy": "no-referrer",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 def main():
@@ -716,26 +736,12 @@ class BearerAuthMiddleware:
         self._auth_token = auth_token
         self._expected = f"Bearer {auth_token}".encode("latin-1")
 
-    @staticmethod
-    def _path_allows_query_token(path: str) -> bool:
-        """Streamable HTTP (`/mcp`) additionally accepts a ``?token=`` param.
-
-        This mirrors the ``/reports`` and ``/app`` handlers: a browser
-        navigation — or a Claude Desktop *native* connector whose UI only
-        takes a URL and no custom ``Authorization`` header — can then
-        authenticate via the query string. The Bearer header stays the
-        preferred path (a query token can leak into access logs), so this
-        is a fallback, not a replacement.
-        """
-        return path == "/mcp" or path.startswith("/mcp/")
-
-    def _query_token_ok(self, scope: Scope) -> bool:
-        from urllib.parse import parse_qs
-
-        qs = scope.get("query_string", b"").decode("latin-1")
-        token = parse_qs(qs).get("token", [""])[0]
-        # Plain equality, same as the /reports and /app query-token check.
-        return bool(self._auth_token) and token == self._auth_token
+    # The former ``/mcp?token=`` carve-out is REMOVED (connector plan R10).
+    # Its stated justification — a native connector UI with no header field
+    # — is contradicted by the verified facts: claude.ai's static_headers
+    # allowlists ``authorization``, and OAuth always sends the header. A
+    # credential in a query string lands in ALB access logs, which is GDPR
+    # H4 restated. Access tokens MUST NOT appear in URI query strings.
 
     async def __call__(
         self, scope: Scope, receive: Receive, send: Send
@@ -768,18 +774,14 @@ class BearerAuthMiddleware:
                 header_value = value
                 break
 
-        if header_value != self._expected:
-            # /mcp additionally accepts ?token= (see _path_allows_query_token)
-            # so a URL-only native connector can still authenticate.
-            if not (
-                self._path_allows_query_token(path)
-                and self._query_token_ok(scope)
-            ):
-                unauthorized = JSONResponse(
-                    {"error": "unauthorized"}, status_code=401
-                )
-                await unauthorized(scope, receive, send)
-                return
+        # Constant-time compare: this endpoint is internet-adjacent and a
+        # byte-by-byte != is a timing oracle on the shared secret.
+        if not hmac.compare_digest(header_value, self._expected):
+            unauthorized = JSONResponse(
+                {"error": "unauthorized"}, status_code=401
+            )
+            await unauthorized(scope, receive, send)
+            return
 
         # Phase 3 multi-tenant: scope the per-request owner from the
         # `X-Cerebro-Owner` header. The bearer token authenticates the

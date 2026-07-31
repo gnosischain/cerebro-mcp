@@ -54,6 +54,59 @@ def test_backtick_qualified_reference_outside_allowed_rejected():
     assert not ok
 
 
+def test_double_quoted_qualified_reference_rejected():
+    """Double-quoted identifiers must survive normalization.
+
+    Regression: `_strip_comments_and_strings` replaced `"x"` with `""`,
+    ERASING the identifier — so extract_table_names returned [] and every
+    relation check (deny list, ALLOWED_DATABASES, connector narrowing)
+    iterated over nothing and passed. The backtick test above covered the
+    path that worked; this covers the one that did not.
+    """
+    ok, _ = validate_query('SELECT * FROM "mixpanel_ga"."mixpanel_raw_events"')
+    assert not ok, "double-quoted qualified reference bypassed the allowlist"
+
+
+def test_double_quoted_internal_only_rejected():
+    ok, _ = validate_query(
+        'SELECT * FROM "dbt"."int_execution_gpay_user_identity_bridge"'
+    )
+    assert not ok, "double-quoting bypassed the internal-only deny list"
+
+
+def test_mixed_quoting_rejected():
+    ok, _ = validate_query('SELECT * FROM `mixpanel_ga`."raw_events"')
+    assert not ok
+
+
+def test_string_literal_containing_quotes_still_stripped():
+    """A single-quoted literal holding a double quote must not corrupt
+    identifier normalization (ordering matters: literals first)."""
+    ok, err = validate_query(
+        "SELECT * FROM dbt.model WHERE name = 'a \" quote' LIMIT 1"
+    )
+    assert ok, err
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM dbt.a, mixpanel_ga.raw_events",
+        "SELECT * FROM dbt.a AS x, `mixpanel_ga`.`raw_events` AS y",
+        "SELECT * FROM dbt.a CROSS JOIN mixpanel_ga.raw_events",
+        "SELECT * FROM (SELECT * FROM mixpanel_ga.raw_events) t",
+        "SELECT * FROM dbt.a UNION ALL SELECT * FROM mixpanel_ga.raw_events",
+        "WITH c AS (SELECT * FROM mixpanel_ga.raw_events) SELECT * FROM c",
+    ],
+)
+def test_every_relation_is_extracted_not_just_the_first(sql):
+    """Regression: the FROM/JOIN regex captured only the FIRST relation
+    after each keyword, so a comma cross-join, a subquery or a UNION arm
+    could reach any database with no check at all."""
+    ok, _ = validate_query(sql)
+    assert not ok, f"unauthorized relation reached through: {sql}"
+
+
 @pytest.mark.parametrize(
     "fn",
     [

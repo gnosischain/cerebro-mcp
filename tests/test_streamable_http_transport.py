@@ -59,8 +59,11 @@ def test_combined_app_has_both_transports(server):
     assert "/mcp" in paths                        # streamable HTTP
     assert "/sse" in paths                        # legacy SSE (dual-served)
     assert any(p and p.startswith("/messages") for p in paths)
-    # Custom routes ride along on the streamable app.
-    assert {"/health", "/metrics", "/"} <= paths
+    # Custom routes ride along on the streamable app. "/" (the browser
+    # app catalog) only exists when MINI_APP_BROWSER_ENABLED opts it in —
+    # default OFF, so its absence IS the assertion.
+    assert {"/health", "/metrics"} <= paths
+    assert "/" not in paths
 
 
 def test_mcp_requires_auth(server):
@@ -86,14 +89,15 @@ def test_mcp_accepts_bearer_header_and_lists_tools(server):
     assert len(tools) > 10
 
 
-def test_mcp_accepts_query_token(server):
+def test_mcp_rejects_query_token(server):
+    """The ?token= carve-out is REMOVED (connector plan R10): a credential
+    in a query string lands in access logs. Only the header authenticates."""
     app = _build(server)
     with TestClient(app) as client:
         resp = client.post(
             f"/mcp?token={AUTH}", json=TOOLS_LIST, headers=JSON_HEADERS
         )
-    assert resp.status_code == 200
-    assert _extract_rpc(resp)["result"]["tools"]
+    assert resp.status_code == 401
 
 
 def test_mcp_rejects_wrong_query_token(server):

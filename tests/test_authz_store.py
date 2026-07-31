@@ -281,3 +281,97 @@ def test_legacy_setter_still_hashes(owner_key):
         assert got != "alice@gnosis.io" and not got.startswith("v1:")
     finally:
         identity.reset_current_owner(token)
+
+
+# ---------------------------------------------------------------------------
+# H5 read-side: owner authorization on the REPORT READ paths
+# ---------------------------------------------------------------------------
+
+
+def test_reports_are_owner_scoped_on_read(tmp_path, monkeypatch, owner_key):
+    """Owner-stamping only closes H5 if the READ paths consult it.
+
+    Regression: the owner column was written at creation and never read, so
+    list_reports / open_report / export_report still served every caller
+    every report (AuthzStore.list_reports_for_owner had zero callers).
+    """
+    from cerebro_mcp.config import settings
+    from cerebro_mcp.runtime.identity import (
+        reset_current_owner,
+        set_current_owner_prehashed,
+    )
+    from cerebro_mcp.tools import tool_policy
+    from cerebro_mcp.tools.visualization import charts
+    from cerebro_mcp.workflow import authz_store as authz_mod
+
+    monkeypatch.setattr(
+        settings, "MCP_SURFACE_PROFILE", tool_policy.PROFILE_TEAM_ANALYTICS_V1
+    )
+    monkeypatch.setattr(
+        settings, "CEREBRO_AUTHZ_DB_PATH", str(tmp_path / "authz.db")
+    )
+    monkeypatch.setattr(settings, "REPORT_ADMIN_OWNER_HASHES", [])
+    authz_mod.reset_authz_store_for_tests()
+    store = authz_mod.get_authz_store()
+    try:
+        for rid, owner in (
+            ("alice_report", "v1:alice"),
+            ("bob_report", "v1:bob"),
+            ("legacy_report", None),
+        ):
+            store.begin_publication(
+                report_id=rid, owner_hash=owner,
+                filename=f"{rid}.html", kind="report",
+            )
+            store.mark_ready(rid)
+
+        tok = set_current_owner_prehashed("v1:alice")
+        try:
+            assert charts.report_visible_to_caller("alice_report")
+            assert not charts.report_visible_to_caller("bob_report"), (
+                "alice can see bob's report — the owner column is still "
+                "write-only"
+            )
+            # legacy (owner NULL) is not visible to an authenticated caller
+            assert not charts.report_visible_to_caller("legacy_report")
+            # an unknown id is denied, and denial is indistinguishable from
+            # nonexistent (no enumeration oracle)
+            assert not charts.report_visible_to_caller("no_such_report")
+        finally:
+            reset_current_owner(tok)
+
+        # local stdio caller (no principal) still sees legacy reports
+        assert charts.report_visible_to_caller("legacy_report")
+
+        # admins see legacy reports
+        monkeypatch.setattr(
+            settings, "REPORT_ADMIN_OWNER_HASHES", ["v1:admin"]
+        )
+        tok = set_current_owner_prehashed("v1:admin")
+        try:
+            assert charts.report_visible_to_caller("legacy_report")
+            assert not charts.report_visible_to_caller("alice_report")
+        finally:
+            reset_current_owner(tok)
+
+        # a pending (never-published) report is invisible to everyone
+        store.begin_publication(
+            report_id="half", owner_hash="v1:alice",
+            filename="half.html", kind="report",
+        )
+        tok = set_current_owner_prehashed("v1:alice")
+        try:
+            assert not charts.report_visible_to_caller("half")
+        finally:
+            reset_current_owner(tok)
+    finally:
+        authz_mod.reset_authz_store_for_tests()
+
+
+def test_report_visibility_open_off_profile(tmp_path, monkeypatch):
+    """Off-profile the single-user trust model is unchanged."""
+    from cerebro_mcp.config import settings
+    from cerebro_mcp.tools.visualization import charts
+
+    monkeypatch.setattr(settings, "MCP_SURFACE_PROFILE", "")
+    assert charts.report_visible_to_caller("anything-at-all")

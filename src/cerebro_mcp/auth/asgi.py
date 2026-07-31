@@ -50,7 +50,7 @@ from cerebro_mcp.runtime.identity import (
     reset_current_owner,
     set_current_owner_prehashed,
 )
-from cerebro_mcp.tools.tool_policy import TOOL_POLICY
+from cerebro_mcp.tools.tool_policy import SCOPE_DISCOVER, TOOL_POLICY
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,11 @@ async def _buffer_body(receive: Receive) -> tuple[bytes, Receive]:
         if not sent:
             sent = True
             return {"type": "http.request", "body": payload, "more_body": False}
-        return {"type": "http.disconnect"}
+        # After the buffered body is replayed, DELEGATE to the real
+        # receive. Synthesizing a disconnect here told the SDK the client
+        # had gone away, tearing down an in-flight SSE POST response
+        # (HTTP 200 with zero bytes) whenever json_response was off.
+        return await receive()
 
     return payload, _replay
 
@@ -243,7 +247,15 @@ class TransportAuthGate:
             await _run_with_principal(self._app, principal, scope, replay, send)
             return
 
-        # GET (stream) / DELETE (session teardown): token already verified.
+        # GET (stream) / DELETE (session teardown) carry no JSON-RPC body,
+        # so there is no per-method union to resolve — but they still need
+        # the BASELINE scope. Without this a zero-scope token (valid, but
+        # granted nothing) could open and hold an SSE stream.
+        baseline = frozenset({SCOPE_DISCOVER})
+        if baseline - principal.scopes:
+            status, header = challenge.challenge_insufficient(resource, baseline)
+            await _plain(status, header)(scope, receive, send)
+            return
         await _run_with_principal(self._app, principal, scope, receive, send)
 
 
@@ -266,6 +278,18 @@ def _inband_envelope(request_id: Any, meta: dict, text: str) -> JSONResponse:
             },
         }
     )
+
+
+async def _noop_receive() -> Message:
+    return {"type": "http.disconnect"}
+
+
+def _rewrite_initialize_payload(payload: dict) -> dict:
+    caps = payload.get("result", {}).get("capabilities")
+    if isinstance(caps, dict):
+        caps.pop("resources", None)
+        caps.pop("prompts", None)
+    return payload
 
 
 class _CapabilityFilter:
@@ -298,25 +322,70 @@ class _CapabilityFilter:
     async def _flush(self) -> None:
         assert self._start is not None
         body = b"".join(self._chunks)
-        try:
-            payload = json.loads(body)
-            caps = payload.get("result", {}).get("capabilities")
-            if isinstance(caps, dict):
-                caps.pop("resources", None)
-                caps.pop("prompts", None)
-                body = json.dumps(payload).encode()
-        except (ValueError, AttributeError):
-            pass  # not JSON (SSE-framed or error) — pass through untouched
+        rewritten = self._strip_capabilities(body)
+        if rewritten is None:
+            # Could not parse the initialize response, so could not prove
+            # the advertised capabilities are tools-only. Passing it
+            # through would re-advertise `resources`/`prompts` that the
+            # endpoint refuses to serve — deny instead of guessing.
+            logger.error(
+                "unparseable initialize response on /openai/mcp; refusing "
+                "to forward an unverified capability object"
+            )
+            await _plain(502)(
+                {"type": "http"}, _noop_receive, self._send
+            )
+            return
+        body = rewritten
         headers = [
             (k, v)
             for k, v in self._start.get("headers", [])
             if k.lower() != b"content-length"
-        ]
+        ]  # noqa: E501
         headers.append((b"content-length", str(len(body)).encode()))
         await self._send({**self._start, "headers": headers})
         await self._send(
             {"type": "http.response.body", "body": body, "more_body": False}
         )
+
+    @staticmethod
+    def _strip_capabilities(body: bytes) -> bytes | None:
+        """Remove resources/prompts from an initialize response.
+
+        Handles BOTH wire formats, because ``STREAMABLE_HTTP_JSON_RESPONSE``
+        is configurable: a plain JSON body, and an SSE-framed body whose
+        payload rides in ``data:`` lines. Returns None when neither parses —
+        the caller must then DENY rather than forward a capability object it
+        could not verify (an unparsed pass-through re-advertised resources
+        and prompts the endpoint refuses to serve).
+        """
+        try:
+            return json.dumps(
+                _rewrite_initialize_payload(json.loads(body))
+            ).encode()
+        except (ValueError, UnicodeDecodeError, AttributeError):
+            pass
+        try:
+            text = body.decode()
+        except UnicodeDecodeError:
+            return None
+        if "data:" not in text:
+            return None
+        out_lines, rewrote = [], False
+        for line in text.splitlines(keepends=True):
+            stripped = line.strip()
+            if stripped.startswith("data:"):
+                raw = stripped[len("data:"):].strip()
+                try:
+                    payload = _rewrite_initialize_payload(json.loads(raw))
+                except ValueError:
+                    return None
+                newline = line[len(line.rstrip("\r\n")):]
+                out_lines.append(f"data: {json.dumps(payload)}{newline}")
+                rewrote = True
+            else:
+                out_lines.append(line)
+        return "".join(out_lines).encode() if rewrote else None
 
 
 class OpenAIAuthGate:

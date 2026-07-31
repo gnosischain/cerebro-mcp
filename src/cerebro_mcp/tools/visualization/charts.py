@@ -728,7 +728,26 @@ def _resolve_report(
     ``_rewrap_report_html``) so old reports pick up presentation fixes.
     Returns (None, None, None) if not found.
     Raises ValueError on ambiguous prefix.
+
+    Owner authorization happens HERE because this is the single resolver
+    behind ``open_report``, ``export_report`` and the ``/reports/{id}``
+    route — checking it at each caller would leave the next one to forget.
+    An unauthorized report is reported as NOT FOUND, never as forbidden, so
+    the resolver cannot be used to probe which ids exist. The cache is
+    re-checked on every hit for the same reason (R10 C6.6).
     """
+    _resolved = _resolve_report_unchecked(report_ref)
+    html, resolved_id, path = _resolved
+    if resolved_id is not None and not report_visible_to_caller(resolved_id):
+        return None, None, None
+    return _resolved
+
+
+def _resolve_report_unchecked(
+    report_ref: str,
+) -> tuple[str | None, str | None, Path | None]:
+    """Resolution WITHOUT the owner check. Internal — every external
+    caller must go through ``_resolve_report``."""
     if report_ref:
         # Exact cache match
         with _REPORT_LOCK:
@@ -790,20 +809,49 @@ def _resolve_report(
     return None, None, None
 
 
-def _append_report_token(url: str) -> str:
-    """Append ``?token=<MCP_AUTH_TOKEN>`` so the report route authorizes.
+def _append_report_capability(url: str, report_id: str) -> str | None:
+    """Append ``?cap=v1.<kid>.<exp>.<sig>`` — a signed one-report capability.
 
-    The download route (``server.download_report``) accepts the shared token as
-    either an ``Authorization: Bearer`` header or a ``?token=`` query param. A
-    plain browser click on the report link carries no header, so without the
-    query param the route answers 401 whenever ``MCP_AUTH_TOKEN`` is set. No-op
-    when the token is unset.
+    Replaces the old ``?token=<MCP_AUTH_TOKEN>`` scheme, which baked the
+    WHOLE-SERVER credential into every report URL (GDPR H4: a leaked report
+    link was an arbitrary-SELECT-and-delete credential). The capability
+    signs the report's immutable auth_id (authz store) with a 7-day TTL —
+    deliberately decoupled from any access-token lifetime, or every link
+    ever handed to a user would die within the hour. Blast radius of a
+    leaked link: one report, until expiry.
+
+    Returns ``None`` when no capability can be minted (no authz row, or
+    signing unconfigured). ``None`` means "emit no HTTP link" — the caller
+    falls back to a ``file://`` path. Returning the bare URL instead would
+    hand the user a link the route denies forever.
     """
-    token = os.environ.get("MCP_AUTH_TOKEN")
-    if not token:
-        return url
+    try:
+        from cerebro_mcp.auth.signing import mint_report_capability
+        from cerebro_mcp.workflow.authz_store import get_authz_store
+
+        row = get_authz_store().get_report(report_id)
+        if row is None or row.status != "ready":
+            logger.warning(
+                "no ready authz row for report %s — emitting no HTTP link",
+                report_id,
+            )
+            return None
+        cap = mint_report_capability(report_id, row.auth_id)
+    except Exception:
+        # An unsigned URL is a link that 401s forever. Returning one hands
+        # the user a dead link and hides the cause in a warning; surface it
+        # as an error and emit NO link, so the caller falls back to the
+        # file:// path (valid when the client shares the filesystem)
+        # instead of a URL that can never work.
+        logger.error(
+            "report capability could not be minted for %s — emitting no "
+            "HTTP link (check CEREBRO_SIGNING_KEY and the authz row)",
+            report_id,
+            exc_info=True,
+        )
+        return None
     sep = "&" if "?" in url else "?"
-    return f"{url}{sep}token={quote(token, safe='')}"
+    return f"{url}{sep}cap={quote(cap, safe='')}"
 
 
 def _get_report_download_url(report_id: str) -> str | None:
@@ -816,13 +864,13 @@ def _get_report_download_url(report_id: str) -> str | None:
     None and let ``_get_report_link`` fall back to a ``file://`` path — valid
     when the client shares the filesystem — while warning the operator to set
     ``REPORT_BASE_URL`` for reachable remote report links. Any URL we do return
-    carries the auth token when ``MCP_AUTH_TOKEN`` is set.
+    carries a signed one-report capability (see ``_append_report_capability``).
     """
     from cerebro_mcp.config import settings
 
     if settings.REPORT_BASE_URL:
-        return _append_report_token(
-            f"{settings.REPORT_BASE_URL.rstrip('/')}/{report_id}"
+        return _append_report_capability(
+            f"{settings.REPORT_BASE_URL.rstrip('/')}/{report_id}", report_id
         )
 
     # SSE mode exposes an HTTP server, but only a non-loopback bind host can be
@@ -839,8 +887,8 @@ def _get_report_download_url(report_id: str) -> str | None:
                 host,
             )
             return None
-        return _append_report_token(
-            f"http://{host}:{port}/reports/{report_id}"
+        return _append_report_capability(
+            f"http://{host}:{port}/reports/{report_id}", report_id
         )
 
     return None
@@ -1104,8 +1152,42 @@ def create_report_artifact(
     else:
         kind = "report"
     report_path = report_dir / _report_filename(report_id, title, kind=kind)
-    with _REPORT_FS_LOCK:
-        _atomic_write_report(report_path, html)
+
+    # Publication protocol (R10 C6.8): pending row (mints the immutable
+    # auth_id capabilities sign) -> temp write + file fsync -> atomic rename
+    # -> PARENT-DIR fsync -> ready. Any metadata failure fails report
+    # creation — a published file without a `ready` row stays inaccessible,
+    # never "legacy fallback".
+    from cerebro_mcp.runtime.identity import get_current_owner
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+    from cerebro_mcp.workflow.authz_store import publish_file_atomically
+
+    if not connector_profile_active():
+        # Off-profile keeps the original single-user path: no authz row, no
+        # hard dependency on a writable authorization DB. Making the store
+        # mandatory here regressed stdio — report generation would raise
+        # wherever the DB could not be opened, for a control that only
+        # matters when there is more than one caller.
+        with _REPORT_FS_LOCK:
+            _atomic_write_report(report_path, html)
+    else:
+        from cerebro_mcp.workflow.authz_store import get_authz_store
+
+        _authz = get_authz_store()
+        _authz.begin_publication(
+            report_id=report_id,
+            owner_hash=get_current_owner(),
+            filename=report_path.name,
+            kind=kind,
+        )
+        try:
+            with _REPORT_FS_LOCK:
+                publish_file_atomically(html.encode("utf-8"), report_path)
+            _authz.mark_ready(report_id)
+        except Exception:
+            _authz.abort_publication(report_id)
+            report_path.unlink(missing_ok=True)
+            raise
 
     file_uri = _get_report_link(report_path)
     structured["file_uri"] = file_uri
@@ -3219,6 +3301,55 @@ def list_charts_impl() -> str:
     return "\n".join(lines)
 
 
+def report_visible_to_caller(report_id: str) -> bool:
+    """Owner authorization for a single report (connector profile only).
+
+    THE read-side half of the H5 fix. Owner-stamping reports at creation
+    only closes the finding if the read paths consult it — the owner column
+    was written and never read, so `list_reports` / `open_report` /
+    `export_report` still served every caller every report.
+
+    Off-profile this is always True (single-user/local trust model,
+    unchanged behavior). On the profile:
+      - no authz row or not `ready`  -> deny (missing metadata never means
+        "public"; that is the fail-closed contract);
+      - `owner_hash IS NULL` (legacy backfill) -> visible only to a local
+        stdio caller (no principal) or a configured admin;
+      - otherwise -> the row's owner must equal the caller's.
+    """
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+    if not connector_profile_active():
+        return True
+    from cerebro_mcp.config import settings
+    from cerebro_mcp.runtime.identity import get_current_owner
+    from cerebro_mcp.workflow.authz_store import AuthzUnavailable, get_authz_store
+
+    caller = get_current_owner()
+    try:
+        row = get_authz_store().get_report(report_id)
+    except AuthzUnavailable:
+        return False  # cannot authorize => deny
+    if row is None or row.status != "ready":
+        return False
+    if row.owner_hash is None:
+        admins = set(getattr(settings, "REPORT_ADMIN_OWNER_HASHES", []) or [])
+        return caller is None or caller in admins
+    return caller is not None and row.owner_hash == caller
+
+
+def _filter_reports_for_caller(paths: list) -> list:
+    """Drop report files the caller may not see (no-op off-profile)."""
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+    if not connector_profile_active():
+        return paths
+    return [
+        p for p in paths
+        if report_visible_to_caller(_extract_report_id_from_path(p))
+    ]
+
+
 def list_reports_impl(limit: int = 20) -> str:
     """Shared implementation for the ``list_reports`` tool and the ``list``
     unifier (``kind="reports"``). Byte-identical output for both callers."""
@@ -3233,6 +3364,7 @@ def list_reports_impl(limit: int = 20) -> str:
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
+    html_files = _filter_reports_for_caller(html_files)
 
     if not html_files:
         return "No saved reports found. Generate a report first with `generate_report` or `generate_research_report`."

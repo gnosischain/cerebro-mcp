@@ -56,9 +56,6 @@ def main() -> int:
     result = compute_grant_closure(
         manifest,
         approved_sources=set(review.get("approved_sources") or []),
-        approved_passthrough_views=set(
-            review.get("approved_passthrough_views") or []
-        ),
     )
     sys.stdout.write(
         render_grant_script(result, user=args.user, manifest_sha=manifest_sha)

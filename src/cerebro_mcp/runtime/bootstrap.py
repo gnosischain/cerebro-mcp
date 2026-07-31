@@ -217,6 +217,36 @@ def validate_surface_profile(transport: str) -> None:
             "or team_analytics_v1 for the connector profile."
         )
     if profile == PROFILE_TEAM_ANALYTICS_V1:
+        # The connector profile exists ONLY on Streamable HTTP. `--sse`
+        # builds the legacy shared-token app (build_streamable_http_app),
+        # which has no OAuth, no scope gate, no revocation check and a
+        # forgeable X-Cerebro-Owner — so every caller would collapse to a
+        # single unauthenticated identity while the profile advertised
+        # per-user isolation. Refuse the combination outright.
+        if transport != "streamable-http":
+            raise RuntimeError(
+                f"MCP_SURFACE_PROFILE=team_analytics_v1 requires the "
+                f"Streamable HTTP transport (--http); got {transport!r}. "
+                "The legacy SSE app serves the shared-token path with no "
+                "OAuth, scope enforcement or revocation."
+            )
+        # Per-tool-call identity requires stateless mode: with a retained
+        # session the principal is pinned to whoever created it, so every
+        # later call in that session runs as the session opener.
+        if not settings.STREAMABLE_HTTP_STATELESS:
+            raise RuntimeError(
+                "team_analytics_v1 requires STREAMABLE_HTTP_STATELESS=true: "
+                "a retained session pins every tool call's owner to the "
+                "session creator, defeating per-user isolation."
+            )
+        # The RPC scan plane builds its own ClickHouse client from the broad
+        # credentials, bypassing the restricted connector identity.
+        if settings.RPC_SCAN_ENABLED:
+            raise RuntimeError(
+                "RPC_SCAN_ENABLED is incompatible with team_analytics_v1: "
+                "the scan plane connects with the broad CLICKHOUSE_USER "
+                "credentials, bypassing the restricted connector identity."
+            )
         if settings.LEAN_CORE_ENABLED:
             raise RuntimeError(
                 "LEAN_CORE_ENABLED is incompatible with "
@@ -270,6 +300,36 @@ def validate_surface_profile(transport: str) -> None:
         get_authz_store().check_owner_key_fingerprint(
             OWNER_KEY_VERSION, owner_key_fingerprint()
         )
+        # Every report link is a signed capability, so a missing/short
+        # signing key means every link 401s — a silent, total failure of
+        # the report plane discovered only by a user clicking a link.
+        # Prove the ring is usable at boot instead.
+        from cerebro_mcp.auth.signing import CapabilityError, _current_kid
+
+        try:
+            _current_kid()
+        except CapabilityError as exc:
+            raise RuntimeError(
+                f"team_analytics_v1 requires a usable CEREBRO_SIGNING_KEY "
+                f"(>= 32 bytes): {exc}. Report links are signed "
+                "capabilities; without it every link is unauthorized."
+            ) from exc
+        # Startup reconciliation of the four report crash divergences. An
+        # unwired reconcile() is a guard that never fires: a `ready` row
+        # whose file vanished would keep serving 500s, and a half-published
+        # pair would linger forever.
+        import os
+        from pathlib import Path
+
+        report_dir = Path(
+            os.environ.get("CEREBRO_REPORT_DIR", "~/.cerebro/reports")
+        ).expanduser()
+        summary = get_authz_store().reconcile(report_dir)
+        if any(
+            summary[k]
+            for k in ("pending_deleted", "stale_pair_deleted", "marked_missing")
+        ) or summary["quarantined"]:
+            logger.warning("authz startup reconciliation: %s", summary)
 
 
 def ensure_writable_dir(path: Path) -> None:

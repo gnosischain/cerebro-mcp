@@ -19,11 +19,10 @@ Profiles
 Scope names are ORTHOGONAL by design (tool requirements are explicit unions,
 never implications), so no hierarchy logic exists anywhere.
 
-The ``handle`` column records the analysis-handle contract (R10 / R9 P0-6).
-Runtime handle enforcement lands with the handle registry (task: deglobalize
-analysis state); until then the column is documentation-plus-test-surface,
-NOT enforced — flipping ``HANDLE_ENFORCEMENT_ENABLED`` before that registry
-exists would reject every call.
+The ``handle`` column records the analysis-handle contract (R10 / R9 P0-6)
+and IS enforced whenever the connector profile is active — see
+``CerebroFastMCP._call_with_handle``, which validates and strips
+``analysis_id`` before dispatch.
 """
 
 from __future__ import annotations
@@ -39,9 +38,6 @@ PROFILE_INTERNAL_FULL = "internal_full"
 RECOGNIZED_PROFILES: frozenset[str] = frozenset(
     {PROFILE_TEAM_ANALYTICS_V1, PROFILE_INTERNAL_FULL}
 )
-
-# Not enforced yet — see module docstring.
-HANDLE_ENFORCEMENT_ENABLED = False
 
 # --- scopes ----------------------------------------------------------------
 
@@ -238,6 +234,43 @@ TEMPLATE_URI_TEMPLATES_ALLOWED: frozenset[str] = frozenset(
 #: Prompts on the connector profile: none. list_prompts is empty and
 #: get_prompt rejects by name.
 PROMPTS_ALLOWED: frozenset[str] = frozenset()
+
+#: Personas serveable on the connector profile — FROZEN (R10 §6, reviewed
+#: 2026-07-31 from a rendered-text sweep: a persona qualifies only when its
+#: rendered body, shared contracts inlined, names no tool outside
+#: TOOL_POLICY; the bare word "list" is treated as prose). Excluded whole
+#: families: dispatcher (routes to specialists that need excluded planes),
+#: cow/dao/chain/forensics (RPC + mini-app planes), storyteller_* (its
+#: pipeline tools), grafana_architect (publishing plane).
+#: tests/test_connector_surface.py re-runs the sweep on every build.
+CONNECTOR_PERSONAS_ALLOWED: frozenset[str] = frozenset(
+    {
+        "analytics_reporter",
+        "bridge_security_analyst",
+        "defi_analyst",
+        "esg_analyst",
+        "forecasting_analyst",
+        "gnosis_research_analyst",
+        "growth_analyst",
+        "marketing_analyst",
+        "mmm_analyst",
+        "mmm_causal_reviewer",
+        "mmm_simulator",
+        "mta_analyst",
+        "network_health_analyst",
+        "statistical_reviewer",
+        "tokenomics_analyst",
+        "ui_designer",
+        "unified_allocator",
+        "unified_causal_reviewer",
+    }
+)
+
+
+def persona_allowed(role: str) -> bool:
+    if not connector_profile_active():
+        return True
+    return role in CONNECTOR_PERSONAS_ALLOWED
 
 
 # --- runtime helpers -------------------------------------------------------

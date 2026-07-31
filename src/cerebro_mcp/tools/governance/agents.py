@@ -149,5 +149,19 @@ def register_agent_tools(mcp):
                 f"Unknown role: {role}. "
                 f"Valid roles: {', '.join(sorted(_VALID_ROLES))}"
             )
+        from cerebro_mcp.tools.tool_policy import (
+            CONNECTOR_PERSONAS_ALLOWED,
+            persona_allowed,
+        )
+
+        if not persona_allowed(role):
+            # Frozen connector allowlist (tool_policy): a persona whose
+            # rendered rules direct the model at excluded tools would
+            # produce a workflow the wire rejects at every step.
+            return (
+                f"Persona '{role}' is not available on this profile — its "
+                "workflow depends on tools outside the connector surface. "
+                f"Available: {', '.join(sorted(CONNECTOR_PERSONAS_ALLOWED))}"
+            )
         runtime_state.current_agent_role = role
         return load_persona(role)

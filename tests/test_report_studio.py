@@ -310,7 +310,13 @@ from cerebro_mcp.tools.visualization.report_studio import (
 
 
 @pytest.fixture
-def studio(report_dir):
+def studio(report_dir, monkeypatch):
+    # Mutations default OFF now (connector plan R10 flipped the trust
+    # switch fail-closed); these tests exercise the mutation features, so
+    # they opt IN the way a trusted single-user deployment does.
+    from cerebro_mcp.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "REPORT_STUDIO_ALLOW_MUTATIONS", True)
     mini_apps.reset_views_for_tests()
     server = CerebroFastMCP("test-studio")
     # Installs the app-only list_tools filter (same order as server.py).

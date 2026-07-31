@@ -67,7 +67,6 @@ def test_privacy_closure_fails_closed():
     result = compute_grant_closure(
         _manifest(),
         approved_sources={"consensus.specs"},
-        approved_passthrough_views={"stg_pass"},
     )
     assert "mart_on_bridge" in result.excluded
     assert "bridge" in result.excluded  # the tagged model itself
@@ -79,7 +78,6 @@ def test_unapproved_source_lands_in_review_not_grants():
     result = compute_grant_closure(
         _manifest(),
         approved_sources={"consensus.specs"},
-        approved_passthrough_views={"stg_pass"},
     )
     assert "mart_on_source" in result.review_required
     assert result.review_required["mart_on_source"] == [
@@ -88,22 +86,31 @@ def test_unapproved_source_lands_in_review_not_grants():
     assert "crawlers_data.secret_feed" not in result.granted
 
 
-def test_unreviewed_view_blocks_dependents():
-    """Views execute as invoker — an unreviewed view blocks grant-through."""
+def test_view_parents_are_granted_with_the_view():
+    """An invoker-executed view cannot read what the caller cannot, so a
+    granted model's closure necessarily grants its parents.
+
+    This documents a REAL residual risk rather than pretending to solve it:
+    a caller can query the wider parent directly and bypass a narrowing
+    view. The earlier per-view "passthrough approval" flag could not express
+    the distinction — every view's parents are already in its own root's
+    closure — so it merely blocked marts while granting their inputs. The
+    remedy for an unacceptable case is a DEFINER view or a connector-safe
+    materialization, decided per case.
+    """
     result = compute_grant_closure(
-        _manifest(),
-        approved_sources={"consensus.specs"},
-        approved_passthrough_views=set(),  # stg_pass NOT approved
+        _manifest(), approved_sources={"consensus.specs"}
     )
-    assert "mart_ok" in result.review_required
-    assert "view:stg_pass" in result.review_required["mart_ok"]
+    assert "mart_ok" not in result.review_required
+    # the view AND its source parent are both granted, together
+    assert "dbt.stg_pass" in result.granted
+    assert "consensus.specs" in result.granted
 
 
 def test_approved_chain_grants_physical_relations():
     result = compute_grant_closure(
         _manifest(),
         approved_sources={"consensus.specs"},
-        approved_passthrough_views={"stg_pass"},
     )
     assert "dbt.mart_ok" in result.granted
     assert "dbt.stg_pass" in result.granted
@@ -117,7 +124,6 @@ def test_missing_lineage_node_is_a_hard_error():
         compute_grant_closure(
             manifest,
             approved_sources={"consensus.specs"},
-            approved_passthrough_views={"stg_pass"},
         )
 
 
@@ -128,7 +134,6 @@ def test_missing_schema_is_a_hard_error():
         compute_grant_closure(
             manifest,
             approved_sources={"consensus.specs"},
-            approved_passthrough_views={"stg_pass"},
         )
 
 
@@ -136,7 +141,6 @@ def test_render_emits_staged_identity_and_pin():
     result = compute_grant_closure(
         _manifest(),
         approved_sources={"consensus.specs"},
-        approved_passthrough_views={"stg_pass"},
     )
     script = render_grant_script(result, user="cerebro_connector_v1", manifest_sha="ab" * 32)
     assert "CREATE USER IF NOT EXISTS cerebro_connector_v1" in script

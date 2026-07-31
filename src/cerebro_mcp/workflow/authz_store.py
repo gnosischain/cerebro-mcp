@@ -224,13 +224,23 @@ class AuthzStore:
                 (report_id,),
             )
 
+    def _read(self, sql: str, params: tuple = ()) -> list:
+        """Every SELECT goes through here so a driver error becomes
+        AuthzUnavailable — callers convert that into a DENY. A raw
+        sqlite3.Error escaping past an `except AuthzUnavailable` handler
+        turns an intended 404 into a 500 and drops the denial telemetry."""
+        try:
+            return self._conn.execute(sql, params).fetchall()
+        except sqlite3.Error as exc:
+            raise AuthzUnavailable(str(exc)) from exc
+
     def get_report(self, report_id: str) -> ReportRow | None:
-        row = self._conn.execute(
+        rows = self._read(
             "SELECT report_id, auth_id, owner_hash, filename, kind,"
             " created_at, status FROM reports WHERE report_id = ?",
             (report_id,),
-        ).fetchone()
-        return ReportRow(*row) if row else None
+        )
+        return ReportRow(*rows[0]) if rows else None
 
     def list_reports_for_owner(
         self, owner_hash: str | None, *, include_unowned: bool = False
@@ -383,14 +393,11 @@ class AuthzStore:
             )
 
     def revocation_watermark(self, owner_hash: str) -> int | None:
-        try:
-            row = self._conn.execute(
-                "SELECT min_iat FROM subject_revocations WHERE owner_hash = ?",
-                (owner_hash,),
-            ).fetchone()
-        except sqlite3.Error as exc:
-            raise AuthzUnavailable(str(exc)) from exc
-        return row[0] if row else None
+        rows = self._read(
+            "SELECT min_iat FROM subject_revocations WHERE owner_hash = ?",
+            (owner_hash,),
+        )
+        return rows[0][0] if rows else None
 
     def deny_subject(self, owner_hash: str, *, actor: str, reason: str) -> None:
         """Tombstone: written FIRST in the emergency sequence — this alone
@@ -430,15 +437,13 @@ class AuthzStore:
     def is_denied(self, owner_hash: str) -> bool:
         """Hot-path point lookup. Raises AuthzUnavailable on ANY store error
         — the verifier must convert that into a denial (fail closed)."""
-        try:
-            row = self._conn.execute(
+        return bool(
+            self._read(
                 "SELECT 1 FROM denied_subjects WHERE owner_hash = ?"
                 " AND unblocked_at IS NULL",
                 (owner_hash,),
-            ).fetchone()
-        except sqlite3.Error as exc:
-            raise AuthzUnavailable(str(exc)) from exc
-        return row is not None
+            )
+        )
 
     def denial_audit(self, owner_hash: str) -> list[tuple]:
         return self._conn.execute(
@@ -481,13 +486,20 @@ def publish_file_atomically(content: bytes, final_path: Path) -> None:
     """
     final_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = final_path.with_suffix(final_path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     try:
-        os.write(fd, content)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, final_path)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.write(fd, content)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, final_path)
+    except BaseException:
+        # Clean up the temp file on ANY failure (including cancellation).
+        # The writer this replaced removed it in a finally; leaking it
+        # leaves a file invisible to both the report globs and reconcile().
+        tmp.unlink(missing_ok=True)
+        raise
     dir_fd = os.open(final_path.parent, os.O_RDONLY)
     try:
         os.fsync(dir_fd)

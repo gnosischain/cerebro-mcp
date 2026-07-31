@@ -13,10 +13,16 @@ Fail-closed rules (connector plan R10 C4, staged identities per C5):
 - Terminal ``source.*`` relations are DEFAULT-DENIED. A source is granted
   only when listed in the reviewed approvals file; models depending on an
   unapproved source land in the REVIEW-REQUIRED worklist, not the grant set.
-- A VIEW inside an approved closure needs a per-view passthrough approval
-  (views execute as invoker, so granting a view's parents lets the caller
-  bypass any row/column narrowing the view performs). Unreviewed views push
-  their dependents into the worklist.
+- Every relation in a granted closure IS granted, INCLUDING intermediate
+  views' parents — that is unavoidable, because an invoker-executed view
+  cannot read what the caller cannot. The consequence is explicit and must
+  be reviewed rather than papered over: granting a narrowing view's parents
+  lets a caller query the wider parent directly and bypass the narrowing.
+  Where that is unacceptable the answer is a ``SQL SECURITY DEFINER``
+  connector view or a connector-safe materialization, decided per case —
+  NOT a per-view "passthrough approval" flag, which cannot express the
+  distinction (a view's parents are already in its own root's closure, so
+  the flag blocked marts while their inputs stayed granted).
 - Unknown node types, missing ``schema``/physical identifiers, or lineage
   gaps are hard errors — silence here would become a silent grant hole.
 
@@ -45,7 +51,7 @@ class ClosureResult:
     granted: list[str] = field(default_factory=list)
     #: root model -> reason, for models excluded by the privacy predicate
     excluded: dict[str, str] = field(default_factory=dict)
-    #: root model -> unapproved relations blocking it (sources / views)
+    #: root model -> unapproved relations blocking it (unapproved sources)
     review_required: dict[str, list[str]] = field(default_factory=dict)
 
 
@@ -85,15 +91,13 @@ def compute_grant_closure(
     manifest: dict,
     *,
     approved_sources: set[str],
-    approved_passthrough_views: set[str],
 ) -> ClosureResult:
     """Compute the fail-closed grant set for the connector identity.
 
     Roots are every dbt MODEL not privacy-excluded (the connector profile
     allows ``dbt.*`` caller SQL, so every reachable model must either be
     fully granted or knowingly absent). ``approved_sources`` holds
-    physical ``db.table`` names; ``approved_passthrough_views`` holds model
-    names reviewed as non-narrowing.
+    physical ``db.table`` names.
     """
     nodes = manifest.get("nodes")
     parent_map = manifest.get("parent_map")
@@ -144,19 +148,6 @@ def compute_grant_closure(
             if cid.startswith("source."):
                 if rel not in approved_sources:
                     blockers.append(f"source:{rel}")
-                    continue
-            else:
-                materialized = (cnode.get("config") or {}).get("materialized")
-                is_view = materialized in (None, "view")
-                has_parents = bool(parent_map.get(cid))
-                if (
-                    is_view
-                    and has_parents
-                    and cid != node_id  # the root grants itself; its own
-                    # narrowing is the caller's intended surface
-                    and cnode.get("name") not in approved_passthrough_views
-                ):
-                    blockers.append(f"view:{cnode.get('name')}")
                     continue
             relations.append(rel)
 

@@ -471,6 +471,23 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
     def system_status() -> str:
         """Show server status: ClickHouse connectivity, manifest state, config."""
         from cerebro_mcp.tools.governance.reasoning import get_tracing_status
+        from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+        if connector_profile_active():
+            # Redacted connector variant (R10 §6.3): the full response leaks
+            # operator detail — filesystem paths, artifact source URLs,
+            # content hashes, the database inventory, raw error strings.
+            # A connector caller gets liveness facts only; operators read
+            # the full variant on the internal profile.
+            lines = ["# System Status\n"]
+            try:
+                ch.get_client("dbt").query("SELECT 1")
+                lines.append("- **Data platform:** connected")
+            except Exception:
+                lines.append("- **Data platform:** unavailable")
+            lines.append(f"- **Models loaded:** {manifest.is_loaded}")
+            lines.append(f"- **Model count:** {manifest.model_count}")
+            return "\n".join(lines)
 
         lines = ["# System Status\n"]
 

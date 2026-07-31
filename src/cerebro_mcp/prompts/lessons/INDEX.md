@@ -43,6 +43,11 @@ separate corpus.
   `list_tools` visibility filter was installed by attribute assignment, but FastMCP
   binds handlers in `__init__`: every test passed while the wire served all 187
   tools unfiltered (app-only included) and `LEAN_CORE_ENABLED` was a no-op.
+- [global-latest-state-serves-strangers](global-latest-state-serves-strangers.md)
+  `observed` — process-global "latest"/registry state on a stateless multi-user
+  transport is keyed by "whoever asks next": one report's finish wiped another
+  conversation's discovery mid-analysis, and the latest-visual resource served one
+  user's data to anyone within 600 s.
 
 ## ClickHouse platform
 
