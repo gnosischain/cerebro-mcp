@@ -66,6 +66,26 @@ def _column_token_pattern(col: str) -> re.Pattern:
 # ---------------------------------------------------------------------------
 
 # Patterns indicating point-in-time constraint: GROUP BY date/day, single date filter, argMax wrapping.
+#: Phrases that acknowledge a deliberate whole-period sum of a stock measure.
+#: Deliberately narrow: a bare mention of "tvl" must not exonerate, or the rule
+#: exonerates every chart it applies to. The caller has to say that summing
+#: across the period is intended, or name the override explicitly.
+_STOCK_FLOW_DISCLOSURE_HINTS = (
+    "override_reason",
+    "point-in-time",
+    "point in time",
+    "snapshot",
+    "argmax",
+    "single date",
+    "as-of",
+    "as of date",
+    "deliberate sum",
+    "intentionally summed",
+    "pre-aggregated",
+    "preaggregated",
+    "stock measure",
+)
+
 _POINT_IN_TIME_HINTS_RE = re.compile(
     r"\bgroup\s+by\b[^()]*?\b(date|day|toStartOfDay|toDate)\b"
     r"|\bwhere\b[^()]*?\b(date|day)\b\s*=\s*"
@@ -77,15 +97,38 @@ _POINT_IN_TIME_HINTS_RE = re.compile(
 def aggregates_stock_measure_over_time(
     sql: str,
     stock_columns: frozenset[str] = DEFAULT_STOCK_COLUMNS,
+    chart_metadata: dict | None = None,
 ) -> tuple[bool, str]:
     """Detect SUM(stock_col) without a single-date constraint.
 
     Returns (is_violation, message). is_violation=True means the SQL
     appears to sum a stock measure over a date range, which is wrong.
+
+    `chart_metadata` may carry `title`, `subtitle`, `description` or
+    `override_reason`; an explicit acknowledgement in any of them exonerates,
+    exactly as it does for the other three discipline rules.
+
+    That parameter was missing entirely, while the gate's rejection message
+    promised the override for every rule — so a legitimate stock sum (a
+    pre-aggregated snapshot table, say) could be reported but never
+    acknowledged, and the only documented escape did nothing. This rule is the
+    one most likely to fire on treasury and TVL work, which is exactly where a
+    deliberate whole-period sum is sometimes correct.
     """
     n = _normalize(sql)
     if not n:
         return False, ""
+
+    blob_parts = []
+    if isinstance(chart_metadata, dict):
+        for key in ("title", "subtitle", "description", "override_reason"):
+            v = chart_metadata.get(key)
+            if isinstance(v, str):
+                blob_parts.append(v.lower())
+    blob = " | ".join(blob_parts)
+    for hint in _STOCK_FLOW_DISCLOSURE_HINTS:
+        if hint in blob:
+            return False, ""
 
     for col in stock_columns:
         # Look for SUM(<col>) anywhere
@@ -348,7 +391,9 @@ def evaluate_all(
     out: list[HeuristicViolation] = []
 
     if enabled.get("stock_flow", True):
-        bad, msg = aggregates_stock_measure_over_time(sql, stock_columns)
+        bad, msg = aggregates_stock_measure_over_time(
+            sql, stock_columns, chart_metadata
+        )
         if bad:
             out.append(HeuristicViolation(
                 rule="stock_flow_discipline",

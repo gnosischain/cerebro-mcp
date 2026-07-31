@@ -7,22 +7,26 @@ from cerebro_mcp.models.research import PeerReviewResult
 
 
 def load_reality_checker_markdown() -> str:
-    return (
-        importlib.resources.files("cerebro_mcp.prompts.agents")
-        .joinpath("reality_checker.md")
-        .read_text("utf-8")
-    )
+    # Via load_persona so the shared quality contract this persona
+    # declares mandatory is actually present in what callers receive.
+    from cerebro_mcp.tools.governance.agents import load_persona
+
+    return load_persona("reality_checker")
 
 
 def load_gnosis_research_analyst_markdown() -> str:
-    return (
-        importlib.resources.files("cerebro_mcp.prompts.agents")
-        .joinpath("gnosis_research_analyst.md")
-        .read_text("utf-8")
-    )
+    # Via load_persona so the shared quality contract this persona
+    # declares mandatory is actually present in what callers receive.
+    from cerebro_mcp.tools.governance.agents import load_persona
+
+    return load_persona("gnosis_research_analyst")
 
 
 def register_prompts(mcp):
+    # Same loader as `get_agent_persona`, so both front doors deliver the
+    # persona WITH its declared shared contracts inlined.
+    from cerebro_mcp.tools.governance.agents import load_persona
+
 
     # --- Agent Persona Prompts (user-facing, supplementary) ---
 
@@ -34,11 +38,7 @@ def register_prompts(mcp):
         ClickHouse SQL with statistical functions, EDA workflow, outlier detection,
         and the batch report chart pipeline.
         """
-        content = (
-            importlib.resources.files("cerebro_mcp.prompts.agents")
-            .joinpath("analytics_reporter.md")
-            .read_text("utf-8")
-        )
+        content = load_persona("analytics_reporter")
         return [prompt_base.Message(role="user", content=content)]
 
     @mcp.prompt()
@@ -48,11 +48,7 @@ def register_prompts(mcp):
         Loads strict operational rules for the UI Designer agent:
         chart type selection, ECharts theming, and generate_report markdown layout.
         """
-        content = (
-            importlib.resources.files("cerebro_mcp.prompts.agents")
-            .joinpath("ui_designer.md")
-            .read_text("utf-8")
-        )
+        content = load_persona("ui_designer")
         return [prompt_base.Message(role="user", content=content)]
 
     @mcp.prompt()
@@ -80,11 +76,7 @@ def register_prompts(mcp):
         chain, enforces gates (e.g. MMM causal-reviewer PASS before
         generate_report), and emits a dispatch manifest.
         """
-        content = (
-            importlib.resources.files("cerebro_mcp.prompts.agents")
-            .joinpath("cerebro_dispatcher.md")
-            .read_text("utf-8")
-        )
+        content = load_persona("cerebro_dispatcher")
         return [prompt_base.Message(role="user", content=content)]
 
     @mcp.prompt()

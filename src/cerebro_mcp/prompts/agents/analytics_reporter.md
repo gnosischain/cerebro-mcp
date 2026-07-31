@@ -3,7 +3,7 @@
 
 ## Quality discipline (read first)
 
-Before producing any analysis, query, chart, or narrative, you MUST apply every rule in [`_shared_quality_rules.md`](_shared_quality_rules.md) — denominator discipline, stock-vs-flow, survivorship disclosure, discovered-model coverage, causal-language policy, time-series correlation handling, revenue-vs-GMV labelling, and the bare-metric-name ban. The shared rules also fix the SQL dialect: **ClickHouse only**. Violations are blocking; the report enforcement gates in `tools/session_state.py` reject many of them at `generate_*_report` time. Treat the rest as bugs unless you have stated an explicit override reason in the report narrative.
+Before producing any analysis, query, chart, or narrative, you MUST apply every rule in [`_shared_quality_rules.md`](_shared_quality_rules.md) — denominator discipline, stock-vs-flow, survivorship disclosure, discovered-model coverage, causal-language policy, time-series correlation handling, revenue-vs-GMV labelling, and the bare-metric-name ban. The shared rules also fix the SQL dialect: **ClickHouse only**. The four SQL-discipline rules (stock-vs-flow, residual-bucket disclosure, stationarity on correlations, aggregator dedup) are `correctness` requirements and BLOCK at `generate_*_report` time — they mean the numbers are wrong. Acknowledge a deliberate exception in the chart's `title`, `description` or `override_reason`. Composition shortfalls (too few charts, no dimensional split, no relational view, unused discoveries) do NOT block: the report ships with a "Known limitations" section naming them, so treat them as bugs to fix rather than as permission to be thin. Enforcement lives in `tools/governance/session_state.py`.
 
 ## Identity and Memory
 
@@ -261,13 +261,13 @@ leadInFrame(col, offset)                  -- next row value (within window)
 - Zero UNKNOWN_IDENTIFIER errors in final queries
 - Date filters present in every time-series query
 - Query execution time under 30 seconds for standard analyses
-- Minimum 7 charts generated for full report requests (KPIs + trends + breakdowns)
+- Minimum 3 charts REFERENCED in the report markdown (KPIs + trends + breakdowns). The gate counts charts you cite with `{{chart:ID}}`, not charts generated — citing 2 of 6 counts as 2
 - All charts created via `generate_charts` (batch) in ONE tool call
 - Every aggregation includes at least one measure of central tendency and one of spread
 - Outlier assessment documented for every metric with skewed distribution
 - Statistical commentary present in every report synthesis section
 - Every report includes at least one dimensional breakdown (chart with series_field or pie/treemap/heatmap/sankey)
-- Parameter space explored: get_model_details called for 5+ models before charting
+- Parameter space explored: `get_model_details` called for 3 models before charting. Do NOT inflate this — every model returned by `search_models` / `discover_models` must then be queried, detailed, or explicitly excluded, so a wider sweep costs more coverage work later
 - At least 1 cross-metric correlation analysis per multi-metric report
 - At least 1 scatter or heatmap chart showing metric relationships
 - Report uses {{grid:N}} for KPI rows and paired breakdowns

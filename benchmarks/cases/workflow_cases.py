@@ -346,17 +346,23 @@ WORKFLOW_CASES: tuple[WorkflowCase, ...] = (
             ),
             WorkflowStep(
                 tool="generate_report",
+                # No longer blocked. A chart shortfall means the report is
+                # THIN, not wrong, so it renders with a "Known limitations"
+                # section instead of refusing. Refusing here is what made a
+                # real session abandon a finished analysis and write markdown
+                # files; the routing prerequisite in step 1 still blocks,
+                # because that one changes which tools you use next.
                 args={"title": "Cold probe 2", "content_markdown": "Still no charts."},
-                expect_block=True,
-                expect_substrings=("Insufficient charts",),
+                expect_block=False,
             ),
         ),
         notes=(
-            "Deliberate violations. meta.blocks records, per block message, "
-            "its size and whether it is actionable (names at least one "
-            "registered tool in backticks — the bare 'Insufficient charts' "
-            "block does not). optimal_calls is 0: the whole case is waste by "
-            "construction."
+            "Deliberate violations. Step 1 must still block: preflight is a "
+            "routing prerequisite. Step 4 must NOT block: an unmet composition "
+            "requirement is disclosed in the artifact. meta.blocks records, "
+            "per block message, its size and whether it is actionable (names "
+            "at least one registered tool in backticks). optimal_calls is 0: "
+            "the whole case is waste by construction."
         ),
     ),
     WorkflowCase(
@@ -409,8 +415,15 @@ WORKFLOW_CASES: tuple[WorkflowCase, ...] = (
             WorkflowStep(
                 tool="generate_report",
                 args={"title": REPORT_TITLE, "content_markdown": REPORT_MARKDOWN},
-                expect_block=True,
-                expect_substrings=("Discovered-but-unused models:",),
+                # Coverage is a composition requirement: an unused discovery
+                # makes the report narrow, not wrong. It ships with the
+                # shortfall disclosed, and the reply tells the caller so it can
+                # choose to sweep and regenerate at full depth.
+                expect_block=False,
+                expect_substrings=(
+                    "disclosed limitation",
+                    "Discovered-but-unused models:",
+                ),
             ),
             WorkflowStep(
                 tool="exclude_models_by_prefix",
@@ -433,10 +446,13 @@ WORKFLOW_CASES: tuple[WorkflowCase, ...] = (
             _REPORT_OK,
         ),
         notes=(
-            "W3 without the coverage sweep: generate_report blocks on "
-            "discovered-but-unused models, then two sweep calls recover it. "
-            "meta.recovery_calls counts the calls between the block and the "
-            "final success."
+            "W3 without the coverage sweep: generate_report SHIPS with the "
+            "discovered-but-unused shortfall disclosed rather than refusing, "
+            "then two sweep calls let it regenerate at full depth. This case "
+            "used to assert a block; coverage is a composition requirement, so "
+            "an unused discovery makes the report narrow, not wrong. "
+            "meta.recovery_calls counts the calls between the disclosed "
+            "shipment and the clean one."
         ),
     ),
     WorkflowCase(

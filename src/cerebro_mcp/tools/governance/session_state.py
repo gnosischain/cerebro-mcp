@@ -39,6 +39,214 @@ _QUALIFIED_TABLE_RE = re.compile(
 )
 
 
+#: Severity decides what an unmet requirement DOES, not how bad it sounds.
+#:
+#: - `correctness` blocks. These mean the numbers are wrong — summing a stock
+#:   measure over a date range, correlating a non-stationary series, hiding a
+#:   residual bucket, double-counting aggregator volume. Publishing them
+#:   publishes something false, so no disclosure substitutes for fixing them.
+#: - `composition` does NOT block. These mean the report is thin, not wrong:
+#:   too few charts, no dimensional split, no relational view, unused
+#:   discoveries. The artifact ships with a "Known limitations" section naming
+#:   each one, because a disclosed thin report beats no report at all — the
+#:   failure this whole contract exists to stop was a session abandoning its
+#:   work over a single missing breakdown chart.
+#: - `advisory` never blocks and never disclaims; it is a nudge in the tool
+#:   result. The statistical- and correlation-query counts have ALWAYS been
+#:   advisory in code, while the instructions block, the SOP and the config
+#:   comments all described them as hard rejects. This is where that stops.
+SEVERITY_CORRECTNESS = "correctness"
+SEVERITY_COMPOSITION = "composition"
+SEVERITY_ADVISORY = "advisory"
+
+#: Marks a warning as a composition shortfall that must be DISCLOSED in the
+#: rendered artifact rather than merely logged. `check_report_preconditions`
+#: returns warnings and every caller used to bind them to `_warnings` and throw
+#: them away; the prefix lets `create_report_artifact` pick out the ones that
+#: belong in the report's "Known limitations" section without changing the
+#: function's return signature.
+_LIMITATION_PREFIX = "LIMITATION: "
+
+
+def split_limitations(warnings: list[str]) -> tuple[list[str], list[str]]:
+    """Partition gate warnings into (disclosable limitations, plain advisories)."""
+    limits = [
+        w[len(_LIMITATION_PREFIX):] for w in warnings
+        if w.startswith(_LIMITATION_PREFIX)
+    ]
+    rest = [w for w in warnings if not w.startswith(_LIMITATION_PREFIX)]
+    return limits, rest
+
+
+@dataclass(frozen=True)
+class ReportRequirement:
+    """One requirement, stated once and rendered everywhere.
+
+    `id` is the stable key. Tests assert that the set of ids rendered by
+    preflight, by the `generate_charts` tail and by the gate are identical —
+    that assertion is what stops the four hand-written prose copies of this
+    contract from drifting again.
+    """
+
+    id: str
+    description: str
+    how_to_fix: str
+    severity: str = SEVERITY_COMPOSITION
+
+    def as_line(self) -> str:
+        return f"{self.description} — {self.how_to_fix}"
+
+
+def report_requirements_for_tier(mode: str = "report") -> list[ReportRequirement]:
+    """The full contract for a tier, derived from settings.
+
+    Single source of truth for BOTH the advisory surfaces (`find`, preflight,
+    the pre-execution chart scan, the `generate_charts` tail) and the enforcing
+    gate. Mirrors the `_route` precedent in `tools/semantic/semantic.py`, which
+    is documented as "Single source of truth so the two front doors can never
+    drift" — the same reasoning applies with more force here, because this
+    contract was previously restated by hand in four places
+    (`server.py` twice, `charts.py`, `CLAUDE.md`) and every copy had drifted.
+
+    Only the report tier has composition requirements; chart/answer tiers
+    return the advisory entries alone, since `REPORT_REQUIRES_EXPLICIT_MODE`
+    blocks them from producing a report artifact at all.
+    """
+    reqs: list[ReportRequirement] = []
+
+    if mode == "report":
+        reqs.append(ReportRequirement(
+            id="min_charts",
+            description=(
+                f"At least {settings.MIN_CHARTS_FOR_REPORT} charts REFERENCED "
+                f"in the report markdown"
+            ),
+            how_to_fix=(
+                "the count is of charts you actually cite with "
+                "`{{chart:ID}}`, not of charts generated — citing 2 of 6 "
+                "counts as 2"
+            ),
+        ))
+        if settings.REQUIRE_CHART_DIVERSITY:
+            reqs.append(ReportRequirement(
+                id="chart_diversity",
+                description="A trend chart (line/area) or a breakdown (bar/pie)",
+                how_to_fix="include at least one of either family",
+            ))
+        reqs.append(ReportRequirement(
+            id="exploratory_queries",
+            description=(
+                f"At least {settings.MIN_EXPLORATORY_QUERIES} exploratory "
+                f"queries"
+            ),
+            how_to_fix="run EDA / distribution checks with `execute_query`",
+        ))
+        if settings.REQUIRE_DIMENSIONAL_BREAKDOWN:
+            reqs.append(ReportRequirement(
+                id="dimensional_breakdown",
+                description="At least one chart split by a dimension",
+                how_to_fix=(
+                    "set `series_field` on a chart, or use a "
+                    "pie/treemap/heatmap/sankey type"
+                ),
+            ))
+        if settings.REQUIRE_RELATIONAL_CHART:
+            reqs.append(ReportRequirement(
+                id="relational_analysis",
+                description="At least one relational view",
+                how_to_fix=(
+                    "add a scatter/heatmap chart, OR run one correlation query "
+                    "(`corr()`, `covarPop()`, `simpleLinearRegression()`)"
+                ),
+            ))
+        if settings.ENFORCE_DISCOVERED_MODEL_COVERAGE:
+            reqs.append(ReportRequirement(
+                id="discovered_model_coverage",
+                description=(
+                    "Every model returned by `search_models` / "
+                    "`discover_models` used or explicitly excluded"
+                ),
+                how_to_fix=(
+                    "query it, call `get_model_details` on it, or sweep in one "
+                    "call with `exclude_module` / `exclude_models_by_prefix` / "
+                    "`exclude_all_discovered_except` / "
+                    "`record_model_exclusion_batch` — do NOT loop the singular "
+                    "`record_model_exclusion`"
+                ),
+            ))
+
+    for key, rule_id, label in (
+        ("ENFORCE_STOCK_FLOW_DISCIPLINE", "stock_flow_discipline",
+         "No stock measure summed over a date range"),
+        ("ENFORCE_RESIDUAL_BUCKET_DISCLOSURE", "residual_bucket_disclosure",
+         "Residual buckets excluded by a filter are disclosed"),
+        ("ENFORCE_STATIONARITY_ON_CORRELATIONS", "stationarity_on_correlations",
+         "Time-series correlations address stationarity"),
+        ("ENFORCE_AGGREGATOR_VOLUME_DEDUP", "aggregator_volume_dedup",
+         "Aggregator volume is deduplicated"),
+    ):
+        if getattr(settings, key, False):
+            reqs.append(ReportRequirement(
+                id=rule_id,
+                description=label,
+                how_to_fix=(
+                    "rewrite the SQL, or acknowledge the exception in the "
+                    "chart's `title` / `description` / `override_reason`"
+                ),
+                severity=SEVERITY_CORRECTNESS,
+            ))
+
+    reqs.append(ReportRequirement(
+        id="statistical_query",
+        description=(
+            f"{settings.MIN_STATISTICAL_QUERIES}+ statistical quer(ies) "
+            f"(quantiles, stddev, corr)"
+        ),
+        how_to_fix="recommended, not required — this never blocks a report",
+        severity=SEVERITY_ADVISORY,
+    ))
+    reqs.append(ReportRequirement(
+        id="correlation_query",
+        description=f"{settings.MIN_CORRELATION_QUERIES}+ correlation quer(ies)",
+        how_to_fix="recommended, not required — this never blocks a report",
+        severity=SEVERITY_ADVISORY,
+    ))
+    return reqs
+
+
+def render_report_contract(mode: str = "report") -> str:
+    """The contract as markdown, for any advisory surface.
+
+    Deliberately states what blocks and what only discloses: a caller that
+    believes every requirement is fatal behaves the same way as one that
+    believes none are.
+    """
+    reqs = report_requirements_for_tier(mode)
+    if not reqs:
+        return ""
+    blocking = [r for r in reqs if r.severity == SEVERITY_CORRECTNESS]
+    shaping = [r for r in reqs if r.severity == SEVERITY_COMPOSITION]
+    advisory = [r for r in reqs if r.severity == SEVERITY_ADVISORY]
+
+    out: list[str] = []
+    if shaping:
+        out.append(
+            "**Report composition** — unmet items do NOT block; the report "
+            "ships with a \"Known limitations\" section naming them:"
+        )
+        out += [f"- {r.as_line()}" for r in shaping]
+    if blocking:
+        out.append(
+            "\n**Correctness — these BLOCK** (they mean the numbers are wrong, "
+            "not that the report is thin):"
+        )
+        out += [f"- {r.as_line()}" for r in blocking]
+    if advisory:
+        out.append("\n**Advisory only:**")
+        out += [f"- {r.as_line()}" for r in advisory]
+    return "\n".join(out)
+
+
 def _format_chart_gate_reason(missing: list[str]) -> str:
     """Render all unmet chart preconditions as one actionable message.
 
@@ -523,24 +731,29 @@ class SessionState:
                         ), []
                     return True, "", []
 
-            # Collect EVERY unmet composition requirement, then report them
-            # together — mirroring `_collect_common_chart_gaps_unlocked` /
-            # `_format_chart_gate_reason` on the chart gate.
+            # Two buckets, by severity — see ReportRequirement above.
             #
-            # These used to return one at a time. That is the worst possible
-            # ordering for the caller: the requirements are only discoverable
-            # at generate_report time, AFTER every chart has been built, so a
-            # session learned "you need a series_field chart" once it had
-            # already produced seven flat time series — and then had to learn
-            # the next requirement on the following round trip. Observed
-            # outcome: a session with 28 queries and 7 charts hit the
-            # dimensional-breakdown rule and abandoned the report entirely,
-            # delivering markdown files instead of a report artifact.
+            # `gaps` BLOCKS: the numbers would be wrong. `limitations` does not
+            # block; it is disclosed in the artifact instead.
+            #
+            # These all used to block, and used to be reported one at a time.
+            # That ordering is the worst possible for the caller, because the
+            # requirements are only discoverable at generate_report time, AFTER
+            # every chart exists — a session learned "you need a series_field
+            # chart" having already built seven flat time series, then would
+            # have learned the next requirement on the following round trip.
+            # Observed outcome: 28 queries, 7 charts, one complaint, and the
+            # session abandoned the report and wrote markdown files.
+            #
+            # A thin report that says it is thin beats no report at all. A
+            # wrong report does not, which is why the SQL-discipline rules
+            # stay in `gaps`.
             gaps: list[str] = []
+            limitations: list[str] = []
 
             min_charts = settings.MIN_CHARTS_FOR_REPORT
             if len(chart_registry) < min_charts:
-                gaps.append(
+                limitations.append(
                     f"Insufficient charts: Generated {len(chart_registry)} "
                     f"chart(s), but the minimum required for a report is "
                     f"{min_charts}."
@@ -556,7 +769,7 @@ class SessionState:
                     for v in chart_registry.values()
                 )
                 if not has_trend and not has_breakdown:
-                    gaps.append(
+                    limitations.append(
                         "Chart diversity lacking: Report must include at "
                         "least one trend chart (line/area) or one breakdown "
                         "chart (bar/pie)."
@@ -564,7 +777,7 @@ class SessionState:
 
             min_queries = settings.MIN_EXPLORATORY_QUERIES
             if self.execute_query_count < min_queries:
-                gaps.append(
+                limitations.append(
                     f"Insufficient exploration: Run at least {min_queries} "
                     f"exploratory queries (EDA, distribution checks, "
                     f"dimensional queries) before generating a report. "
@@ -596,7 +809,7 @@ class SessionState:
                     for v in chart_registry.values()
                 )
                 if not has_dimensional:
-                    gaps.append(
+                    limitations.append(
                         "No dimensional breakdown: At least one chart must "
                         "use series_field to show data split by a dimension "
                         "(token, action type, segment, etc.), or use a "
@@ -610,15 +823,12 @@ class SessionState:
                 )
                 has_correlation = self.correlation_query_count >= 1
                 if not has_relational and not has_correlation:
-                    gaps.append(
+                    limitations.append(
                         "No relational analysis: At least one scatter/"
                         "heatmap chart OR one correlation query (corr(), "
                         "covarPop(), simpleLinearRegression()) is required "
                         "for multi-dimensional analysis."
                     )
-
-            if gaps:
-                return False, _format_report_gate_reason(gaps), warnings
 
             if self.execute_query_count < 5 and self.generate_chart_count > 0:
                 warnings.append(
@@ -699,15 +909,15 @@ class SessionState:
                         f"- {v.chart_id} [{v.rule}]: {v.message}"
                         for v in violations
                     ]
-                    return False, (
+                    gaps.append(
                         "Quality discipline violation(s) on "
                         f"{len(violations)} chart(s). Either rewrite the SQL "
                         "to follow the rules in `_shared_quality_rules.md`, "
                         "or attach an explicit `override_reason` / "
                         "`description` to the chart that acknowledges the "
-                        "antipattern with a stated reason.\n\n"
+                        "antipattern with a stated reason.\n"
                         + "\n".join(detail_lines)
-                    ), []
+                    )
 
             # Discovered-model coverage gate: every model surfaced by
             # search_models / discover_models that is not explored, queried,
@@ -733,7 +943,7 @@ class SessionState:
                         if len(uncovered) > 10
                         else ""
                     )
-                    return False, (
+                    limitations.append(
                         f"Discovered-but-unused models: {len(uncovered)} "
                         f"model(s) returned by `search_models` / "
                         f"`discover_models` were never queried with "
@@ -744,10 +954,26 @@ class SessionState:
                         f"`record_model_exclusion(name, reason)` for each "
                         f"one before generating the report. "
                         f"Uncovered: {sample}{extra}."
-                    ), []
+                    )
                 else:
                     observe_discovered_model_coverage("pass")
                     observe_quality_gate("discovered_model_coverage", "pass")
+
+            # ONE verdict for the whole tier, and only correctness blocks.
+            #
+            # Everything is evaluated before anything is reported, so a caller
+            # never fixes one requirement only to discover the next. Blocking
+            # is reserved for the SQL-discipline rules, where proceeding would
+            # publish wrong numbers; composition shortfalls travel out as
+            # `limitations` and are disclosed IN the artifact by
+            # `create_report_artifact`, which is what makes "the request always
+            # produces something" true without making it produce something
+            # false.
+            if gaps:
+                return False, _format_report_gate_reason(gaps), warnings
+
+            if limitations:
+                warnings.extend(_LIMITATION_PREFIX + item for item in limitations)
 
         return True, "", warnings
 

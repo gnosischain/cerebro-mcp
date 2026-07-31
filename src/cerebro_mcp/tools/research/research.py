@@ -179,7 +179,27 @@ def _validate_evidence_ref(
     if kind == "chart":
         chart = get_chart_record(ref_id)
         if chart is None:
-            raise ValueError(f"Chart '{ref_id}' not found in the current registry.")
+            # The in-memory registry has a 2h TTL and dies with the process, so
+            # `artifact_integrity` used to fail a long-running project purely
+            # because its charts had aged out — a verification failure that
+            # said nothing about the research and could not be fixed by doing
+            # better research. Fall back to the durable copy before declaring
+            # the reference broken.
+            try:
+                from cerebro_mcp.tools.visualization.charts import (
+                    restore_chart_registry,
+                )
+
+                if restore_chart_registry([ref_id]):
+                    chart = get_chart_record(ref_id)
+            except Exception:  # pragma: no cover - durability is best-effort
+                chart = None
+        if chart is None:
+            raise ValueError(
+                f"Chart '{ref_id}' not found in the current registry and no "
+                f"durable record exists. Regenerate it and re-attach the "
+                f"evidence."
+            )
         title = str(chart.get("title") or ref_id)
         summary = str(chart.get("chart_type") or "chart")
         return title, summary
@@ -280,7 +300,10 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
         try:
             project = store.load_project(project_id)
             ensure_current_phase(project, phase)
-            ensure_phase_status(project, phase, "pending")
+            # A failed phase is re-plannable: it is the case that most needs a
+            # new plan, and refusing it stranded the project with no tool-level
+            # way forward.
+            ensure_phase_status(project, phase, "pending", allow_failed=True)
             project.phases[phase].plan_markdown = plan_markdown.strip()
             project.phases[phase].status = "planned"
             store.save_project(project)
@@ -609,9 +632,23 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 )
 
             statistical_found = False
+            # Both query-result kinds count. This inspected only "query_result",
+            # so a project whose evidence came from `query_metrics` — which
+            # attaches "semantic_query_result" — could NEVER satisfy this check,
+            # no matter how statistical its SQL was. A purely-semantic project
+            # was structurally unable to reach publication, and the message it
+            # got back ("No statistical/distribution query evidence detected")
+            # pointed at the one thing it had actually done.
             for item in execution_evidence:
-                if item.kind == "query_result":
-                    artifact = store.load_query_result_artifact(project_id, item.ref_id)
+                if item.kind in ("query_result", "semantic_query_result"):
+                    try:
+                        artifact = store.load_query_result_artifact(
+                            project_id, item.ref_id
+                        )
+                    except Exception:
+                        # A missing artifact is the artifact_integrity check's
+                        # business; it must not silently fail this one too.
+                        continue
                     if state.is_statistical_query(artifact.get("sql", "")):
                         statistical_found = True
                         break
@@ -775,6 +812,14 @@ def register_research_tools(mcp, ch: ClickHouseManager, store: ResearchStore):
                 content_markdown,
                 enforce_quality_gate=False,
                 reset_session_state=False,
+                # Explicit, because omitting it derives the mode from the
+                # process-global `semantic_mode_last`. Session state is a
+                # singleton shared by every concurrent client, so a chart-mode
+                # request in another conversation could file THIS published
+                # research report as a throwaway "visual_answer" — different
+                # reply text, different artifact kind, for reasons entirely
+                # outside this call.
+                presentation_mode="research",
             )
             evidence = EvidenceRef(
                 kind="report",

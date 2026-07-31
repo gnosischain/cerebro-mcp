@@ -79,6 +79,30 @@ runtime_state.ssl_trust_injected = init_ssl_trust()
 RESEARCH_DIR = Path(settings.CEREBRO_RESEARCH_DIR).expanduser()
 logger = logging.getLogger(__name__)
 
+
+def _render_report_contract_for_instructions() -> str:
+    """Render the report contract into the instructions block.
+
+    The block is the only prose the server ships to a client, and it used to
+    restate these requirements by hand — as did the SOP below, `charts.py` and
+    `CLAUDE.md`. Every copy had drifted: two warnings were described as hard
+    rejects, and nine enforced requirements (the four SQL-discipline rules,
+    their override escape, discovered-model coverage and its batch-exclusion
+    escapes, the scoped chart count) appeared in none of them.
+
+    Rendering from `report_requirements_for_tier` means the text a model reads
+    and the predicate that judges it come from one place.
+    """
+    try:
+        from cerebro_mcp.tools.governance.session_state import (
+            render_report_contract,
+        )
+
+        return render_report_contract("report")
+    except Exception:  # pragma: no cover - instructions must never break boot
+        logger.exception("report contract render failed; instructions degraded")
+        return "(report contract unavailable — call `preflight_analytics_request` for it)"
+
 mcp = FastMCP(
     "cerebro-mcp",
     host="0.0.0.0",
@@ -113,8 +137,12 @@ mcp = FastMCP(
         "It routes in one call to the right tools, metrics, and models and returns a "
         "pre-filled `recommended_action`. For a plain answer, follow it straight to "
         "`query_metrics` — NO `preflight_analytics_request` is needed in answer mode. "
-        "Only use `mode=\"chart\"`/`\"report\"` on `find` when the user asked for a chart/report; "
-        "those modes route you through preflight so the chart/report gate is respected.\n\n"
+        "Only use `mode=\"chart\"`/`\"report\"` on `find` when the user asked for a chart/report. "
+        "IMPORTANT: `find` satisfies the CHART gate but NOT the report gate — only "
+        "`preflight_analytics_request` sets the flag `generate_report` checks. For a report you "
+        "must call preflight itself. Also pass `mode=` explicitly: the default `mode=\"auto\"` is "
+        "recorded literally, matches no tier, and silently opts you into the strictest "
+        "requirements.\n\n"
 
         "ENFORCEMENT GATES (CANNOT BE BYPASSED):\n"
         "- `preflight_analytics_request` is REQUIRED only before `generate_chart` / "
@@ -132,12 +160,17 @@ mcp = FastMCP(
         "- `generate_charts` (batch) and `generate_chart` (single) are BLOCKED until you run "
         "`search_models` (or `discover_models`), explore at least 3 models via "
         "`get_model_details`, AND verify at least 1 table via `describe_table`.\n"
-        "- `generate_report` is BLOCKED until: (a) >= 3 charts created (with trend and/or "
-        "breakdown), (b) 2+ exploratory queries run, (c) at least 1 statistical query "
-        "(quantiles/stddev/corr), (d) at least 1 chart with series_field or pie/treemap/"
-        "heatmap/sankey type (dimensional breakdown), (e) at least 1 scatter/heatmap chart "
-        "OR correlation query (relational analysis).\n"
+        "- `generate_report` applies the REPORT CONTRACT below. A composition shortfall no "
+        "longer refuses the report — it ships with a \"Known limitations\" section naming what "
+        "is thin, and the reply tells you what to fix. Only the correctness rules refuse, "
+        "because those mean the numbers are wrong. NEVER respond to a gate message by "
+        "abandoning the report or writing markdown files: fix what it names and call the tool "
+        "again.\n"
         "- For quick ad-hoc plots, use `quick_chart` instead — no gates required.\n\n"
+
+        "REPORT CONTRACT (rendered from the same data the gate enforces, so it cannot "
+        "drift):\n"
+        + _render_report_contract_for_instructions() + "\n\n"
 
         "CUSTOM TOOL ROUTING:\n"
         "- Before writing raw SQL via `execute_query`, check if a custom parameterized tool "
@@ -270,20 +303,20 @@ mcp = FastMCP(
         "(discover_models counts). Map lineage. Identify all dimensions "
         "(token, action, user segment). Use int_* models when marts lack needed breakdowns.\n"
         "3. VERIFY: Call `describe_table` or `get_model_details` before writing SQL.\n"
-        "4. EDA (MANDATORY): Run distribution queries BEFORE final analysis. "
+        "4. EDA: Run distribution queries BEFORE final analysis. "
         "Use quantiles(0.25, 0.5, 0.75), stddevPop(), min/max, count() to assess "
-        "data shape and outliers. Must include at least 1 statistical query and 1 correlation "
-        "query — generate_report REJECTS without them.\n"
+        "data shape and outliers. Statistical and correlation queries are ADVISORY — they do "
+        "not reject a report. A correlation query does, however, satisfy the relational "
+        "requirement without needing a scatter chart.\n"
         "5. EXECUTE: Write ClickHouse SQL. Use fully-qualified table names and partition filters.\n"
         "6. BATCH CHART: Use `generate_charts` (batch tool) with ALL chart specs in ONE call. "
         "Do NOT call `generate_chart` individually for reports.\n"
-        "7. REPORT DEPTH: Reports MUST include KPIs + time-series trends + dimensional breakdowns. "
-        "KPI `numberDisplay` charts must be backed by single-row SQL, never raw time series. "
-        "For monthly summaries, latest-period KPIs should use `ORDER BY month DESC LIMIT 1`. "
-        "Multi-metric trend charts must either use comma-separated `y_field` values or "
-        "long-form data with `series_field`. At least 1 chart must use series_field "
-        "for dimensional breakdown. "
-        "At least 1 scatter/heatmap chart or correlation query for relational analysis.\n"
+        "7. REPORT DEPTH: see REPORT CONTRACT above for what is required — do not rely on a "
+        "restatement here, which is how the two drifted apart. Chart-shape rules that the "
+        "contract does not cover: KPI `numberDisplay` charts must be backed by single-row SQL, "
+        "never raw time series (for monthly summaries use `ORDER BY month DESC LIMIT 1`), and "
+        "multi-metric trend charts need comma-separated `y_field` values or long-form data "
+        "with `series_field`.\n"
         "8. STATS NEED CHARTS: Every statistical claim must have a supporting chart. "
         "Do NOT write 'volume was $2.15M' without a numberDisplay or trend chart. "
         "Text annotates charts; charts carry the data.\n"

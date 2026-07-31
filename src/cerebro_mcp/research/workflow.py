@@ -50,12 +50,26 @@ def ensure_phase_status(
     project: ResearchProjectState,
     phase: str,
     expected: str,
+    *,
+    allow_failed: bool = False,
 ) -> None:
+    """Assert a phase's status, optionally tolerating a previous failure.
+
+    `allow_failed` exists because a phase that has FAILED is exactly the one a
+    caller most needs to re-plan, and the strict comparison made that
+    impossible: once `verify_research_phase` set the status to `failed`, it
+    could never return to `pending`, so `plan_research_phase` refused it
+    forever. The project was not recoverable through the tool surface, and the
+    error said only that it expected `pending`.
+    """
     actual = project.phases[phase].status
-    if actual != expected:
-        raise ValueError(
-            f"Expected phase '{phase}' to be '{expected}', got '{actual}'."
-        )
+    if actual == expected:
+        return
+    if allow_failed and actual == "failed":
+        return
+    raise ValueError(
+        f"Expected phase '{phase}' to be '{expected}', got '{actual}'."
+    )
 
 
 def ensure_phase_not_future(project: ResearchProjectState, phase: str) -> None:

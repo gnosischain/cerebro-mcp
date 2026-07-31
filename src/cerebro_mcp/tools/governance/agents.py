@@ -2,6 +2,55 @@ import importlib.resources
 
 from cerebro_mcp.runtime import runtime_state
 
+#: Shared contracts that personas reference by relative markdown link.
+#:
+#: 30 personas open with "you MUST apply every rule in
+#: `_shared_quality_rules.md`", and the report gate's own rejection message
+#: tells the model to "follow the rules in `_shared_quality_rules.md`" — while
+#: nothing delivered that file. `get_agent_persona` read exactly `{role}.md`,
+#: the file is not a valid role, and a relative link is not resolvable by a
+#: client with no filesystem access to the installed package. So every persona
+#: declared a mandatory dependency that could not be obtained, and the four SQL
+#: discipline rules the gate enforces were stated only there.
+#:
+#: Resolution is driven by the persona's OWN reference rather than a hardcoded
+#: role list: a new persona that links the contract gets it automatically, and
+#: one that drops the link stops paying for it.
+_SHARED_CONTRACTS = ("_shared_quality_rules.md", "_forensic_standards.md")
+
+
+def _read_prompt(filename: str) -> str:
+    return (
+        importlib.resources.files("cerebro_mcp.prompts.agents")
+        .joinpath(filename)
+        .read_text("utf-8")
+    )
+
+
+def load_persona(role: str) -> str:
+    """Persona text with every shared contract it references inlined.
+
+    Shared by `get_agent_persona` and the `@mcp.prompt()` persona loaders in
+    `prompts/templates.py`, so both front doors deliver the same thing.
+    """
+    content = _read_prompt(f"{role}.md")
+    for contract in _SHARED_CONTRACTS:
+        if contract not in content:
+            continue
+        try:
+            body = _read_prompt(contract)
+        except (FileNotFoundError, OSError):  # pragma: no cover - packaging
+            continue
+        content += (
+            f"\n\n---\n\n"
+            f"# Inlined: {contract}\n\n"
+            f"This persona references `{contract}` as mandatory. It is "
+            f"included below because a relative link is not resolvable by an "
+            f"MCP client.\n\n"
+            f"{body}"
+        )
+    return content
+
 
 _VALID_ROLES = {
     "analytics_reporter",
@@ -101,9 +150,4 @@ def register_agent_tools(mcp):
                 f"Valid roles: {', '.join(sorted(_VALID_ROLES))}"
             )
         runtime_state.current_agent_role = role
-        content = (
-            importlib.resources.files("cerebro_mcp.prompts.agents")
-            .joinpath(f"{role}.md")
-            .read_text("utf-8")
-        )
-        return content
+        return load_persona(role)

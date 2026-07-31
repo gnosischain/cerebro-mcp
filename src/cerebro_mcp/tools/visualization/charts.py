@@ -194,6 +194,78 @@ def _prune_chart_registry() -> None:
 # Writes ride the store's deadline, so a wedged filesystem loses durability,
 # never the chart itself.
 
+def render_report_readiness(registry: dict) -> str:
+    """Where the current charts stand against the report contract.
+
+    Appended to the batch chart tools so composition requirements are known
+    while charts are still being built, rather than at `generate_report` — a
+    session once produced seven flat time series and only then learned it
+    needed one with `series_field`.
+
+    Deliberately optimistic-aware: the gate scores only the charts a report
+    actually CITES with `{{chart:ID}}`, while this reads the whole registry, so
+    it says so rather than implying a guarantee.
+    """
+    try:
+        from cerebro_mcp.config import settings
+        from cerebro_mcp.tools.governance.session_state import (
+            SEVERITY_COMPOSITION,
+            report_requirements_for_tier,
+            state,
+        )
+    except Exception:  # pragma: no cover - advisory must never break a tool
+        return ""
+
+    reqs = [
+        r for r in report_requirements_for_tier("report")
+        if r.severity == SEVERITY_COMPOSITION
+    ]
+    if not reqs:
+        return ""
+
+    values = list(registry.values())
+    met: dict[str, bool] = {
+        "min_charts": len(registry) >= settings.MIN_CHARTS_FOR_REPORT,
+        "chart_diversity": any(
+            v.get("chart_type") in ("line", "area", "bar", "pie") for v in values
+        ),
+        "exploratory_queries": (
+            state.execute_query_count >= settings.MIN_EXPLORATORY_QUERIES
+        ),
+        "dimensional_breakdown": any(
+            v.get("series_field")
+            or v.get("chart_type") in ("pie", "treemap", "heatmap", "sankey")
+            for v in values
+        ),
+        "relational_analysis": any(
+            v.get("chart_type") in ("scatter", "heatmap") for v in values
+        ) or state.correlation_query_count >= 1,
+        "discovered_model_coverage": not (
+            state.discovered_models
+            - (
+                state.explored_models
+                | state.verified_query_surfaces
+                | state.excluded_models
+            )
+        ),
+    }
+
+    missing = [r for r in reqs if not met.get(r.id, True)]
+    done = len(reqs) - len(missing)
+    if not missing:
+        return f"\n**Report readiness:** {done}/{len(reqs)} — ready.\n"
+
+    bullets = "\n".join(f"- {r.as_line()}" for r in missing)
+    return (
+        f"\n**Report readiness: {done}/{len(reqs)}.** Still missing (counted "
+        f"across ALL registered charts; the report gate counts only the ones "
+        f"you cite with `{{{{chart:ID}}}}`):\n{bullets}\n"
+        f"These do not block a report — unmet items are disclosed in a "
+        f"\"Known limitations\" section — but fixing them now is cheaper than "
+        f"regenerating later.\n"
+    )
+
+
 def _persist_chart(chart_id: str, entry: dict) -> None:
     """Best-effort durable copy of one chart record."""
     try:
@@ -813,6 +885,11 @@ def create_report_artifact(
     with _chart_lock:
         registry = dict(_chart_registry)
 
+    # Bound before the gate branch: the bypass paths (_render_visual_answer,
+    # storyteller, publish_research_report) never enter it, and an unbound name
+    # here is precisely the class `make lint-undefined` exists to catch.
+    report_limitations: list[str] = []
+
     if enforce_quality_gate:
         # Scope the gate to charts actually referenced by this report's
         # markdown. The global _chart_registry persists across sessions and
@@ -822,11 +899,17 @@ def create_report_artifact(
             for cid in chart_ids_in_content
             if cid in registry
         }
-        passed, reason, _warnings = state.check_report_preconditions(
+        passed, reason, gate_warnings = state.check_report_preconditions(
             scoped_registry
         )
         if not passed:
             raise ValueError(f"Report quality gate failed: {reason}")
+        # Composition shortfalls no longer block; they are disclosed in the
+        # artifact instead. These warnings used to be bound to `_warnings` and
+        # dropped, so the reader had no way to know a report was thin.
+        from cerebro_mcp.tools.governance.session_state import split_limitations
+
+        report_limitations, _advisories = split_limitations(gate_warnings)
 
     has_grid = "{{grid:" in content_markdown
     kpi_count = sum(
@@ -873,6 +956,22 @@ def create_report_artifact(
         raise ValueError(
             f"Chart IDs not found in registry: {', '.join(missing)}. "
             f"Available: {', '.join(registry.keys()) or 'none'}."
+        )
+
+    if report_limitations:
+        # Disclose in the artifact, not in a log line. A composition shortfall
+        # no longer refuses the report, so the reader is the one who needs to
+        # know the analysis is thin — appended after the author's markdown so
+        # it reads as a footer rather than displacing the argument.
+        bullets = "\n".join(f"- {item}" for item in report_limitations)
+        content_markdown = (
+            content_markdown.rstrip()
+            + "\n\n## Known limitations\n\n"
+            + "This report was generated with unmet composition requirements. "
+            + "They do not indicate incorrect figures — they indicate the "
+            + "analysis is narrower than a full report would normally be:\n\n"
+            + bullets
+            + "\n"
         )
 
     rendered_html = _markdown_to_html(
@@ -1035,6 +1134,19 @@ def create_report_artifact(
             f"_Ask if they want the HTML exported or conversion to docx/pdf/pptx._"
         )
 
+    if report_limitations:
+        # Tell the CALLER too, not just the reader. Disclosing only inside the
+        # artifact would let a model report unqualified success while having
+        # shipped a thin report it never learned was thin — the gate stopped
+        # refusing, so this is now the only signal it gets.
+        reply_text += (
+            f"\n\n**Shipped with {len(report_limitations)} disclosed "
+            f"limitation(s)** (listed in the report's \"Known limitations\" "
+            f"section). These did not block the report. To produce a full-depth "
+            f"report, resolve them and call `generate_report` again:\n"
+            + "\n".join(f"- {item}" for item in report_limitations)
+        )
+
     return {
         "report_id": report_id,
         "report_path": report_path,
@@ -1042,6 +1154,7 @@ def create_report_artifact(
         "structured": structured,
         "reply_text": reply_text,
         "chart_count": len(chart_specs),
+        "limitations": report_limitations,
     }
 
 
@@ -3902,6 +4015,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             "call `generate_report(title, content_markdown)` with `{{chart:ID}}` "
             "placeholders. For a plain chart request these charts are the "
             "deliverable — present them and stop."
+            + render_report_readiness(_chart_registry)
         )
 
         return _text_result("\n".join(lines))
@@ -4114,6 +4228,7 @@ def register_visualization_tools(mcp, ch: ClickHouseManager):
             "call `generate_report(title, content_markdown)` with `{{chart:ID}}` "
             "placeholders. For a plain chart request these charts are the "
             "deliverable — present them and stop."
+            + render_report_readiness(_chart_registry)
         )
         return "\n".join(lines)
 

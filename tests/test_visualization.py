@@ -1894,7 +1894,13 @@ class TestResearchReport:
 
     def test_record_model_exclusion_satisfies_coverage_gate(self, monkeypatch):
         """record_model_exclusion marks a discovered model as excluded so it
-        no longer counts toward the coverage gate."""
+        no longer counts toward the coverage gate.
+
+        Coverage is a `composition` requirement, so an unused discovery is
+        DISCLOSED in the artifact rather than refusing it — an unused model
+        makes a report narrow, not wrong. The behaviour under test is
+        unchanged: excluding the model clears the finding.
+        """
         s = session_state_mod.settings
         monkeypatch.setattr(s, "ENFORCE_CHART_PRECONDITIONS", True)
         monkeypatch.setattr(s, "ENFORCE_DISCOVERED_MODEL_COVERAGE", True)
@@ -1922,14 +1928,23 @@ class TestResearchReport:
             "description": "",
         }
 
-        passed, reason, _ = state.check_report_preconditions(viz._chart_registry)
-        assert not passed
-        assert "Discovered-but-unused" in reason
+        passed, reason, warnings = state.check_report_preconditions(
+            viz._chart_registry
+        )
+        limitations, _ = session_state_mod.split_limitations(warnings)
+        assert passed, "an unused discovery is thin, not wrong — it must not block"
+        assert any("Discovered-but-unused" in item for item in limitations), (
+            f"coverage shortfall was neither blocked nor disclosed: {warnings}"
+        )
 
-        # After exclusion → gate passes.
+        # After exclusion → nothing left to disclose.
         state.record_model_exclusion("fct_some_unused_model", "out of scope")
-        passed, reason, _ = state.check_report_preconditions(viz._chart_registry)
+        passed, reason, warnings = state.check_report_preconditions(
+            viz._chart_registry
+        )
+        limitations, _ = session_state_mod.split_limitations(warnings)
         assert passed, f"Expected pass after exclusion, got: {reason}"
+        assert not any("Discovered-but-unused" in item for item in limitations)
 
     def test_quality_gate_still_fires_on_referenced_polluting_chart(
         self, tmp_path, monkeypatch

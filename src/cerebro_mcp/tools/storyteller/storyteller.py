@@ -807,7 +807,13 @@ def register_storyteller_tools(mcp, ch=None) -> None:
                     "Use 'research', 'scrollytelling', or 'dashboard'."
                 )
 
-            extra_kwargs: dict[str, Any] = {}
+            # Default explicitly rather than letting `create_report_artifact`
+            # derive it from the process-global `semantic_mode_last`: that
+            # singleton is shared by every concurrent client, so a chart-mode
+            # request in another conversation could file this finished story as
+            # a throwaway "visual_answer". The research and scrollytelling
+            # branches below override it.
+            extra_kwargs: dict[str, Any] = {"presentation_mode": "report"}
             if normalized_style == "research":
                 extra_kwargs["presentation_mode"] = "research"
                 extra_kwargs["research_metadata"] = (

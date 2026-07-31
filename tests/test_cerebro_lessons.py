@@ -87,7 +87,14 @@ def test_last_verified_is_a_date_and_not_stale(lesson_id):
     raw = str(LESSONS[lesson_id]["last_verified"])
     verified = dt.date.fromisoformat(raw)  # raises on a non-ISO date
     age = (dt.date.today() - verified).days
-    assert age >= 0, f"{lesson_id}: last_verified is in the future"
+    # One day of future-dating is clock skew, not an error: CI runs UTC while
+    # authors do not. A record written at 01:22 CEST carries the local date,
+    # which is still tomorrow in UTC — that failed main once. Anything beyond a
+    # day is a real typo. The staleness ceiling below is what this test is for.
+    assert age >= -1, (
+        f"{lesson_id}: last_verified is {-age} days in the future — that is "
+        f"past any timezone offset, so it is a typo rather than clock skew"
+    )
     assert age <= MAX_VERIFY_AGE_DAYS, (
         f"{lesson_id}: last verified {age} days ago — re-verify it or drop it"
     )

@@ -1,6 +1,6 @@
 # Shared Quality Rules — applies to every analysis persona
 
-> **Operational status:** every cerebro analysis persona that emits findings, charts, or reports must apply the rules below. The report enforcement gates in `tools/session_state.py` enforce a subset of these rules at `generate_*_report` time; the rest are agent responsibilities. A finding that violates a rule below must be corrected, removed, or accompanied by an explicit override note in the surrounding narrative before the report is generated.
+> **Operational status:** every cerebro analysis persona that emits findings, charts, or reports must apply the rules below. The report enforcement gates in `tools/governance/session_state.py` enforce a subset of these rules at `generate_*_report` time; the rest are agent responsibilities. A finding that violates a rule below must be corrected, removed, or accompanied by an explicit override note in the surrounding narrative before the report is generated.
 
 ---
 
@@ -180,6 +180,33 @@ Three rules follow:
   as a silent filter. If the shape is unexpected the answer is NULL, not a default.
 - **Assert the eras, not just the current one.** A test that only exercises today's payload shape
   cannot see this class of bug. Pin at least one row from each historical layout.
+
+---
+
+## 10. Aggregator volume must be deduplicated
+
+A trade routed through an aggregator is recorded more than once: the aggregator's own leg and each
+underlying pool leg it touched. `SUM(volume_usd)` across those rows counts the same economic trade
+two or three times, and the inflation is not uniform — it scales with routing complexity, so the
+periods with the most aggregator activity are inflated most. A "volume doubled" finding is
+frequently a routing-mix change.
+
+**Affected models:** `fct_execution_pools_daily`, `fct_execution_trades_by_protocol_daily`,
+`fct_execution_trades_by_token_daily`.
+
+**Do this instead:**
+- Deduplicate to one row per trade in a CTE before summing, or
+- restrict to first-hop legs only, and **say so in the chart title or description** — the scope
+  restriction changes what the number means, so it belongs in the label rather than a comment.
+
+**Enforcement.** `aggregator_volume_dedup` in `tools/analytics/sql_heuristics.py` rejects
+`SUM(volume_usd)` over those models with no dedup CTE and no first-hop acknowledgement. It is a
+`correctness` requirement: it blocks, because the alternative is publishing a number that is wrong
+rather than merely thin. Acknowledge a deliberate exception in the chart's `title`, `description`
+or `override_reason`.
+
+This rule was enforced by the gate before it was written here, so the rejection message cited a rule
+that did not exist in this file.
 
 ---
 

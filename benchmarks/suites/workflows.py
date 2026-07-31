@@ -206,11 +206,23 @@ async def _run_case(mcp, case: WorkflowCase, tool_names: set[str]) -> CaseResult
     # of silently restoring a cross-session data race. Real per-report isolation
     # needs a session identity (stateful transport) — a separate decision, and when
     # it lands this assertion is the thing to revisit.
+    #
+    # The `did_discover` precondition is load-bearing: the check infers "was
+    # reset" from a zero counter, which is only evidence of a reset if the case
+    # ever incremented it. A probe case that never calls search_models has a
+    # zero count by construction. That false positive stayed hidden while such
+    # cases always ended in a blocked report; once a composition shortfall
+    # started shipping instead of refusing, the last step succeeded and the
+    # guard fired on a case it was never meant to judge.
+    did_discover = any(
+        step.tool in ("search_models", "discover_models") for step in case.steps
+    )
     if (
         error is None
         and case.steps
         and case.steps[-1].tool == "generate_report"
         and not case.steps[-1].expect_block
+        and did_discover
         and state.search_models_count == 0
     ):
         error = (

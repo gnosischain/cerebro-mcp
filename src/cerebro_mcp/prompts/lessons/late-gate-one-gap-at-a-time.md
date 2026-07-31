@@ -5,7 +5,7 @@ status: enforced
 layer: governance
 scope: tools/governance/session_state.py, tools/visualization/charts.py
 symptom: the model does all the analysis, then delivers markdown files or prose instead of the report artifact; no report appears in list_reports
-last_verified: 2026-07-31
+last_verified: 2026-07-30
 evidence: |
   An 11-year-anniversary campaign session ran 28 `execute_query` calls, 5
   `discover_models`, 7 `describe_table` and built 7 charts, then called
