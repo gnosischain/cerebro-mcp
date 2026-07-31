@@ -16,7 +16,7 @@ This README is intentionally implementation-oriented. It describes what the serv
 
 ## What Cerebro MCP Actually Is
 
-Cerebro MCP is a FastMCP server exposing **192 static tools** (plus **7 dynamically registered SQL tools** from `custom_tools.yaml`), with:
+Cerebro MCP is a FastMCP server exposing **192 static tools** (plus, when `CUSTOM_TOOLS_ENABLED` is set, **8 more**: 7 SQL tools defined in `custom_tools.yaml` and the `list_custom_tools` helper — all 8 are gated together, none are static), with:
 
 - ClickHouse access for read-only SQL
 - `stdio`, Streamable HTTP (`--http`, endpoint `/mcp`), and legacy SSE transports — see [Running Cerebro MCP](#running-cerebro-mcp)

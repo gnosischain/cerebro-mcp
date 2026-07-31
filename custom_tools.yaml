@@ -15,10 +15,16 @@ tools:
         description: "Start date (YYYY-MM-DD)"
         default: "2024-01-01"
     database: dbt
+    # Numeric wire contract: *_gwei columns are RAW integer provenance
+    # (exact). The *_gno columns are Gwei/1e9 convenience conversions in
+    # Float64 — exact for any realistic single-validator balance (< 2^53
+    # Gwei) but labeled convenience; the raw column is authoritative.
     sql: |
       SELECT
         toDate(slot_timestamp) AS date,
         validator_index,
+        argMax(balance, slot_timestamp) AS balance_gwei,
+        argMax(effective_balance, slot_timestamp) AS effective_balance_gwei,
         argMax(balance, slot_timestamp) / 1e9 AS balance_gno,
         argMax(effective_balance, slot_timestamp) / 1e9 AS effective_balance_gno,
         argMax(status, slot_timestamp) AS status
@@ -42,11 +48,14 @@ tools:
         description: "Start date (YYYY-MM-DD)"
         default: "2024-01-01"
     database: dbt
+    # Numeric wire contract: amount_gwei is RAW integer provenance (exact);
+    # amount_gno is the Gwei/1e9 convenience conversion (Float64).
     sql: |
       SELECT
         toDate(slot_timestamp) AS date,
         validator_index,
         address AS withdrawal_address,
+        amount AS amount_gwei,
         amount / 1e9 AS amount_gno,  -- consensus withdrawal.amount is in Gwei, not wei
         withdrawal_index
       FROM stg_consensus__withdrawals
@@ -59,8 +68,13 @@ tools:
   - name: get_token_transfers_for_address
     description: >
       Get daily ERC-20 token transfer summary for a specific address
-      (sent and received). Optionally filter by token. Returns volume
-      in token units and transfer counts.
+      (sent and received). Optionally filter by token. Amounts:
+      `amount_raw` is the exact integer in the token's smallest unit
+      (authoritative); `amount` is an exact decimal STRING normalized by
+      the token's own decimals from effective-dated metadata, and is NULL
+      whenever `decimals_status` is not 'ok' ('unknown' = no metadata for
+      that date, 'ambiguous' = overlapping metadata intervals). Never
+      assume 18 decimals.
     parameters:
       address:
         type: String
@@ -74,48 +88,174 @@ tools:
         description: "Optional token symbol filter (e.g., GNO, USDC)"
         default: ""
     database: dbt
+    # Numeric wire contract (R10 C6.9): exact strings, never Float64.
+    #  - amount_raw: toString(Int256) — exact provenance, always present.
+    #  - amount: exact decimal string, digits split at the token's own
+    #    `decimals` from stg_pools__tokens_meta joined on token_address AND
+    #    the transfer date falling inside [date_start, date_end) — the
+    #    metadata is EFFECTIVE-DATED; a bare address join is wrong.
+    #  - Exactly-one-match enforcement: the meta join is pre-grouped per
+    #    (token_address, date); 0 matches -> decimals_status='unknown',
+    #    >1 -> 'ambiguous'; both yield amount=NULL rather than a guessed
+    #    or double-counted value. A previous revision divided EVERY asset
+    #    by 1e18, under-reporting USDC by 1e12 — same class as the
+    #    2026-04-22 Gwei/wei withdrawal bug (see tests).
     sql: |
-      WITH transfers AS (
+      WITH base AS (
         SELECT
-          date,
-          symbol,
-          `from`,
-          `to`,
-          toFloat64(amount_raw) / 1e18 AS amount,
-          transfer_count,
+          t.date,
+          t.symbol,
+          t.token_address,
+          t.`from`,
+          t.`to`,
+          t.amount_raw,
+          t.transfer_count,
           CASE
-            WHEN `from` = lower({address:String}) THEN 'sent'
+            WHEN t.`from` = lower({address:String}) THEN 'sent'
             ELSE 'received'
           END AS direction
-        FROM int_execution_transfers_whitelisted_daily
-        WHERE (`from` = lower({address:String})
-            OR `to` = lower({address:String}))
-          AND date >= toDate({start_date:String})
-          AND ({token_symbol:String} = '' OR symbol = {token_symbol:String})
+        FROM int_execution_transfers_whitelisted_daily AS t
+        WHERE (t.`from` = lower({address:String})
+            OR t.`to` = lower({address:String}))
+          AND t.date >= toDate({start_date:String})
+          AND ({token_symbol:String} = '' OR t.symbol = {token_symbol:String})
+      ),
+      meta AS (
+        -- Exactly-one-match guard: grouped per (token_address, date) so the
+        -- later LEFT JOIN can never fan out a transfer row, even if the
+        -- whitelist ships overlapping validity intervals.
+        SELECT
+          b.token_address,
+          b.date,
+          count() AS n_meta,
+          any(m.decimals) AS dec
+        FROM (SELECT DISTINCT token_address, date FROM base) AS b
+        INNER JOIN stg_pools__tokens_meta AS m
+          ON m.token_address = b.token_address
+        WHERE m.date_start <= b.date
+          AND (m.date_end IS NULL OR b.date < m.date_end)
+        GROUP BY b.token_address, b.date
+      ),
+      enriched AS (
+        SELECT
+          b.date,
+          b.symbol,
+          b.token_address,
+          b.`from`,
+          b.`to`,
+          b.amount_raw,
+          b.transfer_count,
+          b.direction,
+          mm.dec AS dec,
+          multiIf(
+            coalesce(mm.n_meta, 0) = 0, 'unknown',
+            mm.n_meta > 1, 'ambiguous',
+            'ok'
+          ) AS decimals_status,
+          -- Exact decimal string: place the point `dec` digits from the
+          -- right of the raw integer's digit string. No floats involved.
+          if(
+            b.amount_raw IS NULL OR coalesce(mm.n_meta, 0) != 1,
+            NULL,
+            concat(
+              if(b.amount_raw < 0, '-', ''),
+              if(
+                mm.dec = 0,
+                toString(abs(b.amount_raw)),
+                concat(
+                  substring(
+                    leftPad(toString(abs(b.amount_raw)),
+                            toUInt64(greatest(length(toString(abs(b.amount_raw))),
+                                              toUInt64(mm.dec) + 1)), '0'),
+                    1,
+                    greatest(length(toString(abs(b.amount_raw))),
+                             toUInt64(mm.dec) + 1) - toUInt64(mm.dec)
+                  ),
+                  '.',
+                  substring(
+                    leftPad(toString(abs(b.amount_raw)),
+                            toUInt64(greatest(length(toString(abs(b.amount_raw))),
+                                              toUInt64(mm.dec) + 1)), '0'),
+                    greatest(length(toString(abs(b.amount_raw))),
+                             toUInt64(mm.dec) + 1) - toUInt64(mm.dec) + 1
+                  )
+                )
+              )
+            )
+          ) AS amount
+        FROM base AS b
+        LEFT JOIN meta AS mm
+          ON mm.token_address = b.token_address AND mm.date = b.date
       ),
       summary AS (
+        -- Raw sums are exact (Int256). Normalized totals only when every
+        -- contributing row resolved to one single known decimals value.
         SELECT
           symbol,
-          SUM(CASE WHEN direction = 'received' THEN amount ELSE 0 END) AS total_received,
-          SUM(CASE WHEN direction = 'sent' THEN amount ELSE 0 END) AS total_sent,
-          SUM(CASE WHEN direction = 'received' THEN amount ELSE 0 END)
-            - SUM(CASE WHEN direction = 'sent' THEN amount ELSE 0 END) AS net_inflow,
-          SUM(CASE WHEN direction = 'received' THEN transfer_count ELSE 0 END) AS received_count,
-          SUM(CASE WHEN direction = 'sent' THEN transfer_count ELSE 0 END) AS sent_count
-        FROM transfers
+          SUM(if(direction = 'received', coalesce(amount_raw, toInt256(0)), toInt256(0))) AS received_raw,
+          SUM(if(direction = 'sent', coalesce(amount_raw, toInt256(0)), toInt256(0))) AS sent_raw,
+          SUM(if(direction = 'received', coalesce(amount_raw, toInt256(0)), toInt256(0)))
+            - SUM(if(direction = 'sent', coalesce(amount_raw, toInt256(0)), toInt256(0))) AS net_raw,
+          SUM(if(direction = 'received', transfer_count, 0)) AS received_count,
+          SUM(if(direction = 'sent', transfer_count, 0)) AS sent_count,
+          countIf(decimals_status != 'ok') AS bad_rows,
+          uniqExact(dec) AS n_dec,
+          any(dec) AS s_dec
+        FROM enriched
         GROUP BY symbol
       )
-      SELECT '--- SUMMARY ---' AS date, symbol,
-        '' AS `from`, '' AS `to`,
-        net_inflow AS amount, received_count + sent_count AS transfer_count,
-        concat('net_inflow=', toString(round(net_inflow, 4)),
-               ' | received=', toString(round(total_received, 4)),
-               ' | sent=', toString(round(total_sent, 4))) AS direction
+      SELECT
+        '--- SUMMARY ---' AS date,
+        symbol,
+        '' AS token_address,
+        '' AS `from`,
+        '' AS `to`,
+        concat('net_inflow_raw=', toString(net_raw),
+               ' | received_raw=', toString(received_raw),
+               ' | sent_raw=', toString(sent_raw)) AS direction,
+        toString(net_raw) AS amount_raw,
+        if(bad_rows = 0 AND n_dec = 1,
+           concat(
+             if(net_raw < 0, '-', ''),
+             if(s_dec = 0,
+                toString(abs(net_raw)),
+                concat(
+                  substring(
+                    leftPad(toString(abs(net_raw)),
+                            toUInt64(greatest(length(toString(abs(net_raw))),
+                                              toUInt64(s_dec) + 1)), '0'),
+                    1,
+                    greatest(length(toString(abs(net_raw))),
+                             toUInt64(s_dec) + 1) - toUInt64(s_dec)
+                  ),
+                  '.',
+                  substring(
+                    leftPad(toString(abs(net_raw)),
+                            toUInt64(greatest(length(toString(abs(net_raw))),
+                                              toUInt64(s_dec) + 1)), '0'),
+                    greatest(length(toString(abs(net_raw))),
+                             toUInt64(s_dec) + 1) - toUInt64(s_dec) + 1
+                  )
+                )
+             )
+           ),
+           NULL) AS amount,
+        if(bad_rows = 0 AND n_dec = 1, 'ok', 'mixed_or_unknown') AS decimals_status,
+        received_count + sent_count AS transfer_count
       FROM summary
       UNION ALL
-      SELECT toString(date), symbol, `from`, `to`,
-        amount, transfer_count, direction
-      FROM transfers
+      SELECT
+        toString(date) AS date,
+        symbol,
+        token_address,
+        `from`,
+        `to`,
+        direction,
+        toString(amount_raw) AS amount_raw,
+        amount,
+        decimals_status,
+        transfer_count
+      FROM enriched
       ORDER BY date DESC
       LIMIT 500
 
@@ -124,6 +264,9 @@ tools:
       Get Gnosis Pay transaction history for a specific wallet address.
       Returns classified transactions (Payment, Cashback, Fiat Top Up,
       Crypto Deposit, etc.) with amounts in both native token and USD.
+      Numeric contract: `amount` and `amount_usd` are modeled upstream
+      as Float64 (USD via price joins) — treat as approximate, not exact
+      accounting values.
     parameters:
       wallet_address:
         type: String
@@ -154,7 +297,8 @@ tools:
     description: >
       Get unique liquidity provider counts for a token across time windows
       (7D, 30D, 90D, All). Includes percent change vs prior period.
-      Uses bitmap deduplication internally.
+      Uses bitmap deduplication internally. Numeric contract: counts are
+      exact integers; `change_pct` is a derived ratio — approximate.
     parameters:
       token:
         type: String
@@ -177,6 +321,9 @@ tools:
     description: >
       Get daily bridge flow volume for a specific token across all bridges
       on Gnosis Chain. Shows inbound/outbound by bridge with USD values.
+      Numeric contract: `volume_token` and `volume_usd` are modeled
+      upstream as Float64 (USD via price joins) — approximate, not exact;
+      `txs` is an exact count.
     parameters:
       token:
         type: String
@@ -212,7 +359,11 @@ tools:
     description: >
       Get GBC (Gnosis Beacon Chain) deposit events, optionally filtered
       by withdrawal credentials. Useful for tracking staking deposits
-      by a specific entity.
+      by a specific entity. Numeric contract: `total_amount` is the exact
+      raw sum of deposit-event units (UInt64) — deliberately NOT converted
+      to GNO, because the correct divisor is era-dependent on Gnosis
+      (Gwei vs mGNO accounting); apply a conversion only when you know
+      which era the deposits belong to.
     parameters:
       start_date:
         type: String
