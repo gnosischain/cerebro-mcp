@@ -77,11 +77,44 @@ class ManifestLoader:
         # path re-enters via _load_local_manifest.
         self._lock = threading.RLock()
 
+    @staticmethod
+    def _manifest_pin_violation(content_hash: str) -> str | None:
+        """One immutable authorization version (connector plan R10 C4).
+
+        When ``MCP_EXPECTED_MANIFEST_SHA256`` is set, only that exact
+        manifest revision may be ACTIVATED — grants, relation policy,
+        search, discovery and lineage must all read the set the grant
+        reconciler verified. The pin is maintained by
+        ``scripts/generate_connector_grants.py``; under team_analytics_v1
+        a non-empty pin is mandatory (``validate_surface_profile``).
+        Returns an error string on violation, else None.
+        """
+        expected = settings.MCP_EXPECTED_MANIFEST_SHA256
+        # A pin must be a real string: tests that mock the settings module
+        # produce truthy MagicMock attributes, and a mock is not a pin.
+        if not isinstance(expected, str) or not expected.strip():
+            return None
+        expected = expected.strip().lower()
+        if content_hash.lower() == expected:
+            return None
+        return (
+            f"manifest sha256 {content_hash[:12]}… does not match the "
+            f"reconciled pin {expected[:12]}… — refusing to activate an "
+            "unreconciled manifest (grants and policy would diverge). "
+            "Re-run the grant reconciler and update "
+            "MCP_EXPECTED_MANIFEST_SHA256."
+        )
+
     def load(self) -> None:
         """Load manifest from URL or local file and build indexes."""
         result = self._fetch_manifest()
         if result:
             data, content_hash = result
+            violation = self._manifest_pin_violation(content_hash)
+            if violation:
+                # Boot-time activation of an unreconciled manifest is a
+                # hard failure, never a degraded start.
+                raise RuntimeError(f"manifest pin violation at load: {violation}")
             indexes = self._build_indexes_internal(data)
             with self._lock:
                 self._apply_indexes(indexes)
@@ -177,6 +210,16 @@ class ManifestLoader:
         data, new_hash = result
         if new_hash == self._content_hash:
             return False, None
+
+        violation = self._manifest_pin_violation(new_hash)
+        if violation:
+            # Hot refresh: REJECT the swap and keep serving the pinned
+            # revision — raising here would kill the periodic refresher.
+            # The rejection is loud (ERROR + recorded refresh error) so a
+            # drifted upstream manifest cannot advance policy silently.
+            logger.error("manifest pin violation at refresh: %s", violation)
+            self._last_refresh_error = violation
+            return False, violation
 
         # Build the new indexes OUTSIDE the lock (it is the expensive part and
         # touches nothing shared), then publish them under it so no reader can

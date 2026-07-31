@@ -576,6 +576,16 @@ def _record_step(entry: ReasoningStep) -> int | None:
     """
     global _current_session
 
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+    if connector_profile_active():
+        # R10 §6.4: _current_session is process-global while
+        # install_auto_tool_tracing wraps EVERY tool — under the connector
+        # profile it would combine and persist arguments and results from
+        # DIFFERENT users into one trace. Disabled there outright; stdio /
+        # internal_full keep the existing behavior.
+        return None
+
     _bound_entry_payloads(entry)
 
     with _lock:

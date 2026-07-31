@@ -210,8 +210,18 @@ def test_non_tool_surface_frozen(connector_profile):
     assert not tool_policy.prompt_allowed("analysis_sop")
 
 
-def test_surface_profile_boot_validation(monkeypatch):
+def test_surface_profile_boot_validation(monkeypatch, tmp_path):
+    from cerebro_mcp.runtime import identity
     from cerebro_mcp.runtime.bootstrap import validate_surface_profile
+    from cerebro_mcp.workflow.authz_store import reset_authz_store_for_tests
+
+    # Owner key + isolated authz store for the connector-profile happy path.
+    monkeypatch.setenv("CEREBRO_OWNER_KEY_V1", "k" * 32)
+    monkeypatch.setattr(
+        settings, "CEREBRO_AUTHZ_DB_PATH", str(tmp_path / "authz.db")
+    )
+    identity.reset_owner_key_cache_for_tests()
+    reset_authz_store_for_tests()
 
     # stdio: exempt
     monkeypatch.setattr(settings, "MCP_SURFACE_PROFILE", "")
@@ -244,7 +254,37 @@ def test_surface_profile_boot_validation(monkeypatch):
     with pytest.raises(RuntimeError, match="SEMANTIC_ENABLED"):
         validate_surface_profile("streamable-http")
     monkeypatch.setattr(settings, "SEMANTIC_ENABLED", True)
+
+    # the restricted ClickHouse identity is mandatory (no broad fallback)
+    with pytest.raises(RuntimeError, match="CONNECTOR_CLICKHOUSE_USER"):
+        validate_surface_profile("streamable-http")
+    monkeypatch.setattr(settings, "CONNECTOR_CLICKHOUSE_USER", "cerebro_connector_v1")
+    monkeypatch.setattr(settings, "CONNECTOR_CLICKHOUSE_PASSWORD", "x")
+
+    # one immutable authorization version: manifest SHA pin required
+    with pytest.raises(RuntimeError, match="MCP_EXPECTED_MANIFEST_SHA256"):
+        validate_surface_profile("streamable-http")
+    monkeypatch.setattr(settings, "MCP_EXPECTED_MANIFEST_SHA256", "a" * 64)
+
+    # owner key: missing key fails the boot (fail closed)
+    monkeypatch.delenv("CEREBRO_OWNER_KEY_V1")
+    identity.reset_owner_key_cache_for_tests()
+    with pytest.raises(identity.OwnerKeyError):
+        validate_surface_profile("streamable-http")
+    monkeypatch.setenv("CEREBRO_OWNER_KEY_V1", "k" * 32)
+    identity.reset_owner_key_cache_for_tests()
+
     validate_surface_profile("streamable-http")
+
+    # a swapped owner key on the SAME store fails the boot
+    monkeypatch.setenv("CEREBRO_OWNER_KEY_V1", "m" * 32)
+    identity.reset_owner_key_cache_for_tests()
+    from cerebro_mcp.workflow.authz_store import AuthzUnavailable
+
+    with pytest.raises(AuthzUnavailable, match="fingerprint mismatch"):
+        validate_surface_profile("streamable-http")
+    identity.reset_owner_key_cache_for_tests()
+    reset_authz_store_for_tests()
 
 
 def test_plain_fastmcp_refused_by_filter_install():

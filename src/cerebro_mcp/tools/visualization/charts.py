@@ -156,7 +156,58 @@ def _open_in_browser_async(url: str) -> None:
 
 
 # --- Chart Registry ---
-_chart_registry: dict[str, dict] = {}
+#
+# Under the connector profile the registry is PER ANALYSIS CYCLE (proxied to
+# runtime/analysis_registry.AnalysisCycle.charts). Scoping the storage is
+# what closes the disclosure surfaces the audits called out — the keys()
+# broadcast in the generate_chart responses, list_charts_impl's global dump,
+# and {{chart:ID}} resolution — in one place: a caller can only ever reach
+# chart ids from their own cycle, so citing another user's charts (formerly
+# the cheapest way to pass check_report_preconditions) is structurally
+# impossible. Off-profile everything resolves to the legacy module dict,
+# byte-for-byte the previous behavior. Same proxy pattern as
+# session_state.state (by-value imports hold the proxy; resolution is per
+# access).
+
+from collections.abc import MutableMapping as _MutableMapping
+
+
+_default_chart_registry: dict[str, dict] = {}
+
+
+class _ChartRegistryProxy(_MutableMapping):
+    @staticmethod
+    def _resolve() -> dict:
+        from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+        if connector_profile_active():
+            from cerebro_mcp.runtime.analysis_registry import current_cycle
+
+            cycle = current_cycle()
+            if cycle is not None:
+                return cycle.charts
+        return _default_chart_registry
+
+    def __getitem__(self, key):
+        return self._resolve()[key]
+
+    def __setitem__(self, key, value):
+        self._resolve()[key] = value
+
+    def __delitem__(self, key):
+        del self._resolve()[key]
+
+    def __iter__(self):
+        return iter(self._resolve())
+
+    def __len__(self):
+        return len(self._resolve())
+
+    def clear(self):
+        self._resolve().clear()
+
+
+_chart_registry = _ChartRegistryProxy()
 _chart_counter = 0
 _chart_lock = threading.Lock()
 _CHART_TTL = timedelta(hours=2)
@@ -165,6 +216,15 @@ _CHART_TTL = timedelta(hours=2)
 def _next_chart_id() -> str:
     global _chart_counter
     with _chart_lock:
+        from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+        if connector_profile_active():
+            from cerebro_mcp.runtime.analysis_registry import current_cycle
+
+            cycle = current_cycle()
+            if cycle is not None:
+                cycle.chart_counter += 1
+                return f"chart_{cycle.chart_counter}"
         _chart_counter += 1
         return f"chart_{_chart_counter}"
 
@@ -268,6 +328,15 @@ def render_report_readiness(registry: dict) -> str:
 
 def _persist_chart(chart_id: str, entry: dict) -> None:
     """Best-effort durable copy of one chart record."""
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+    if connector_profile_active():
+        # R10 §4.2: the durable chart store is one fixed ownerless workflow
+        # row that load_chart_records() reads with NO owner filter — a
+        # best-effort telemetry stream is the wrong substrate for an
+        # authorization decision, so on the connector profile chart state
+        # is in-memory per analysis cycle ONLY.
+        return
     try:
         from cerebro_mcp.workflow.event_store_sync import record_chart
 
@@ -293,6 +362,13 @@ def restore_chart_registry(chart_ids: list[str] | None = None) -> int:
     and a caller explicitly recovering a session would otherwise get entries
     that the next prune immediately discards.
     """
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+    if connector_profile_active():
+        # Restore would rehydrate ANY user's ever-persisted charts into the
+        # live registry (no owner filter on the durable rows) — disabled on
+        # the connector profile alongside _persist_chart above.
+        return 0
     try:
         from cerebro_mcp.workflow.event_store_sync import load_chart_records
 
@@ -1181,6 +1257,13 @@ def _result_ui_meta(report_id: str) -> dict | None:
     off, chart/answer results deliver model-rendered inline charts + a link.
     """
     from cerebro_mcp.config import settings
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+    if connector_profile_active():
+        # R10 C6.10: the connector profile excludes the ui:// resources, so
+        # advertising their URIs in result _meta would hand every client a
+        # dangling UI contract — suppressed regardless of the inline flag.
+        return None
     if not settings.MCP_UI_INLINE_ENABLED:
         return None
     return {"ui": {"resourceUri": _report_instance_uri(report_id)}}
@@ -1282,9 +1365,17 @@ def _render_visual_answer(chart_ids: list[str], title: str) -> dict:
         reset_session_state=False,
         presentation_mode="visual_answer",
     )
-    with _REPORT_LOCK:
-        _LAST_VISUAL["report_id"] = report["report_id"]
-        _LAST_VISUAL["created_at"] = datetime.now(timezone.utc)
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+    if not connector_profile_active():
+        # _LAST_VISUAL feeds ui://cerebro/visualization — a GLOBAL "latest
+        # artifact" pointer with no caller identity. On the connector
+        # profile that resource is excluded AND the pointer is never
+        # written, so no code path can serve one user's charts to another
+        # (R10 §4.3).
+        with _REPORT_LOCK:
+            _LAST_VISUAL["report_id"] = report["report_id"]
+            _LAST_VISUAL["created_at"] = datetime.now(timezone.utc)
     return report
 
 

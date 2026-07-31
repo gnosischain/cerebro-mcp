@@ -25,7 +25,23 @@ FORBIDDEN_KEYWORDS = [
 FORBIDDEN_PATTERNS = [
     r"\bFORMAT\s+\w+\b",
     r"\bSETTINGS\b",
-    r"\b(file|url|s3|hdfs|jdbc|mysql|postgresql|odbc|remote)\s*\(",
+    # Table functions and cross-relation wrappers. Grants do not control
+    # table functions (they are a separate ClickHouse privilege class), so
+    # the application layer denies them outright; the connector identity
+    # additionally receives no SOURCES grants. The legacy list covered only
+    # eight — remoteSecure/sqlite/merge/cluster* et al. sailed through
+    # (proven 2026-07-31; see tests/test_relation_boundary.py).
+    r"\b(file|url|s3|hdfs|jdbc|mysql|postgresql|odbc|remote|remoteSecure"
+    r"|urlCluster|s3Cluster|hdfsCluster|azureBlobStorage|deltaLake|iceberg"
+    r"|hudi|mongodb|redis|sqlite|executable|input|cluster"
+    r"|clusterAllReplicas|merge|generateRandom|fileCluster)\s*\(",
+    # The dictionary access family (dictGet, dictGetString, dictHas,
+    # dictionary(...)) reads outside the grant system entirely.
+    r"\bdict\w*\s*\(",
+    # format(<BareIdentifier>, ...) is the TABLE function (reads inline
+    # data); format('...') the string function has a quoted first argument
+    # and, after literal stripping, never matches this.
+    r"\bformat\s*\(\s*[A-Za-z_]",
 ]
 
 # Allowed query starts
@@ -157,12 +173,20 @@ def validate_query(sql: str, max_length: int = 10000) -> Tuple[bool, str]:
         if re.search(pattern, clean_sql, flags=re.IGNORECASE):
             return False, f"Forbidden SQL pattern detected: {pattern}"
 
-    # Reject any reference to internal_only tables (privacy boundary).
-    # The bridge tables hold raw addresses + pseudonyms together; querying
-    # them would defeat the whole pseudonymization design.
+    # Relation-level checks. extract_table_names returns "db.table" or bare
+    # "table"; both forms are validated here so a qualified reference can
+    # never bypass a check that a bare one would hit (GDPR-audit M1: only
+    # the CONNECTION database was validated, so
+    # `execute_query(sql="SELECT ... FROM mixpanel_ga.<t>", database="dbt")`
+    # passed every application-layer control).
+    from cerebro_mcp.config import settings as _settings
+
+    allowed_dbs = set(_settings.ALLOWED_DATABASES)
     for table in extract_table_names(sql):
-        # extract_table_names returns either "db.table" or just "table".
-        bare_name = table.split(".")[-1]
+        db_part, _, bare_name = table.rpartition(".")
+
+        # Privacy boundary: internal-only tables (raw + pseudonym pairing)
+        # are denied in bare AND qualified form.
         if bare_name in INTERNAL_ONLY_TABLES:
             return False, (
                 f"Table '{bare_name}' is internal-only (raw + pseudonym "
@@ -171,6 +195,60 @@ def validate_query(sql: str, max_length: int = 10000) -> Tuple[bool, str]:
                 f"see the GA/GP MTA stack docs."
             )
 
+        # Qualifier allowlist: a db-qualified reference must name an allowed
+        # database, regardless of which connection database was requested.
+        if db_part and db_part not in allowed_dbs:
+            return False, (
+                f"Database '{db_part}' is not allowed. Allowed: "
+                f"{', '.join(sorted(allowed_dbs))}"
+            )
+
+        # Connector-profile narrowing: caller SQL reaches dbt plus the
+        # explicit consensus.specs grant, nothing else. The authority for
+        # the sets is tools/tool_policy.py (imported lazily — safety is
+        # loaded very early).
+        if db_part:
+            from cerebro_mcp.tools.tool_policy import (
+                connector_profile_active,
+                connector_relation_allowed,
+            )
+
+            if connector_profile_active() and not connector_relation_allowed(
+                db_part, bare_name
+            ):
+                return False, (
+                    f"Relation '{table}' is outside the connector profile "
+                    f"(dbt.* plus consensus.specs only)."
+                )
+
+    return True, ""
+
+
+def validate_relation_access(database: str, table: str) -> Tuple[bool, str]:
+    """Relation authorization for the TYPED metadata path (describe_table).
+
+    Free SQL against ``system.*`` stays keyword-blocked; the typed schema
+    functions authorize the (database, table) they were asked about BEFORE
+    running their fixed parameterized ``system.columns`` query — so schema
+    introspection obeys the same boundary as data access.
+    """
+    from cerebro_mcp.config import settings as _settings
+    from cerebro_mcp.tools.tool_policy import (
+        connector_profile_active,
+        connector_relation_allowed,
+    )
+
+    if table in INTERNAL_ONLY_TABLES:
+        return False, f"Table '{table}' is internal-only."
+    if database not in set(_settings.ALLOWED_DATABASES):
+        return False, f"Database '{database}' is not allowed."
+    if connector_profile_active() and not connector_relation_allowed(
+        database, table
+    ):
+        return False, (
+            f"Relation '{database}.{table}' is outside the connector "
+            f"profile (dbt.* plus consensus.specs only)."
+        )
     return True, ""
 
 

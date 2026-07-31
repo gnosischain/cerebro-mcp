@@ -25,6 +25,13 @@ dependencies = [
     "aiosqlite>=0.20",
     "web3>=7.0,<8",
     "sqlglot>=24.0",
+    # OAuth resource-server verification (connector plan R10 §5/8). Upper
+    # bound is deliberate, same convention as the mcp pin above: this repo
+    # has already paid for an unbounded resolve (CrashLoopBackOff
+    # 2026-07-28), and token verification is the worst possible place to
+    # discover a breaking major. Do NOT hand-roll signature verification —
+    # pyjwt[crypto] exists so we author zero lines of crypto.
+    "pyjwt[crypto]>=2.8,<3",
 ]
 
 [project.optional-dependencies]

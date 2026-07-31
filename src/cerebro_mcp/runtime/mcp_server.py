@@ -64,12 +64,52 @@ def _policy_annotations(name: str) -> ToolAnnotations | None:
     )
 
 
+def _inject_analysis_id_schema(tool: MCPTool) -> MCPTool:
+    """Advertise the analysis-handle contract WITHOUT touching real
+    signatures (R9-audit P0-6: current tools do not accept analysis_id, so
+    forwarding it would be a signature error — the call layer strips it).
+
+    REQUIRED tools gain a required `analysis_id` property; MINTS tools an
+    optional one (supply to REUSE a cycle, omit to start fresh)."""
+    import copy
+
+    policy = tool_policy.TOOL_POLICY.get(tool.name)
+    if policy is None or policy.handle is tool_policy.Handle.NONE:
+        return tool
+    schema = copy.deepcopy(tool.inputSchema or {"type": "object", "properties": {}})
+    props = schema.setdefault("properties", {})
+    if "analysis_id" in props:
+        return tool
+    if policy.handle is tool_policy.Handle.REQUIRED:
+        props["analysis_id"] = {
+            "type": "string",
+            "description": (
+                "The analysis-cycle id returned by find or "
+                "preflight_analytics_request. Required."
+            ),
+        }
+        required = list(schema.get("required", []) or [])
+        if "analysis_id" not in required:
+            required.append("analysis_id")
+        schema["required"] = required
+    else:  # MINTS
+        props["analysis_id"] = {
+            "type": "string",
+            "description": (
+                "Optional: pass a previously returned analysis id to REUSE "
+                "that cycle; omit to start a fresh one."
+            ),
+        }
+    return tool.model_copy(update={"inputSchema": schema})
+
+
 class CerebroFastMCP(FastMCP):
     """FastMCP whose visibility and policy enforcement reach the wire."""
 
     async def list_tools(self) -> list[MCPTool]:
         tools = await super().list_tools()
         is_app_only, lean_core_hides = _visibility_filters()
+        profile_active = tool_policy.connector_profile_active()
         out: list[MCPTool] = []
         for tool in tools:
             if is_app_only(tool):
@@ -82,6 +122,8 @@ class CerebroFastMCP(FastMCP):
                 annotations = _policy_annotations(tool.name)
                 if annotations is not None:
                     tool = tool.model_copy(update={"annotations": annotations})
+            if profile_active:
+                tool = _inject_analysis_id_schema(tool)
             out.append(tool)
         return out
 
@@ -91,7 +133,74 @@ class CerebroFastMCP(FastMCP):
         # Raises ToolPolicyViolation for excluded tools / denied argument
         # values; the SDK converts the exception into an MCP error result.
         tool_policy.check_call_allowed(name, arguments)
-        return await super().call_tool(name, arguments)
+        if not tool_policy.connector_profile_active():
+            return await super().call_tool(name, arguments)
+        return await self._call_with_handle(name, arguments)
+
+    async def _call_with_handle(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
+        """Analysis-handle contract (R10 §4.1): the advertised schemas carry
+        ``analysis_id`` (injected in list_tools); it is validated and
+        STRIPPED here, bound to the request context, and the unmodified
+        underlying tool runs — real signatures never change. MINTS tools
+        (find/preflight) mint-or-reuse and ANNOTATE their result with the
+        id; REQUIRED tools acquire/release with the refcount decrement in
+        ``finally`` so cancellation can never pin a cycle."""
+        from cerebro_mcp.runtime import analysis_registry as registry
+        from cerebro_mcp.runtime.identity import get_current_owner
+
+        policy = tool_policy.TOOL_POLICY.get(name)
+        handle_rule = policy.handle if policy else tool_policy.Handle.NONE
+        args = dict(arguments or {})
+        supplied = args.pop("analysis_id", None)
+        if supplied is not None and not isinstance(supplied, str):
+            raise registry.AnalysisHandleError("analysis_id must be a string")
+        owner = get_current_owner()
+
+        if handle_rule is tool_policy.Handle.MINTS:
+            handle, _reused = registry.mint_or_reuse(owner, supplied or None)
+            token = registry.set_current_handle(handle)
+            try:
+                result = await super().call_tool(name, args)
+            finally:
+                registry.reset_current_handle(token)
+            return self._annotate_analysis_id(result, handle)
+
+        if handle_rule is tool_policy.Handle.REQUIRED:
+            if not supplied:
+                raise registry.AnalysisHandleError(
+                    f"{name} requires analysis_id — call find or "
+                    "preflight_analytics_request first and pass the id it "
+                    "returns"
+                )
+            registry.acquire(owner, supplied)
+            token = registry.set_current_handle(supplied)
+            try:
+                return await super().call_tool(name, args)
+            finally:
+                registry.reset_current_handle(token)
+                registry.release(owner, supplied)
+
+        # Handle.NONE: durable owner-keyed reads — handle-free by design
+        # (they must survive handle expiry, R10 D8).
+        return await super().call_tool(name, args)
+
+    @staticmethod
+    def _annotate_analysis_id(result, handle: str):
+        """Attach the minted/reused id to a find/preflight result so the
+        caller can echo it into subsequent stateful calls."""
+        if isinstance(result, dict):
+            result.setdefault("analysis_id", handle)
+            return result
+        try:
+            from mcp.types import TextContent
+
+            return list(result) + [
+                TextContent(type="text", text=f"analysis_id: {handle}")
+            ]
+        except Exception:  # pragma: no cover — never break the tool result
+            return result
 
     async def list_resources(self) -> list[MCPResource]:
         resources = await super().list_resources()

@@ -1505,6 +1505,14 @@ def register_load_tools_tool(mcp) -> None:
     async def load_tools(names: list[str]) -> dict[str, Any]:
         """Un-hide advanced tools so they appear in the tool list (lean-core mode).
 
+        DENIED on remote transports: `_force_visible_tool_names` is
+        process-global with no per-session key, so on a multi-user HTTP
+        server one caller's un-hide would widen EVERY caller's advertised
+        surface — and under a stateless multi-replica deployment only the
+        serving pod changes, so tools would appear and disappear between
+        turns (R10 §7 / R9-audit). The connector profile's surface is
+        static config widened by redeploy, never by a runtime call.
+
         When ``LEAN_CORE_ENABLED`` is on, only the ~17 core tools are advertised
         by default; advanced tools stay registered and CALLABLE but are hidden
         from ``list_tools``. This un-hides the named advanced tools so they also
@@ -1525,6 +1533,24 @@ def register_load_tools_tool(mcp) -> None:
         Returns:
             ``{unhidden, unknown, already_core, list_changed_emitted, note}``.
         """
+        import os as _os
+
+        if _os.environ.get("CEREBRO_TRANSPORT") in ("sse", "streamable-http"):
+            return {
+                "unhidden": [],
+                "unknown": [],
+                "already_core": [],
+                "list_changed_emitted": False,
+                "note": (
+                    "load_tools is disabled on remote transports: the "
+                    "un-hide set is process-global, so it would change the "
+                    "advertised surface for EVERY connected caller (and "
+                    "only on the serving replica). The advertised surface "
+                    "is fixed per deployment; all advertised tools are "
+                    "directly callable."
+                ),
+            }
+
         registered = getattr(getattr(mcp, "_tool_manager", None), "_tools", {}) or {}
         from cerebro_mcp.tools.tool_meta import is_core_tool
 

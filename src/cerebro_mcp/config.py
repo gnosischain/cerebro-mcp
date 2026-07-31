@@ -198,6 +198,38 @@ class Settings(BaseSettings):
     #                       inherited from an empty default.
     MCP_SURFACE_PROFILE: str = ""
 
+    # Restricted ClickHouse identity for the connector profile (R10 C5:
+    # staged versioned users, e.g. cerebro_connector_v1). MANDATORY under
+    # team_analytics_v1 — the broad service account must never serve
+    # connector traffic, and get_client() fails closed rather than falling
+    # back (see clients/clickhouse.py:_credentials). Unused otherwise.
+    CONNECTOR_CLICKHOUSE_USER: str = ""
+    CONNECTOR_CLICKHOUSE_PASSWORD: str = ""
+
+    # OAuth resource-server configuration (connector plan R10 §5/8).
+    # Cerebro never issues tokens: the external AS (Auth0, per D1/D5 —
+    # RFC 9068 profile, client_id claim) signs them, and these settings
+    # pin what the verifier accepts. OAUTH_RESOURCE_BASE is the public
+    # origin; audiences derive as <base>/mcp and <base>/openai/mcp and
+    # must be byte-identical to the Auth0 API identifiers and the PRM
+    # `resource` fields (no trailing slash). The four client IDs form the
+    # frozen matrix (auth/clients.py) — a valid token from any OTHER
+    # application in the tenant is rejected.
+    OAUTH_ISSUER_URL: str = ""
+    OAUTH_JWKS_URL: str = ""
+    OAUTH_RESOURCE_BASE: str = ""
+    OAUTH_CLIENT_CLAUDE_TEAM: str = ""
+    OAUTH_CLIENT_CLAUDE_CODE: str = ""
+    OAUTH_CLIENT_CODEX: str = ""
+    OAUTH_CLIENT_CHATGPT: str = ""
+
+    # Authoritative authorization store (workflow/authz_store.py) —
+    # DELIBERATELY separate from the best-effort workflow event store: a
+    # dropped write there loses telemetry, a dropped write here is an
+    # authorization hole. Opened fail-closed at HTTP boot under any
+    # recognized surface profile; reports/tombstones/watermarks live here.
+    CEREBRO_AUTHZ_DB_PATH: str = ".cerebro/cerebro_authz.db"
+
     # Custom tools (MCP Toolbox pattern)
     CUSTOM_TOOLS_ENABLED: bool = False
     CUSTOM_TOOLS_PATH: str = ""
@@ -249,7 +281,14 @@ class Settings(BaseSettings):
     # Security / audit
     MCP_SECURITY_POLICY_MODE: str = "log_only"  # future: "warn", "enforce"
     MCP_SECURITY_LOG_DIR: str = ".cerebro/security_audit"
-    MCP_EXPECTED_MANIFEST_SHA256: str = ""  # optional pin, empty = disabled
+    # Manifest activation pin. Empty = unpinned (stdio / internal_full).
+    # When set, loaders/manifest.py refuses to ACTIVATE any manifest whose
+    # sha256 differs — boot fails hard, hot refresh rejects the swap and
+    # keeps the pinned revision (one immutable authorization version across
+    # manifest, relation policy and ClickHouse grants — connector plan R10
+    # C4). Mandatory non-empty under MCP_SURFACE_PROFILE=team_analytics_v1;
+    # maintained by scripts/generate_connector_grants.py.
+    MCP_EXPECTED_MANIFEST_SHA256: str = ""
 
     # Manifest refresh
     MANIFEST_REFRESH_INTERVAL_SECONDS: int = 300

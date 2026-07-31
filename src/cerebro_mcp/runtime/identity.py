@@ -103,3 +103,93 @@ def initial_stdio_owner() -> str | None:
     """
     val = (os.environ.get("CEREBRO_OWNER") or "").strip()
     return val or None
+
+
+# ---------------------------------------------------------------------------
+# v1 owner identity (connector plan R10 §5.2 / A5-A6)
+# ---------------------------------------------------------------------------
+#
+# The legacy path above (salted SHA-256 of a SELF-ATTESTED header) stays for
+# stdio and the documented internal telemetry use. Verified OAuth principals
+# use the keyed v1 scheme below instead:
+#
+#   owner = "v1:" + hex(HMAC-SHA256(CEREBRO_OWNER_KEY_V1, issuer || NUL || subject))
+#
+# Differences from the legacy hash, each deliberate:
+# - KEYED (HMAC), not salted-hash: the legacy salt may be EMPTY and is read
+#   per request, so a hot change silently re-keys every owner (R9 P0-7).
+#   The v1 key is mandatory (>= 32 bytes), read once, and IMMUTABLE for the
+#   deployment; rotation is lazy aliasing at reauthentication, never an
+#   in-place rewrite (issuer/subject are not persisted, so old hashes are
+#   unrecoverable by construction).
+# - VERSion-prefixed ("v1:") so a future key version can coexist during a
+#   lazy migration and tombstones can be checked across aliases.
+# - The (version, sha256-fingerprint) pair is persisted in the authz store
+#   at boot; a mismatch fails startup (C6.5).
+
+import hmac as _hmac
+from dataclasses import dataclass
+
+OWNER_KEY_VERSION = "v1"
+
+_owner_key_cache: bytes | None = None
+
+
+class OwnerKeyError(RuntimeError):
+    """Missing/short owner key — HTTP boot must fail, never degrade."""
+
+
+def _owner_key() -> bytes:
+    global _owner_key_cache
+    if _owner_key_cache is None:
+        raw = (os.environ.get("CEREBRO_OWNER_KEY_V1") or "").strip()
+        if len(raw.encode("utf-8")) < 32:
+            raise OwnerKeyError(
+                "CEREBRO_OWNER_KEY_V1 must be set and at least 32 bytes — "
+                "verified-principal ownership refuses to run keyless."
+            )
+        _owner_key_cache = raw.encode("utf-8")
+    return _owner_key_cache
+
+
+def reset_owner_key_cache_for_tests() -> None:
+    global _owner_key_cache
+    _owner_key_cache = None
+
+
+def owner_key_fingerprint() -> str:
+    """Non-secret fingerprint persisted in the authz store (C6.5)."""
+    return hashlib.sha256(_owner_key()).hexdigest()[:16]
+
+
+def owner_hash_v1(issuer: str, subject: str) -> str:
+    """The v1 owner identifier for a VERIFIED principal."""
+    msg = issuer.encode("utf-8") + b"\x00" + subject.encode("utf-8")
+    digest = _hmac.new(_owner_key(), msg, hashlib.sha256).hexdigest()
+    return f"{OWNER_KEY_VERSION}:{digest}"
+
+
+@dataclass(frozen=True)
+class CerebroPrincipal:
+    """The verified caller identity carried through a request (A6)."""
+
+    kind: str            # "oauth" | "stdio"
+    issuer: str
+    subject: str
+    client_id: str
+    scopes: frozenset[str]
+    owner: str           # owner_hash_v1(...) — already hashed
+
+
+def set_current_owner_prehashed(
+    owner_hash: str | None,
+) -> contextvars.Token[str | None]:
+    """Set an ALREADY-HASHED owner (v1 principal bridge).
+
+    Distinct from `set_current_owner`, which hashes its input: passing a
+    v1 owner hash through the legacy setter would hash it a second time
+    and silently partition that caller's data from itself (R9-audit P1).
+    """
+    if owner_hash is None or not str(owner_hash).strip():
+        return _current_owner.set(None)
+    return _current_owner.set(str(owner_hash).strip())

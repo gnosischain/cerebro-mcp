@@ -237,6 +237,39 @@ def validate_surface_profile(transport: str) -> None:
                 "discover_metrics, get_metric_details, explain_metric_query, "
                 "query_metrics) are registered behind that gate."
             )
+        if not (
+            settings.CONNECTOR_CLICKHOUSE_USER
+            and settings.CONNECTOR_CLICKHOUSE_PASSWORD
+        ):
+            raise RuntimeError(
+                "team_analytics_v1 requires CONNECTOR_CLICKHOUSE_USER and "
+                "CONNECTOR_CLICKHOUSE_PASSWORD (the restricted, staged "
+                "identity) — the broad service account must never serve "
+                "connector traffic."
+            )
+        if not settings.MCP_EXPECTED_MANIFEST_SHA256:
+            raise RuntimeError(
+                "team_analytics_v1 requires MCP_EXPECTED_MANIFEST_SHA256: "
+                "the connector activates only a manifest whose grants were "
+                "reconciled (one immutable authorization version across "
+                "manifest, policy and ClickHouse grants — R10 C4). Run "
+                "scripts/generate_connector_grants.py, apply and verify the "
+                "grants, then pin the manifest SHA it reports."
+            )
+        # Verified-principal ownership: the v1 owner key must exist (>= 32
+        # bytes) and match the fingerprint the authz store recorded — an
+        # accidentally swapped key would silently re-key every owner. Both
+        # checks fail the boot, and opening the store here also proves the
+        # fail-closed authorization DB is usable before any listener binds.
+        from cerebro_mcp.runtime.identity import (
+            OWNER_KEY_VERSION,
+            owner_key_fingerprint,
+        )
+        from cerebro_mcp.workflow.authz_store import get_authz_store
+
+        get_authz_store().check_owner_key_fingerprint(
+            OWNER_KEY_VERSION, owner_key_fingerprint()
+        )
 
 
 def ensure_writable_dir(path: Path) -> None:

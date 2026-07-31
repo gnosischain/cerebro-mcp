@@ -254,6 +254,31 @@ def connector_profile_active() -> bool:
     return active_profile() == PROFILE_TEAM_ANALYTICS_V1
 
 
+# --- ClickHouse relation boundary for team_analytics_v1 --------------------
+
+#: Databases the connector's caller SQL may touch (A1 decision).
+CONNECTOR_ALLOWED_DATABASES: frozenset[str] = frozenset({"dbt"})
+
+#: Explicit single-relation grants outside those databases.
+#: consensus.specs backs gnosis://chain-parameters (public chain constants).
+CONNECTOR_ALLOWED_TABLES: frozenset[tuple[str, str]] = frozenset(
+    {("consensus", "specs")}
+)
+
+
+def connector_relation_allowed(database: str, table: str) -> bool:
+    """Is (database, table) reachable under the connector profile?
+
+    Callers must gate on :func:`connector_profile_active` themselves — this
+    answers only the membership question so it can be used in error paths
+    without re-reading settings.
+    """
+    return (
+        database in CONNECTOR_ALLOWED_DATABASES
+        or (database, table) in CONNECTOR_ALLOWED_TABLES
+    )
+
+
 def tool_visible(name: str) -> bool:
     """Wire visibility under the active profile (tools/list)."""
     if not connector_profile_active():

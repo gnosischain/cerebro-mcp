@@ -352,7 +352,26 @@ class SessionState:
                 self.semantic_path_used = "mixed"
 
     def _preflight_cache_key(self, query: str, mode: str) -> str:
-        return f"{query.strip().lower()}::{mode.strip().lower()}"
+        # The routing result depends on the active AGENT ROLE (persona
+        # boosts) and on the semantic-registry revision, not only on the
+        # normalized question — a query+mode key served one role's cached
+        # routing to another and survived registry reloads (R10 C6.4). The
+        # cache itself lives per analysis cycle (see _SessionStateProxy),
+        # which is what isolates OWNERS; these key parts fix staleness
+        # WITHIN a cycle.
+        from cerebro_mcp.runtime import runtime_state
+
+        role = getattr(runtime_state, "current_agent_role", "") or ""
+        try:
+            from cerebro_mcp.loaders.semantic import semantic_registry
+
+            registry_rev = str(semantic_registry.content_hash or "")[:12]
+        except Exception:
+            registry_rev = ""
+        return (
+            f"{query.strip().lower()}::{mode.strip().lower()}"
+            f"::{role}::{registry_rev}"
+        )
 
     def _record_verified_query_surface_unlocked(self, sql: str) -> None:
         matches = {
@@ -1065,5 +1084,57 @@ class SessionState:
             self.analysis_path = "undecided"
 
 
-# Global singleton
-state = SessionState()
+class _SessionStateProxy:
+    """The stable state accessor (connector plan R10 §4.1, R9-audit P0-6).
+
+    ``state`` was a process-global ``SessionState()`` shared by every
+    caller, and it is imported BY VALUE all over the repo
+    (``from ...session_state import state`` — research.py, charts.py,
+    function-local imports). Rebinding the module attribute would therefore
+    deglobalize nothing: those sites hold the old object forever. The audit
+    prescription is a PROXY — every existing ``state.foo`` call site keeps
+    working, including by-value imports (they hold the proxy), and
+    resolution happens PER ACCESS:
+
+    - connector profile active AND an analysis handle bound to the current
+      request context -> that ``(owner, handle)`` cycle's ``SessionState``
+      from ``runtime/analysis_registry.py``;
+    - otherwise (stdio, internal_full, no handle) -> the legacy singleton,
+      byte-for-byte the previous behavior.
+
+    The proxy holds NO state of its own; ``__setattr__`` delegates too, so
+    ``state.generate_chart_count = 0`` mutates the resolved cycle.
+    """
+
+    def _resolve(self) -> SessionState:
+        from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+        if connector_profile_active():
+            from cerebro_mcp.runtime.analysis_registry import (
+                get_current_handle,
+                state_for,
+            )
+            from cerebro_mcp.runtime.identity import get_current_owner
+
+            handle = get_current_handle()
+            if handle:
+                resolved = state_for(get_current_owner(), handle)
+                if resolved is not None:
+                    return resolved
+        return _default_state
+
+    def __getattr__(self, name: str):
+        return getattr(self._resolve(), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(self._resolve(), name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(self._resolve(), name)
+
+
+# The legacy process-global cycle (stdio / internal_full / no handle).
+_default_state = SessionState()
+
+# The stable accessor every import site holds. See _SessionStateProxy.
+state = _SessionStateProxy()

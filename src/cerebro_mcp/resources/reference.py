@@ -320,8 +320,11 @@ def register_reference_resources(mcp, ch: ClickHouseManager):
         try:
             sql = "SELECT parameter_name, parameter_value FROM consensus.specs ORDER BY parameter_name"
             cache_key = "resource:chain-params"
+            # Qualified SQL — connect via "dbt" so the read works under the
+            # connector profile too, where the connection allowlist is
+            # dbt-only and consensus.specs is a single-relation grant.
             result = ch.execute_raw_cached(
-                sql, "consensus", cache_key
+                sql, "dbt", cache_key
             )
 
             if result["rows"]:

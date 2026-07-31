@@ -927,16 +927,35 @@ def _run_streamable_http_with_auth():
 
     os.environ["CEREBRO_TRANSPORT"] = "streamable-http"
 
-    auth_token = os.environ.get("MCP_AUTH_TOKEN")
-    validate_remote_transport_auth(auth_token)
-    log_event(
-        logger,
-        "auth_middleware_enabled",
-        enabled=bool(auth_token),
-        stateless=settings.STREAMABLE_HTTP_STATELESS,
-        json_response=settings.STREAMABLE_HTTP_JSON_RESPONSE,
-    )
-    starlette_app = build_streamable_http_app(auth_token, include_sse=True)
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+    if connector_profile_active():
+        # team_analytics_v1 is OAUTH-ONLY (single auth policy, D1/D2): no
+        # shared token, no ?token= carve-out, no folded /sse (under SSE the
+        # tool body runs inside the long-lived handle_sse task, pinning the
+        # principal to whoever opened the stream — per-tool-call identity
+        # requires Streamable HTTP). The legacy shared token is simply not
+        # consulted on this profile.
+        from cerebro_mcp.auth.app import build_connector_app
+
+        log_event(
+            logger,
+            "connector_app_enabled",
+            stateless=settings.STREAMABLE_HTTP_STATELESS,
+            json_response=settings.STREAMABLE_HTTP_JSON_RESPONSE,
+        )
+        starlette_app = build_connector_app(mcp)
+    else:
+        auth_token = os.environ.get("MCP_AUTH_TOKEN")
+        validate_remote_transport_auth(auth_token)
+        log_event(
+            logger,
+            "auth_middleware_enabled",
+            enabled=bool(auth_token),
+            stateless=settings.STREAMABLE_HTTP_STATELESS,
+            json_response=settings.STREAMABLE_HTTP_JSON_RESPONSE,
+        )
+        starlette_app = build_streamable_http_app(auth_token, include_sse=True)
 
     # Same off-loop hardening as SSE: keep per-call trace/audit disk writes
     # off the single event loop. No-op unless THINKING_ASYNC_PERSIST is on.

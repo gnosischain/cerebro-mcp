@@ -1,0 +1,23 @@
+# Reviewed approvals for the connector grant closure.
+#
+# THIS FILE IS THE REVIEW ARTIFACT (connector plan R10 C4). A source or
+# passthrough view becomes grantable to the connector identity ONLY by being
+# listed here; everything else fails closed into the review worklist that
+# scripts/generate_connector_grants.py prints.
+#
+# approved_sources: physical `db.table` names. Approve a source only when
+#   its content is public chain data — a source carrying personal data
+#   (mixpanel_ga.*, forum tables, ipinfo, gpay wallet lists) must NEVER be
+#   approved; the dependent models stay unreachable on this profile instead.
+#
+# approved_passthrough_views: dbt model NAMES reviewed as non-narrowing
+#   (no row filter / column drop relative to their parents). Views execute
+#   as invoker, so granting a view's parents lets the caller bypass any
+#   narrowing the view performs — that is what this review exists to catch.
+#
+# Every addition needs a reviewer and date in the comment beside it.
+
+approved_sources:
+  - consensus.specs   # public chain constants; backs gnosis://chain-parameters (plan R10, 2026-07-31)
+
+approved_passthrough_views: []

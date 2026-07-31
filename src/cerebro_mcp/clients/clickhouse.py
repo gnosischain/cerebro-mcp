@@ -238,17 +238,45 @@ class ClickHouseManager:
         # Unlike the clients above, these caches are SHARED across threads.
         self._cache_lock = threading.Lock()
 
+    @staticmethod
+    def _credentials() -> tuple[str, str]:
+        """The ClickHouse identity for this process.
+
+        Under the connector profile the RESTRICTED identity is mandatory —
+        the broad service account (`mcp_reader`: SELECT over governance_db,
+        execution*, plus write/DDL on rpc_state_indexer/scratch) must never
+        serve connector traffic. The profile is fixed at boot
+        (validate_surface_profile), so one credential set exists per
+        process and the per-thread client cache below stays credential-safe.
+        Fail closed: an active connector profile without connector
+        credentials is a boot error, not a fallback to the broad identity.
+        """
+        from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+        if connector_profile_active():
+            user = settings.CONNECTOR_CLICKHOUSE_USER
+            password = settings.CONNECTOR_CLICKHOUSE_PASSWORD
+            if not user or not password:
+                raise RuntimeError(
+                    "team_analytics_v1 requires CONNECTOR_CLICKHOUSE_USER "
+                    "and CONNECTOR_CLICKHOUSE_PASSWORD — refusing to fall "
+                    "back to the broad service identity."
+                )
+            return user, password
+        return settings.CLICKHOUSE_USER, settings.CLICKHOUSE_PASSWORD
+
     def get_client(self, database: str):
         clients = getattr(self._local, "clients", None)
         if clients is None:
             clients = {}
             self._local.clients = clients
         if database not in clients:
+            username, password = self._credentials()
             clients[database] = clickhouse_connect.get_client(
                 host=settings.CLICKHOUSE_HOST,
                 port=settings.CLICKHOUSE_PORT,
-                username=settings.CLICKHOUSE_USER,
-                password=settings.CLICKHOUSE_PASSWORD,
+                username=username,
+                password=password,
                 database=database,
                 secure=settings.CLICKHOUSE_SECURE,
                 verify=settings.CLICKHOUSE_VERIFY,
@@ -329,6 +357,23 @@ class ClickHouseManager:
             raise ValueError(
                 f"Database '{database}' is not allowed. "
                 f"Allowed: {', '.join(settings.ALLOWED_DATABASES)}"
+            )
+        # Connector-profile narrowing: the CONNECTION database itself is
+        # restricted, not just qualified references inside the SQL —
+        # otherwise `execute_query(database="governance_db", sql=...)` with
+        # bare table names would sidestep the qualifier check entirely.
+        from cerebro_mcp.tools.tool_policy import (
+            CONNECTOR_ALLOWED_DATABASES,
+            connector_profile_active,
+        )
+
+        if (
+            connector_profile_active()
+            and database not in CONNECTOR_ALLOWED_DATABASES
+        ):
+            raise ValueError(
+                f"Database '{database}' is outside the connector profile "
+                f"(allowed: {', '.join(sorted(CONNECTOR_ALLOWED_DATABASES))})."
             )
 
     def ping(self, database: str = "dbt") -> bool:

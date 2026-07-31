@@ -50,6 +50,16 @@ def build_table_schema(
     database: str = "dbt",
     record_state: bool = True,
 ) -> TableSchema:
+    # Typed-metadata authorization: schema introspection obeys the same
+    # relation boundary as data access. Free SQL against system.* stays
+    # keyword-blocked; THIS path is the sanctioned one, and it authorizes
+    # the requested relation before running its fixed parameterized query.
+    from cerebro_mcp.safety import validate_relation_access
+
+    allowed, err = validate_relation_access(database, table)
+    if not allowed:
+        raise ValueError(err)
+
     sql = (
         "SELECT name, type, default_kind, comment "
         "FROM system.columns "
@@ -57,9 +67,16 @@ def build_table_schema(
         "ORDER BY position"
     )
     cache_key = f"columns:{database}.{table}"
+    # The query is fully qualified (system.columns filtered by parameter),
+    # so the CONNECTION database is immaterial — route via "dbt" under the
+    # connector profile, whose connection allowlist is dbt-only even though
+    # single-relation grants (consensus.specs) exist.
+    from cerebro_mcp.tools.tool_policy import connector_profile_active
+
+    connection_db = "dbt" if connector_profile_active() else database
     result = ch.execute_raw_cached(
         sql,
-        database,
+        connection_db,
         cache_key,
         parameters={"db": database, "tbl": table},
     )
