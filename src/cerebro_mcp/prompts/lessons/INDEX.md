@@ -39,6 +39,10 @@ separate corpus.
   model renamed to `.sqlx` left dbt's DAG with no error and froze ~12 days behind
   chain head; a whitelist in the same model claimed "COMPLETE · 7 of 7" for a 9-leg
   transaction.
+- [wire-handler-binds-at-init](wire-handler-binds-at-init.md) `observed` — the
+  `list_tools` visibility filter was installed by attribute assignment, but FastMCP
+  binds handlers in `__init__`: every test passed while the wire served all 187
+  tools unfiltered (app-only included) and `LEAN_CORE_ENABLED` was a no-op.
 
 ## ClickHouse platform
 

@@ -80,6 +80,7 @@ from benchmarks.core.semantic_env import (
     snapshot_from_fixture,
 )
 from benchmarks.core.stats import measure_latency, measure_latency_async
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 from tests.eval.corpus_fixtures import (
     FIXTURES_DIR,
     install_fixture_manifest,
@@ -804,7 +805,7 @@ async def _query_metrics_async(
                 # Fresh server + fresh scriptable fake per case: scripted
                 # failure counters must not leak across cases.
                 ch = BenchClickHouse(fail_error=case.fail_error or "UNKNOWN_IDENTIFIER: bench")
-                mcp = FastMCP(f"bench-{case.id.replace('.', '-')}")
+                mcp = CerebroFastMCP(f"bench-{case.id.replace('.', '-')}")
                 register_semantic_tools(mcp, ch, SimpleNamespace())
 
                 args: dict[str, Any] = {"metrics": list(case.metrics), "limit": 50}
@@ -955,7 +956,7 @@ async def _query_metrics_real_async(
 
     reset_semantic_process_state()
     with deterministic_semantic_runtime(snapshot):
-        mcp = FastMCP("bench-semantic-real")
+        mcp = CerebroFastMCP("bench-semantic-real")
         register_semantic_tools(mcp, ch, SimpleNamespace())
         for cid, metric, dims in real_cases:
             args: dict[str, Any] = {"metrics": [metric], "limit": 50}

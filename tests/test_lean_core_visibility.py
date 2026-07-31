@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP
 
 from cerebro_mcp import config
 from cerebro_mcp.tools.tool_meta import classify_tool
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 from cerebro_mcp.tools.visualization.mini_apps import (
     APP_ONLY_META,
     clear_force_visible_tool_names,
@@ -29,7 +30,7 @@ from cerebro_mcp.tools.visualization.mini_apps import (
 def _make_mcp(name: str) -> FastMCP:
     """A FastMCP with one core tool, one advanced tool, and one app-only tool,
     with the visibility filter + `load_tools` installed (as in server.py)."""
-    mcp = FastMCP(name)
+    mcp = CerebroFastMCP(name)
 
     @mcp.tool()
     def query_metrics(metrics: list[str]) -> str:  # core

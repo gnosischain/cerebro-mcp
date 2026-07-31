@@ -181,6 +181,64 @@ def validate_remote_transport_auth(auth_token: str | None) -> None:
     )
 
 
+def validate_surface_profile(transport: str) -> None:
+    """Fail-closed surface-profile validation for remote transports.
+
+    Runs beside `validate_remote_transport_auth` in `main()` before any
+    listener binds. stdio is exempt (local, single-user, full surface).
+
+    - An HTTP/SSE server must name a recognized profile: an empty value
+      boots stdio only. This is deliberate — the internal deployment opts
+      into today's full surface as "internal_full" BY NAME instead of by
+      omission, so the connector profile can never be silently absent.
+    - team_analytics_v1 rejects LEAN_CORE_ENABLED (a visibility filter, not
+      enforcement — its 18-tool set conflicts with the profile's 44).
+    - team_analytics_v1 requires the flags that register its gated tools:
+      CUSTOM_TOOLS_ENABLED + CUSTOM_TOOLS_PATH (8 tools) and
+      SEMANTIC_ENABLED (6 tools). Without them the connector would serve a
+      silently smaller surface; the post-registration exact-set assertion
+      in server.py is the second, registry-level layer of the same guard.
+    """
+    if transport == "stdio":
+        return
+
+    from cerebro_mcp.tools.tool_policy import (
+        PROFILE_TEAM_ANALYTICS_V1,
+        RECOGNIZED_PROFILES,
+    )
+
+    profile = (settings.MCP_SURFACE_PROFILE or "").strip()
+    if profile not in RECOGNIZED_PROFILES:
+        raise RuntimeError(
+            f"MCP_SURFACE_PROFILE={profile!r} is not a recognized profile "
+            f"({sorted(RECOGNIZED_PROFILES)}). Remote transports refuse to "
+            "boot without an explicit surface profile: set "
+            "MCP_SURFACE_PROFILE=internal_full for the legacy full surface "
+            "or team_analytics_v1 for the connector profile."
+        )
+    if profile == PROFILE_TEAM_ANALYTICS_V1:
+        if settings.LEAN_CORE_ENABLED:
+            raise RuntimeError(
+                "LEAN_CORE_ENABLED is incompatible with "
+                "MCP_SURFACE_PROFILE=team_analytics_v1: lean-core is a "
+                "list_tools visibility filter, not enforcement, and its "
+                "core set conflicts with the profile's 44 tools."
+            )
+        if not (settings.CUSTOM_TOOLS_ENABLED and settings.CUSTOM_TOOLS_PATH):
+            raise RuntimeError(
+                "team_analytics_v1 requires CUSTOM_TOOLS_ENABLED=true and "
+                "CUSTOM_TOOLS_PATH: 8 of the 44 profile tools (7 YAML tools "
+                "+ list_custom_tools) are registered behind that gate."
+            )
+        if not settings.SEMANTIC_ENABLED:
+            raise RuntimeError(
+                "team_analytics_v1 requires SEMANTIC_ENABLED=true: 6 of the "
+                "44 profile tools (find, preflight_analytics_request, "
+                "discover_metrics, get_metric_details, explain_metric_query, "
+                "query_metrics) are registered behind that gate."
+            )
+
+
 def ensure_writable_dir(path: Path) -> None:
     normalized = path.expanduser()
     try:

@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 from cerebro_mcp import config
 from cerebro_mcp.models.tool import TableListPage
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 from cerebro_mcp.tools.analytics.list_unifier import LIST_KINDS, register_list_tool
 from cerebro_mcp.tools.analytics.metadata import register_metadata_tools
 from cerebro_mcp.tools.analytics.saved_queries import register_saved_query_tools
@@ -60,7 +61,7 @@ def _make_ch() -> MagicMock:
 def _make_mcp(tmp_saved_dir=None) -> FastMCP:
     """Register the five listing families + the `list` unifier on one server,
     exactly as server.py wires them (unifier last)."""
-    mcp = FastMCP("list-unifier")
+    mcp = CerebroFastMCP("list-unifier")
     ch = _make_ch()
     register_schema_tools(mcp, ch)
     register_metadata_tools(mcp, ch)

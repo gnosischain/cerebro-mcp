@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from cerebro_mcp.clients import abi_resolver
 from cerebro_mcp.tools.web3 import contract_explorer
 from cerebro_mcp.tools.visualization import mini_apps
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +100,7 @@ def _make_ch_for_eure():
 
 
 def _build_server(ch):
-    server = FastMCP("test")
+    server = CerebroFastMCP("test")
     mini_apps.register_mini_app_infra(server, ch)
     contract_explorer.register_contract_explorer_tools(server, ch)
     return server

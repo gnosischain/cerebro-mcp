@@ -12,6 +12,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 
 from cerebro_mcp.clients.clickhouse import ClickHouseManager, ExecutedQuery
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 from cerebro_mcp.models.semantic import SemanticSnapshot
 from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
 from cerebro_mcp.tools.visualization import metric_lab as metric_lab_module
@@ -389,7 +390,7 @@ class StubCH:
 
 
 def _build_server(total=60):
-    server = FastMCP("test-catalog")
+    server = CerebroFastMCP("test-catalog")
     ch = StubCH(total=total)
     mini_apps.register_mini_app_infra(server, ch)
     register_metric_lab_tools(server, ch)
@@ -764,7 +765,7 @@ class ColsStubCH:
 
 
 def _build_server_with(ch):
-    server = FastMCP("test-catalog")
+    server = CerebroFastMCP("test-catalog")
     mini_apps.register_mini_app_infra(server, ch)
     register_metric_lab_tools(server, ch)
     return server
@@ -1288,7 +1289,7 @@ def test_run_sql_rejects_edited_sql_with_placeholders(snapshot_ready):
 
 
 def test_run_sql_broken_sql_surfaces_error(snapshot_ready):
-    server = FastMCP("test-catalog")
+    server = CerebroFastMCP("test-catalog")
     ch = StubCH()
     mini_apps.register_mini_app_infra(server, ch)
     register_metric_lab_tools(server, ch)
@@ -1343,7 +1344,7 @@ def test_run_sql_force_refresh_bypasses_cache(snapshot_ready):
             calls["n"] += 1
             return super().run_query(sql, database, *args, **kwargs)
 
-    server = FastMCP("test-catalog")
+    server = CerebroFastMCP("test-catalog")
     ch = CountingCH()
     mini_apps.register_mini_app_infra(server, ch)
     register_metric_lab_tools(server, ch)

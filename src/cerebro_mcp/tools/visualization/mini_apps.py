@@ -1436,42 +1436,33 @@ def _lean_core_hides(tool) -> bool:
 
 
 def install_app_only_filter(mcp) -> None:
-    """Wrap ``mcp.list_tools`` so hidden tools never reach the model.
+    """Compatibility shim — the filtering now lives in ``CerebroFastMCP``.
 
-    Two drops share this single wrapper:
+    The original implementation assigned ``mcp.list_tools = wrapper`` here.
+    That NEVER reached the wire: FastMCP binds ``self.list_tools`` into the
+    low-level ``tools/list`` handler eagerly in ``__init__``
+    (``_setup_handlers``), so the attribute assignment changed what tests
+    calling ``mcp.list_tools()`` saw while every real client received the
+    unfiltered registry — 187 tools including the 27 app-only hydration
+    tools (lesson: wire-handler-binds-at-init).
 
-    1. **App-only** — anything whose ``meta.ui.visibility`` contains ``"app"``
-       (mini-app hydration tools). Always applied. The tools stay callable by
-       the frontend, which uses the ext-apps SDK ``callTool`` path that bypasses
-       ``list_tools``.
-    2. **Lean-core** — when ``settings.LEAN_CORE_ENABLED`` is on, tools
-       classified ``tier="advanced"`` in ``tools/tool_meta.py`` (and not
-       un-hidden via ``load_tools``) are also dropped, leaving the ~17 core
-       tools. When the flag is OFF, behaviour is unchanged (all non-app tools
-       visible). Advanced tools stay registered and callable either way — this
-       only trims the advertised list.
-
-    Idempotent: a marker attribute prevents double-wrapping. NOTE: the wrapper
-    is process-global (no per-request/session state), so the lean-core surface
-    is the same for every session.
+    The app-only and lean-core drops are applied by
+    ``cerebro_mcp.runtime.mcp_server.CerebroFastMCP.list_tools`` (using the
+    same ``_is_app_only_tool`` / ``_lean_core_hides`` predicates below),
+    which IS the method bound at construction. This shim remains so existing
+    call sites and the registration order comment stay valid, and it marks
+    the server so tests can assert the visibility machinery is present.
     """
-    if getattr(mcp, "_mini_app_filter_installed", False):
-        return
+    from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 
-    original_list_tools = mcp.list_tools
-
-    async def list_tools_filtered():
-        tools = await original_list_tools()
-        filtered = []
-        for tool in tools:
-            if _is_app_only_tool(tool):
-                continue
-            if _lean_core_hides(tool):
-                continue
-            filtered.append(tool)
-        return filtered
-
-    mcp.list_tools = list_tools_filtered  # type: ignore[assignment]
+    if not isinstance(mcp, CerebroFastMCP):
+        # A plain FastMCP cannot filter the wire. Refuse silently degrading
+        # into the old dead-wrapper behavior — fail loudly instead.
+        raise TypeError(
+            "install_app_only_filter requires a CerebroFastMCP server: "
+            "on a plain FastMCP the visibility filter never reaches the "
+            "wire (lesson: wire-handler-binds-at-init)"
+        )
     mcp._mini_app_filter_installed = True  # type: ignore[attr-defined]
 
 

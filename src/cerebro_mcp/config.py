@@ -181,6 +181,23 @@ class Settings(BaseSettings):
     # `load_tools([...])`.
     LEAN_CORE_ENABLED: bool = False
 
+    # HTTP surface profile (connector plan R10). Recognized values live in
+    # tools/tool_policy.py:
+    #   ""                  no profile — full surface. Valid for stdio only:
+    #                       an HTTP transport REFUSES to boot without an
+    #                       explicit recognized profile (fail closed).
+    #   "team_analytics_v1" the 44-tool connector profile: wire visibility,
+    #                       invocation enforcement, argument restrictions and
+    #                       the frozen non-tool surface all come from
+    #                       tools/tool_policy.py. Incompatible with
+    #                       LEAN_CORE_ENABLED (startup rejection — lean-core
+    #                       is a visibility filter, not enforcement, and its
+    #                       18-tool set conflicts with the profile's 44).
+    #   "internal_full"     today's full surface, chosen BY NAME for the
+    #                       pre-connector internal deployment rather than
+    #                       inherited from an empty default.
+    MCP_SURFACE_PROFILE: str = ""
+
     # Custom tools (MCP Toolbox pattern)
     CUSTOM_TOOLS_ENABLED: bool = False
     CUSTOM_TOOLS_PATH: str = ""

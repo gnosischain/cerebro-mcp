@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 
 _DATE_TOKENS = ("day", "date", "week", "month")
 _CATEGORY_TOKENS = ("sector", "bridge", "token", "label", "pool", "client", "category", "symbol")
@@ -247,7 +248,7 @@ def build_bench_server(ch, *, tracing: bool = False):
         register_mini_app_infra,
     )
 
-    mcp = FastMCP("bench")
+    mcp = CerebroFastMCP("bench")
     research_store = SimpleNamespace()
     register_query_tools(mcp, ch, research_store)
     register_schema_tools(mcp, ch)

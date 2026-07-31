@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from cerebro_mcp.tools.visualization import charts
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 
 
 def _make_report(
@@ -311,7 +312,7 @@ from cerebro_mcp.tools.visualization.report_studio import (
 @pytest.fixture
 def studio(report_dir):
     mini_apps.reset_views_for_tests()
-    server = FastMCP("test-studio")
+    server = CerebroFastMCP("test-studio")
     # Installs the app-only list_tools filter (same order as server.py).
     mini_apps.register_mini_app_infra(server, None)
     register_report_studio_tools(server, None)

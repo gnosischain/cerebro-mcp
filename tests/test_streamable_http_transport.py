@@ -196,6 +196,11 @@ def test_main_routes_http_flag_to_streamable_runner(server, monkeypatch, tmp_pat
         lambda: {},
     )
     monkeypatch.setattr(server, "validate_remote_transport_auth", lambda t: None)
+    # Exercise the REAL surface-profile validator on its happy path: remote
+    # transports refuse to boot without a named profile (fail closed).
+    monkeypatch.setattr(
+        server.settings, "MCP_SURFACE_PROFILE", "internal_full"
+    )
     monkeypatch.setattr(
         server, "_run_streamable_http_with_auth", lambda: calls.append("http")
     )

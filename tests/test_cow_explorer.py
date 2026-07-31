@@ -12,6 +12,7 @@ from cerebro_mcp.clients.clickhouse import INTERACTIVE_QUERY_BUDGET, ExecutedQue
 from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
 from cerebro_mcp.security import RiskClass, TOOL_RISK_REGISTRY
 from cerebro_mcp.tools.visualization import coingecko, cow_explorer, mini_apps, web_apps
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 from tests.sql_text import sql_code
 
 
@@ -110,7 +111,7 @@ def reset_state():
 
 
 def _server(ch=None):
-    server = FastMCP("cow-test")
+    server = CerebroFastMCP("cow-test")
     ch = ch or StubCH()
     mini_apps.register_mini_app_infra(server, ch)
     cow_explorer.register_cow_explorer_tools(server, ch)

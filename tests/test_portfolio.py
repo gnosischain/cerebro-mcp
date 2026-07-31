@@ -9,6 +9,7 @@ from cerebro_mcp.clients.clickhouse import ExecutedQuery
 from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
 from cerebro_mcp.tools.visualization import mini_apps
 from cerebro_mcp.tools.visualization.portfolio import register_portfolio_tools
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 
 
 SAFE = "0x1111111111111111111111111111111111111111"
@@ -299,7 +300,7 @@ class StubCH:
 
 
 def _build_server():
-    server = FastMCP("portfolio-test")
+    server = CerebroFastMCP("portfolio-test")
     ch = StubCH()
     mini_apps.register_mini_app_infra(server, ch)
     register_portfolio_tools(server, ch)

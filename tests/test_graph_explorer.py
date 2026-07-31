@@ -21,6 +21,7 @@ from cerebro_mcp.tools.semantic.graph_explorer.forensics import (
     reset_source_contract_cache_for_tests,
 )
 from cerebro_mcp.tools.semantic.graph_explorer.ui_tools import _edge_pivot_rows
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 
 
 AVATAR = "0xaaaa000000000000000000000000000000000001"
@@ -245,7 +246,7 @@ def reset_state():
 
 
 def _server(ch: StubCH) -> FastMCP:
-    server = FastMCP("graph-explorer-test")
+    server = CerebroFastMCP("graph-explorer-test")
     register_graph_explorer_tools(server, ch)
     return server
 
@@ -2066,7 +2067,7 @@ def test_new_graph_app_tools_hidden_from_model(fake_snapshot):
 
     from cerebro_mcp.tools.visualization import web_apps as _web_apps
 
-    server = FastMCP("graph-vis-test")
+    server = CerebroFastMCP("graph-vis-test")
     mini_apps.register_mini_app_infra(server, None)
     register_graph_explorer_tools(server, StubCH())
     names = [t.name for t in _asyncio.run(server.list_tools())]

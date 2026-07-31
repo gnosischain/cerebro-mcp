@@ -8,6 +8,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 
 from cerebro_mcp.clients.clickhouse import ExecutedQuery
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 from cerebro_mcp.runtime.mini_app_cache import reset_cache_for_tests
 from cerebro_mcp.tools.visualization import metric_lab as metric_lab_module
 from cerebro_mcp.tools.visualization import mini_apps
@@ -52,7 +53,7 @@ class StubCH:
 
 
 def _build_server(total=60):
-    server = FastMCP("test")
+    server = CerebroFastMCP("test")
     ch = StubCH(total=total)
     mini_apps.register_mini_app_infra(server, ch)
     register_metric_lab_tools(server, ch)
@@ -176,7 +177,7 @@ def test_preview_only_mode_locks_chart_to_table():
                 rows=rows, row_count=n, elapsed_seconds=0.0, fetch_mode="rows", warnings=[],
             )
 
-    server = FastMCP("test")
+    server = CerebroFastMCP("test")
     ch = BadCH()
     mini_apps.register_mini_app_infra(server, ch)
     register_metric_lab_tools(server, ch)
@@ -433,7 +434,7 @@ def test_open_metric_lab_from_sql_returns_error_on_broken_sql():
                 "Code: 47. DB::Exception: Unknown expression identifier `week_start`"
             )
 
-    server = FastMCP("test")
+    server = CerebroFastMCP("test")
     ch = BrokenCH()
     mini_apps.register_mini_app_infra(server, ch)
     register_metric_lab_tools(server, ch)

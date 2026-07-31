@@ -93,12 +93,21 @@ def _call_signature(name: str, parameters: dict[str, Any] | None) -> str:
 def _build_tool_corpus(mcp) -> tuple[BM25Index, dict[str, dict[str, Any]]]:
     """Build the find-scoped tool corpus from the unfiltered tool map,
     enriched with `tool_meta` (domain/tags/tier) and EXCLUDING APP_ONLY tools.
+
+    Under the connector profile the corpus is restricted to TOOL_POLICY, so
+    `find` can never rank or recommend a tool the wire will not serve — the
+    router and the surface read the same table (R10: "find's corpus is built
+    from TOOL_POLICY").
     """
+    from cerebro_mcp.tools.tool_policy import tool_visible
+
     app_only = get_app_only_tool_names()
     docs: list[BM25Doc] = []
     meta_by_name: dict[str, dict[str, Any]] = {}
     for name, tool in _registered_tools(mcp).items():
         if name in app_only or name in _FIND_EXCLUDED_TOOLS:
+            continue
+        if not tool_visible(name):
             continue
         description = getattr(tool, "description", "") or ""
         meta = classify_tool(name, description)
@@ -129,10 +138,15 @@ def _build_tool_corpus(mcp) -> tuple[BM25Index, dict[str, dict[str, Any]]]:
 def _tool_corpus(mcp) -> tuple[BM25Index, dict[str, dict[str, Any]]]:
     """Return the cached tool corpus, (re)building when the tool set changes."""
     global _tool_index, _tool_docs, _corpus_signature
+    from cerebro_mcp.tools.tool_policy import active_profile
+
+    # The profile is part of the signature so a profile flip (tests, config
+    # reload) rebuilds the corpus instead of serving the previous surface.
     signature = (
         frozenset(_registered_tools(mcp).keys())
         - get_app_only_tool_names()
-        - _FIND_EXCLUDED_TOOLS
+        - _FIND_EXCLUDED_TOOLS,
+        active_profile(),
     )
     with _corpus_lock:
         if _tool_index is None or signature != _corpus_signature:

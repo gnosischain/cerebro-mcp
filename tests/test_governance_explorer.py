@@ -16,6 +16,7 @@ from cerebro_mcp.runtime.mini_app_cache import CachedDataset, reset_cache_for_te
 from cerebro_mcp.security import RiskClass, TOOL_RISK_REGISTRY
 from cerebro_mcp.tools.tool_meta import TOOL_META
 from cerebro_mcp.tools.visualization import governance_explorer, mini_apps, web_apps
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 from tests.sql_text import sql_code
 
 
@@ -184,7 +185,7 @@ def reset_state():
 
 
 def _server(ch=None):
-    server = FastMCP("governance-test")
+    server = CerebroFastMCP("governance-test")
     ch = ch or StubCH()
     mini_apps.register_mini_app_infra(server, ch)
     governance_explorer.register_governance_tools(server, ch)

@@ -4,7 +4,9 @@ import time
 from pathlib import Path
 
 import anyio
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP  # noqa: F401 — re-exported for tests/back-compat
+
+from cerebro_mcp.runtime.mcp_server import CerebroFastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -103,7 +105,10 @@ def _render_report_contract_for_instructions() -> str:
         logger.exception("report contract render failed; instructions degraded")
         return "(report contract unavailable — call `preflight_analytics_request` for it)"
 
-mcp = FastMCP(
+# CerebroFastMCP, not FastMCP: the visibility/policy overrides must exist
+# BEFORE __init__ binds the request handlers, or they never reach the wire
+# (lesson: wire-handler-binds-at-init).
+mcp = CerebroFastMCP(
     "cerebro-mcp",
     host="0.0.0.0",
     instructions=(
@@ -465,6 +470,18 @@ log_event(
     enabled=str(settings.TOOL_OFFLOAD_ENABLED).lower(),
 )
 
+# Connector-profile exact-set assertion: with team_analytics_v1 active, every
+# one of the 44 profile tools must actually be registered — a missing feature
+# flag (CUSTOM_TOOLS_ENABLED, SEMANTIC_ENABLED) must be a boot failure, never
+# a silently smaller connector surface. Runs at import so ANY entrypoint
+# (uvicorn, tests, main()) hits it; no-op when the profile is inactive.
+from cerebro_mcp.tools import tool_policy as _tool_policy  # noqa: E402
+
+if _tool_policy.connector_profile_active():
+    _tool_policy.assert_exact_surface(
+        set(getattr(getattr(mcp, "_tool_manager", None), "_tools", {}) or {})
+    )
+
 
 @mcp.custom_route("/livez", methods=["GET"])
 async def liveness_check(request: Request) -> JSONResponse:
@@ -600,6 +617,11 @@ def main():
     else:
         transport = "stdio"
     log_event(logger, "transport_selected", transport=transport)
+    # Fail closed BEFORE any listener binds: remote transports must name a
+    # recognized surface profile, and team_analytics_v1 must be able to
+    # register its full 44-tool set (see runtime/bootstrap.py).
+    from cerebro_mcp.runtime.bootstrap import validate_surface_profile
+    validate_surface_profile(transport)
     ensure_writable_dir(RESEARCH_DIR)
     manifest.load()
     catalog.load()
