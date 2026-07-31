@@ -131,3 +131,9 @@ separate corpus.
 - [negated-grep-passes-when-tool-absent](negated-grep-passes-when-tool-absent.md)
   `remediated` — `! rg …` returns success when `rg` is absent from `/bin/sh`'s PATH,
   so the dev-fixture leak gate had been passing unconditionally.
+- [unexported-build-stage-never-caches](unexported-build-stage-never-caches.md)
+  `observed` — the mini-app stage recompiled on every push because nothing exported
+  it: no cache flags, and `mode=max` is what carries an INTERMEDIATE stage (the
+  default `mode=min` keeps only the final one). Compounded by a missing
+  `.dockerignore` — the context IS the `COPY` cache key — and by a stage with no
+  `--platform`, which a multi-arch build runs once per arch.

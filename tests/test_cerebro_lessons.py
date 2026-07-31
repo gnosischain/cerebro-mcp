@@ -144,6 +144,31 @@ def test_every_profile_declares_a_path_prefix():
     for profile in cerebro_lessons.profiles.get("profiles") or []:
         prefix = (profile.get("match") or {}).get("path_prefix")
         assert prefix, f"{profile.get('name')}: profiles match path prefixes, not names"
+        for one in [prefix] if isinstance(prefix, str) else prefix:
+            assert one, f"{profile.get('name')}: empty entry in path_prefix"
+
+
+def test_a_dotfile_path_resolves_to_its_profile():
+    """`lstrip("./")` strips a CHARACTER SET, not a prefix, so it ate the leading
+    dot off every dotfile — `.github/workflows/x.yml` arrived as `github/...` and
+    could not match a `.github/` prefix however it was declared. The build layer was
+    the first profile to need dotfile paths, so nothing had exercised this."""
+    for path in (
+        ".github/workflows/build-and-release.yml",
+        "./.github/workflows/build-and-release.yml",
+        ".dockerignore",
+        "Dockerfile",
+    ):
+        names = [p["name"] for p in cerebro_lessons.profiles_for_path(path)]
+        assert "build_and_gates" in names, f"{path} -> {names}"
+
+
+def test_a_multi_prefix_profile_ranks_on_its_longest_match():
+    """Specificity must come from the prefix that actually matched. Ranking on the
+    first or shortest declared prefix would let a profile that happens to also list
+    a short path outrank a genuinely deeper one."""
+    matched = cerebro_lessons.profiles_for_path("Makefile")
+    assert [p["name"] for p in matched] == ["build_and_gates"]
 
 
 def test_profiles_resolve_least_specific_first():
@@ -192,6 +217,7 @@ RETRIEVAL_CASES = [
     ("wrong column label positional row", "dataset-column-order-is-a-contract"),
     ("sql edit has no effect", "sql-loader-cache-needs-restart"),
     ("class is applied but no border or background", "css-undefined-token-drops-rule"),
+    ("build stage re-runs every push nothing changed", "unexported-build-stage-never-caches"),
 ]
 
 

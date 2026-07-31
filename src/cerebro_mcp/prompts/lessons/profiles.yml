@@ -191,15 +191,31 @@ profiles:
     guide: ui/src/mini-apps/AGENTS.md
 
   - name: build_and_gates
-    description: Makefile targets, CI workflows and git hooks
+    description: Makefile targets, the image build, CI workflows and git hooks
     match:
-      path_prefix: Makefile
+      # One class of change, four locations. This profile claimed CI workflows in
+      # its description for months while matching `Makefile` alone, so a change
+      # packet for the Dockerfile or a workflow returned global rules only.
+      path_prefix:
+        - Makefile
+        - Dockerfile
+        - .dockerignore
+        - .github/workflows/
+        - .githooks/
     rules:
       - text: >-
           Recipes run under /bin/sh. Use POSIX `grep -E`, never a negated
           non-POSIX tool — absence becomes a pass.
         lesson: negated-grep-passes-when-tool-absent
+      - text: >-
+          An intermediate image stage caches only if the build EXPORTS it —
+          `mode=max`; the default `mode=min` keeps the final stage alone. The
+          context is the `COPY` cache key, so a `.dockerignore` comes first, and a
+          stage emitting arch-independent output wants `--platform=$BUILDPLATFORM`
+          or a multi-arch build runs it once per arch.
+        lesson: unexported-build-stage-never-caches
     hazards:
       - negated-grep-passes-when-tool-absent
       - stale-prebuilt-miniapp-bundle
+      - unexported-build-stage-never-caches
     guide: AGENTS.md

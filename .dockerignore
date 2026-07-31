@@ -1,0 +1,21 @@
+# The build context is the cache key for `COPY ui/ .` (Dockerfile:7). Untracked
+# local junk under ui/ silently busts the UI-stage layer cache — which is the
+# whole point of that stage being cacheable — and `ui/node_modules` from the host
+# would overwrite the one `npm ci` just installed one layer earlier.
+#
+# Do NOT exclude pyproject.toml, src/, or ui/src. src/cerebro_mcp/static/ must
+# stay: Dockerfile:36-51 overwrites it with fresh bundles, but `pip install .`
+# still builds the wheel from that tree (see pyproject.toml [tool.hatch...]).
+
+.git
+.github
+.venv
+**/node_modules
+ui/dist
+ui/dist-*
+
+benchmarks/results
+tests
+.sql-baseline.json
+**/__pycache__
+.claude/worktrees

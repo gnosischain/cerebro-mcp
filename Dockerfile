@@ -1,5 +1,11 @@
 # Stage 1: Build the React UI
-FROM node:20-slim AS ui-builder
+#
+# Pinned to $BUILDPLATFORM (predefined by BuildKit, no ARG needed): this stage
+# emits arch-independent HTML/JS/fonts, so under a multi-arch
+# `--platform linux/amd64,linux/arm64` build it must run ONCE natively rather
+# than once per target arch with arm64 emulated under QEMU. Stage 2 only
+# `COPY --from`s data files out of it, so the platform mismatch is inert.
+FROM --platform=$BUILDPLATFORM node:20-slim AS ui-builder
 
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./

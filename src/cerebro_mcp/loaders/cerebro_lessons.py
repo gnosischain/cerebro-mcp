@@ -117,13 +117,27 @@ class CerebroLessonLoader:
         specific wins" is a property of the data and not of how the file happens to
         be arranged. `queries/` sits under `tools/visualization/`, so both match and
         the deeper one must come last for any scalar merge to be correct.
+
+        `path_prefix` may be a single string or a list. A build layer is not one
+        directory — Makefile, Dockerfile and .github/workflows/ are the same class of
+        change — and forcing one prefix per profile meant either three near-duplicate
+        profiles or, as happened, no coverage at all for two of the three.
+
+        Normalisation strips a leading `./` as a PREFIX, not as a character set:
+        `lstrip("./")` ate the dot off every dotfile, so `.github/workflows/x.yml`
+        became `github/...` and could never match a declared `.github/` prefix.
         """
-        path = (path or "").lstrip("./")
+        path = (path or "").removeprefix("./").lstrip("/")
         matched = []
         for profile in self.profiles.get("profiles") or []:
-            prefix = (profile.get("match") or {}).get("path_prefix")
-            if prefix and path.startswith(prefix.rstrip("/")):
-                matched.append((len(prefix), profile))
+            prefixes = (profile.get("match") or {}).get("path_prefix")
+            if isinstance(prefixes, str):
+                prefixes = [prefixes]
+            hits = [p for p in prefixes or [] if path.startswith(p.rstrip("/"))]
+            if hits:
+                # Rank on the LONGEST matching prefix, so a profile does not become
+                # less specific merely by also declaring a short one.
+                matched.append((max(len(p) for p in hits), profile))
         matched.sort(key=lambda pair: pair[0])
         return [profile for _, profile in matched]
 

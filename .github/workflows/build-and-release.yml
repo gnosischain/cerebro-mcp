@@ -44,14 +44,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push Latest
-        run: |
-          docker buildx build --platform linux/amd64,linux/arm64 \
-            --tag ghcr.io/${{ steps.org_name.outputs.org_name }}/gc-cerebro-mcp:latest \
-            --push .
-
-      - name: Push Versioned
-        run: |
-          docker buildx build --platform linux/amd64,linux/arm64 \
-            --tag ghcr.io/${{ steps.org_name.outputs.org_name }}/gc-cerebro-mcp:${{ steps.commit.outputs.short }} \
-            --push .
+      # One build, both tags. This used to be two full `docker buildx build`
+      # invocations with no cache flags, so `npm ci` + the 11 vite builds in the
+      # ui-builder stage ran four times per push (2 tags x 2 arches) to produce
+      # byte-identical output.
+      #
+      # mode=max on cache-to is MANDATORY, not a tuning knob: ui-builder is not
+      # part of the final image, so the default mode=min exports only the runtime
+      # stage's layers and the UI would rebuild from scratch every run — exactly
+      # the cost this cache exists to remove. Registry cache rather than
+      # type=gha: no 10 GB Actions-cache budget or eviction, survives across
+      # branches, and the ghcr credentials are already in scope above.
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ steps.org_name.outputs.org_name }}/gc-cerebro-mcp:latest
+            ghcr.io/${{ steps.org_name.outputs.org_name }}/gc-cerebro-mcp:${{ steps.commit.outputs.short }}
+          cache-from: type=registry,ref=ghcr.io/${{ steps.org_name.outputs.org_name }}/gc-cerebro-mcp:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ steps.org_name.outputs.org_name }}/gc-cerebro-mcp:buildcache,mode=max
