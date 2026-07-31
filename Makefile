@@ -105,6 +105,12 @@ install: build-ui
 dev:
 	cd ui && npm run dev
 
+# Run the OAuth-only connector profile locally with a throwaway in-process
+# IdP (no Auth0 needed). Tokens land in .cerebro-dev/tokens.env — source it,
+# then curl $$CEREBRO_DEV_BASE/mcp. Development only; see the script header.
+dev-connector:
+	CEREBRO_DEV_CONNECTOR=1 .venv/bin/python scripts/dev/connector_local.py
+
 test:
 	pytest tests/ -q
 

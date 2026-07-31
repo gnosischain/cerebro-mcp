@@ -213,6 +213,17 @@ def serve(port: int, token: str) -> int:
     environment = os.environ.copy()
     environment["MCP_AUTH_TOKEN"] = token
     environment["FASTMCP_PORT"] = str(port)
+    # Remote transports must NAME a surface profile (fail-closed boot), so
+    # the connector profile can never be silently absent. This dev server
+    # wants today's full surface: say so explicitly rather than inheriting
+    # it from an empty default. Overridable for testing another profile.
+    environment.setdefault("MCP_SURFACE_PROFILE", "internal_full")
+    # The mini-app browser plane is what this server exists to serve, so
+    # opt it back in (it is default-OFF because serve_app echoes the
+    # caller credential into the page and its POST dispatch runs tools on
+    # it — acceptable for a local single-user dev server, not for a shared
+    # deployment). See docs/deploy/connector_breaking_changes.md.
+    environment.setdefault("MINI_APP_BROWSER_ENABLED", "true")
     child = subprocess.Popen(command, cwd=REPO_ROOT, env=environment)
     _write_state(port, child.pid, command)
 

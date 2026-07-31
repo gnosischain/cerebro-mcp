@@ -36,9 +36,20 @@ class JwksUnavailable(Exception):
 class JwksCache:
     def __init__(self, jwks_url: str):
         parsed = urllib.parse.urlparse(jwks_url)
-        if parsed.scheme != "https":
+        host = (parsed.hostname or "").lower()
+        loopback = host in ("127.0.0.1", "::1", "localhost")
+        if parsed.scheme != "https" and not (
+            parsed.scheme == "http" and loopback
+        ):
+            # HTTPS everywhere except a LOOPBACK host. The carve-out is
+            # narrow and safe: this URL is configuration, never
+            # attacker-supplied, and a loopback address cannot leave the
+            # machine — the same reasoning RFC 8252 uses for loopback
+            # redirect URIs. It exists so the local dev harness
+            # (scripts/dev/connector_local.py) can run the real gates.
             raise JwksUnavailable(
-                f"JWKS URL must be https, got {jwks_url!r}"
+                f"JWKS URL must be https (or http on loopback), got "
+                f"{jwks_url!r}"
             )
         self._url = jwks_url
         self._origin = (parsed.scheme, parsed.netloc)

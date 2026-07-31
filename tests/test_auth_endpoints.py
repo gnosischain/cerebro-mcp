@@ -444,3 +444,26 @@ def test_get_requires_baseline_scope():
     r = _client("/mcp").get("/mcp", headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 403
     assert 'scope="cerebro:discover"' in r.headers["WWW-Authenticate"]
+
+
+@pytest.mark.parametrize(
+    "url,ok",
+    [
+        ("https://x.auth0.com/.well-known/jwks.json", True),
+        ("http://127.0.0.1:8931/dev-idp/jwks.json", True),   # loopback dev
+        ("http://localhost:8931/jwks.json", True),
+        ("http://evil.example/jwks.json", False),            # non-loopback http
+        ("http://169.254.169.254/jwks.json", False),         # metadata service
+        ("ftp://x/jwks.json", False),
+    ],
+)
+def test_jwks_url_scheme_policy(url, ok):
+    """HTTPS everywhere except loopback (dev harness). A non-loopback
+    http:// URL must never be accepted."""
+    from cerebro_mcp.auth.jwks_cache import JwksCache, JwksUnavailable
+
+    if ok:
+        JwksCache(url)
+    else:
+        with pytest.raises(JwksUnavailable):
+            JwksCache(url)
