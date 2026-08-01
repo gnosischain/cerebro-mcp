@@ -59,6 +59,10 @@ separate corpus.
   a CTE scored as five extra scans — which is also why the reference ceiling had
   been set to 2. The false-negative direction is worse: documenting a fix passes the
   test for having made it.
+- [ch-union-arm-needs-own-alias](ch-union-arm-needs-own-alias.md) `observed` — each
+  UNION ALL arm resolves identifiers alone, so `GROUP BY bucket` in a later arm
+  needs that arm's own `AS bucket`; code 47 fires only against real ClickHouse
+  while every hermetic suite passes.
 
 ## Verification method
 

@@ -147,14 +147,47 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         "2026-07-10T09:00:00Z", "2026-07-11T09:00:00Z", "2026-07-18T09:00:00Z",
         34990000, 0, "pending", 75000, "missed", 0, 12, "", null, 0, 153, "", null],
     ]),
+    // vp_share MIRRORS proposal_votes.sql: vp / scores_total, NULL while
+    // scores are pending (the last row exercises the em-dash render).
     proposal_votes: descriptor(
       "proposal_votes",
-      ["vote_id", "voter_key", "voter", "created_at", "vp", "vp_state", "choice_kind", "choice_index", "choice_indexes", "reason"],
+      ["vote_id", "voter_key", "voter", "created_at", "vp", "vp_state", "vp_share", "choice_kind", "choice_index", "choice_indexes", "reason"],
       [
-        [`0x${"f1".repeat(32)}`, `0x${"66".repeat(20)}`, `0x${"66".repeat(20)}`, "2026-05-03T10:00:00Z", 51000.5, "final", "single", 1, [], "Strongly in favor"],
-        [`0x${"f2".repeat(32)}`, `0x${"77".repeat(20)}`, `0x${"77".repeat(20)}`, "2026-03-12T11:00:00Z", 1200, "final", "ranked", null, [2, 1, 3], ""],
-        [`0x${"f3".repeat(32)}`, `0x${"88".repeat(20)}`, `0x${"88".repeat(20)}`, "2026-05-04T12:00:00Z", 10, "final", "unsupported", null, [], ""],
+        [`0x${"f1".repeat(32)}`, `0x${"66".repeat(20)}`, `0x${"66".repeat(20)}`, "2026-05-03T10:00:00Z", 51000.5, "final", 0.4104, "single", 1, [], "Strongly in favor"],
+        [`0x${"f2".repeat(32)}`, `0x${"77".repeat(20)}`, `0x${"77".repeat(20)}`, "2026-03-12T11:00:00Z", 1200, "final", 0.0097, "ranked", null, [2, 1, 3], ""],
+        [`0x${"f3".repeat(32)}`, `0x${"88".repeat(20)}`, `0x${"88".repeat(20)}`, "2026-05-04T12:00:00Z", 10, "pending", null, "unsupported", null, [], ""],
       ],
+    ),
+    // MIRRORS topic_proposal_links.sql (rows are ALL Snapshot proposals;
+    // 'discussion' sorts before 'gip' — the identity-row button targets the
+    // first row and folds the rest into its (+N) and tooltip).
+    topic_proposal_links: descriptor(
+      "topic_proposal_links",
+      ["linked_id", "linked_title", "state", "link_source", "votes_count", "created_at"],
+      [
+        [P1, "GIP-149: Should GnosisDAO fund the thing?", "closed", "discussion", 153, "2026-05-01T12:00:00Z"],
+        [P5, "GIP-149: Temperature check (earlier signal)", "closed", "gip", 88, "2026-04-15T10:00:00Z"],
+      ],
+    ),
+    // MIRRORS topic_detail.sql — feeds the Topic KPI panel and the collapsed
+    // thread's always-visible brief (GIP / author / phase tag / type tag).
+    topic_detail: descriptor(
+      "topic_detail",
+      [
+        "topic_id", "title", "slug", "category_id", "category_name",
+        "posts_count", "reply_count", "views", "like_count",
+        "participant_count", "tags", "created_at", "last_posted_at",
+        "bumped_at", "closed", "archived", "pinned", "status", "gip_number",
+        "topic_url",
+      ],
+      [[
+        12131, "GIP-149: Should GnosisDAO fund the thing?",
+        "gip-149-should-gnosisdao-fund-the-thing", 6, "GIPs",
+        57, 56, 3200, 88, 24, ["phase-2", "funding"],
+        "2026-04-28T09:00:00Z", "2026-07-21T22:10:00Z", "2026-07-21T22:10:00Z",
+        0, 0, 0, "open", 149,
+        "https://forum.gnosis.io/t/gip-149-should-gnosisdao-fund-the-thing/12131",
+      ]],
     ),
     topic_posts: descriptor(
       "topic_posts",
@@ -183,6 +216,166 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         // A sibling proposal sharing the same GIP number — exercises the
         // 'proposal' linked_type click route.
         ["proposal", P5, "GIP-149: Temperature check (earlier signal)", "gip", 12, "2026-04-15T10:00:00Z"],
+      ],
+    ),
+    // Forum plane. MIRRORS forum_summary.sql: the like columns follow the
+    // eligibility contract (active + mapped + scoped), exclusions are COUNTED
+    // (likes_unmapped is nonzero here so the disclosure caption renders in
+    // dev), and like_attribution_pct is the live all-history figure the UI
+    // caption interpolates — never hard-coded copy.
+    forum_summary: descriptor(
+      "forum_summary",
+      [
+        "topic_count", "post_count", "view_count", "like_count",
+        "participant_count", "open_count", "closed_count", "archived_count",
+        "active_users", "active_categories", "likes_in_range",
+        "distinct_likers", "likes_hidden_or_deleted", "likes_unmapped",
+        "like_attribution_pct",
+      ],
+      [[882, 6836, 1204321, 14336, 4180, 640, 200, 42, 310, 14, 10365, 498, 0, 19, 0.723]],
+    ),
+    // MIRRORS contributor_leaderboard.sql: lifetime counter columns from
+    // forum_users beside windowed ATTRIBUTED like columns (the disclosure
+    // caption renders on this panel).
+    contributor_leaderboard: descriptor(
+      "contributor_leaderboard",
+      [
+        "user_id", "username", "name", "trust_level", "lifetime_posts",
+        "lifetime_topics", "likes_received", "likes_given", "days_visited",
+        "posts_in_range", "topics_started", "last_post_at",
+        "likes_received_in_range", "likes_given_in_range",
+      ],
+      [
+        [301, "gnosis-whale", "Gnosis Whale", 3, 412, 44, 890, 340, 720, 18, 2, "2026-07-21T10:00:00Z", 26, 9],
+        [302, "forum-friend", "Forum Friend", 2, 208, 12, 310, 505, 501, 11, 1, "2026-07-19T08:30:00Z", 12, 21],
+      ],
+    ),
+    // MIRRORS poll_summary.sql: poll grain collapsed from the option grain;
+    // poll_voter_slots multi-counts a user voting in several polls.
+    poll_summary: descriptor(
+      "poll_summary",
+      [
+        "poll_count", "open_polls", "closed_polls", "multiple_choice_polls",
+        "hidden_result_polls", "topics_with_polls", "poll_voter_slots",
+        "latest_poll_at",
+      ],
+      [[189, 106, 83, 11, 2, 180, 3584, "2026-07-22T08:56:38Z"]],
+    ),
+    // MIRRORS forum_polls.sql — one row per poll, ORDER BY created_at DESC.
+    // Exercises every leading-option cell branch: a leader, a multiple-choice
+    // leader, a positive-score TIE (leading_option null, leading_tied 1), a
+    // ZERO-VOTE poll (leading_votes 0, not a tie), a HIDDEN poll (nulls), and
+    // a reply-post poll (post_number 3 — polls are not always the opener).
+    forum_polls: descriptor(
+      "forum_polls",
+      [
+        "poll_id", "topic_id", "topic_title", "post_id", "post_number",
+        "poll_name", "poll_type", "status", "results_visibility", "close_at",
+        "created_at", "options_count", "voters", "results_hidden",
+        "leading_option", "leading_votes", "leading_tied",
+      ],
+      [
+        [241, 12131, "GIP-149: Should GnosisDAO fund the thing?", 55001, 1, "poll", "regular", "closed", "always", "2026-07-29T08:56:00Z", "2026-07-22T08:56:38Z", 2, 18, 0, "In Favour", 14, 0],
+        [240, 12100, "Treasury diversification options", 54900, 1, "poll", "multiple", "open", "always", null, "2026-07-15T14:28:59Z", 3, 64, 0, "Option B", 40, 0],
+        [238, 12050, "Which logo should we adopt?", 54800, 3, "poll2", "regular", "open", "always", null, "2026-07-12T16:56:31Z", 2, 10, 0, null, 5, 1],
+        [237, 12040, "Signal: park the idea?", 54700, 1, "poll", "regular", "open", "always", null, "2026-06-12T17:07:43Z", 2, 0, 0, null, 0, 0],
+        [234, 12000, "Confidential compensation review", 54600, 1, "poll", "regular", "open", "on_vote", "2026-08-15T00:00:00Z", "2026-02-18T09:43:02Z", 3, 28, 1, null, null, 0],
+      ],
+    ),
+    // LONG format mirroring poll_activity.sql; the last bucket is missing its
+    // poll_voters row (missing metric -> chart ?? 0).
+    poll_activity: descriptor(
+      "poll_activity",
+      ["bucket", "metric", "metric_value", "bucket_unit"],
+      [
+        ["2026-05-01", "polls_created", 3, "month"],
+        ["2026-05-01", "poll_voters", 96, "month"],
+        ["2026-06-01", "polls_created", 1, "month"],
+        ["2026-06-01", "poll_voters", 4, "month"],
+        ["2026-07-01", "polls_created", 2, "month"],
+      ],
+    ),
+    // MIRRORS likes_by_category.sql: likes per (bucket, category). Three
+    // categories so the top-N fold path is exercisable with maxSeries below 3.
+    likes_by_category: descriptor(
+      "likes_by_category",
+      ["bucket", "bucket_unit", "category", "likes"],
+      [
+        ["2026-05-01", "month", "GIPs", 130],
+        ["2026-05-01", "month", "General", 60],
+        ["2026-05-01", "month", "Uncategorized", 20],
+        ["2026-06-01", "month", "GIPs", 110],
+        ["2026-06-01", "month", "General", 54],
+        ["2026-07-01", "month", "GIPs", 70],
+        ["2026-07-01", "month", "Uncategorized", 26],
+      ],
+    ),
+    // MIRRORS topic_likes_activity.sql: one topic's likes per (bucket, post),
+    // adaptive buckets (daily <= 120-day like span, else weekly). This fixture
+    // topic spans ~4 months, so the SQL would emit WEEKLY buckets — the rows
+    // must agree. post_number 0 is the de-indexed-post residual
+    // ("Unknown post").
+    topic_likes_activity: descriptor(
+      "topic_likes_activity",
+      ["bucket", "bucket_unit", "post_number", "username", "likes"],
+      [
+        ["2026-03-02", "week", 1, "gnosis-whale", 9],
+        ["2026-03-02", "week", 3, "forum-friend", 4],
+        ["2026-05-04", "week", 1, "gnosis-whale", 6],
+        ["2026-05-04", "week", 0, "", 2],
+        ["2026-07-13", "week", 3, "forum-friend", 5],
+      ],
+    ),
+    // LONG format mirroring likes_activity.sql (attributed likes only).
+    likes_activity: descriptor(
+      "likes_activity",
+      ["bucket", "metric", "metric_value", "bucket_unit"],
+      [
+        ["2026-05-01", "likes_given", 210, "month"],
+        ["2026-05-01", "distinct_likers", 58, "month"],
+        ["2026-06-01", "likes_given", 164, "month"],
+        ["2026-06-01", "distinct_likers", 41, "month"],
+        ["2026-07-01", "likes_given", 96, "month"],
+      ],
+    ),
+    // MIRRORS most_liked_topics.sql: windowed ATTRIBUTED likes beside the
+    // lifetime counter so both truths sit in one row.
+    most_liked_topics: descriptor(
+      "most_liked_topics",
+      [
+        "id", "title", "category_id", "likes_in_range", "likers_in_range",
+        "lifetime_like_count", "posts_count", "last_like_at", "gip_number",
+      ],
+      [
+        [12131, "GIP-149: Should GnosisDAO fund the thing?", 6, 42, 18, 88, 57, "2026-07-21T22:10:00Z", 149],
+        [12100, "Treasury diversification options", 6, 31, 12, 40, 33, "2026-07-20T14:00:00Z", null],
+      ],
+    ),
+    // MIRRORS topic_polls.sql — per-OPTION grain, ORDER BY poll_id,
+    // option_votes DESC NULLS LAST. voters repeats per option BY DESIGN
+    // (groupPollOptions takes it once, never sums). option_votes is null on
+    // the hidden poll (the SQL neutralizes the -1 sentinel — a raw -1 must
+    // never reach this contract).
+    topic_polls: descriptor(
+      "topic_polls",
+      [
+        "poll_id", "post_id", "post_number", "poll_name", "poll_type",
+        "status", "results_visibility", "is_public", "close_at", "voters",
+        "option_id", "option_label", "option_votes",
+      ],
+      [
+        [234, 54600, 1, "poll", "regular", "open", "on_vote", 0, "2026-08-15T00:00:00Z", 28, "opt-a", "Approve", null],
+        [234, 54600, 1, "poll", "regular", "open", "on_vote", 0, "2026-08-15T00:00:00Z", 28, "opt-b", "Reject", null],
+        [234, 54600, 1, "poll", "regular", "open", "on_vote", 0, "2026-08-15T00:00:00Z", 28, "opt-c", "Abstain", null],
+        [237, 54700, 1, "poll", "regular", "open", "always", 1, null, 0, "opt-a", "Yes", 0],
+        [237, 54700, 1, "poll", "regular", "open", "always", 1, null, 0, "opt-b", "No", 0],
+        [238, 54800, 3, "poll2", "regular", "open", "always", 1, null, 10, "opt-a", "Logo A", 5],
+        [238, 54800, 3, "poll2", "regular", "open", "always", 1, null, 10, "opt-b", "Logo B", 5],
+        [240, 54900, 1, "poll", "multiple", "open", "always", 1, null, 64, "opt-b", "Option B", 40],
+        [240, 54900, 1, "poll", "multiple", "open", "always", 1, null, 64, "opt-c", "Option C", 31],
+        [240, 54900, 1, "poll", "multiple", "open", "always", 1, null, 64, "opt-a", "Option A", 22],
+        [241, 55001, 1, "poll", "regular", "closed", "always", 1, "2026-07-29T08:56:00Z", 18, "opt-a", "In Favour", 14],
+        [241, 55001, 1, "poll", "regular", "closed", "always", 1, "2026-07-29T08:56:00Z", 18, "opt-b", "Against", 4],
       ],
     ),
     // Delegation plane (Snapshot DelegateRegistry — Ethereum mainnet AND
@@ -384,7 +577,7 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
       "overview.core": true, "overview.live": true, "overview.insights": false,
       "proposals.core": false, "proposals.charts": false,
       "voters.core": false, "voters.insights": false,
-      "forum.core": false, "forum.insights": false,
+      "forum.core": false, "forum.insights": false, "forum.engagement": false,
       "delegations.core": false, "delegations.insights": false,
       "treasury.core": false, "treasury.insights": false, "treasury.history": false,
       "treasury.token_history": false,

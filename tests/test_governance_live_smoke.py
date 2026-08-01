@@ -29,7 +29,7 @@ GOV_DB = "governance_db"
 EXPECTED_TABLES = {
     "snapshot_proposals", "snapshot_votes", "snapshot_follows",
     "snapshot_space", "forum_topics", "forum_posts", "forum_users",
-    "forum_categories",
+    "forum_categories", "forum_polls", "forum_likes",
 }
 
 #: Key columns per table (excluding the re-ingest additions, checked apart).
@@ -68,6 +68,16 @@ KEY_COLUMNS = {
         "id", "parent_id", "name", "slug", "topic_count", "post_count",
         "description", "ingested_at",
     },
+    "forum_polls": {
+        "post_id", "topic_id", "poll_id", "poll_name", "poll_type", "status",
+        "results_visibility", "is_public", "close_at", "voters", "option_id",
+        "option_html", "option_votes", "raw_json", "ingested_at",
+    },
+    "forum_likes": {
+        "post_id", "topic_id", "post_number", "acting_user_id",
+        "acting_username", "created_at", "hidden", "deleted", "raw_json",
+        "ingested_at",
+    },
 }
 
 
@@ -102,7 +112,7 @@ def _columns(ch, table: str) -> set[str]:
     return {str(name) for name in result.columns}
 
 
-def test_all_eight_tables_exist_with_key_columns(ch):
+def test_expected_tables_exist_with_key_columns(ch):
     missing = []
     for table in sorted(EXPECTED_TABLES):
         try:
@@ -151,6 +161,10 @@ def test_final_count_invariants(ch):
     assert users >= 2_600
     assert categories >= 15
     assert space == 1
+    poll_option_rows = int(_scalar(ch, "SELECT count() FROM governance_db.forum_polls FINAL"))
+    likes = int(_scalar(ch, "SELECT count() FROM governance_db.forum_likes FINAL"))
+    assert poll_option_rows >= 350
+    assert likes >= 9_000
     voters = int(_scalar(
         ch, "SELECT uniqExact(lower(voter)) FROM governance_db.snapshot_votes FINAL"
     ))
@@ -176,6 +190,137 @@ def test_posts_reference_existing_topics(ch):
 SELECT count() FROM governance_db.forum_posts FINAL
 WHERE topic_id NOT IN (SELECT id FROM governance_db.forum_topics FINAL)"""))
     assert orphans == 0
+
+
+def test_poll_identity_and_post_consistency(ch):
+    """poll_id is the poll identity, one-to-one with (post_id, poll_name).
+    Uniq-count equality alone proves neither direction, so both are checked.
+    Every poll's poll-bearing post exists and agrees on the topic."""
+    pairs_per_id = int(_scalar(ch, """
+SELECT max(pairs) FROM (
+  SELECT poll_id, uniqExact(post_id, poll_name) AS pairs
+  FROM governance_db.forum_polls FINAL GROUP BY poll_id)"""))
+    assert pairs_per_id == 1
+    ids_per_pair = int(_scalar(ch, """
+SELECT max(ids) FROM (
+  SELECT post_id, poll_name, uniqExact(poll_id) AS ids
+  FROM governance_db.forum_polls FINAL GROUP BY post_id, poll_name)"""))
+    assert ids_per_pair == 1
+    orphan_posts = int(_scalar(ch, """
+SELECT count() FROM governance_db.forum_polls FINAL
+WHERE post_id NOT IN (SELECT id FROM governance_db.forum_posts FINAL)"""))
+    assert orphan_posts == 0
+    topic_mismatch = int(_scalar(ch, """
+SELECT count()
+FROM governance_db.forum_polls AS p FINAL
+INNER JOIN governance_db.forum_posts AS fp FINAL ON fp.id = p.post_id
+WHERE toInt64(p.topic_id) != toInt64(fp.topic_id)"""))
+    assert topic_mismatch == 0
+
+
+def test_poll_voters_is_poll_level_and_options_unique(ch):
+    """voters is a poll-level total repeated per option row (so max == min
+    per poll); (poll_id, option_id) is unique; -1 is the only sentinel."""
+    voters_varies = int(_scalar(ch, """
+SELECT countIf(mn != mx) FROM (
+  SELECT poll_id, min(voters) AS mn, max(voters) AS mx
+  FROM governance_db.forum_polls FINAL GROUP BY poll_id)"""))
+    assert voters_varies == 0
+    max_dup_options = int(_scalar(ch, """
+SELECT max(cnt) FROM (
+  SELECT poll_id, option_id, count() AS cnt
+  FROM governance_db.forum_polls FINAL GROUP BY poll_id, option_id)"""))
+    assert max_dup_options == 1
+    sentinel_floor = int(_scalar(ch, """
+SELECT min(option_votes) FROM governance_db.forum_polls FINAL"""))
+    assert sentinel_floor >= -1
+
+
+def test_like_identity_and_attribution_band(ch):
+    """(post_id, acting_user_id) is the per-like identity. The attribution
+    band is a data-quality rail only (measured 0.72 on 2026-07-31): the
+    DISPLAYED figure is computed live by forum_summary.like_attribution_pct.
+    If a backfill moves coverage outside the band, re-measure and revisit
+    the UI wording together with this rail."""
+    max_dup_likes = int(_scalar(ch, """
+SELECT max(cnt) FROM (
+  SELECT post_id, acting_user_id, count() AS cnt
+  FROM governance_db.forum_likes FINAL GROUP BY post_id, acting_user_id)"""))
+    assert max_dup_likes == 1
+    eligible = int(_scalar(ch, """
+SELECT count() FROM governance_db.forum_likes FINAL
+WHERE hidden = 0 AND deleted = 0
+  AND topic_id IN (SELECT id FROM governance_db.forum_topics FINAL)
+  AND post_id IN (SELECT id FROM governance_db.forum_posts FINAL)"""))
+    counters = int(_scalar(ch, """
+SELECT sum(like_count) FROM governance_db.forum_posts FINAL"""))
+    ratio = eligible / max(counters, 1)
+    assert 0.60 <= ratio <= 0.85, f"attribution ratio {ratio:.3f} outside band"
+
+
+def test_forum_polls_spec_tie_and_zero_vote_contract(ch):
+    """Run the rendered forum_polls spec: leading_option must be NULL on
+    every hidden, tied, or zero-vote poll — and live data currently contains
+    all three shapes, so the guards are actually exercised (if one shape
+    disappears from the data, loosen the presence floor consciously)."""
+    from cerebro_mcp.tools.visualization import governance_explorer
+
+    range_state = governance_explorer._range_state("", "")
+    specs = {
+        spec.key: spec
+        for spec in governance_explorer._forum_specs(
+            range_state, governance_explorer._default_filters()
+        )
+    }
+    spec = specs["forum_polls"]
+    result = ch.run_query(
+        spec.sql, GOV_DB, requested_max_rows=10_000, audience="internal",
+        fetch_mode="auto", parameters=spec.parameters or None,
+    )
+    idx = {str(name): i for i, name in enumerate(result.columns)}
+    tied = hidden = zero = 0
+    for row in result.rows:
+        leading_option = row[idx["leading_option"]]
+        leading_votes = row[idx["leading_votes"]]
+        if row[idx["leading_tied"]]:
+            tied += 1
+            assert leading_option is None, row
+        if row[idx["results_hidden"]]:
+            hidden += 1
+            assert leading_option is None, row
+            assert leading_votes is None, row
+        if leading_votes == 0:
+            zero += 1
+            assert leading_option is None, row
+    assert tied >= 1, "no tied poll left in live data — loosen consciously"
+    assert zero >= 1, "no zero-vote poll left in live data — loosen consciously"
+    assert hidden >= 1, "no hidden-results poll left in live data — loosen consciously"
+
+
+def test_source_freshness_forum_clock_matches_weakest_table_live(ch):
+    """The rendered forum ingestion clock equals the min of the six forum
+    tables' independently-queried max(ingested_at) values."""
+    from cerebro_mcp.tools.visualization import governance_explorer
+
+    spec = governance_explorer._source_freshness_spec()
+    result = ch.run_query(
+        spec.sql, GOV_DB, requested_max_rows=10, audience="internal",
+        fetch_mode="auto",
+    )
+    idx = {str(name): i for i, name in enumerate(result.columns)}
+    forum_clock = None
+    for row in result.rows:
+        if str(row[idx["source"]]) == "forum":
+            forum_clock = row[idx["latest_ingested_at"]]
+    assert forum_clock is not None
+    per_table = [
+        _scalar(ch, f"SELECT max(ingested_at) FROM governance_db.{table} FINAL")
+        for table in (
+            "forum_topics", "forum_posts", "forum_users", "forum_categories",
+            "forum_polls", "forum_likes",
+        )
+    ]
+    assert forum_clock == min(per_table), (forum_clock, per_table)
 
 
 def test_choices_and_scores_extract_on_all_proposals(ch):

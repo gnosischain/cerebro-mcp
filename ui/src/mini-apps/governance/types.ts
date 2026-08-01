@@ -264,6 +264,63 @@ export interface PostRow {
   plain_text?: string;
 }
 
+/** One row per poll (`forum_polls` dataset). `leading_option` is null when
+ * results are hidden, tied, or no votes were cast — the cell renderer
+ * distinguishes the three via `results_hidden` / `leading_tied` /
+ * `leading_votes === 0`. */
+export interface PollListRow {
+  poll_id: number;
+  topic_id: number;
+  topic_title: string;
+  post_id: number;
+  post_number: number;
+  poll_name: string;
+  poll_type: string;
+  status: string;
+  results_visibility: string;
+  close_at: string | null;
+  created_at: string;
+  options_count: number;
+  voters: number;
+  results_hidden: boolean | number;
+  leading_option: string | null;
+  leading_votes: number | null;
+  leading_tied: boolean | number;
+}
+
+/** Per-OPTION poll row (`topic_polls` entity dataset). Poll-level fields are
+ * repeated per option by design; `option_votes` is null where Discourse hides
+ * results (the SQL neutralizes the -1 sentinel). */
+export interface PollOptionRow {
+  poll_id: number;
+  post_id: number;
+  post_number: number;
+  poll_name: string;
+  poll_type: string;
+  status: string;
+  results_visibility: string;
+  is_public: boolean | number;
+  close_at: string | null;
+  voters: number;
+  option_id: string;
+  option_label: string;
+  option_votes: number | null;
+}
+
+/** `most_liked_topics` row: windowed ATTRIBUTED likes beside the lifetime
+ * counter so both truths sit in one row. */
+export interface MostLikedTopicRow {
+  id: number;
+  title: string;
+  category_id: number | null;
+  likes_in_range: number;
+  likers_in_range: number;
+  lifetime_like_count: number | null;
+  posts_count: number | null;
+  last_like_at: string;
+  gip_number: number | null;
+}
+
 // ---------------------------------------------------------------------------
 // Delegation plane (Snapshot DelegateRegistry, rpc_log_indexer) — Ethereum
 // mainnet (chain 1) AND Gnosis Chain (chain 100); the gnosis.eth space

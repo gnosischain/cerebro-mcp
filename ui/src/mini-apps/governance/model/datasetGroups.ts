@@ -27,6 +27,17 @@ export const SECTION_GROUPS: Record<string, Record<string, readonly string[]>> =
   forum: {
     core: ["forum_summary", "forum_categories", "forum_topics"],
     insights: ["forum_activity", "contributor_leaderboard"],
+    // Poll + per-like metrics share one group so every dataset carrying the
+    // who-liked attribution caveat sits behind one gate with one shared
+    // disclosure caption. Mirrors the backend comment in governance_explorer.py.
+    engagement: [
+      "poll_summary",
+      "forum_polls",
+      "poll_activity",
+      "likes_activity",
+      "likes_by_category",
+      "most_liked_topics",
+    ],
   },
   delegations: {
     core: ["delegation_summary", "top_delegates"],
@@ -59,7 +70,7 @@ export const SECTION_GROUPS: Record<string, Record<string, readonly string[]>> =
 export const ENTITY_DATASETS: Record<string, readonly string[]> = {
   proposal: ["proposal_detail", "proposal_choices", "proposal_vote_trend", "proposal_votes", "proposal_forum_links"],
   voter: ["voter_profile", "voter_votes", "voter_participation"],
-  forum_topic: ["topic_detail", "topic_posts", "topic_proposal_links"],
+  forum_topic: ["topic_detail", "topic_posts", "topic_proposal_links", "topic_polls", "topic_likes_activity"],
   forum_user: ["contributor_profile", "contributor_posts", "contributor_activity"],
   treasury_token: [
     "treasury_token_detail", "treasury_token_holders", "treasury_token_holder_series",

@@ -30,7 +30,7 @@ both sides):
   (exact topic id) is the PRIMARY proposal<->topic link (``link_source =
   'discussion'``); exact GIP-number equality is the secondary tier
   (``link_source = 'gip'``). No fuzzy/text joins, ever.
-* **FINAL on every table read**: all eight ``governance_db`` tables are
+* **FINAL on every table read**: every ``governance_db`` table is
   ``ReplacingMergeTree(ingested_at)`` and the daily ingesters re-insert rows
   routinely (all proposals, the whole user directory, every bumped topic
   with all its posts), so un-FINAL'd aggregates double-count until merges
@@ -230,6 +230,18 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
     "forum": {
         "core": ("forum_summary", "forum_categories", "forum_topics"),
         "insights": ("forum_activity", "contributor_leaderboard"),
+        # Poll + per-like metrics live in ONE group: all five queries are tiny
+        # (hundreds of rows), and keeping every dataset that carries the
+        # who-liked attribution caveat behind one gate lets the section render
+        # one shared disclosure caption above them.
+        "engagement": (
+            "poll_summary",
+            "forum_polls",
+            "poll_activity",
+            "likes_activity",
+            "likes_by_category",
+            "most_liked_topics",
+        ),
     },
     "delegations": {
         "core": ("delegation_summary", "top_delegates"),
@@ -266,7 +278,10 @@ ENTITY_BUNDLES: dict[str, tuple[str, ...]] = {
         "proposal_votes", "proposal_forum_links",
     ),
     "voter": ("voter_profile", "voter_votes", "voter_participation"),
-    "forum_topic": ("topic_detail", "topic_posts", "topic_proposal_links"),
+    "forum_topic": (
+        "topic_detail", "topic_posts", "topic_proposal_links", "topic_polls",
+        "topic_likes_activity",
+    ),
     "forum_user": (
         "contributor_profile", "contributor_posts", "contributor_activity",
     ),
@@ -1211,13 +1226,20 @@ def _forum_specs(
 ) -> list[QuerySpec]:
     activity_time = _point_predicate("last_posted_at", range_state)
     posts_time = _point_predicate("created_at", range_state)
+    # Per-like/poll predicates. likes/polls window on their own event clocks
+    # (like created_at; poll-bearing post created_at) and scope topics via
+    # filter_sql ALONE — topic_where would also window topics by
+    # last_posted_at, silently dropping valid in-range likes on quiet topics.
+    likes_time = _point_predicate("created_at", range_state)
+    likes_recv_time = _point_predicate("l.created_at", range_state)
+    polls_time = _point_predicate("created_at", range_state)
     filter_sql, filter_params = _forum_filter(filters)
     params = {**_time_params(range_state), **filter_params}
     topic_where = f"{activity_time} AND {filter_sql}"
     sort_fragment = FORUM_SORTS.get(filters.get("sort_by", ""), FORUM_SORTS[""])
     days = _range_days(range_state)
 
-    forum_summary = sql_loader.load_sql("governance", "forum_summary", posts_time=posts_time, topic_where=topic_where)
+    forum_summary = sql_loader.load_sql("governance", "forum_summary", posts_time=posts_time, topic_where=topic_where, likes_time=likes_time, likes_topic_filter=filter_sql)
 
     forum_categories = sql_loader.load_sql("governance", "forum_categories")
 
@@ -1227,11 +1249,33 @@ def _forum_specs(
     post_bucket, _ = _bucket("created_at", days)
     forum_activity = sql_loader.load_sql("governance", "forum_activity", filter_sql=filter_sql, unit=unit, topic_bucket=topic_bucket, post_bucket=post_bucket, posts_time=posts_time)
 
-    contributor_leaderboard = sql_loader.load_sql("governance", "contributor_leaderboard", posts_time=posts_time)
+    contributor_leaderboard = sql_loader.load_sql("governance", "contributor_leaderboard", posts_time=posts_time, likes_recv_time=likes_recv_time, likes_given_time=likes_time, filter_sql=filter_sql)
+
+    poll_bucket, _ = _bucket("created_at", days)
+    like_bucket, _ = _bucket("created_at", days)
+    poll_summary = sql_loader.load_sql("governance", "poll_summary", filter_sql=filter_sql, polls_time=polls_time)
+
+    forum_polls = sql_loader.load_sql("governance", "forum_polls", filter_sql=filter_sql, polls_time=polls_time)
+
+    poll_activity = sql_loader.load_sql("governance", "poll_activity", filter_sql=filter_sql, polls_time=polls_time, poll_bucket=poll_bucket, unit=unit)
+
+    likes_activity = sql_loader.load_sql("governance", "likes_activity", filter_sql=filter_sql, likes_time=likes_time, like_bucket=like_bucket, unit=unit)
+
+    # The category stack joins forum_topics, whose created_at collides with the
+    # like timestamp — bucket and time predicate both prefix l.created_at.
+    like_bucket_prefixed, _ = _bucket("l.created_at", days)
+    likes_by_category = sql_loader.load_sql("governance", "likes_by_category", filter_sql=filter_sql, likes_time=likes_recv_time, like_bucket=like_bucket_prefixed, unit=unit)
+
+    most_liked_topics = sql_loader.load_sql("governance", "most_liked_topics", filter_sql=filter_sql, likes_time=likes_time, gip_sql=_gip_sql("t.title"))
 
     return [
         QuerySpec("forum_summary", "Forum summary", forum_summary, dict(params),
-                  "last_posted_at", "forum"),
+                  "last_posted_at; like columns read eligible likes only "
+                  "(active + mapped, exclusions counted in "
+                  "likes_hidden_or_deleted / likes_unmapped); "
+                  "like_attribution_pct is the all-history attributed share "
+                  "of the like_count counters (Discourse who-liked "
+                  "visibility limit)", "forum"),
         QuerySpec("forum_categories", "Forum categories", forum_categories, {},
                   "all-time category directory", "forum"),
         QuerySpec("forum_topics", "Forum topics", forum_topics, dict(params),
@@ -1239,8 +1283,40 @@ def _forum_specs(
         QuerySpec("forum_activity", "Forum activity", forum_activity, dict(params),
                   "created_at", "forum"),
         QuerySpec("contributor_leaderboard", "Contributor leaderboard",
-                  contributor_leaderboard, dict(params), "post created_at",
+                  contributor_leaderboard, dict(params),
+                  "post created_at; windowed like columns are attributed "
+                  "likes only (Discourse who-liked visibility limit) — "
+                  "lifetime likes_received/likes_given are the counter truth",
                   "forum"),
+        QuerySpec("poll_summary", "Poll summary", poll_summary, dict(params),
+                  "poll creation (poll-bearing post created_at); voters is "
+                  "Discourse's poll-level participant total (max per poll, "
+                  "never option-summed); poll_voter_slots sums per-poll "
+                  "totals — a user voting in N polls counts N times", "forum"),
+        QuerySpec("forum_polls", "Forum polls", forum_polls, dict(params),
+                  "poll creation (poll-bearing post created_at); option "
+                  "votes NULL where results are hidden (-1 sentinel); "
+                  "leading_option NULL on hidden, tied, or zero-vote polls",
+                  "forum"),
+        QuerySpec("poll_activity", "Poll activity", poll_activity, dict(params),
+                  "poll creation (poll-bearing post created_at); poll_voters "
+                  "attributes each poll's participant total to its creation "
+                  "bucket — per-vote timestamps do not exist", "forum"),
+        QuerySpec("likes_activity", "Likes activity", likes_activity,
+                  dict(params),
+                  "like created_at; eligible likes only (hidden/deleted and "
+                  "unmapped rows excluded and counted by forum_summary); "
+                  "attributed likes undercount the like_count counters "
+                  "(Discourse who-liked visibility limit)", "forum"),
+        QuerySpec("likes_by_category", "Likes by category", likes_by_category,
+                  dict(params),
+                  "like created_at, stacked by topic category; eligible likes "
+                  "only (Discourse who-liked visibility limit); the client "
+                  "keeps top categories and counts the rest as Other", "forum"),
+        QuerySpec("most_liked_topics", "Most liked topics", most_liked_topics,
+                  dict(params),
+                  "like created_at; attributed likes only — "
+                  "lifetime_like_count is the counter truth", "forum"),
     ]
 
 
@@ -1318,6 +1394,10 @@ def _topic_entity_specs(identifier: str) -> list[QuerySpec]:
 
     topic_proposal_links = sql_loader.load_sql("governance", "topic_proposal_links", gip_title=_gip_sql("title"), gip_proposal_title=_gip_sql("p.title"), discussion_topic_sql=DISCUSSION_TOPIC_SQL)
 
+    topic_polls = sql_loader.load_sql("governance", "topic_polls")
+
+    topic_likes_activity = sql_loader.load_sql("governance", "topic_likes_activity")
+
     return [
         QuerySpec("topic_detail", "Topic detail", topic_detail, dict(params),
                   "all history", "forum"),
@@ -1327,6 +1407,17 @@ def _topic_entity_specs(identifier: str) -> list[QuerySpec]:
                   topic_proposal_links, dict(params),
                   "discussion URL (primary) + exact GIP number (secondary)",
                   "cross"),
+        QuerySpec("topic_polls", "Topic polls", topic_polls, dict(params),
+                  "all history; per-option grain (voters is the poll-level "
+                  "total, taken once per poll, never summed); option votes "
+                  "NULL where results are hidden (-1 sentinel)", "forum"),
+        QuerySpec("topic_likes_activity", "Likes over time",
+                  topic_likes_activity, dict(params),
+                  "all history, per post; adaptive buckets — daily while the "
+                  "topic's like span is <= 120 days, weekly beyond; "
+                  "eligible (non-hidden/deleted) attributed likes only "
+                  "(Discourse who-liked visibility limit); likes on "
+                  "de-indexed posts appear as post_number 0", "forum"),
     ]
 
 

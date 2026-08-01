@@ -100,6 +100,19 @@
 
 /* Post bodies (markdown + sanitized HTML + plain) */
 .gov-posts{display:grid;gap:12px}
+.gov-polls{display:grid;gap:12px}
+.gov-poll{border:1px solid var(--border);border-radius:10px;background:var(--surface);padding:12px 14px}
+.gov-identity-actions{display:inline-flex;gap:8px;align-items:center}
+.gov-topic-brief{display:grid;grid-template-columns:auto 1fr;gap:6px 18px;margin:0 0 12px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface)}
+.gov-topic-brief dt{color:var(--text-muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.04em;align-self:baseline}
+.gov-topic-brief dd{margin:0;color:var(--text-primary);font-size:13px;overflow-wrap:anywhere}
+.gov-collapse-toggle{border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text-secondary);font:11px var(--font-mono);padding:4px 10px;cursor:pointer}
+.gov-collapse-toggle:hover{color:var(--text-primary)}
+.gov-collapse-hint{width:100%;border:1px dashed var(--border);border-radius:10px;background:var(--surface);color:var(--text-secondary);font:12px var(--font-mono);padding:14px;cursor:pointer;text-align:center}
+.gov-collapse-hint:hover{color:var(--text-primary)}
+.gov-share-cell{display:inline-flex;align-items:center;gap:8px;min-width:120px}
+.gov-share-cell__bar{flex:1;min-width:56px;height:8px;border-radius:4px;background:var(--surface-2);overflow:hidden}
+.gov-share-cell__bar>span{display:block;height:100%;border-radius:4px;background:var(--primary)}
 .gov-post{border:1px solid var(--border);border-radius:10px;background:var(--surface);padding:12px 14px}
 .gov-post.is-opener{border-color:var(--accent-border)}
 .gov-post__head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;color:var(--text-muted);font:11px var(--font-mono)}

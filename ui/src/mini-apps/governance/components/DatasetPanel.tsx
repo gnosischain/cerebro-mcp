@@ -20,6 +20,11 @@ export function DatasetPanel({
   onRetry,
   meta,
   emptyLabel = "No matching rows.",
+  collapsible = false,
+  open = true,
+  onToggle,
+  collapsedLabel = "Show",
+  collapsedContent,
   children,
 }: {
   title: string;
@@ -30,6 +35,17 @@ export function DatasetPanel({
   onRetry?: () => void;
   meta?: ReactNode;
   emptyLabel?: string;
+  /** Controlled collapse (owner holds the state, e.g. so a "Post #N" jump can
+   * expand the thread first). Failure and loading states are NEVER hidden —
+   * a collapsed panel that swallowed an error would violate the
+   * visible-failure rule. */
+  collapsible?: boolean;
+  open?: boolean;
+  onToggle?: (open: boolean) => void;
+  collapsedLabel?: string;
+  /** Rendered ABOVE the expand hint while collapsed — the always-visible
+   * summary (e.g. the topic brief) that the collapse must not swallow. */
+  collapsedContent?: ReactNode;
   children: ReactNode;
 }) {
   const state = datasetDisplayState(descriptor, groupLoaded, hydrationPhase);
@@ -75,8 +91,29 @@ export function DatasetPanel({
     default:
       body = children;
   }
+  const collapsed = collapsible && !open && state !== "failed" && state !== "loading";
+  if (collapsed) {
+    body = (
+      <>
+        {collapsedContent}
+        <button type="button" className="gov-collapse-hint" onClick={() => onToggle?.(true)}>
+          {collapsedLabel}
+        </button>
+      </>
+    );
+  }
+  const toggle = collapsible && state !== "failed" && state !== "loading" ? (
+    <button
+      type="button"
+      className="gov-collapse-toggle"
+      aria-expanded={!collapsed}
+      onClick={() => onToggle?.(collapsed)}
+    >
+      {collapsed ? "Expand" : "Collapse"}
+    </button>
+  ) : null;
   return (
-    <MaSection title={title} meta={meta}>
+    <MaSection title={title} meta={toggle ? <>{meta}{toggle}</> : meta}>
       {body}
     </MaSection>
   );

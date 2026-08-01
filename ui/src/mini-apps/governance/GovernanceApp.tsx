@@ -62,6 +62,10 @@ const LARGE_DATASETS = new Set([
   "contributor_posts",
   "contributor_leaderboard",
   "top_delegates",
+  // Table-only poll/like datasets: PaginatedTable renders them straight from
+  // descriptor pages; full hydration would buy nothing.
+  "forum_polls",
+  "most_liked_topics",
   // treasury_holdings is deliberately NOT here: USD ranking happens client-side
   // (prices are an overlay, not a SQL column), and sorting a server-paged
   // preview would rank only the visible page. At ~361 rows against the 10k

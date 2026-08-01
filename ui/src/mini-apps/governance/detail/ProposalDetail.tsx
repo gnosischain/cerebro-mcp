@@ -207,6 +207,19 @@ export function ProposalDetail({ ctx }: { ctx: GovViewContext }) {
                 />
               );
             }
+            if (column === "vp_share") {
+              const share = Number(value);
+              // NULL while scores are pending — an em-dash, never a fake 0%.
+              if (value === null || value === undefined || !Number.isFinite(share)) return <span>—</span>;
+              return (
+                <span className="gov-share-cell">
+                  <span className="gov-share-cell__bar">
+                    <span style={{ width: `${Math.min(100, share * 100)}%` }} />
+                  </span>
+                  <span className="gov-mono">{(share * 100).toFixed(share >= 0.1 ? 1 : 2)}%</span>
+                </span>
+              );
+            }
             if (column === "created_at") {
               return <span className="gov-mono">{String(value ?? "").slice(0, 16).replace("T", " ")}</span>;
             }

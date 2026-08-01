@@ -570,6 +570,120 @@ def test_every_spec_targets_governance_db_with_final_order_by_and_binds():
     assert by_key["proposals"].parameters["start_at"] == "2025-01-01T00:00:00Z"
 
 
+def test_poll_specs_respect_option_grain():
+    """forum_polls is poll-OPTION grain: ``voters`` is a poll-level total
+    REPEATED per option row (max per poll, never summed across options), and
+    ``option_votes = -1`` is Discourse's hidden-results sentinel (NULL, never
+    summed raw). Assertions run on rendered spec SQL — comments are already
+    stripped by the loader."""
+    specs = {spec.key: spec for spec in _all_specs()}
+    poll_readers = {key for key, spec in specs.items() if "governance_db.forum_polls" in spec.sql}
+    # Growing this set means a new forum_polls reader — it must adopt the
+    # grain guards below (or, like source_freshness, read ingested_at only).
+    assert poll_readers == {
+        "poll_summary", "forum_polls", "poll_activity", "topic_polls",
+        "source_freshness",
+    }
+    for key in ("poll_summary", "forum_polls", "poll_activity"):
+        sql = specs[key].sql
+        assert "max(p.voters)" in sql, key
+        assert "sum(p.option_votes" not in sql, key
+        assert "sum(option_votes" not in sql, key
+    # The list spec guards the sentinel, positive-score ties, and the
+    # zero-vote case (an all-zero poll has no leader).
+    list_sql = specs["forum_polls"].sql
+    assert "min(p.option_votes) < 0" in list_sql
+    assert "arrayMax" in list_sql
+    assert "max(p.option_votes) > 0" in list_sql
+    # The entity spec is per-option BY DESIGN (exempt from the voters-max
+    # rule) but must neutralize the sentinel.
+    assert "nullIf(p.option_votes, -1)" in specs["topic_polls"].sql
+    # The activity spec has no business reading option votes at all.
+    assert "option_votes" not in specs["poll_activity"].sql
+    # Freshness reads ingested_at only.
+    assert "option_votes" not in specs["source_freshness"].sql
+
+
+def test_like_specs_apply_the_eligibility_contract():
+    """Every analytical forum_likes read is ACTIVE (hidden/deleted excluded),
+    MAPPED (referenced topic and post still exist), and scoped by the
+    filters-only topic subquery — never by topic_where, whose last_posted_at
+    window silently drops valid in-range likes on quiet topics."""
+    specs = {spec.key: spec for spec in _all_specs()}
+    like_readers = {key for key, spec in specs.items() if "governance_db.forum_likes" in spec.sql}
+    assert like_readers == {
+        "forum_summary", "contributor_leaderboard", "likes_activity",
+        "likes_by_category", "most_liked_topics", "topic_likes_activity",
+        "source_freshness",
+    }
+    for key in sorted(like_readers):
+        sql = specs[key].sql
+        if key == "source_freshness":
+            # Freshness deliberately skips the contract: it reads ingested_at
+            # only, and filtering there would let a purge fake freshness.
+            assert "hidden" not in sql
+            continue
+        assert "hidden = 0" in sql, key
+        assert "deleted = 0" in sql, key
+        # Topic scope: section specs filter via the topics subquery; entity
+        # specs pin one topic by bind. Both count as scoped+mapped.
+        assert (
+            "topic_id IN (" in sql
+            or "topic_id = {topic_id:UInt32}" in sql
+        ), key
+        assert (
+            "post_id IN (SELECT id FROM governance_db.forum_posts" in sql
+            or "ON fp.id = l.post_id" in sql
+        ), key
+    # Like predicates never window on last_posted_at.
+    for key in ("likes_activity", "most_liked_topics", "contributor_leaderboard"):
+        assert "last_posted_at" not in specs[key].sql, key
+    # forum_summary legitimately uses topic_where (last_posted_at) for its
+    # TOPIC aggregates — but its like subselects must scope by filters only.
+    summary_sql = specs["forum_summary"].sql
+    likes_chunk = summary_sql.split(" AS likes_in_range")[0].rsplit("(SELECT count()", 1)[1]
+    assert "last_posted_at" not in likes_chunk
+    assert "hidden = 0 AND deleted = 0" in likes_chunk
+
+
+def test_proposal_votes_share_is_null_safe():
+    """vp_share divides by the proposal's scores_total through nullIf — a
+    pending/zero total yields NULL, never a fabricated 0 or a div-by-zero."""
+    specs = {spec.key: spec for spec in _all_specs()}
+    sql = specs["proposal_votes"].sql
+    assert "vp_share" in sql
+    assert "nullIf" in sql
+    assert "scores_total" in sql
+
+
+def test_forum_summary_counts_like_exclusions():
+    """Ineligible likes are COUNTED, never silently dropped, and the
+    attribution share ships as a live figure for the UI caption (NULL, never
+    a division by zero, when the counter denominator is empty)."""
+    specs = {spec.key: spec for spec in _all_specs()}
+    sql = specs["forum_summary"].sql
+    assert "likes_hidden_or_deleted" in sql
+    assert "likes_unmapped" in sql
+    assert "like_attribution_pct" in sql
+    assert "nullIf" in sql
+
+
+def test_source_freshness_forum_clock_is_weakest_link():
+    """The forum ingestion clock is the min across every forum table's own
+    max(ingested_at) — a stalled polls/likes ingest must not be masked by a
+    fresh posts/topics run. Snapshot keeps max() (one ingest run)."""
+    sql = governance_explorer._source_freshness_spec().sql
+    for table in (
+        "forum_topics", "forum_posts", "forum_users", "forum_categories",
+        "forum_polls", "forum_likes",
+    ):
+        assert f"governance_db.{table}" in sql, table
+    assert (
+        "if(source = 'forum', min(latest_ingested_at), max(latest_ingested_at))"
+        in sql
+    )
+
+
 def test_specs_carry_interactive_query_budget():
     server, ch = _server()
     opened = _tool(server, "open_governance")()

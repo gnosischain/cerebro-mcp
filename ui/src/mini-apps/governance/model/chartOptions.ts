@@ -1103,3 +1103,96 @@ export function gipGraphOption(
     _cerebro_height: GRAPH_HEIGHT,
   } as EChartsOption;
 }
+
+/** Forum tab: likes stacked by topic CATEGORY (bars, shared stacked builder —
+ * top categories named, the rest folded into a residual band whose legend
+ * carries its fold count) plus the unique-likers line on a second axis. The
+ * line rides likes_activity's distinct_likers, which shares this chart's
+ * bucketing and filters, so buckets align by construction. */
+export function likesByCategoryOption(
+  rows: Array<Record<string, unknown>>,
+  likersByBucket: Map<string, number | null>,
+): EChartsOption {
+  const base = stackedSeriesOption(rows, {
+    xField: "bucket",
+    valueField: "likes",
+    seriesField: "category",
+    kind: "bar",
+    maxSeries: 7,
+    yName: "likes",
+  }) as EChartsOption & {
+    xAxis?: { data?: string[] };
+    yAxis?: unknown;
+    series?: unknown[];
+    grid?: Record<string, unknown>;
+  };
+  const buckets = base.xAxis?.data ?? [];
+  return {
+    ...base,
+    grid: { ...(base.grid ?? {}), right: 64 },
+    yAxis: [
+      base.yAxis,
+      {
+        type: "value",
+        name: "likers",
+        nameTextStyle: { fontFamily: LABEL_FONT, fontSize: 10 },
+        axisLabel: { fontFamily: LABEL_FONT, fontSize: 10 },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      ...(base.series ?? []),
+      {
+        name: "Unique likers",
+        type: "line",
+        yAxisIndex: 1,
+        showSymbol: false,
+        smooth: true,
+        data: buckets.map((bucket) => likersByBucket.get(bucket) ?? null),
+      },
+    ],
+    _cerebro_height: "420px",
+  } as EChartsOption;
+}
+
+/** Topic drill-down: that topic's likes over time, stacked per POST. Top
+ * posts stay named with their author ("Post #3 · martin" — a bare index is
+ * opaque without scrolling to the thread); the rest fold into the counted
+ * residual band. post_number 0 is a like whose post left the index —
+ * rendered as "Unknown post", never silently dropped. The series KEY stays
+ * the post number (identity); the author is display text only, and a
+ * caller-supplied username is untrusted display text (sanitized). */
+export function topicLikesOption(rows: Array<Record<string, unknown>>): EChartsOption {
+  const authorByPost = new Map<string, string>();
+  for (const row of rows) {
+    const key = String(row.post_number ?? "");
+    const author = sanitizeSymbol(row.username);
+    if (key !== "" && author && !authorByPost.has(key)) authorByPost.set(key, author);
+  }
+  const spec = stackedSeriesOption(rows, {
+    xField: "bucket",
+    valueField: "likes",
+    seriesField: "post_number",
+    kind: "bar",
+    maxSeries: 6,
+    seriesLabeler: (key) => {
+      if (key === "0") return "Unknown post";
+      const author = authorByPost.get(key);
+      return author ? `Post #${key} · ${author}` : `Post #${key}`;
+    },
+    yName: "likes",
+  }) as EChartsOption & { xAxis?: Record<string, unknown> };
+  // Buckets are adaptive (daily for short-lived topics, weekly otherwise) —
+  // name the axis from the rows' own unit column, never assume.
+  const unitRaw = rows[0]?.bucket_unit;
+  const unit = typeof unitRaw === "string" && unitRaw ? unitRaw : "week";
+  return {
+    ...spec,
+    xAxis: {
+      ...(spec.xAxis ?? {}),
+      name: `per ${unit}`,
+      nameTextStyle: { fontFamily: LABEL_FONT, fontSize: 10 },
+    },
+    _cerebro_height: "360px",
+  } as EChartsOption;
+}

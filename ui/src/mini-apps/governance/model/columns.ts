@@ -28,6 +28,7 @@ export const COLUMN_LABELS: Record<string, string> = {
   proposal_state: "State",
   vp: "VP",
   vp_state: "VP state",
+  vp_share: "VP share",
   choice_kind: "Choice",
   reason: "Reason",
   proposal_title: "Proposal",
@@ -96,6 +97,21 @@ export const COLUMN_LABELS: Record<string, string> = {
   delegated_vp_total: "Delegated VP",
   delegated_vp_mainnet: "Delegated VP (Ethereum)",
   delegated_vp_gnosischain: "Delegated VP (Gnosis Chain)",
+  poll_name: "Poll",
+  poll_type: "Type",
+  results_visibility: "Results",
+  voters: "Voters",
+  options_count: "Options",
+  leading_option: "Leading option",
+  leading_votes: "Leading votes",
+  close_at: "Closes",
+  likes_in_range: "Likes (range)",
+  likers_in_range: "Likers (range)",
+  likes_received_in_range: "Likes received (range)",
+  likes_given_in_range: "Likes given (range)",
+  lifetime_like_count: "Likes (lifetime)",
+  last_like_at: "Last like",
+  poll_voter_slots: "Poll voters",
 };
 
 /** Columns kept in the row payload (for click-through identifiers and cell
@@ -109,6 +125,15 @@ export const HIDDEN_COLUMNS: Record<string, string[]> = {
   voter_leaderboard: ["voter_key"],
   forum_topics: ["id", "category_id", "created_at", "slug", "bumped_at", "closed", "archived", "pinned"],
   contributor_leaderboard: ["id", "user_id"],
+  // results_hidden / leading_tied stay in the payload: the leading-option
+  // cell renders Hidden / Tie / No votes from them. poll_name stays VISIBLE
+  // as the disambiguator for topics carrying two polls (its value is usually
+  // the literal "poll" — the topic title leads).
+  forum_polls: [
+    "poll_id", "topic_id", "post_id", "post_number", "results_hidden",
+    "leading_tied", "results_visibility",
+  ],
+  most_liked_topics: ["id", "category_id", "last_like_at"],
   contributor_posts: ["id", "topic_id", "user_id", "post_id"],
   // balance_total_raw stays VISIBLE: it is the authoritative exact integer, and
   // it is the only balance shown at all for a token whose decimals were never

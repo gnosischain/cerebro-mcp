@@ -9,12 +9,15 @@ function fmtVp(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
-export function ChoiceBars({ entries, quorum, scoresTotal, rankedNote }: {
+export function ChoiceBars({ entries, quorum, scoresTotal, rankedNote, unitLabel = "VP" }: {
   entries: ChoiceEntry[];
   quorum: number | null;
   scoresTotal: number | null;
-  /** Extra explanatory note (ranked-choice proposals). */
+  /** Extra explanatory note (ranked-choice proposals / multiple-choice polls). */
   rankedNote?: string;
+  /** Unit noun for the cast-total captions. Default "VP" preserves the
+   * Snapshot-proposal render; forum polls pass "votes". */
+  unitLabel?: string;
 }) {
   if (entries.length === 0) {
     return <div className="gov-empty">No choices recorded for this proposal.</div>;
@@ -23,6 +26,11 @@ export function ChoiceBars({ entries, quorum, scoresTotal, rankedNote }: {
   const total = entries.reduce((sum, entry) => sum + (entry.score ?? 0), 0);
   const hasQuorum = quorum !== null && quorum > 0;
   const castTotal = scoresTotal ?? total;
+  // Aria phrase: the default keeps the historical "Voting power cast …" text
+  // verbatim; a custom unit reads "Votes cast …".
+  const ariaUnit = unitLabel === "VP"
+    ? "Voting power"
+    : unitLabel.charAt(0).toUpperCase() + unitLabel.slice(1);
   // The track spans max(scores_total, quorum) so both the fill and the
   // quorum marker always fit inside it.
   const trackMax = hasQuorum ? Math.max(castTotal, quorum) : castTotal;
@@ -51,14 +59,14 @@ export function ChoiceBars({ entries, quorum, scoresTotal, rankedNote }: {
       {rankedNote && <p className="gov-caption">{rankedNote}</p>}
       {trackMax > 0 && (
         <>
-          <div className="gov-quorum-track" role="img" aria-label={hasQuorum ? `Voting power cast ${fmtVp(castTotal)} against a quorum of ${fmtVp(quorum)}` : `Voting power cast ${fmtVp(castTotal)}; no quorum specified`}>
+          <div className="gov-quorum-track" role="img" aria-label={hasQuorum ? `${ariaUnit} cast ${fmtVp(castTotal)} against a quorum of ${fmtVp(quorum)}` : `${ariaUnit} cast ${fmtVp(castTotal)}; no quorum specified`}>
             <span style={{ width: `${Math.min(1, castTotal / trackMax) * 100}%` }} />
             {hasQuorum && (
               <span className="gov-quorum-marker" style={{ left: `${Math.min(1, quorum / trackMax) * 100}%` }} />
             )}
           </div>
           <p className="gov-quorum-caption">
-            {fmtVp(castTotal)} VP cast
+            {fmtVp(castTotal)} {unitLabel} cast
             {hasQuorum ? ` · quorum threshold ${fmtVp(quorum)} (marker)` : " · no quorum specified"}
           </p>
         </>

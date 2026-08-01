@@ -82,12 +82,19 @@ profiles:
           These views are written continuously. Prove a rewrite equivalent with
           BOTH forms inside ONE query — two separate runs measure the write.
         lesson: live-table-invalidates-cross-query-diff
+      - text: >-
+          Each UNION ALL arm resolves identifiers ALONE. A GROUP BY / ORDER BY
+          on an alias needs that alias declared in the same arm — the first
+          arm's AS does not carry across, and only a real ClickHouse notices.
+          Alias every arm.
+        lesson: ch-union-arm-needs-own-alias
     hazards:
       - ch-final-three-way-rule
       - ch-cte-inlined-per-reference
       - ch-output-alias-shadows-column
       - ch-alias-in-where-illegal-aggregation
       - ch-bare-limit-nondeterministic
+      - ch-union-arm-needs-own-alias
       - versioned-payload-positional-index
       - sql-loader-cache-needs-restart
       - sql-guard-counts-comments-as-code

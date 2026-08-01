@@ -8,7 +8,7 @@ import { SegmentedControl } from "../../shared/SegmentedControl";
 import { DatasetPanel, GroupBanner } from "../components/DatasetPanel";
 import { DateRangeControl } from "../components/DateRangeControl";
 import { GipBadge } from "../components/GipBadge";
-import { activityComboOption } from "../model/chartOptions";
+import { activityComboOption, likesByCategoryOption } from "../model/chartOptions";
 import { COLUMN_LABELS, hiddenColumnsFor } from "../model/columns";
 import { rowsToObjects } from "../../shared/rowDataset";
 import { parseActivity } from "../model/parseRows";
@@ -37,6 +37,44 @@ export function ForumSection({ ctx }: { ctx: GovViewContext }) {
     { field: "posts_created", label: "Posts", type: "line", yAxisIndex: 1 },
   ], "posts"), [activityDs]);
   const retryInsights = () => ctx.retryGroup("forum", "insights");
+
+  const pollSummary = firstRow(ctx, "poll_summary");
+  const polls = ctx.descriptors.forum_polls;
+  const pollIndex = new Map((polls?.columns ?? []).map((column, index) => [column.name, index]));
+  const likedTopics = ctx.descriptors.most_liked_topics;
+  const likedIndex = new Map((likedTopics?.columns ?? []).map((column, index) => [column.name, index]));
+  const pollActivityDs = useDataset(ctx, "poll_activity");
+  const pollActivitySpec = useMemo(() => activityComboOption(parseActivity(pollActivityDs), [
+    { field: "polls_created", label: "Polls created", type: "bar" },
+    { field: "poll_voters", label: "Poll voters", type: "line", yAxisIndex: 1 },
+  ], "voters"), [pollActivityDs]);
+  // Likes: bars stacked by topic category (likes_by_category) + the
+  // unique-likers line (likes_activity) — same bucketing and filters, so the
+  // buckets align by construction.
+  const likesActivityDs = useDataset(ctx, "likes_activity");
+  const likesByCategoryDs = useDataset(ctx, "likes_by_category");
+  const likesActivitySpec = useMemo(() => {
+    const likersByBucket = new Map<string, number | null>();
+    for (const row of parseActivity(likesActivityDs)) {
+      likersByBucket.set(row.bucket, typeof row.distinct_likers === "number" ? row.distinct_likers : null);
+    }
+    return likesByCategoryOption(rowsToObjects(likesByCategoryDs), likersByBucket);
+  }, [likesActivityDs, likesByCategoryDs]);
+  const retryEngagement = () => ctx.retryGroup("forum", "engagement");
+
+  // Visible attribution disclosure — the per-like table only attributes a
+  // share of the counter-tracked likes; the live figure ships in the summary
+  // (like_attribution_pct), never hard-coded here.
+  const attributionPct = pickNumber(summary, ["like_attribution_pct"]);
+  const likesHiddenOrDeleted = pickNumber(summary, ["likes_hidden_or_deleted"]) ?? 0;
+  const likesUnmapped = pickNumber(summary, ["likes_unmapped"]) ?? 0;
+  const attributionCopy =
+    `Attributed likes cover ${attributionPct !== null ? `${(attributionPct * 100).toFixed(0)}%` : "an unknown share"}`
+    + " of counter-tracked likes, measured over all forum history as of the latest ingest —"
+    + " coverage within the selected window is unknown (Discourse who-liked visibility limit).";
+  const exclusionCopy = likesHiddenOrDeleted + likesUnmapped > 0
+    ? ` ${fmtNum(likesHiddenOrDeleted)} hidden/deleted and ${fmtNum(likesUnmapped)} unmapped likes excluded.`
+    : "";
 
   return (
     <>
@@ -105,11 +143,16 @@ export function ForumSection({ ctx }: { ctx: GovViewContext }) {
               { label: "Posts", value: fmtNum(pickNumber(summary, ["post_count", "posts"])) },
               { label: "Active contributors", value: fmtNum(pickNumber(summary, ["contributor_count", "active_users", "user_count"])) },
               { label: "Views", value: fmtNum(pickNumber(summary, ["views", "view_count"])) },
-              { label: "Likes", value: fmtNum(pickNumber(summary, ["like_count", "likes"])) },
+              { label: "Likes (lifetime)", value: fmtNum(pickNumber(summary, ["like_count", "likes"])) },
+              { label: "Attributed likes (range)", value: fmtNum(pickNumber(summary, ["likes_in_range"])) },
+              { label: "Likers (range)", value: fmtNum(pickNumber(summary, ["distinct_likers"])) },
               { label: "Active categories", value: fmtNum(pickNumber(summary, ["active_categories", "category_count"])) },
             ]}
           />
         )}
+        {/* Below the grid, not in the meta slot: this copy is long, and the
+            flex meta slot would squeeze the KPI grid into a single column. */}
+        {summary && <p className="gov-caption">{attributionCopy}{exclusionCopy}</p>}
         <DatasetPanel
           title="Topics"
           descriptor={topics}
@@ -196,6 +239,152 @@ export function ForumSection({ ctx }: { ctx: GovViewContext }) {
               renderCell={(column, value) => {
                 if (column === "last_post_at") {
                   return <span className="gov-mono">{String(value ?? "").slice(0, 10)}</span>;
+                }
+                return undefined;
+              }}
+            />
+            {/* This panel sits OUTSIDE the engagement gate, so it carries its
+                own copy of the attribution disclosure. */}
+            <p className="gov-caption">
+              Likes received/given (range) are attributed likes only. {attributionCopy}
+            </p>
+          </DatasetPanel>
+        </div>
+      </GroupGate>
+
+      <GroupGate ctx={ctx} section="forum" group="engagement">
+        <GroupBanner groupLoaded={groups["forum.engagement"]} onRetry={retryEngagement} />
+        {pollSummary && (
+          <KpiRow
+            items={[
+              { label: "Polls", value: fmtNum(pickNumber(pollSummary, ["poll_count"])) },
+              { label: "Open polls", value: fmtNum(pickNumber(pollSummary, ["open_polls"])) },
+              { label: "Poll voters (slots)", value: fmtNum(pickNumber(pollSummary, ["poll_voter_slots"])) },
+              { label: "Topics with polls", value: fmtNum(pickNumber(pollSummary, ["topics_with_polls"])) },
+              { label: "Multiple-choice", value: fmtNum(pickNumber(pollSummary, ["multiple_choice_polls"])) },
+              { label: "Hidden results", value: fmtNum(pickNumber(pollSummary, ["hidden_result_polls"])) },
+            ]}
+          />
+        )}
+        {pollSummary && (
+          <p className="gov-caption">
+            Poll voters (slots) sums each poll's participant total — a user voting in several
+            polls counts once per poll. Like metrics below are attributed likes only. {attributionCopy}
+          </p>
+        )}
+        <div className="gov-grid-2">
+          <DatasetPanel
+            title="Poll activity"
+            descriptor={ctx.descriptors.poll_activity}
+            groupLoaded={groups["forum.engagement"]}
+            hydrationPhase={ctx.hydrated.poll_activity?.phase}
+            hydrationError={ctx.hydrated.poll_activity?.error}
+            onRetry={retryEngagement}
+          >
+            <ChartCard
+              chartId="gov-poll-activity"
+              hideId
+              sql={ctx.descriptors.poll_activity?.sql}
+              sourceModel="governance_db"
+              spec={pollActivitySpec}
+            />
+            <p className="gov-caption">
+              Polls and their participant totals grouped by the poll-bearing post's creation
+              date, not vote time — Discourse records no per-vote timestamps.
+            </p>
+          </DatasetPanel>
+          <DatasetPanel
+            title="Likes activity"
+            descriptor={ctx.descriptors.likes_by_category}
+            groupLoaded={groups["forum.engagement"]}
+            hydrationPhase={ctx.hydrated.likes_by_category?.phase}
+            hydrationError={ctx.hydrated.likes_by_category?.error}
+            onRetry={retryEngagement}
+          >
+            <ChartCard
+              chartId="gov-likes-activity"
+              hideId
+              sql={ctx.descriptors.likes_by_category?.sql}
+              sourceModel="governance_db"
+              spec={likesActivitySpec}
+            />
+            <p className="gov-caption">
+              Bars are likes given, stacked by the topic's forum category (top categories named,
+              the rest counted as Other); the line is unique likers per period.
+            </p>
+          </DatasetPanel>
+        </div>
+        <div className="gov-grid-2">
+          <DatasetPanel
+            title="Polls"
+            descriptor={polls}
+            groupLoaded={groups["forum.engagement"]}
+            onRetry={retryEngagement}
+            emptyLabel="No polls match the applied filters."
+          >
+            <PaginatedTable
+              dataset={polls}
+              datasetKey="forum_polls"
+              viewId={ctx.viewId}
+              fetchRows={ctx.fetchRows}
+              maxHeight="440px"
+              hiddenColumns={hiddenColumnsFor("forum_polls")}
+              columnLabels={COLUMN_LABELS}
+              sourceLabel="Forum activity (forum.gnosis.io)"
+              onCellClick={(column, _value, row) => {
+                if (column !== "topic_title") return;
+                const id = row[pollIndex.get("topic_id") ?? -1];
+                if (id !== undefined && id !== null && id !== "") ctx.onEntity("forum_topic", String(id));
+              }}
+              renderCell={(column, value, row) => {
+                if (column === "leading_option") {
+                  if (row[pollIndex.get("results_hidden") ?? -1]) return <span>Hidden</span>;
+                  if (row[pollIndex.get("leading_tied") ?? -1]) return <span>Tie</span>;
+                  const votes = row[pollIndex.get("leading_votes") ?? -1];
+                  if (Number(votes ?? 0) === 0) return <span>No votes</span>;
+                  return <span>{String(value ?? "—")}</span>;
+                }
+                if (column === "status") {
+                  const status = String(value ?? "");
+                  return <span className={`gov-state-chip gov-state-chip--${status === "open" ? "active" : status}`}>{status || "—"}</span>;
+                }
+                if (column === "created_at" || column === "close_at") {
+                  const text = String(value ?? "").slice(0, 10);
+                  return <span className="gov-mono">{text || "—"}</span>;
+                }
+                return undefined;
+              }}
+            />
+          </DatasetPanel>
+          <DatasetPanel
+            title="Most liked topics"
+            descriptor={likedTopics}
+            groupLoaded={groups["forum.engagement"]}
+            onRetry={retryEngagement}
+            emptyLabel="No attributed likes in the selected range."
+          >
+            <PaginatedTable
+              dataset={likedTopics}
+              datasetKey="most_liked_topics"
+              viewId={ctx.viewId}
+              fetchRows={ctx.fetchRows}
+              maxHeight="440px"
+              hiddenColumns={hiddenColumnsFor("most_liked_topics")}
+              columnLabels={COLUMN_LABELS}
+              sourceLabel="Forum activity (forum.gnosis.io)"
+              onCellClick={(column, _value, row) => {
+                if (column !== "title") return;
+                const id = row[likedIndex.get("id") ?? -1];
+                if (id !== undefined && id !== null && id !== "") ctx.onEntity("forum_topic", String(id));
+              }}
+              renderCell={(column, value, row) => {
+                if (column === "title") {
+                  return (
+                    <span>
+                      {String(value ?? "")}
+                      <GipBadge gip={pickNumber({ gip: row[likedIndex.get("gip_number") ?? -1] }, ["gip"])} />
+                    </span>
+                  );
                 }
                 return undefined;
               }}
