@@ -3,7 +3,7 @@ id: grafana-table-format-needs-pivot-transform
 title: >-
   Table-format Grafana targets are never pivoted into series by the panel —
   long-format results render broken while every SQL gate reports OK
-status: observed
+status: enforced
 layer: mcp-tool
 scope: >-
   src/cerebro_mcp/grafana/ (models, styles, compiler), the publish tools in
@@ -26,7 +26,7 @@ evidence:
     trends; v2's groupingToMatrix into NATIVE heatmap panels then crashed with
     the reading-'config' TypeError; v3 rendering the retention grids as tables
     works.
-  - "fix in tree, pending deploy: compiler.auto_transformations + _renders_as_grid_table, styles.AUTO_TRANSFORM_COLUMNS, models.py canonical-alias parse gate"
+  - "fix merged to main 2026-08-17: compiler.auto_transformations + _renders_as_grid_table, styles.AUTO_TRANSFORM_COLUMNS, models.py canonical-alias parse gate (CI-run via make bench-check)"
   - "tests/test_grafana_compiler.py::test_auto_pivot_added_for_time_series_multi, ::test_distribution_2d_compiles_to_color_grid_table, ::test_user_transformations_win_over_auto_pivot, ::test_time_series_multi_without_label_alias_rejected"
 ---
 ## Symptom
@@ -81,12 +81,13 @@ and the panel carries `{"id": "partitionByValues", "options": {"fields":
 '0')` for hours), numeric categories are rejected by the barchart panel. For
 `distribution_2d`: never a native heatmap — render a table fed by
 `groupingToMatrix` (rowField=y, columnField=x) with color-background cells.
-The in-tree compiler does all of this automatically when the spec supplies no
-transformations of its own.
+The compiler does all of this automatically when the spec supplies no
+transformations of its own (a running server needs a restart to pick the
+merged code up).
 
 ## Enforcement
 
-In tree, pending deploy (status stays `observed` until merged):
+Merged to main 2026-08-17:
 `compile_grafana_dashboard` auto-appends the pivot for the (viz, shape) pairs
 in `styles.AUTO_TRANSFORM_COLUMNS` and compiles heatmap+distribution_2d as a
 color-graded table grid; `models.GrafanaPanelDef` rejects long-format SQL at

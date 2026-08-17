@@ -94,7 +94,7 @@ separate corpus.
 ## Grafana publishing
 
 - [grafana-table-format-needs-pivot-transform](grafana-table-format-needs-pivot-transform.md)
-  `observed` — every ClickHouse target ships as table format, so long-format
+  `enforced` — every ClickHouse target ships as table format, so long-format
   multi-series results need a compiler-added pivot transformation or they render
   as one garbled series while validate/verify report healthy row counts; and a
   native heatmap panel crashes outright on a categorical x/y grid. SQL-level
