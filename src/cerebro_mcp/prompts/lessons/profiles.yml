@@ -197,6 +197,28 @@ profiles:
       - npm test --prefix ui
     guide: ui/src/mini-apps/AGENTS.md
 
+  - name: grafana_publisher
+    description: GrafanaDashboardDef schema, compiler, and the publish tools
+    match:
+      path_prefix:
+        - src/cerebro_mcp/grafana/
+        - src/cerebro_mcp/tools/visualization/grafana.py
+    rules:
+      - text: >-
+          Every target ships as TABLE format, so the panel never pivots
+          long-format rows into series. The compiler must append the pivot
+          transformation (canonical aliases: `label`; `category`/`series`/
+          `value`; `x`/`y`/`value`), and a native heatmap panel cannot render a
+          categorical x/y grid at all — compile it as a color-graded table.
+          Green validate/verify output proves the SQL runs, not that the panel
+          renders.
+        lesson: grafana-table-format-needs-pivot-transform
+    hazards:
+      - grafana-table-format-needs-pivot-transform
+    validation:
+      - .venv/bin/python -m pytest tests/test_grafana_compiler.py tests/test_grafana_models.py tests/test_grafana_tools.py -q
+    guide: AGENTS.md
+
   - name: build_and_gates
     description: Makefile targets, the image build, CI workflows and git hooks
     match:

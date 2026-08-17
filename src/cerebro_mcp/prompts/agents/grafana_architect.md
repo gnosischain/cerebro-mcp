@@ -56,14 +56,21 @@ Always declare the shape your SQL returns. The compiler rejects mismatches.
 | `single_value` | 1 row x 1 numeric column |
 | `single_value_bounded` | 1 row x 1 numeric column with a known max (e.g. a % of target) |
 | `time_series_single` | `(time, value)` |
-| `time_series_multi` | `(time, series_label, value)` |
+| `time_series_multi` | `(time, label, value)` — series column MUST be aliased `label` |
 | `category_value` | `(category, value)` |
-| `category_value_multi` | `(category, series, value)` |
+| `category_value_multi` | `(category, series, value)` — exactly these aliases |
 | `share_of_total` | `(category, value)` summing to a whole, <= 6 rows |
 | `distribution_1d` | `(bucket, count)` |
-| `distribution_2d` | `(x_bucket, y_bucket, count)` |
+| `distribution_2d` | `(x, y, value)` — exactly these aliases |
 | `category_state_over_time` | `(time, entity, state_label)` |
 | `tabular` | arbitrary rows x cols for audit |
+
+The long-format shapes (`time_series_multi`, `category_value_multi`,
+`distribution_2d`) are pivoted into series by a **compiler-added Grafana
+transformation that references columns BY NAME** — that is why the aliases
+above are mandatory, and the schema rejects SQL missing them at parse time.
+Supplying your own `transformations` on the panel disables the auto-pivot
+(and the alias check) entirely.
 
 ## Dashboard composition rules
 
@@ -86,7 +93,12 @@ Always declare the shape your SQL returns. The compiler rejects mismatches.
   are > 8 categories or long labels.
 - `share_of_total` -> `piechart` (<= 6 slices; otherwise use
   `barchart_horizontal`).
-- `distribution_1d` -> `histogram`; `distribution_2d` -> `heatmap`.
+- `distribution_1d` -> `histogram`; `distribution_2d` -> `heatmap`. Note:
+  a `distribution_2d` "heatmap" (e.g. a cohort-retention grid with two
+  categorical axes) is compiled as a color-graded TABLE grid, not a native
+  heatmap panel — the native panel only supports time x numeric buckets and
+  crashes on categorical grids. Declare it as `viz: heatmap` anyway; the
+  compiler handles the rendering.
 - `category_state_over_time` -> `state_timeline` (supply `value_mappings`).
 - `tabular` -> `table`.
 
@@ -111,7 +123,7 @@ Always declare the shape your SQL returns. The compiler rejects mismatches.
 
 ## ClickHouse Grafana rules (MUST follow — these are the publish failures)
 
-The ClickHouse Grafana datasource is strict. These four rules prevent the
+The ClickHouse Grafana datasource is strict. These rules prevent the
 errors seen most often when `verify_grafana_dashboard` runs panel SQL against
 the live datasource:
 
@@ -131,6 +143,16 @@ the live datasource:
 4. **Explicit date arithmetic in WHERE.** Use
    `addMonths(toStartOfMonth(today()), -N)` rather than `today() - N` for
    month-level ranges — implicit integer subtraction produces unexpected types.
+5. **Long-format multi-series SQL must use the canonical aliases** (see the
+   data_shape table above). Because of rule 1 the panel never pivots rows into
+   series itself; the compiler appends the pivot transformation, which looks
+   columns up BY NAME (`label` for `time_series_multi`;
+   `category`/`series`/`value` for `category_value_multi`; `x`/`y`/`value` for
+   `distribution_2d`). A wrong alias renders as one garbled series while every
+   SQL gate stays green — this is a render-layer failure that `validate` /
+   `verify` structurally cannot catch. Also: barchart CATEGORY columns must be
+   Strings — cast numeric categories (hours:
+   `leftPad(toString(toHour(t)), 2, '0')`) or the panel rejects the frame.
 
 ## UID convention
 

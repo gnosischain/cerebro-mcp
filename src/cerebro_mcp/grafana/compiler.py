@@ -24,6 +24,7 @@ from cerebro_mcp.grafana.models import (
     GrafanaVariableDef,
 )
 from cerebro_mcp.grafana.styles import (
+    AUTO_TRANSFORM_COLUMNS,
     DASHBOARD_STYLE,
     KPI_THRESHOLDS_REFINED,
     PALETTE,
@@ -193,9 +194,11 @@ def _options_histogram(panel: GrafanaPanelDef) -> dict:
 
 
 def _options_heatmap(panel: GrafanaPanelDef) -> dict:
-    calculate = panel.data_shape == "time_series_multi"
+    # Only reached for time_series_multi (raw values bucketed over time).
+    # distribution_2d never compiles to a native heatmap panel — see
+    # _renders_as_grid_table.
     return {
-        "calculate": calculate,
+        "calculate": True,
         "color": {"mode": "scheme", "scheme": "Inferno", "steps": 64},
         "legend": {"show": True},
         "tooltip": {"show": True, "yHistogram": False},
@@ -237,9 +240,25 @@ _OPTION_BUILDERS = {
 }
 
 
+def _renders_as_grid_table(panel: GrafanaPanelDef) -> bool:
+    """heatmap + distribution_2d compiles to a color-graded TABLE grid.
+
+    The native heatmap panel structurally cannot render a categorical x/y
+    grid from table-format data — it expects time x numeric buckets and
+    crashes with `Cannot read properties of undefined (reading 'config')`
+    (observed in production 2026-08-17; lesson:
+    grafana-table-format-needs-pivot-transform). A table panel fed by the
+    groupingToMatrix pivot with color-background cells renders the same
+    information reliably, so the compiler emits that instead.
+    """
+    return panel.effective_viz == "heatmap" and panel.data_shape == "distribution_2d"
+
+
 def _custom_field_config(panel: GrafanaPanelDef) -> dict:
     """The `custom` block of fieldConfig.defaults, per viz family."""
     viz = panel.effective_viz
+    if _renders_as_grid_table(panel):
+        return {"align": "auto", "cellOptions": {"type": "color-background"}}
     if viz == "timeseries_line":
         return {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10,
                 "spanNulls": False, "showPoints": "never"}
@@ -266,6 +285,14 @@ def _field_config(panel: GrafanaPanelDef) -> dict:
         "thresholds": _build_thresholds(panel),
         "color": {"mode": "thresholds"} if panel.role == "kpi" else {"mode": "palette-classic"},
     }
+    if _renders_as_grid_table(panel):
+        # Continuous low-red -> high-green gradient over the unit's bounds
+        # gives the color-background cells the heat look the heatmap intent
+        # asked for (percent -> 0..100).
+        defaults["color"] = {"mode": "continuous-RdYlGr"}
+        implied = bounds_for_unit(panel.unit)
+        if implied:
+            defaults["min"], defaults["max"] = implied
     if panel.decimals is not None:
         defaults["decimals"] = panel.decimals
 
@@ -328,19 +355,58 @@ def _build_target(panel: GrafanaPanelDef) -> dict:
     }
 
 
+# --- auto transformations -------------------------------------------------
+# Table-format targets (see _FORMAT_TABLE above) are never pivoted into
+# series by the panel itself, so the long-format shapes need a Grafana
+# transformation or they render as one garbled series while validate/verify
+# still report healthy row counts (confirmed in production 2026-08-17;
+# lesson: grafana-table-format-needs-pivot-transform). The compiler appends
+# the pivot itself for the (viz, shape) pairs in AUTO_TRANSFORM_COLUMNS,
+# whose canonical column aliases models.py enforces at parse time. A panel
+# that declares its own `transformations` opts out entirely.
+
+
+def auto_transformations(panel: GrafanaPanelDef) -> list[dict]:
+    """Pivot transformation implied by (viz, data_shape); [] when none."""
+    if (panel.effective_viz, panel.data_shape) not in AUTO_TRANSFORM_COLUMNS:
+        return []
+    if panel.data_shape == "time_series_multi":
+        return [{
+            "id": "partitionByValues",
+            "options": {"fields": ["label"], "keepFields": False,
+                        "naming": {"asLabels": True}},
+        }]
+    if panel.data_shape == "category_value_multi":
+        return [{
+            "id": "groupingToMatrix",
+            "options": {"columnField": "series", "rowField": "category",
+                        "valueField": "value"},
+        }]
+    # distribution_2d grid table: one row per y (cohort), one column per x.
+    return [{
+        "id": "groupingToMatrix",
+        "options": {"columnField": "x", "rowField": "y", "valueField": "value"},
+    }]
+
+
 def _compile_panel(panel: GrafanaPanelDef, panel_id: int, grid_pos: dict) -> dict:
-    builder = _OPTION_BUILDERS[panel.effective_viz]
+    if _renders_as_grid_table(panel):
+        panel_type = "table"
+        options = _options_table(panel)
+    else:
+        panel_type = grafana_type(panel.effective_viz)
+        options = _OPTION_BUILDERS[panel.effective_viz](panel)
     return {
         "id": panel_id,
-        "type": grafana_type(panel.effective_viz),
+        "type": panel_type,
         "title": panel.title,
         "description": panel.description,
         "datasource": _datasource(),
         "gridPos": grid_pos,
         "fieldConfig": _field_config(panel),
-        "options": builder(panel),
+        "options": options,
         "targets": [_build_target(panel)],
-        "transformations": panel.transformations,
+        "transformations": panel.transformations or auto_transformations(panel),
     }
 
 

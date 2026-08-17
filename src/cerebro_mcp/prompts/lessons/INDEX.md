@@ -91,6 +91,15 @@ separate corpus.
   GIP citation arc bowed downward past the y=0 floor and was clipped away; the guard
   had asserted the two signs were opposite, which was true and yet exactly the bug.
 
+## Grafana publishing
+
+- [grafana-table-format-needs-pivot-transform](grafana-table-format-needs-pivot-transform.md)
+  `observed` — every ClickHouse target ships as table format, so long-format
+  multi-series results need a compiler-added pivot transformation or they render
+  as one garbled series while validate/verify report healthy row counts; and a
+  native heatmap panel crashes outright on a categorical x/y grid. SQL-level
+  gates structurally cannot see render-layer failures.
+
 ## Gates and workflow
 
 - [late-gate-one-gap-at-a-time](late-gate-one-gap-at-a-time.md) `enforced` — the

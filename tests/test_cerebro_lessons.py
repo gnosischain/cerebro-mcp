@@ -219,6 +219,7 @@ RETRIEVAL_CASES = [
     ("class is applied but no border or background", "css-undefined-token-drops-rule"),
     ("build stage re-runs every push nothing changed", "unexported-build-stage-never-caches"),
     ("unknown identifier 47 union arm group by", "ch-union-arm-needs-own-alias"),
+    ("grafana panel renders one garbled series verify ok", "grafana-table-format-needs-pivot-transform"),
 ]
 
 

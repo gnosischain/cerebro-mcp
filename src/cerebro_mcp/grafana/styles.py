@@ -220,6 +220,26 @@ VIZ_ACCEPTS_SHAPE: dict[str, set[str]] = {
     viz: set(spec["accepts"]) for viz, spec in PANEL_CATALOG.items()
 }
 
+# --- Long-format pivot contract ------------------------------------------
+# Every ClickHouse target ships as TABLE format (see compiler._FORMAT_TABLE),
+# so the panel itself never pivots long-format rows into series: a
+# (time, label, value) result draws as one garbled series while the SQL-level
+# gates (validate/verify) still report healthy row counts. The compiler
+# therefore auto-appends the pivot transformation for these (viz, data_shape)
+# pairs. The transformation references columns BY NAME, so the SQL must
+# expose exactly these aliases — enforced at parse time in models.py unless
+# the panel supplies its own `transformations` (which always win).
+# Lesson: grafana-table-format-needs-pivot-transform.
+
+AUTO_TRANSFORM_COLUMNS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("timeseries_line", "time_series_multi"): ("label",),
+    ("timeseries_area", "time_series_multi"): ("label",),
+    ("timeseries_bar", "time_series_multi"): ("label",),
+    ("barchart_vertical", "category_value_multi"): ("category", "series", "value"),
+    ("barchart_horizontal", "category_value_multi"): ("category", "series", "value"),
+    ("heatmap", "distribution_2d"): ("x", "y", "value"),
+}
+
 # Max pie slices before the persona should switch to barchart_horizontal.
 MAX_PIE_SLICES = 6
 

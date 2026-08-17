@@ -33,11 +33,11 @@ def _full_dashboard():
              "data_shape": "single_value_bounded", "sql_query": "SELECT v FROM t", "unit": "percent"},
             {"title": "DAU", "role": "trend", "viz": "timeseries_area",
              "data_shape": "time_series_multi",
-             "sql_query": "SELECT toStartOfDay(ts) AS time, chain, count() FROM e WHERE $__timeFilter(ts) GROUP BY time, chain",
+             "sql_query": "SELECT toStartOfDay(ts) AS time, chain AS label, count() AS value FROM e WHERE $__timeFilter(ts) GROUP BY time, label",
              "unit": "short"},
             {"title": "Heat", "role": "breakdown", "viz": "heatmap",
              "data_shape": "distribution_2d",
-             "sql_query": "SELECT x, y, count() FROM d GROUP BY x, y", "unit": "short"},
+             "sql_query": "SELECT x, y, count() AS value FROM d GROUP BY x, y", "unit": "percent"},
             {"title": "Top users", "role": "detail", "data_shape": "tabular",
              "sql_query": "SELECT user, n FROM top LIMIT 50"},
         ],
@@ -185,8 +185,8 @@ def test_per_viz_option_builders():
     # area-multi has stacking normal
     area_custom = by_title["DAU"]["fieldConfig"]["defaults"]["custom"]
     assert area_custom["stacking"]["mode"] == "normal"
-    # heatmap with distribution_2d => calculate False
-    assert by_title["Heat"]["options"]["calculate"] is False
+    # heatmap with distribution_2d compiles to a color-graded table grid
+    assert by_title["Heat"]["type"] == "table"
     # table has cellOptions
     assert "cellOptions" in by_title["Top users"]["fieldConfig"]["defaults"]["custom"]
 
@@ -199,6 +199,107 @@ def test_heatmap_timeseries_multi_calculates_true():
     ])
     out = compile_grafana_dashboard(d)
     assert out["panels"][0]["options"]["calculate"] is True
+    # calculate-mode heatmaps bucket the raw value column themselves; the
+    # auto-pivot applies only to timeseries_* viz, never here.
+    assert out["panels"][0]["type"] == "heatmap"
+    assert out["panels"][0]["transformations"] == []
+
+
+# --- long-format pivot: auto transformations + alias contract -------------
+# Table-format targets are never pivoted into series by the panel itself
+# (lesson: grafana-table-format-needs-pivot-transform) — these tests pin the
+# compiler-added pivots and prove the parse-time alias gate rejects exactly
+# the SQL it exists to reject.
+
+
+def test_auto_pivot_added_for_time_series_multi():
+    out = compile_grafana_dashboard(_full_dashboard())
+    by_title = {p["title"]: p for p in out["panels"]}
+    assert by_title["DAU"]["transformations"] == [{
+        "id": "partitionByValues",
+        "options": {"fields": ["label"], "keepFields": False,
+                    "naming": {"asLabels": True}},
+    }]
+    # shapes without a long-format pivot stay untransformed
+    assert by_title["Users"]["transformations"] == []
+    assert by_title["Top users"]["transformations"] == []
+
+
+def test_distribution_2d_compiles_to_color_grid_table():
+    out = compile_grafana_dashboard(_full_dashboard())
+    heat = {p["title"]: p for p in out["panels"]}["Heat"]
+    # native heatmap panel crashes on categorical grids -> table grid instead
+    assert heat["type"] == "table"
+    assert heat["transformations"] == [{
+        "id": "groupingToMatrix",
+        "options": {"columnField": "x", "rowField": "y", "valueField": "value"},
+    }]
+    defaults = heat["fieldConfig"]["defaults"]
+    assert defaults["custom"]["cellOptions"] == {"type": "color-background"}
+    assert defaults["color"]["mode"] == "continuous-RdYlGr"
+    # percent unit implies 0..100 bounds for the gradient
+    assert defaults["min"] == 0.0 and defaults["max"] == 100.0
+
+
+def test_auto_pivot_barchart_category_value_multi():
+    d = GrafanaDashboardDef(uid="u", title="t", panels=[
+        {"title": "Hourly", "role": "breakdown", "viz": "barchart_vertical",
+         "data_shape": "category_value_multi",
+         "sql_query": "SELECT hour AS category, chain AS series, count() AS value FROM e GROUP BY category, series",
+         "unit": "short"},
+    ])
+    out = compile_grafana_dashboard(d)
+    assert out["panels"][0]["transformations"] == [{
+        "id": "groupingToMatrix",
+        "options": {"columnField": "series", "rowField": "category",
+                    "valueField": "value"},
+    }]
+
+
+def test_user_transformations_win_over_auto_pivot():
+    custom = [{"id": "partitionByValues", "options": {"fields": ["chain"]}}]
+    d = GrafanaDashboardDef(uid="u", title="t", panels=[
+        {"title": "DAU", "role": "trend", "viz": "timeseries_line",
+         "data_shape": "time_series_multi",
+         # no canonical aliases needed when transformations are supplied
+         "sql_query": "SELECT time, chain, v FROM e",
+         "unit": "short", "transformations": custom},
+    ])
+    out = compile_grafana_dashboard(d)
+    assert out["panels"][0]["transformations"] == custom
+
+
+def test_time_series_multi_without_label_alias_rejected():
+    # The gate must fail on the exact input it exists to reject: long-format
+    # SQL whose series column is not aliased `label` and no explicit
+    # transformations to compensate.
+    with pytest.raises(ValueError, match="label"):
+        GrafanaDashboardDef(uid="u", title="t", panels=[
+            {"title": "DAU", "role": "trend", "viz": "timeseries_line",
+             "data_shape": "time_series_multi",
+             "sql_query": "SELECT toStartOfDay(ts) AS time, chain, count() AS value FROM e GROUP BY time, chain",
+             "unit": "short"},
+        ])
+
+
+def test_distribution_2d_without_canonical_aliases_rejected():
+    with pytest.raises(ValueError, match="Missing"):
+        GrafanaDashboardDef(uid="u", title="t", panels=[
+            {"title": "Heat", "role": "breakdown", "viz": "heatmap",
+             "data_shape": "distribution_2d",
+             "sql_query": "SELECT a, b, count() FROM d GROUP BY a, b",
+             "unit": "short"},
+        ])
+
+
+def test_category_value_multi_without_canonical_aliases_rejected():
+    with pytest.raises(ValueError, match="Missing"):
+        GrafanaDashboardDef(uid="u", title="t", panels=[
+            {"title": "Hourly", "role": "breakdown", "viz": "barchart_vertical",
+             "data_shape": "category_value_multi",
+             "sql_query": "SELECT hour, chain, count() FROM e GROUP BY hour, chain",
+             "unit": "short"},
+        ])
 
 
 def test_five_kpis_balance_across_rows_filling_24():

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cerebro_mcp.grafana.styles import (
     ALLOWED_UNITS,
+    AUTO_TRANSFORM_COLUMNS,
     DataShape,
     PanelRole,
     ROLE_ALLOWED_VIZ,
@@ -120,6 +121,32 @@ class GrafanaPanelDef(BaseModel):
             raise ValueError(
                 f"viz '{viz}' requires value_mappings (state -> color)"
             )
+
+        # Long-format shapes get a compiler-added pivot transformation that
+        # references columns BY NAME (table-format targets are never pivoted
+        # by the panel itself — see compiler.auto_transformations; lesson:
+        # grafana-table-format-needs-pivot-transform). Unless the panel
+        # supplies its own transformations, the SQL must expose the canonical
+        # aliases the pivot will look for. This is a token-presence check,
+        # not a parser — it exists to fail loudly at parse time instead of
+        # publishing a panel that renders broken while every SQL gate is green.
+        if not self.transformations:
+            required = AUTO_TRANSFORM_COLUMNS.get((viz, self.data_shape))
+            if required:
+                missing = [
+                    col for col in required
+                    if not re.search(rf"\b{col}\b", self.sql_query, re.IGNORECASE)
+                ]
+                if missing:
+                    raise ValueError(
+                        f"viz '{viz}' with data_shape '{self.data_shape}' is "
+                        f"pivoted into series by a compiler-added transformation "
+                        f"that references columns by name. The SQL must expose "
+                        f"column(s) {list(required)} — alias them (e.g. "
+                        f"`chain AS label`). Missing: {missing}. Alternatively "
+                        f"supply explicit `transformations` to override the "
+                        f"auto-pivot."
+                    )
 
         return self
 
