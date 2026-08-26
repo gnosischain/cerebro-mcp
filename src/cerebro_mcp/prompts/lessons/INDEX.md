@@ -113,6 +113,12 @@ separate corpus.
   "no dimensional breakdown", abandoned the report and wrote markdown files
   instead; it actually had TWO gaps, so complying once would have been refused
   again. A late gate that rations its feedback gets abandoned, not satisfied.
+- [eval-single-id-pin-on-shared-symptom](eval-single-id-pin-on-shared-symptom.md)
+  `observed` — a retrieval-eval scenario that pins ONE lesson id on symptom wording
+  a whole incident cluster shares breaks when the (sibling-built) corpus grows: the
+  expected lesson's score is unchanged, new records crowd it out. Widen the tuple
+  only with shared-incident evidence, and ALWAYS re-pin the displaced lesson under
+  wording only it owns — a tuple satisfied by another lesson guarantees nothing.
 
 ## Runtime and configuration
 
