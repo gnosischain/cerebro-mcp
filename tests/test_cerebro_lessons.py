@@ -1,10 +1,14 @@
 """Gates for this repo's own lesson corpus.
 
 Four of these exist specifically because dbt-cerebro's otherwise-excellent system
-does NOT have them, and the gaps have already cost it something:
+lacked them, and the gaps have already cost it something:
 
-  - the `status` vocabulary is documented in three places and validated nowhere, so
-    an undocumented fifth value ("primer") drifted into that corpus;
+  - the `status` vocabulary was documented in three places and validated nowhere,
+    so an undocumented value ("primer") drifted into that corpus — and later two
+    more synonyms (`documented`, `resolved`). Closed upstream 2026-08-26:
+    dbt-cerebro's build_agent_context.py now fails the build on an
+    out-of-vocabulary status, with `primer` kept as a documented value for
+    conceptual background records (this repo's vocabulary has no primers);
   - INDEX.md completeness is manual — nothing catches an unindexed record or an
     index entry pointing at a file that does not exist;
   - the body section headings are convention only;
@@ -221,6 +225,8 @@ RETRIEVAL_CASES = [
     ("unknown identifier 47 union arm group by", "ch-union-arm-needs-own-alias"),
     ("grafana panel renders one garbled series verify ok", "grafana-table-format-needs-pivot-transform"),
     ("whole section fails total memory limit 10 GiB view", "fat-view-join-never-prunes"),
+    ("eval scenario fails after corpus rebuilt score unchanged",
+     "eval-single-id-pin-on-shared-symptom"),
 ]
 
 

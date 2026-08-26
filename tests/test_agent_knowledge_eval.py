@@ -32,8 +32,16 @@ _DEFAULT_LOCAL = (
 # Derived from the L1-L8 / OC-1 / OC-2 investigation plus the promoted
 # session-memory lessons — the "same mistakes over and over" corpus.
 SCENARIOS = [
-    # L1 — WxDAI decode change / dropped logs
-    ("decoded events missing after raw backfill", None, "decode-watermark-late-logs"),
+    # L1/L3 — the same incident recorded from two layers: the raw backfill that
+    # landed below the append watermarks. raw-logs-ingestion-holes' evidence
+    # names the event and routes to the watermark lesson — either is a correct
+    # diagnosis start.
+    ("decoded events missing after raw backfill", None,
+     ("decode-watermark-late-logs", "raw-logs-ingestion-holes")),
+    # L1 pinned uniquely — the widening above must not leave the watermark
+    # lesson unpinned (its other tuple appearance below is satisfied by
+    # frontier-day).
+    ("logs arrived late missing from decoded models", None, "decode-watermark-late-logs"),
     # Two lessons legitimately own this symptom (historical drop vs frozen
     # frontier day) — either surfacing is a correct diagnosis start.
     ("negative token balances real holder", None,
