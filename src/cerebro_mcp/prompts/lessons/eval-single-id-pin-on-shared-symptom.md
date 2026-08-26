@@ -4,7 +4,7 @@ title: >-
   A retrieval-eval scenario that pins ONE lesson id on symptom wording a whole
   incident cluster shares breaks when the corpus grows — and widening the
   tuple without a unique re-pin silently unpins the lesson
-status: observed
+status: remediated
 layer: testing
 scope: >-
   the retrieval evals — tests/test_agent_knowledge_eval.py (dbt corpus, built
@@ -38,7 +38,7 @@ evidence:
     lesson, so a future drift degrades gracefully
   - >-
     tests/test_agent_knowledge_eval.py — widened tuple + unique re-pin
-    scenario (fix in tree, pending commit)
+    scenario, merged and CI-green on main 2026-08-26 (PR #4)
 ---
 ## Symptom
 
