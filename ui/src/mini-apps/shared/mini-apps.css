@@ -1788,6 +1788,15 @@ button.data-card:hover { border-color: var(--border-hover); transform: translate
   border-top: 1px solid var(--border);
   gap: 12px;
 }
+/* Provenance line under a PaginatedTable. Lived only in cow-explorer.css
+ * while the component is shared — every OTHER host rendered it unstyled and
+ * overflowing (the second-host stylesheet lesson). Same move ChainBadge made. */
+.ptable__source {
+  padding: 7px 10px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  font: 10px var(--font-mono, ui-monospace, monospace);
+}
 
 /* LoadingOverlay */
 .loading {

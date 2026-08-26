@@ -9,6 +9,7 @@ SELECT
   CAST(NULL AS Nullable(Float64)) AS value_usd
 FROM @src AS t
 INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
-WHERE t.job_name = '@job' AND @chain_sql AND @ltd_sql
+WHERE t.job_name = '@job' AND t.snapshot_date IN (SELECT as_of FROM asof)
+  AND @chain_sql AND @ltd_sql
 GROUP BY t.chain_id, t.wallet_address
 ORDER BY gno_units DESC, tokens_held DESC, wallet_address

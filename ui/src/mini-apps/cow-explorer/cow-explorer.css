@@ -23,6 +23,7 @@
 .cow-filterbar label{display:flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:12px}.cow-filterbar input{min-width:235px;font-family:var(--font-mono)}
 .cow-timebar{padding:8px 16px;background:var(--surface-1);border-bottom:1px solid var(--border);flex-wrap:wrap}.cow-timebar label{display:flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:12px}.cow-timebar input,.cow-timebar select,.cow-timebar button{border:1px solid var(--border);background:var(--surface-2);color:var(--text-primary);border-radius:7px;padding:6px 9px;font:12px var(--font-body)}
 .cow-empty{min-height:160px;display:grid;place-items:center;color:var(--text-muted);border:1px dashed var(--border);border-radius:8px}
+.cow-caption{margin:6px 2px 0;font:11px var(--font-body);color:var(--text-muted)}
 .cow-live-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:4px 0 10px}
 .cow-live-pulse{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .cow-live-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:999px;border:1px solid var(--border);background:var(--surface-2);font:11px var(--font-mono);color:var(--text-secondary)}
@@ -112,7 +113,9 @@ button.cow-live-chip:hover{border-color:var(--border-hover)}
 .cow-amount--raw sup{color:#fbbf24;margin-left:2px}
 .cow-time{font:12px var(--font-mono);color:var(--text-secondary)}
 .ptable__cell--clickable{cursor:pointer}.ptable__cell--clickable:hover{color:var(--primary);background:var(--accent-bg)}
-.ptable__error{padding:8px 12px;color:#fca5a5;background:rgba(239,68,68,.1);font-size:12px}.ptable__source{padding:7px 10px;color:var(--text-muted);border-top:1px solid var(--border);font:10px var(--font-mono)}
+.ptable__error{padding:8px 12px;color:#fca5a5;background:rgba(239,68,68,.1);font-size:12px}
+/* .ptable__source moved to shared/mini-apps.css — the component is shared and
+   every other host rendered it unstyled (same move ChainBadge made). */
 @media(max-width:900px){.cow-subbar{align-items:stretch;flex-direction:column}.cow-nav-groups{overflow-x:auto}.cow-nav-subtabs{flex-wrap:wrap}.cow-search{justify-content:stretch}.cow-search input{width:100%}.cow-controls select{max-width:120px}.cow-candidates button{grid-template-columns:1fr}.cow-filterbar input{min-width:180px}.cow-content{padding:12px}}
 
 .cow-grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(480px,1fr));gap:0 16px;align-items:stretch}

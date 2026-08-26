@@ -16,6 +16,7 @@ from cerebro_mcp.runtime.mini_app_cache import CachedDataset, reset_cache_for_te
 from cerebro_mcp.security import RiskClass, TOOL_RISK_REGISTRY
 from cerebro_mcp.tools.tool_meta import TOOL_META
 from cerebro_mcp.tools.visualization import governance_explorer, mini_apps, web_apps
+from tests.gip_fixtures import GIP_TITLE_FIXTURES
 from tests.sql_text import sql_code
 
 
@@ -228,6 +229,7 @@ def _all_specs() -> list[governance_explorer.QuerySpec]:
     specs += governance_explorer._delegations_specs(range_state, {
         **defaults, "sort_by": "recently_active",
     })
+    specs += governance_explorer._graph_specs(range_state)
     specs += governance_explorer._treasury_specs(range_state, {
         **defaults, "chain_id": 100, "asset": ASSET, "exclude_ltd": True,
         "sort_by": "supply_share",
@@ -235,6 +237,8 @@ def _all_specs() -> list[governance_explorer.QuerySpec]:
     for kind, identifier in (
         ("proposal", PROPOSAL_ID), ("voter", VOTER),
         ("forum_topic", "987654"), ("forum_user", "987654"),
+        ("treasury_wallet", "100:0x0000000000000000000000000000000000000001"),
+        ("treasury_token", "100:0x0000000000000000000000000000000000000002"),
     ):
         specs += governance_explorer._entity_specs(kind, identifier)
     return specs
@@ -936,39 +940,98 @@ def test_classify_choice_python_helper_edge_cases(choice_raw, choice_count, kind
         assert result["indexes"]
 
 
-GIP_FIXTURES = [
-    ("GIP-151: Should GnosisDAO fund X", 151),
-    ("GIP 152 - Treasury topup", 152),
-    ("discussing gip-128 here", 128),
-    ("GIP-0042 legacy numbering", 42),
-    ("AGIP-5 is another DAO's numbering", None),
-    ("no token here", None),
-]
+def _py_gip(text: str) -> int | None:
+    """The Python-dialect evaluation of the canonical title identity, with
+    the gip_number > 0 phantom guard the SQL side bakes into _gip_sql()."""
+    match = re.compile(governance_explorer.GIP_PATTERN, re.IGNORECASE).match(text)
+    if not match:
+        return None
+    n = int(match.group(1))
+    return n if n > 0 else None
 
 
 def test_gip_extraction_exact_patterns_only():
-    pattern = re.compile(governance_explorer.GIP_PATTERN, re.IGNORECASE)
-    for text, expected in GIP_FIXTURES:
-        match = pattern.search(text)
-        got = int(match.group(1)) if match else None
-        assert got == expected, text
-    # The SQL side carries the verbatim shared regex literal.
-    sql_literal = r"(?i)\\bGIP[\\s-]?0*([0-9]+)"
+    for text, expected in GIP_TITLE_FIXTURES:
+        assert _py_gip(text) == expected, text
+    # The SQL side carries the canonical anchored literal (comment-stripped —
+    # a prose mention must not satisfy this; see sql_code()).
+    sql_literal = governance_explorer.GIP_PATTERN_SQL
     proposals = {s.key: s for s in governance_explorer._proposals_specs(
         governance_explorer._range_state("", ""),
         governance_explorer._default_filters(),
     )}["proposals"]
-    assert sql_literal in proposals.sql
+    assert sql_literal in sql_code(proposals.sql)
     # Link specs use exact GIP equality joins — never fuzzy text joins.
     links = {s.key: s for s in governance_explorer._entity_specs("proposal", PROPOSAL_ID)}
     link_sql = links["proposal_forum_links"].sql
-    assert sql_literal in link_sql
+    assert sql_literal in sql_code(link_sql)
     assert "positionCaseInsensitive" not in link_sql
     assert "LIKE" not in link_sql.upper()
     reverse = {s.key: s for s in governance_explorer._entity_specs("forum_topic", "12131")}
     reverse_sql = reverse["topic_proposal_links"].sql
-    assert sql_literal in reverse_sql
+    assert sql_literal in sql_code(reverse_sql)
     assert "positionCaseInsensitive" not in reverse_sql
+
+
+def test_mention_pattern_diverges_only_in_graph_edges():
+    """The unanchored mention pattern is a DELIBERATE divergence scoped to the
+    citation graph's body scan — everywhere else the anchored canonical
+    pattern is the only GIP extraction."""
+    mention = governance_explorer.GIP_MENTION_PATTERN_SQL
+    carriers = {s.key for s in _all_specs() if mention in sql_code(s.sql)}
+    assert carriers == {"graph_edges"}
+    edges = {s.key: s for s in _all_specs()}["graph_edges"]
+    # The src (title) side of the same query uses the canonical pattern.
+    assert governance_explorer.GIP_PATTERN_SQL in sql_code(edges.sql)
+
+
+def test_concentration_tiers_are_the_canonical_10_20_50_everywhere():
+    """Canonical space-level tiers (dbt api_governance_concentration_latest).
+    delegation_concentration was the one outlier at 5/10/20 — WL-039 aligned
+    it; this pins ALL concentration surfaces to the one scale."""
+    tiers = "[toUInt32(10), toUInt32(20), toUInt32(50)]"
+    specs = {s.key: s for s in _all_specs()}
+    for key in ("delegation_concentration", "voter_concentration",
+                "voter_power_concentration"):
+        assert tiers in sql_code(specs[key].sql), key
+    for spec in specs.values():
+        assert "toUInt32(5)" not in sql_code(spec.sql), spec.key
+
+
+def test_treasury_dates_resolve_from_publications_and_every_scan_is_pruned():
+    """Since the holder census landed, token_balances holds billions of rows
+    and v_treasury_balances FINAL-merges all of it. Two rules keep the plane
+    alive: (1) snapshot dates resolve from census_publications, never by
+    aggregating the view; (2) every view scan carries an IN-prune beside its
+    asof/months join — the JOIN alone never prunes, the uncorrelated IN folds
+    to constants at plan time and does."""
+    treasury = [s for s in _all_specs() if "v_treasury_balances" in s.sql]
+    assert treasury, "treasury specs missing from the sweep"
+    prunes = (
+        "snapshot_date IN (SELECT as_of FROM asof)",
+        "snapshot_date IN (SELECT month_end FROM months)",
+        "IN (SELECT chain_id, month_end FROM months)",
+    )
+    for spec in treasury:
+        code = sql_code(spec.sql)
+        assert "census_publications" in code, spec.key
+        # No date aggregation over the fat view, anywhere.
+        assert not re.search(
+            r"max\(snapshot_date\)[^)]*\n?[^)]*FROM\s+rpc_state_indexer\.v_treasury_balances",
+            code,
+        ), spec.key
+        assert any(p in code for p in prunes), spec.key
+
+
+def test_re_delegations_uses_the_canonical_repointed_definition():
+    """re_delegations must be dbt's 'repointed': sets whose row_number over
+    ALL events (sets and clears) is > 1 — not sets beyond the first set,
+    which undercounts delegators whose first event was a clear."""
+    summary = {s.key: s for s in _all_specs()}["delegation_summary"]
+    code = sql_code(summary.sql)
+    assert "row_number() OVER (PARTITION BY chain_id, delegator" in code
+    assert "rn > 1" in code
+    assert "uniqExactIf((chain_id, delegator)" not in code
 
 
 DISCUSSION_FIXTURES = [
@@ -1596,11 +1659,21 @@ def test_treasury_specs_reference_each_cte_once():
 
     A spec that genuinely needs two references should say so here with its
     measured cost, not relax the bound silently.
+
+    DECLARED two-reference allowance — `asof` and `months`: since the holder
+    census grew token_balances to billions of rows, these CTEs read
+    census_publications (123 MiB; ~1s per scan measured 2026-08-26), and their
+    SECOND reference is the `snapshot_date IN (SELECT ... FROM asof/months)`
+    prune that folds to constants and saves the view scan the JOIN alone
+    cannot prune — it replaced a 10.8 GiB code-241 OOM with a ~2.4s query.
+    The allowance is conditional: a spec spending it must actually carry the
+    prune, so it cannot be silently reused for a fat second scan.
     """
     specs = governance_explorer._treasury_specs(
         governance_explorer._range_state("", ""),
         governance_explorer._default_filters(),
     )
+    PRUNE_CTES = {"asof", "months"}
     seen = 0
     for spec in specs:
         # Comments stripped FIRST — see sql_code(). A prose mention of a CTE is
@@ -1613,6 +1686,19 @@ def test_treasury_specs_reference_each_cte_once():
         for name in names:
             # `<name> AS (` is the definition; every other bare mention reads it.
             uses = len(re.findall(rf"\b{name}\b", code)) - 1
+            # Up to 3: join + main-scan prune, plus a picker-CTE prune where a
+            # top-N picker also scans the view (treasury_wallet_history).
+            if name in PRUNE_CTES and 2 <= uses <= 3:
+                assert f"IN (SELECT" in code and f"FROM {name})" in code, (
+                    f"{spec.key}: CTE `{name}` spends its second reference on "
+                    f"something other than the IN-prune"
+                )
+                assert "census_publications" in code, (
+                    f"{spec.key}: the two-reference allowance is for the cheap "
+                    f"publications source only"
+                )
+                seen += 1
+                continue
             assert uses <= 1, (
                 f"{spec.key}: CTE `{name}` is referenced {uses}x — ClickHouse "
                 f"inlines it per reference, so that is {uses} scans of its source"

@@ -17,6 +17,8 @@ SELECT
   CAST(NULL AS Nullable(Float64)) AS nav_usd
 FROM @src AS t
 INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
-WHERE t.job_name = '@job' AND @chain_sql AND @ltd_sql
+-- The IN is the prune (folds to constants; the join never prunes the view).
+WHERE t.job_name = '@job' AND t.snapshot_date IN (SELECT as_of FROM asof)
+  AND @chain_sql AND @ltd_sql
 GROUP BY t.chain_id, a.as_of
 ORDER BY as_of DESC, chain_id

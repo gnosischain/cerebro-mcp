@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   GIP_STAGE_COLOR,
+  danglingCitations,
   drawableEdges,
   gipDegrees,
   gipGraphOption,
@@ -48,6 +49,17 @@ describe("drawableEdges", () => {
     // render as a real GIP that merely has no data. GIP numbers appear in post
     // bodies far more often than they exist as a topic or proposal.
     expect(drawableEdges([node(1), node(2)], [edge(1, 2), edge(1, 999)])).toHaveLength(1);
+  });
+});
+
+describe("danglingCitations", () => {
+  it("counts the weight of the edges drawableEdges drops", () => {
+    // A deliberate exclusion must be COUNTED — the summary line discloses the
+    // dropped citations instead of letting the graph silently shrink.
+    const nodes = [node(1), node(2)];
+    const edges = [edge(1, 2, 3), edge(1, 999, 4), edge(998, 2, 2)];
+    expect(danglingCitations(nodes, edges)).toBe(6);
+    expect(danglingCitations(nodes, [edge(1, 2, 3)])).toBe(0);
   });
 });
 

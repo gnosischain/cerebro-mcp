@@ -12,7 +12,8 @@ FROM (
          if(anyHeavy(t.decimals) IS NULL, NULL, sum(t.balance_units)) AS balance_units
   FROM @src AS t
   INNER JOIN asof AS a ON t.snapshot_date = a.as_of
-  WHERE t.job_name = '@job' AND t.chain_id = @chain
+  WHERE t.job_name = '@job' AND t.snapshot_date IN (SELECT as_of FROM asof)
+    AND t.chain_id = @chain
     AND t.token_address = {addr:String} AND t.balance_raw != 0
   GROUP BY wallet_address, is_ltd
 )

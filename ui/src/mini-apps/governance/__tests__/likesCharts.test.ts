@@ -57,28 +57,21 @@ describe("likesByCategoryOption", () => {
 });
 
 describe("topicLikesOption", () => {
+  // The payload carries no author names (WL-039 privacy alignment) — the
+  // hostile-username sanitization case that lived here died with the input
+  // contract; sanitizeSymbol keeps its own coverage (treasury chart tests).
   const ROWS = [
-    { bucket: "2026-06-29", bucket_unit: "week", post_number: 1, username: "alice", likes: 9 },
-    { bucket: "2026-06-29", bucket_unit: "week", post_number: 3, username: "", likes: 4 },
-    { bucket: "2026-07-06", bucket_unit: "week", post_number: 0, username: "", likes: 2 },
+    { bucket: "2026-06-29", bucket_unit: "week", post_number: 1, likes: 9 },
+    { bucket: "2026-06-29", bucket_unit: "week", post_number: 3, likes: 4 },
+    { bucket: "2026-07-06", bucket_unit: "week", post_number: 0, likes: 2 },
   ];
 
-  it("names posts with their author and keeps the de-indexed residual visible", () => {
+  it("names posts by number and keeps the de-indexed residual visible", () => {
     const spec = topicLikesOption(ROWS) as AnySpec;
     const names = (spec.series ?? []).map((s) => s.name);
-    expect(names).toContain("Post #1 · alice");
-    // No username indexed for the post: the bare index still renders.
+    expect(names).toContain("Post #1");
     expect(names).toContain("Post #3");
     expect(names).toContain("Unknown post");
-  });
-
-  it("sanitizes a hostile username before it reaches the legend", () => {
-    const spec = topicLikesOption([
-      { bucket: "2026-06-29", bucket_unit: "week", post_number: 2, username: "bob‮gnp.exe", likes: 1 },
-    ]) as AnySpec;
-    const name = String(spec.series?.[0]?.name ?? "");
-    expect(name.startsWith("Post #2 · bob")).toBe(true);
-    expect(name).not.toContain("‮");
   });
 
   it("stacks bars over the buckets and names the axis from the rows' unit", () => {
@@ -88,7 +81,7 @@ describe("topicLikesOption", () => {
     // Buckets are adaptive server-side — the axis label follows the data.
     expect(spec.xAxis?.name).toBe("per week");
     const daily = topicLikesOption([
-      { bucket: "2026-07-01", bucket_unit: "day", post_number: 1, username: "alice", likes: 2 },
+      { bucket: "2026-07-01", bucket_unit: "day", post_number: 1, likes: 2 },
     ]) as AnySpec & { xAxis?: { name?: string } };
     expect(daily.xAxis?.name).toBe("per day");
   });

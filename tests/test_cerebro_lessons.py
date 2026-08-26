@@ -220,6 +220,7 @@ RETRIEVAL_CASES = [
     ("build stage re-runs every push nothing changed", "unexported-build-stage-never-caches"),
     ("unknown identifier 47 union arm group by", "ch-union-arm-needs-own-alias"),
     ("grafana panel renders one garbled series verify ok", "grafana-table-format-needs-pivot-transform"),
+    ("whole section fails total memory limit 10 GiB view", "fat-view-join-never-prunes"),
 ]
 
 

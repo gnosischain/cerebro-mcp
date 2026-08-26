@@ -2,51 +2,60 @@ import { describe, expect, it } from "vitest";
 
 import { extractGip } from "../model/gip";
 
-// Shared fixture list — asserted identically against the backend SQL pattern
-// (?i)\bGIP[\s-]?0*([0-9]+) in tests/test_governance_explorer.py.
+// Shared fixture table — content-identical to tests/gip_fixtures.py, which
+// the Python and live-ClickHouse suites evaluate against their own dialect
+// renderings of dbt's canonical parse_gip_number pattern. The three dialects
+// cannot share one regex string (escape syntax differs), so THIS table is
+// what pins them together. Edit both files or neither.
 const FIXTURES: Array<[string, number | null]> = [
-  ["GIP-151: Should GnosisDAO do the thing?", 151],
-  ["GIP 152 - Treasury diversification", 152],
+  // Plain identities.
+  ["GIP-151: Should GnosisDAO fund X", 151],
+  ["GIP 152 - Treasury topup", 152],
   ["gip-128", 128],
-  ["GIP-0042", 42],
-  ["AGIP-5", null], // \b rejects the AGIP prefix
-  ["Community call schedule", null],
+  ["GIP-0042 legacy numbering", 42],
+  ["GIP - 77", 77],
+  // No digit cap, no trailing boundary.
+  ["GIP-1234567", 1234567],
+  ["GIP-151abc", 151],
+  // Canonical prefixes before the identity.
+  ["[Draft] GIP-90: x", 90],
+  ["(Signaling) GIP-64 vote", 64],
+  ["# GIP-12", 12],
+  ["​GIP-45", 45],
+  ["Redo of: GIP-33", 33],
+  ["Re-do of: GIP-33", 33],
+  ["[RE-RUN] (redo) GIP-8", 8],
+  // Mid-title mentions are NOT identities (anchored pattern).
+  ["discussing gip-128 here", null],
+  ["Re: GIP-33 follow-up", null],
+  ["(GIP-7)", null],
+  // Other DAOs' numbering and non-matches.
+  ["AGIP-5 is another DAO's numbering", null],
+  ["preGIP-9", null],
+  ["GIP:151 colon is not a separator", null],
+  ["no token here", null],
+  ["", null],
+  // Phantom guard: GIP-0 is never an identity.
+  ["GIP-0", null],
 ];
 
-describe("extractGip — frozen shared pattern /\\bGIP[\\s-]?0*([0-9]+)/i", () => {
-  it("matches the shared fixture list", () => {
-    expect(extractGip("GIP-151: Should GnosisDAO do the thing?")).toBe(151);
-    expect(extractGip("GIP 152 - Treasury diversification")).toBe(152);
-    expect(extractGip("gip-128")).toBe(128);
-    expect(extractGip("GIP-0042")).toBe(42);
-    expect(extractGip("AGIP-5")).toBeNull();
-    expect(extractGip("Community call schedule")).toBeNull();
+describe("extractGip — canonical anchored title identity (dbt parse_gip_number)", () => {
+  it("matches the shared fixture table", () => {
+    for (const [title, expected] of FIXTURES) {
+      expect(extractGip(title), JSON.stringify(title)).toBe(expected);
+    }
   });
 
-  it("has no digit cap and no trailing boundary", () => {
-    expect(extractGip("GIP-1234567")).toBe(1234567);
-    expect(extractGip("GIP-151abc")).toBe(151); // no trailing boundary by design
-  });
-
-  it("word boundary rejects prefixed tokens but not separated ones", () => {
-    expect(extractGip("AGIP-5")).toBeNull();
-    expect(extractGip("preGIP-9")).toBeNull();
-    expect(extractGip("Re: GIP-33 follow-up")).toBe(33);
-    expect(extractGip("(GIP-7)")).toBe(7);
+  it("is an identity, not a mention scan", () => {
+    // The load-bearing change of WL-039: a title that merely MENTIONS a GIP
+    // is not that GIP. Body-mention extraction lives server-side only, as
+    // GIP_MENTION_PATTERN_SQL in graph_edges.sql.
+    expect(extractGip("report on GIP-18")).toBeNull();
+    expect(extractGip("GIP-18 report")).toBe(18);
   });
 
   it("handles empty and null-ish input", () => {
     expect(extractGip("")).toBeNull();
     expect(extractGip(undefined as unknown as string)).toBeNull();
-  });
-});
-
-// Guard against fixture drift: the table above documents intent for the
-// cross-stack fixture file; keep it consistent with the direct assertions.
-describe("fixture list consistency", () => {
-  it("every fixture extracts its expected value", () => {
-    for (const [title, expected] of FIXTURES) {
-      expect(extractGip(title), title).toBe(expected);
-    }
   });
 });

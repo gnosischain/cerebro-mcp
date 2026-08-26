@@ -7,7 +7,7 @@
 // link_source tiers.
 
 import type { DatasetDescriptor, MiniAppPayload } from "../shared/miniAppTypes";
-import type { GovernanceViewState } from "./types";
+import type { GovEntityType, GovernanceViewState } from "./types";
 
 function descriptor(key: string, columns: string[], rows: unknown[][]): DatasetDescriptor {
   return {
@@ -124,6 +124,56 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         ["2026-07-13", "posts_created", 66, "week"],
       ],
     ),
+    // Overview insights (WL-039 fixture sweep — these panels rendered "Query
+    // failed." stubs in dev because no fixture rows existed). Counts stay
+    // consistent with space_summary: 253 proposals, 48,136 votes, 6,341 voters.
+    proposal_types: descriptor(
+      "proposal_types",
+      ["type", "proposal_count", "vote_count", "total_vp"],
+      [
+        ["basic", 140, 30110, 5100000],
+        ["single-choice", 80, 12000, 2300000],
+        ["ranked-choice", 33, 6026, 800000],
+      ],
+    ),
+    quorum_distribution: descriptor(
+      "quorum_distribution",
+      ["quorum_status", "proposal_count", "avg_quorum_ratio"],
+      // avg_quorum_ratio is NULL for unspecified (quorum <= 0 -> ratio NULL).
+      [
+        ["met", 168, 1.92],
+        ["unspecified", 45, null],
+        ["missed", 40, 0.54],
+      ],
+    ),
+    voter_power_concentration: descriptor(
+      "voter_power_concentration",
+      ["tier", "tier_vp", "all_vp", "vp_share", "voter_count"],
+      [
+        [10, 5084000, 8200000, 0.62, 6341],
+        [20, 6068000, 8200000, 0.74, 6341],
+        [50, 7052000, 8200000, 0.86, 6341],
+      ],
+    ),
+    latest_activity: descriptor(
+      "latest_activity",
+      ["kind", "identifier", "title", "status", "activity_at"],
+      [
+        ["forum_topic", "12390", "GIP 152 - Should GnosisDAO spin out the Gnosis App into an independent entity?", "open", "2026-07-28T23:11:45Z"],
+        ["forum_topic", "12131", "GIP-149: Should GnosisDAO fund the thing?", "open", "2026-07-21T22:10:00Z"],
+        [`proposal`, P5, "GIP-153: Pending scores example", "closed", "2026-07-10T09:00:00Z"],
+        [`proposal`, P2, "GIP 152 - Treasury diversification", "closed", "2026-05-20T10:00:00Z"],
+      ],
+    ),
+    forum_category_activity: descriptor(
+      "forum_category_activity",
+      ["category_id", "category_name", "category_slug", "topics_in_range", "posts_in_range", "last_posted_at"],
+      [
+        [9, "General", "general", 410, 2600, "2026-07-22T03:40:00Z"],
+        [6, "GIPs", "gips", 240, 3100, "2026-07-21T22:10:00Z"],
+        [14, "Uncategorized", "uncategorized", 232, 1136, "2026-05-30T16:20:00Z"],
+      ],
+    ),
     proposals: descriptor("proposals", PROPOSAL_COLUMNS, [
       // basic, quorum met, discussion-linked
       [P1, "GIP-149: Should GnosisDAO fund the thing?", "closed", "basic", `0x${"11".repeat(20)}`,
@@ -147,6 +197,94 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         "2026-07-10T09:00:00Z", "2026-07-11T09:00:00Z", "2026-07-18T09:00:00Z",
         34990000, 0, "pending", 75000, "missed", 0, 12, "", null, 0, 153, "", null],
     ]),
+    // Proposals-section KPIs + activity chart (WL-039 fixture sweep).
+    proposal_summary: descriptor(
+      "proposal_summary",
+      [
+        "proposal_count", "active_count", "pending_count", "closed_count",
+        "vote_count", "avg_votes", "median_votes", "quorum_met_count",
+        "quorum_missed_count", "quorum_unspecified_count", "unique_voters",
+      ],
+      [[253, 0, 0, 253, 48136, 190.3, 121, 168, 40, 45, 6341]],
+    ),
+    // LONG format mirroring proposal_activity.sql (proposals_started /
+    // votes_cast per bucket).
+    proposal_activity: descriptor(
+      "proposal_activity",
+      ["bucket", "metric", "metric_value", "bucket_unit"],
+      [
+        ["2026-05-01", "proposals_started", 4, "month"],
+        ["2026-05-01", "votes_cast", 1890, "month"],
+        ["2026-06-01", "proposals_started", 2, "month"],
+        ["2026-06-01", "votes_cast", 940, "month"],
+        ["2026-07-01", "proposals_started", 3, "month"],
+        ["2026-07-01", "votes_cast", 1210, "month"],
+      ],
+    ),
+    // Voters section (WL-039 fixture sweep). Totals agree with space_summary
+    // and voter_power_concentration above.
+    voter_summary: descriptor(
+      "voter_summary",
+      ["voter_count", "total_vp", "vote_count", "avg_participation", "median_participation", "repeat_rate", "follower_count"],
+      [[6341, 8200000, 48136, 7.59, 2, 0.62, 12229]],
+    ),
+    voter_leaderboard: descriptor(
+      "voter_leaderboard",
+      ["voter_key", "voter", "vote_count", "total_vp", "avg_vp", "first_vote_at", "last_vote_at"],
+      [
+        [`0x${"66".repeat(20)}`, `0x${"66".repeat(20)}`, 152, 1200000, 7894.7, "2021-11-16T11:49:47Z", "2026-06-25T12:00:00Z"],
+        [`0x${"77".repeat(20)}`, `0x${"77".repeat(20)}`, 98, 640000, 6530.6, "2022-03-30T05:46:30Z", "2026-05-20T19:03:00Z"],
+        [`0x${"88".repeat(20)}`, `0x${"88".repeat(20)}`, 41, 90000, 2195.1, "2023-01-12T09:00:00Z", "2026-02-02T02:06:47Z"],
+      ],
+    ),
+    // Two metrics x canonical tiers 10/20/50 (same scale as every other
+    // concentration surface).
+    voter_concentration: descriptor(
+      "voter_concentration",
+      ["metric", "tier", "tier_value", "total_value", "share"],
+      [
+        ["vp", 10, 5084000, 8200000, 0.62],
+        ["vp", 20, 6068000, 8200000, 0.74],
+        ["vp", 50, 7052000, 8200000, 0.86],
+        ["votes", 10, 8664, 48136, 0.18],
+        ["votes", 20, 12997, 48136, 0.27],
+        ["votes", 50, 19736, 48136, 0.41],
+      ],
+    ),
+    voter_activity: descriptor(
+      "voter_activity",
+      ["bucket", "unique_voters", "vote_count", "total_vp", "bucket_unit"],
+      [
+        ["2026-05-01", 1450, 3890, 610000, "month"],
+        ["2026-06-01", 820, 2140, 388000, "month"],
+        ["2026-07-01", 990, 2612, 452000, "month"],
+      ],
+    ),
+    // Voter entity bundle (WL-039 fixture sweep; reach it in dev with
+    // ?entity=voter:0x6666...). The profile voter is the leaderboard's top row.
+    voter_profile: descriptor(
+      "voter_profile",
+      ["voter_key", "voter_display", "vote_count", "total_vp", "avg_vp", "first_vote_at", "last_vote_at", "participation_rate", "follower_row_count"],
+      [[`0x${"66".repeat(20)}`, `0x${"66".repeat(20)}`, 152, 1200000, 7894.7, "2021-11-16T11:49:47Z", "2026-06-25T12:00:00Z", 0.6008, 1]],
+    ),
+    voter_votes: descriptor(
+      "voter_votes",
+      ["vote_id", "proposal_id", "proposal_title", "proposal_state", "created_at", "vp", "vp_state", "choice_kind", "choice_index", "choice_indexes", "choice_label", "reason"],
+      [
+        [`0x${"f1".repeat(32)}`, P1, "GIP-149: Should GnosisDAO fund the thing?", "closed", "2026-05-03T10:00:00Z", 51000.5, "final", "single", 1, [], "For", "Strongly in favor"],
+        [`0x${"f4".repeat(32)}`, P3, "GIP-128: Ranked signal on validator set", "closed", "2026-03-12T11:00:00Z", 1200, "final", "ranked", null, [2, 1, 3], "", ""],
+        [`0x${"f5".repeat(32)}`, P5, "GIP-153: Pending scores example", "closed", "2026-07-12T12:00:00Z", 10, "pending", "unsupported", null, [], "", ""],
+      ],
+    ),
+    voter_participation: descriptor(
+      "voter_participation",
+      ["bucket", "vote_count", "total_vp", "bucket_unit"],
+      [
+        ["2026-05-01", 3, 96000, "month"],
+        ["2026-06-01", 1, 21000, "month"],
+        ["2026-07-01", 2, 40000, "month"],
+      ],
+    ),
     // vp_share MIRRORS proposal_votes.sql: vp / scores_total, NULL while
     // scores are pending (the last row exercises the em-dash render).
     proposal_votes: descriptor(
@@ -189,21 +327,25 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         "https://forum.gnosis.io/t/gip-149-should-gnosisdao-fund-the-thing/12131",
       ]],
     ),
+    // MIRRORS topic_posts.sql's SELECT list exactly (the fixture used to
+    // declare id/topic_id columns the query never emits — devFixture must
+    // MIRROR the SQL it stands in for). username stays: verbatim public posts
+    // keep their author as published (WL-039 privacy decision).
     topic_posts: descriptor(
       "topic_posts",
-      ["id", "topic_id", "post_number", "username", "created_at", "reply_to_post_number", "like_count", "reads", "raw_markdown", "cooked_html", "plain_text"],
+      ["post_id", "post_number", "user_id", "username", "created_at", "updated_at", "reply_to_post_number", "reply_count", "reads", "like_count", "raw_markdown", "cooked_html", "plain_text"],
       [
         // raw markdown with a Discourse [quote] block
-        [9001, 12131, 1, "alice", "2026-04-28T09:00:00Z", null, 14, 320,
+        [9001, 1, 301, "alice", "2026-04-28T09:00:00Z", "2026-04-28T09:05:00Z", null, 2, 320, 14,
           "[quote=\"bob, post:2, topic:12131\"]We should fund it.[/quote]\n\nI **agree** — see GIP-149.",
           "<p>quoted + agreement</p>", "We should fund it. I agree — see GIP-149."],
         // cooked-only (empty raw) with a benign XSS probe for eyeballing the sanitizer
-        [9002, 12131, 2, "mallory", "2026-04-28T10:00:00Z", 1, 0, 250,
+        [9002, 2, 666, "mallory", "2026-04-28T10:00:00Z", "2026-04-28T10:00:00Z", 1, 0, 250, 0,
           "",
           "<p>Hello <script>alert(1)</script><a href=\"javascript:alert(2)\">bad link</a> <a href=\"https://forum.gnosis.io/t/x/1\">good link</a> <img src=\"https://forum.gnosis.io/uploads/pic.png\"></p>",
           "Hello bad link good link"],
         // empty raw AND cooked — plain_text last resort
-        [9003, 12131, 3, "carol", "2026-04-29T11:00:00Z", null, 2, 190,
+        [9003, 3, 303, "carol", "2026-04-29T11:00:00Z", "2026-04-29T11:00:00Z", null, 0, 190, 2,
           "", "", "Plain text only body."],
       ],
     ),
@@ -216,6 +358,57 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         // A sibling proposal sharing the same GIP number — exercises the
         // 'proposal' linked_type click route.
         ["proposal", P5, "GIP-149: Temperature check (earlier signal)", "gip", 12, "2026-04-15T10:00:00Z"],
+      ],
+    ),
+    // MIRRORS forum_topics.sql's SELECT list. These three panels (topics,
+    // categories, activity) had NO fixture rows, so the Forum section rendered
+    // "Query failed." stubs in dev — a fixture-coverage gap, not a real query
+    // failure. gip_number values MUST agree with the anchored canonical
+    // extraction of each title (the mid-title mention row is null on purpose).
+    forum_topics: descriptor(
+      "forum_topics",
+      [
+        "id", "title", "slug", "category_id", "posts_count", "reply_count",
+        "views", "like_count", "participant_count", "tags", "created_at",
+        "last_posted_at", "bumped_at", "closed", "archived", "pinned",
+        "status", "gip_number",
+      ],
+      [
+        [12131, "GIP-149: Should GnosisDAO fund the thing?",
+          "gip-149-should-gnosisdao-fund-the-thing", 6, 57, 56, 3200, 88, 24,
+          ["phase-2", "funding"], "2026-04-28T09:00:00Z",
+          "2026-07-21T22:10:00Z", "2026-07-21T22:10:00Z", 0, 0, 0, "open", 149],
+        [12088, "Community call schedule — H2 2026", "community-call-schedule",
+          9, 12, 11, 640, 9, 7, [], "2026-03-02T10:00:00Z",
+          "2026-07-10T08:00:00Z", "2026-07-10T08:00:00Z", 0, 0, 1, "open", null],
+        [11987, "Retrospective on the GIP-128 funding round",
+          "retrospective-gip-128", 6, 31, 30, 1450, 40, 15, ["phase-1"],
+          "2026-01-12T09:30:00Z", "2026-05-30T16:20:00Z",
+          "2026-05-30T16:20:00Z", 1, 0, 0, "closed", null],
+      ],
+    ),
+    // MIRRORS forum_categories.sql (id AS category_id; parent_id 0 = root).
+    forum_categories: descriptor(
+      "forum_categories",
+      ["category_id", "parent_id", "name", "slug", "topic_count", "post_count", "description"],
+      [
+        [6, 0, "GIPs", "gips", 240, 3100, "Gnosis Improvement Proposals"],
+        [9, 0, "General", "general", 410, 2600, "Everything else"],
+        [14, 9, "Uncategorized", "uncategorized", 232, 1136, ""],
+      ],
+    ),
+    // LONG format mirroring forum_activity.sql (topics_created / posts_created
+    // per bucket), same shape as likes_activity below.
+    forum_activity: descriptor(
+      "forum_activity",
+      ["bucket", "metric", "metric_value", "bucket_unit"],
+      [
+        ["2026-05-01", "topics_created", 14, "month"],
+        ["2026-05-01", "posts_created", 260, "month"],
+        ["2026-06-01", "topics_created", 9, "month"],
+        ["2026-06-01", "posts_created", 198, "month"],
+        ["2026-07-01", "topics_created", 11, "month"],
+        ["2026-07-01", "posts_created", 231, "month"],
       ],
     ),
     // Forum plane. MIRRORS forum_summary.sql: the like columns follow the
@@ -236,18 +429,43 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     ),
     // MIRRORS contributor_leaderboard.sql: lifetime counter columns from
     // forum_users beside windowed ATTRIBUTED like columns (the disclosure
-    // caption renders on this panel).
+    // caption renders on this panel). No username/name (WL-039 privacy
+    // alignment): user_id is the visible identity and click target.
     contributor_leaderboard: descriptor(
       "contributor_leaderboard",
       [
-        "user_id", "username", "name", "trust_level", "lifetime_posts",
+        "user_id", "trust_level", "lifetime_posts",
         "lifetime_topics", "likes_received", "likes_given", "days_visited",
         "posts_in_range", "topics_started", "last_post_at",
         "likes_received_in_range", "likes_given_in_range",
       ],
       [
-        [301, "gnosis-whale", "Gnosis Whale", 3, 412, 44, 890, 340, 720, 18, 2, "2026-07-21T10:00:00Z", 26, 9],
-        [302, "forum-friend", "Forum Friend", 2, 208, 12, 310, 505, 501, 11, 1, "2026-07-19T08:30:00Z", 12, 21],
+        [301, 3, 412, 44, 890, 340, 720, 18, 2, "2026-07-21T10:00:00Z", 26, 9],
+        [302, 2, 208, 12, 310, 505, 501, 11, 1, "2026-07-19T08:30:00Z", 12, 21],
+      ],
+    ),
+    // Contributor entity bundle (WL-039 fixture sweep; reach it in dev with
+    // ?entity=forum_user:301). Values agree with leaderboard row 301.
+    contributor_profile: descriptor(
+      "contributor_profile",
+      ["user_id", "trust_level", "likes_received", "likes_given", "lifetime_posts", "lifetime_topics", "days_visited"],
+      [[301, 3, 890, 340, 412, 44, 720]],
+    ),
+    contributor_posts: descriptor(
+      "contributor_posts",
+      ["post_id", "topic_id", "topic_title", "post_number", "created_at", "like_count", "reads", "excerpt"],
+      [
+        [9001, 12131, "GIP-149: Should GnosisDAO fund the thing?", 1, "2026-04-28T09:00:00Z", 14, 320, "We should fund it. I agree — see GIP-149."],
+        [9107, 12390, "GIP 152 - Should GnosisDAO spin out the Gnosis App into an independent entity?", 7, "2026-07-03T15:20:00Z", 6, 210, "Spin-out economics look workable if the treasury keeps the license."],
+      ],
+    ),
+    contributor_activity: descriptor(
+      "contributor_activity",
+      ["bucket", "post_count", "topics_started", "bucket_unit"],
+      [
+        ["2026-05-01", 8, 1, "month"],
+        ["2026-06-01", 4, 0, "month"],
+        ["2026-07-01", 6, 1, "month"],
       ],
     ),
     // MIRRORS poll_summary.sql: poll grain collapsed from the option grain;
@@ -315,15 +533,17 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     // topic spans ~4 months, so the SQL would emit WEEKLY buckets — the rows
     // must agree. post_number 0 is the de-indexed-post residual
     // ("Unknown post").
+    // No username column (WL-039 privacy alignment): series are labeled by
+    // post number client-side.
     topic_likes_activity: descriptor(
       "topic_likes_activity",
-      ["bucket", "bucket_unit", "post_number", "username", "likes"],
+      ["bucket", "bucket_unit", "post_number", "likes"],
       [
-        ["2026-03-02", "week", 1, "gnosis-whale", 9],
-        ["2026-03-02", "week", 3, "forum-friend", 4],
-        ["2026-05-04", "week", 1, "gnosis-whale", 6],
-        ["2026-05-04", "week", 0, "", 2],
-        ["2026-07-13", "week", 3, "forum-friend", 5],
+        ["2026-03-02", "week", 1, 9],
+        ["2026-03-02", "week", 3, 4],
+        ["2026-05-04", "week", 1, 6],
+        ["2026-05-04", "week", 0, 2],
+        ["2026-07-13", "week", 3, 5],
       ],
     ),
     // LONG format mirroring likes_activity.sql (attributed likes only).
@@ -382,7 +602,8 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     // Gnosis Chain). Registry edges are counts; delegation_power carries
     // realized vp_by_strategy (voted delegates only), and is NULL — never 0 —
     // where no realized figure exists. delegation_activity / _churn are WIDE
-    // (parseActivity).
+    // (parseActivity). re_delegations is the canonical 'repointed': sets whose
+    // row_number over ALL of that (chain, delegator)'s events is > 1.
     delegation_summary: descriptor(
       "delegation_summary",
       ["active_delegators", "active_delegates", "total_events", "set_events", "clear_events", "re_delegations", "clear_rate"],
@@ -424,10 +645,13 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     delegation_concentration: descriptor(
       "delegation_concentration",
       ["tier", "tier_value", "total_value", "share"],
+      // Canonical space-level tiers 10/20/50 (dbt
+      // api_governance_concentration_latest); share = tier_value/total_value,
+      // total consistent with delegation_summary.active_delegators above.
       [
-        [5, 620, 1820, 0.3407],
         [10, 940, 1820, 0.5165],
         [20, 1300, 1820, 0.7143],
+        [50, 1560, 1820, 0.8571],
       ],
     ),
     delegation_churn: descriptor(
@@ -518,6 +742,61 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         [1, "2026-07-01", "other", 0, 5851.05, "5851050000000000000000"],
       ],
     ),
+    // Treasury entity bundles (WL-039 fixture sweep; reach them in dev with
+    // ?entity=treasury_wallet:1:0x458c... / ?entity=treasury_token:1:0x6810...).
+    // The wallet is treasury_by_wallet's top row; the token is mainnet GNO.
+    // value_usd mirrors the SQL's CAST(NULL ...): always null, never 0.
+    treasury_wallet_detail: descriptor(
+      "treasury_wallet_detail",
+      ["chain_id", "entity_label", "wallet_address", "is_ltd", "as_of", "anchor_block", "tokens_held", "tokens_named", "unnamed_positions", "gno_units", "value_usd"],
+      [[1, "Ethereum 0x458c…5e6f", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, "2026-07-27", 25627590, 102, 1, 101, 414931.58, null]],
+    ),
+    treasury_wallet_positions: descriptor(
+      "treasury_wallet_positions",
+      ["chain_id", "token_address", "symbol", "decimals", "metadata_status", "symbol_collisions", "wallets_holding", "balance_total_raw", "balance_units", "treasury_share", "value_usd"],
+      [
+        [1, "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 0, 5, "414931579828128603923740", 414931.58, 0.5286, null],
+        [1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC", 6, "resolved", 0, 3, "321494537595", 321494.54, 0.5173, null],
+        // Unresolved metadata: decimals unknown, units NOT scalable.
+        [1, "0x2ec109a0cefec70661a242a8b54cae8f45630397", null, null, "failed", 0, 23, "10000000000000000000", null, 1, null],
+      ],
+    ),
+    treasury_wallet_series: descriptor(
+      "treasury_wallet_series",
+      ["chain_id", "bucket", "token_address", "symbol", "decimals", "metadata_status", "balance_units", "balance_total_raw", "wallets_holding"],
+      [
+        [1, "2026-06-01", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 414931.58, "414931579828128603923740", 5],
+        [1, "2026-06-01", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC", 6, "resolved", 301494.54, "301494537595", 3],
+        [1, "2026-07-01", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 414931.58, "414931579828128603923740", 5],
+        [1, "2026-07-01", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC", 6, "resolved", 321494.54, "321494537595", 3],
+      ],
+    ),
+    treasury_token_detail: descriptor(
+      "treasury_token_detail",
+      ["chain_id", "entity_label", "token_address", "symbol", "decimals", "metadata_status", "as_of", "anchor_block", "wallets_holding", "balance_total_raw", "balance_units", "symbol_collisions", "supply_share", "value_usd"],
+      [[1, "Ethereum GNO", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", "2026-07-27", 25627590, 5, "784931822290089813540215", 784931.82, 0, 0.0785, null]],
+    ),
+    treasury_token_holders: descriptor(
+      "treasury_token_holders",
+      ["chain_id", "wallet_address", "is_ltd", "balance_total_raw", "balance_units", "treasury_share", "value_usd"],
+      [
+        [1, "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, "414931579828128603923740", 414931.58, 0.5286, null],
+        [1, "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, "360410999999999999999999", 360411, 0.4592, null],
+        [1, "0x689d4bd36bc1938af5ca2673c3c753235e3b4d2b", 0, "9588467961961218516441", 9588.47, 0.0122, null],
+      ],
+    ),
+    treasury_token_holder_series: descriptor(
+      "treasury_token_holder_series",
+      ["chain_id", "bucket", "wallet_address", "is_ltd", "units", "units_raw"],
+      [
+        [1, "2026-06-01", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 414931.58, "414931579828128603923740"],
+        [1, "2026-06-01", "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 360411, "360410999999999999999999"],
+        [1, "2026-06-01", "other", 0, 9588.47, "9588467961961218516441"],
+        [1, "2026-07-01", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 414931.58, "414931579828128603923740"],
+        [1, "2026-07-01", "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 360411, "360410999999999999999999"],
+        [1, "2026-07-01", "other", 0, 9588.47, "9588467961961218516441"],
+      ],
+    ),
     // Proposal entity datasets (for dev-rendering ProposalDetail incl. the
     // vote-trend chart). proposal_votes / proposal_forum_links are above.
     proposal_detail: descriptor(
@@ -528,6 +807,16 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         "2026-05-01T09:00:00Z", "2026-05-02T09:00:00Z", "2026-05-09T09:00:00Z", 34567890, 120000, 75000, 412, "final",
         1.6, "met", 149, 12131, "## Summary\nThis proposal funds the thing. See GIP-149 for context.",
         "[\"For\",\"Against\"]", "[100000,20000]", `https://snapshot.org/#/gnosis.eth/proposal/${P1}`]],
+    ),
+    // MIRRORS proposal_choices.sql: one row per choice with per-choice score
+    // and share (P1's For/Against, scores 100000/20000 of 120000).
+    proposal_choices: descriptor(
+      "proposal_choices",
+      ["choice_index", "choice", "score", "score_share", "scores_state"],
+      [
+        [1, "For", 100000, 0.8333, "final"],
+        [2, "Against", 20000, 0.1667, "final"],
+      ],
     ),
     proposal_vote_trend: descriptor(
       "proposal_vote_trend",
@@ -574,7 +863,9 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
     },
     // Every frozen `section.group` key appears exactly once (test-enforced).
     loaded_groups: {
-      "overview.core": true, "overview.live": true, "overview.insights": false,
+      // All three overview groups load: every insights dataset now has
+      // fixture rows (WL-039 sweep), so the failed-group alert would be a lie.
+      "overview.core": true, "overview.live": true, "overview.insights": true,
       "proposals.core": false, "proposals.charts": false,
       "voters.core": false, "voters.insights": false,
       "forum.core": false, "forum.insights": false, "forum.engagement": false,
@@ -600,8 +891,14 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
   },
 };
 
+const DEV_ENTITY_TYPES: GovEntityType[] = [
+  "proposal", "voter", "forum_topic", "forum_user",
+  "treasury_token", "treasury_wallet",
+];
+
 /**
- * `MOCK_PAYLOAD` with `?section=<id>` applied, for `npm run dev`.
+ * `MOCK_PAYLOAD` with `?section=<id>` or `?entity=<type>:<identifier>`
+ * applied, for `npm run dev`.
  *
  * The fixture carries descriptors for EVERY section, but ships every
  * `loaded_groups` flag except overview's as `false` — so without this, a tab
@@ -612,10 +909,38 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
  *
  * Flips the requested section's groups to loaded, which is enough: `useDataset`
  * falls back to each descriptor's `preview_rows` when nothing is hydrated.
+ *
+ * `?entity=` makes the six detail views reachable too (they were not, for the
+ * same reason): it sets `section: "entity"` + `selected_entity`, and the
+ * detail components hydrate from the fixture descriptors. Treasury
+ * identifiers keep their `chain:address` form, so only the FIRST colon
+ * separates type from identifier. Examples:
+ *   ?entity=forum_user:301          ?entity=forum_topic:12131
+ *   ?entity=voter:0x6666...         ?entity=proposal:0xa1a1...
+ *   ?entity=treasury_wallet:1:0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f
+ *   ?entity=treasury_token:1:0x6810e776880c02933d47db1b9fc05908e5386b96
  */
 export function devPayload(search: string): MiniAppPayload<GovernanceViewState> {
-  const section = new URLSearchParams(search).get("section");
+  const params = new URLSearchParams(search);
   const state = MOCK_PAYLOAD.view_state;
+  const entity = params.get("entity") ?? "";
+  const sep = entity.indexOf(":");
+  if (state && sep > 0) {
+    const entityType = entity.slice(0, sep) as GovEntityType;
+    const identifier = entity.slice(sep + 1);
+    if (DEV_ENTITY_TYPES.includes(entityType) && identifier) {
+      return {
+        ...MOCK_PAYLOAD,
+        view_state: {
+          ...state,
+          section: "entity",
+          selected_entity: { entity_type: entityType, identifier, label: identifier },
+          breadcrumbs: [{ label: identifier, entity_type: entityType, identifier }],
+        },
+      };
+    }
+  }
+  const section = params.get("section");
   if (!state || !section || section === state.section) return MOCK_PAYLOAD;
   const groups = state.loaded_groups ?? {};
   // Unknown section id: leave the fixture alone rather than inventing groups.

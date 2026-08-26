@@ -250,13 +250,18 @@ export interface TopicRow {
   gip_number: number | null;
 }
 
+/** Mirrors topic_posts.sql's SELECT list (post_id, not id; no topic_id —
+ * the query is already scoped to one topic). username stays: verbatim public
+ * posts keep their author as published (WL-039 privacy decision). */
 export interface PostRow {
-  id: number;
-  topic_id: number;
+  post_id: number;
   post_number: number;
+  user_id: number | null;
   username: string;
   created_at: string;
+  updated_at?: string;
   reply_to_post_number: number | null;
+  reply_count?: number | null;
   like_count: number | null;
   reads: number | null;
   raw_markdown?: string;

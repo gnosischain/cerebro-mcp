@@ -43,6 +43,7 @@ export const COLUMN_LABELS: Record<string, string> = {
   last_posted_at: "Last activity",
   status: "Status",
   username: "Username",
+  user_id: "User ID",
   trust_level: "Trust level",
   days_visited: "Days visited",
   post_count: "Posts",
@@ -124,7 +125,10 @@ export const HIDDEN_COLUMNS: Record<string, string[]> = {
   voter_votes: ["vote_id", "voter_key", "proposal_id", "choice_index", "choice_indexes", "choice_label"],
   voter_leaderboard: ["voter_key"],
   forum_topics: ["id", "category_id", "created_at", "slug", "bumped_at", "closed", "archived", "pinned"],
-  contributor_leaderboard: ["id", "user_id"],
+  // user_id is deliberately VISIBLE post-de-identification (WL-039): the
+  // leaderboard payload carries no username, so the id column IS the identity
+  // column and the click-through target.
+  contributor_leaderboard: ["id"],
   // results_hidden / leading_tied stay in the payload: the leading-option
   // cell renders Hidden / Tie / No votes from them. poll_name stays VISIBLE
   // as the disambiguator for topics carrying two polls (its value is usually

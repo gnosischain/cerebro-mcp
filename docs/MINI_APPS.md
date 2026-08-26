@@ -389,7 +389,14 @@ every `governance_db` read carries `FINAL`. The two external planes are the
 exception: `rpc_log_indexer.v_delegate_events_gnosis` (delegations) and
 `rpc_state_indexer.v_treasury_balances` (treasury) resolve dedup internally
 and are queried WITHOUT `FINAL`. Treasury reads additionally MUST pin
-`job_name = 'daily_treasury'` — that view spans every census job. Freshness is tracked as two independent
+`job_name = 'daily_treasury'` — the view spans every census job, and its base
+table holds billions of rows since the holder census landed. Snapshot dates
+are resolved from `census_publications` (never by aggregating the view — that
+OOMs at the server cap), and every view scan carries a
+`snapshot_date IN (SELECT ...)` prune beside its asof/months join, because a
+JOIN alone never prunes (lesson: `fat-view-join-never-prunes`). The history
+datasets are bounded to the latest `TREASURY_HISTORY_MONTHS` (24) month-end
+snapshots per chain, disclosed in each dataset's basis. Freshness is tracked as two independent
 clocks per source (ingestion vs latest activity; `source_stale` after 24h).
 
 Cross-source linking is two-tier and never fuzzy: the author-declared

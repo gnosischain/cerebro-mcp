@@ -100,6 +100,7 @@ profiles:
       - sql-guard-counts-comments-as-code
       - live-table-invalidates-cross-query-diff
       - orphaned-sql-template-never-wired
+      - fat-view-join-never-prunes
     validation:
       - .venv/bin/python -m pytest tests/test_sql_loader.py -q
     guide: src/cerebro_mcp/tools/visualization/queries/AGENTS.md
