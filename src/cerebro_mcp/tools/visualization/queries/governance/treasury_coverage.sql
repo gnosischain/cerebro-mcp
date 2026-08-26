@@ -7,7 +7,8 @@ held AS (
          anyHeavy(t.metadata_status) AS metadata_status
   FROM @src AS t
   INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
-  WHERE t.job_name = '@job' AND @chain_sql AND @ltd_sql
+  WHERE t.job_name = '@job' AND t.snapshot_date IN (SELECT as_of FROM asof)
+    AND @chain_sql AND @ltd_sql
     AND t.balance_raw != 0
   GROUP BY t.chain_id, t.token_address
 ),

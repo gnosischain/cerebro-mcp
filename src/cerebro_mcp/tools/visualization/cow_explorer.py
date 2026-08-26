@@ -562,7 +562,7 @@ def _chain_checkpoint(cid: int) -> str:
 
 #: Aggregate scans over many chains use the BASE trades table with
 #: dedup-invariant aggregates instead of the reorg-safe canonical view:
-#: ``uniq((tx_hash,log_index,order_uid))`` deduplicates ReplacingMergeTree
+#: ``uniq((tx_hash,log_index))`` deduplicates ReplacingMergeTree
 #: versions in CONSTANT memory (HLL, ~0.8% max error; the RMT is >99.9%
 #: merged anyway) without FINAL, and skipping the view's chain_blocks join
 #: (millions of rows per chain) is what keeps ten-chain aggregates inside the
@@ -570,7 +570,15 @@ def _chain_checkpoint(cid: int) -> str:
 #: key and was a memory risk at all-history. Small bounded tables
 #: (competition_*, orders) keep uniqExact. Rows from orphaned (reorged)
 #: blocks may be counted — a marginal overcount the coverage mode discloses.
-TRADE_KEY = "(tx_hash,log_index,order_uid)"
+#:
+#: ``order_uid`` is deliberately NOT in the key: one Trade log is one fill of
+#: one order, so (tx_hash, log_index) is already the full identity —
+#: live-verified 2026-08-26: 0 of 2.8M chain-100 (tx, log) pairs carry more
+#: than one order_uid. It is also the expensive column: at 114 bytes it
+#: doubled the scan cost of every fill count as the deep-history backfill
+#: grew ``trades`` (the all-time network totals ran 11.3s with it, past the
+#: 20s budget under cold cache; ~7s without).
+TRADE_KEY = "(tx_hash,log_index)"
 BASE_DEDUP_MODE = "checkpoint_bounded_base_dedup"
 
 

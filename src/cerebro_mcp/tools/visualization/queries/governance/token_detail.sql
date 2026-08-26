@@ -11,15 +11,18 @@ held AS (
          if(anyHeavy(t.decimals) IS NULL, NULL, sum(t.balance_units)) AS balance_units
   FROM @src AS t
   INNER JOIN asof AS a ON t.snapshot_date = a.as_of
-  WHERE t.job_name = '@job' AND t.chain_id = @chain AND t.balance_raw != 0
+  WHERE t.job_name = '@job' AND t.snapshot_date IN (SELECT as_of FROM asof)
+    AND t.chain_id = @chain AND t.balance_raw != 0
   GROUP BY token_address
 ),
 supply AS (
   SELECT s.token_address AS supply_token,
          argMax(s.scalar_raw, s.snapshot_date) AS total_supply_raw
   FROM @scalars AS s
+  -- Date prune is load-bearing — see treasury_holdings.sql's supply CTE.
   WHERE s.job_name = '@job' AND s.chain_id = @chain
     AND s.scalar_name = 'totalSupply' AND s.token_address = {addr:String}
+    AND s.snapshot_date IN (SELECT as_of FROM asof)
   GROUP BY supply_token
 )
 SELECT @chain AS chain_id, '@label' AS entity_label,

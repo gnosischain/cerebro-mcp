@@ -84,13 +84,21 @@ DELEGATE_VIEW = "v_delegate_events_gnosis"
 #:
 #: CRITICAL: the view is NOT job-scoped upstream — it spans every census job,
 #: including the ``full_holders`` jobs whose universes contain the treasury
-#: wallets (hundreds of thousands of rows per date, 185M+ overall). Every spec
+#: wallets (billions of rows since the holder census landed). Every spec
 #: here MUST pin ``job_name = TREASURY_JOB``; an unpinned read exhausts server
-#: memory and double-counts any token measured by two jobs.
+#: memory and double-counts any token measured by two jobs. Pinning alone is
+#: no longer enough — see TREASURY_PUB_TABLE below and the
+#: fat-view-join-never-prunes lesson for the date-resolution + prune contract.
 TREASURY_DB = "rpc_state_indexer"
 TREASURY_VIEW = "v_treasury_balances"
 TREASURY_SCALARS_VIEW = "v_token_scalars_published"
 TREASURY_JOB = "daily_treasury"
+#: Snapshot-date resolution reads this base table, never the balances view:
+#: the view FINAL-merges token_balances (billions of rows since the holder
+#: census landed), so aggregating it for max(snapshot_date) OOMs at the
+#: server cap. Publications are authoritative for which dates exist — the
+#: view INNER JOINs them. See _cte_treasury_asof_per_chain.sql.
+TREASURY_PUB_TABLE = "census_publications"
 #: Chains the treasury job publishes on. Labels only — the chain set actually
 #: shown is derived from the data, never assumed.
 TREASURY_CHAINS = {1: "Ethereum", 100: "Gnosis Chain"}
@@ -121,6 +129,12 @@ TREASURY_HISTORY_UNIT = "month"
 #: USD ranking happens client-side (prices are a frontend overlay), so the
 #: server ships a candidate pool and the UI picks its own top-N by value.
 TREASURY_HISTORY_TOKENS = 24
+#: Month-end dates per chain the history datasets read. The balances view
+#: costs ~0.4s per selected date (measured 2026-08-26: the full 52-date set
+#: ran 22s, over the 20s interactive budget), so history is BOUNDED to each
+#: chain's latest N month-ends and every history basis discloses it. Full
+#: history returns when the indexer materializes a treasury slice.
+TREASURY_HISTORY_MONTHS = 24
 #: bytes32 of "gnosis.eth" (right-padded ASCII) — the Snapshot space id.
 GNOSIS_SPACE_ID = "0x676e6f7369732e65746800000000000000000000000000000000000000000000"
 #: The Snapshot space slug as it appears in ``governance_db.*.space_id``. The
@@ -180,16 +194,33 @@ ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
 TREASURY_ENTITY_ID_RE = re.compile(r"^([0-9]{1,6}):(0x[0-9a-f]{40})$")
 FORUM_ID_RE = re.compile(r"^[0-9]{1,10}$")
 GIP_QUERY_RE = re.compile(r"^gip[\s-]?0*([0-9]+)$", re.IGNORECASE)
-#: Shared GIP regex, verbatim across SQL (RE2) and TS: no digit cap, no
-#: trailing boundary; ``AGIP-5`` must NOT match (word boundary before GIP).
-GIP_PATTERN = r"\bGIP[\s-]?0*([0-9]+)"
-#: The same pattern as a SQL string literal — RE2 inside ClickHouse needs the
-#: backslashes doubled, exactly as GIP_SQL does. Kept beside GIP_PATTERN so the
-#: two can never drift.
-GIP_PATTERN_SQL = r"(?i)\\bGIP[\\s-]?0*([0-9]+)"
-#: SQL fragment template — ``{col}`` is a trusted internal column reference,
-#: never user input. The regex is a SQL string literal, hence ``\\b``.
-GIP_SQL = r"toInt32OrNull(extract({col}, '(?i)\\bGIP[\\s-]?0*([0-9]+)'))"
+#: dbt macros/governance/parse_gip_number.sql is the DEFINITION OF RECORD for
+#: title-identity GIP extraction: an ANCHORED leading identity — optional
+#: whitespace / zero-width chars / ``#``, ``[...]`` / ``(...)`` prefixes, an
+#: optional "re-do of:" — then the GIP number. A mid-title mention yields NULL.
+#: Three dialect renderings exist: SQL/RE2 here, Python below, JS in
+#: ui/src/mini-apps/governance/model/gip.ts. Escape syntax differs per dialect
+#: (``\x{200B}`` in RE2 vs ``​`` in Python/JS), so parity is pinned by the
+#: shared fixture table (tests/gip_fixtures.py, mirrored in gip.test.ts)
+#: evaluated in each engine — never by string comparison. The RE2 form is a SQL
+#: string literal, hence the doubled backslashes.
+GIP_PATTERN_SQL = (
+    r"(?i)^[\\s\\x{200B}\\x{FEFF}#]*(?:\\[[^\\]]*\\]\\s*)*"
+    r"(?:\\([^)]*\\)\\s*)*(?:re-?do of:\\s*)?GIP\\s*-?\\s*0*([0-9]+)"
+)
+#: Python-dialect twin of GIP_PATTERN_SQL — compile with re.IGNORECASE. Note
+#: RE2's ``\s`` is ASCII-only while Python/JS ``\s`` is Unicode-wide; an exotic
+#: whitespace separator can match here and not in SQL (accepted, display-only).
+GIP_PATTERN = (
+    r"^[\s​﻿#]*(?:\[[^\]]*\]\s*)*"
+    r"(?:\([^)]*\)\s*)*(?:re-?do of:\s*)?GIP\s*-?\s*0*([0-9]+)"
+)
+#: DELIBERATE divergence from the canonical anchored pattern: body-MENTION
+#: extraction for the citation graph keeps the pre-WL-039 unanchored regex — a
+#: mention mid-post-body is exactly what a graph edge IS, and anchoring the
+#: scan would zero the edges plane. Consumed ONLY by graph_edges.sql's
+#: extractAll over forum_posts.raw; dbt has no mention-plane equivalent.
+GIP_MENTION_PATTERN_SQL = r"(?i)\\bGIP[\\s-]?0*([0-9]+)"
 #: PRIMARY link tier: topic id from the author-declared discussion URL.
 #: Handles trailing post-number segments (``/t/slug/123/5`` -> 123) and is
 #: NULL-safe while the column is empty pre-reingest.
@@ -425,8 +456,12 @@ def get_governance_diagnostics() -> dict[str, Any]:
 
 
 def _gip_sql(col: str) -> str:
-    """GIP-number extraction over a trusted internal column reference."""
-    return GIP_SQL.format(col=col)
+    """Canonical GIP title identity (dbt parse_gip_number.sql) over a trusted
+    internal column reference, with the dbt consumers' ``gip_number > 0``
+    phantom guard baked in: GIP-0 extracts as NULL everywhere, exactly as a
+    non-GIP title does. Assembled with an f-string — the pattern's
+    ``\\x{200B}`` braces would break ``str.format``."""
+    return f"nullIf(toUInt32OrNull(extract({col}, '{GIP_PATTERN_SQL}')), 0)"
 
 
 def _range_state(start_at: str, end_at: str) -> dict[str, Any]:
@@ -1034,7 +1069,7 @@ def _graph_specs(range_state: dict[str, Any]) -> list[QuerySpec]:
     )
     edges = sql_loader.load_sql(
         "governance", "graph_edges", gov_db=GOV_DB, gip_title=_gip_sql("title"),
-        gip_pattern=GIP_PATTERN_SQL, cap=GRAPH_EDGE_CAP,
+        gip_pattern=GIP_MENTION_PATTERN_SQL, cap=GRAPH_EDGE_CAP,
     )
     return [
         QuerySpec("graph_nodes", "GIPs", nodes, {},
@@ -1084,14 +1119,22 @@ def _treasury_specs(
 ) -> list[QuerySpec]:
     """Verified treasury balances from the rpc-state-indexer plane.
 
-    Three invariants hold in every spec here:
+    Five invariants hold in every spec here:
 
     * ``job_name = TREASURY_JOB`` is pinned. The upstream view is not
-      job-scoped; without this a read spans the full_holders jobs (185M+ rows),
-      exhausts memory, and double-counts any token measured by two jobs.
+      job-scoped; without this a read spans the census jobs (billions of
+      rows), exhausts memory, and double-counts any token measured by two jobs.
+    * Snapshot dates resolve from ``TREASURY_PUB_TABLE`` — never by
+      aggregating the balances view — and every view scan carries a
+      ``snapshot_date IN (SELECT ...)`` prune beside its asof/months join,
+      because a JOIN alone never prunes the view (lesson:
+      fat-view-join-never-prunes; pinned by
+      test_treasury_dates_resolve_from_publications_and_every_scan_is_pruned).
     * The as-of date is resolved PER CHAIN. Chains publish independently and
       are months apart, so a global ``max(snapshot_date)`` would blend one
       chain's current snapshot with another's stale one.
+    * The history datasets are BOUNDED to the latest TREASURY_HISTORY_MONTHS
+      month-ends per chain, and each history basis discloses the bound.
     * ``decimals`` is Nullable and NULL means "not observed" — never 0. A
       balance whose decimals are unknown is emitted raw with its status, and is
       never scaled into a plausible-looking wrong number.
@@ -1110,16 +1153,26 @@ def _treasury_specs(
     ltd_list = ", ".join(f"'{address}'" for address in LTD_WALLETS) or "''"
     # Per-chain as-of. Repeated per spec rather than materialized: the frozen
     # QuerySpec contract is one self-contained statement per dataset.
-    asof_cte = sql_loader.load_sql("governance", "_cte_treasury_asof_per_chain", src=src, job=TREASURY_JOB)
+    pub = f"{TREASURY_DB}.{TREASURY_PUB_TABLE}"
+    asof_cte = sql_loader.load_sql("governance", "_cte_treasury_asof_per_chain", pub=pub, job=TREASURY_JOB)
     # Per-chain month-end sampling for the history datasets. Same per-chain
     # discipline as asof: a global month-end would pin one chain's date onto
     # the other's rows.
-    months_cte = sql_loader.load_sql("governance", "_cte_treasury_months_per_chain", src=src, job=TREASURY_JOB)
+    months_cte = sql_loader.load_sql("governance", "_cte_treasury_months_per_chain", pub=pub, job=TREASURY_JOB, history_months=TREASURY_HISTORY_MONTHS)
     months_join = sql_loader.load_sql("governance", "_join_treasury_months")
     #: The focus token for the per-wallet history: the selected asset when one
     #: is focused, otherwise GNO — the holding with an unambiguous governance
-    #: meaning on both chains.
-    focus_sql = f"{{asset:String}}" if filters.get("asset") else gno_sql
+    #: meaning on both chains. A PREDICATE, not an expression: the old
+    #: `t.token_address = multiIf(t.chain_id, ...)` form put an expression on
+    #: both sides, defeating the (chain, job, token) index and costing ~15s of
+    #: the wallet-history budget; the constant tuple-IN prunes token ranges.
+    if filters.get("asset"):
+        focus_pred = "t.token_address = {asset:String}"
+    else:
+        gno_tuples = ", ".join(
+            f"({chain}, '{address}')" for chain, address in sorted(GNO_TOKENS.items())
+        )
+        focus_pred = f"(t.chain_id, t.token_address) IN ({gno_tuples})"
 
     treasury_summary = sql_loader.load_sql("governance", "treasury_summary", asof_cte=asof_cte, gno_sql=gno_sql, ltd_list=ltd_list, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql)
 
@@ -1162,11 +1215,13 @@ def _treasury_specs(
     # Per-wallet monthly series for ONE token — the focused asset, else GNO.
     # Same unit throughout, so the stack total is meaningful and folding the
     # tail into 'other' is a legitimate sum (unlike stacking across tokens).
-    treasury_wallet_history = sql_loader.load_sql("governance", "treasury_wallet_history", months_cte=months_cte, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql, focus_sql=focus_sql, ltd_list=ltd_list, months_join=months_join)
+    treasury_wallet_history = sql_loader.load_sql("governance", "treasury_wallet_history", months_cte=months_cte, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql, focus_pred=focus_pred, ltd_list=ltd_list, months_join=months_join)
 
     scope = "; Ltd wallets excluded" if filters.get("exclude_ltd") else "; all treasury wallets"
     history_basis = (
-        f"month-end snapshot per chain; chains never blended{scope}"
+        f"latest {TREASURY_HISTORY_MONTHS} month-end snapshots per chain "
+        f"(bounded — the balances plane grew too large for full history within "
+        f"the interactive budget); chains never blended{scope}"
     )
     return [
         QuerySpec(
@@ -1458,9 +1513,9 @@ def _treasury_entity_ctes(chain: int) -> tuple[str, str]:
     once. An entity is one chain by construction, so pinning is both cheaper
     and strictly stronger — there is no second chain to blend in.
     """
-    src = f"{TREASURY_DB}.{TREASURY_VIEW}"
-    asof = sql_loader.load_sql("governance", "_cte_treasury_asof_one_chain", src=src, job=TREASURY_JOB, chain=chain)
-    months = sql_loader.load_sql("governance", "_cte_treasury_months_one_chain", src=src, job=TREASURY_JOB, chain=chain)
+    pub = f"{TREASURY_DB}.{TREASURY_PUB_TABLE}"
+    asof = sql_loader.load_sql("governance", "_cte_treasury_asof_one_chain", pub=pub, job=TREASURY_JOB, chain=chain)
+    months = sql_loader.load_sql("governance", "_cte_treasury_months_one_chain", pub=pub, job=TREASURY_JOB, chain=chain, history_months=TREASURY_HISTORY_MONTHS)
     return asof, months
 
 
@@ -2628,7 +2683,8 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
 
 __all__ = [
     "GOV_APP_ID", "GOV_TITLE", "GOV_URI", "GOV_DB", "SECTION_GROUPS",
-    "ENTITY_BUNDLES", "GIP_PATTERN", "get_governance_html",
+    "ENTITY_BUNDLES", "GIP_PATTERN", "GIP_PATTERN_SQL",
+    "GIP_MENTION_PATTERN_SQL", "get_governance_html",
     "get_governance_diagnostics", "register_governance_tools",
     "reset_failure_cache_for_tests", "_search_candidates",
 ]

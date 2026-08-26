@@ -19,7 +19,7 @@ Instead: the table map below is your discovery surface. Table and column names a
 
 | Table | What it holds / how to read it |
 |---|---|
-| `trades` | Settled fills, all chains. Dedup key `(tx_hash, log_index, order_uid)`. Cross-chain aggregates read THIS table (not `trades_canonical`) with a checkpoint bound + dedup — memory safety. |
+| `trades` | Settled fills, all chains. Fill identity `(tx_hash, log_index)` — one Trade log is one fill of one order, so `order_uid` adds nothing to the key (live-verified) and, at 114 bytes, doubles the scan cost of every count as the deep-history backfill grows. Cross-chain aggregates read THIS table (not `trades_canonical`) with a checkpoint bound + dedup — memory safety. |
 | `trades_canonical` | Deduplicated single-chain view. Never use for cross-chain sweeps. |
 | `orders`, `order_events` | Orderbook-API snapshots, ReplacingMergeTree versions — latest row via `FINAL`, `argMax(..., observed_at)`, or `LIMIT 1 BY order_uid`. The synced orderbook is a PARTIAL subset (~78K orders, limit-heavy, recent-skewed) — never treat it as all CoW orders. |
 | `settlements`, `settlements_canonical` | Settlement transactions; `block_timestamp` semantics shared with `trades`. |
@@ -50,7 +50,7 @@ Instead: the table map below is your discovery surface. Table and column names a
 ### Daily fills per chain, deduplicated and checkpoint-bounded
 ```sql
 SELECT toDate(block_timestamp) AS dt, chain_id,
-    uniqExact((tx_hash, log_index, order_uid)) AS fills
+    uniqExact((tx_hash, log_index)) AS fills
 FROM cow_db.trades
 WHERE block_timestamp >= now() - INTERVAL 30 DAY
   AND block_timestamp IS NOT NULL
@@ -78,7 +78,7 @@ GROUP BY chain_id
 
 ## Critical Rules
 
-1. **Dedup discipline.** Every `cow_db` table is ReplacingMergeTree. Count trades with `uniqExact((tx_hash, log_index, order_uid))`; read smaller tables (`orders`, `competition_*`) with `FINAL` or `LIMIT 1 BY`. Bare `count()` across versions overcounts — if you must use it, disclose.
+1. **Dedup discipline.** Every `cow_db` table is ReplacingMergeTree. Count trades with `uniqExact((tx_hash, log_index))` — never add `order_uid` to the key: it is redundant (one log = one fill = one order) and its 114-byte column doubles the read. Read smaller tables (`orders`, `competition_*`) with `FINAL` or `LIMIT 1 BY`. Bare `count()` across versions overcounts — if you must use it, disclose.
 2. **BNB Chain (chain_id 56) trades lack block timestamps.** Exclude chain 56 from time-bucketed series (`block_timestamp IS NOT NULL`) and disclose; all-time counts still include it.
 3. **Known open intents are an observed snapshot, never a complete orderbook.** Order-class and order-type mixes describe the ~78K-order synced subset, not all CoW orders.
 4. **Depth history is bounded by per-chain order-capture start** (~2026-07-20, a growing data property). Read the bound from the data; never hardcode it.

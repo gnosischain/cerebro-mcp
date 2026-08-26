@@ -340,7 +340,9 @@ FROM governance_db.snapshot_proposals FINAL"""))
 
 
 def test_gip_extraction_hits_both_sides(ch):
-    gip_sql = r"toInt32OrNull(extract(title, '(?i)\\bGIP[\\s-]?0*([0-9]+)'))"
+    from cerebro_mcp.tools.visualization import governance_explorer as gov
+
+    gip_sql = gov._gip_sql("title")
     proposals = int(_scalar(ch, f"""
 SELECT countIf({gip_sql} IS NOT NULL)
 FROM governance_db.snapshot_proposals FINAL"""))
@@ -349,6 +351,27 @@ SELECT countIf({gip_sql} IS NOT NULL)
 FROM governance_db.forum_topics FINAL"""))
     assert proposals > 0
     assert topics > 0
+
+
+def test_gip_fixture_table_matches_in_clickhouse(ch):
+    """Evaluate the shared GIP fixture table in the engine that runs the SQL
+    dialect — RE2 escape/semantics differences from Python/JS make this the
+    only authoritative check for the rendered pattern (incl. that the
+    \\x{200B} braces survive the f-string assembly and the client's
+    {name:Type} parameter substitution untouched)."""
+    from cerebro_mcp.tools.visualization import governance_explorer as gov
+    from tests.gip_fixtures import GIP_TITLE_FIXTURES
+
+    strings = [text for text, _ in GIP_TITLE_FIXTURES]
+    rows = _rows(ch, f"""
+SELECT s, {gov._gip_sql('s')} AS gip
+FROM (SELECT arrayJoin({{strs:Array(String)}}) AS s)
+""", parameters={"strs": strings})
+    got = {str(row[0]): row[1] for row in rows}
+    assert set(got) == set(strings)
+    for text, expected in GIP_TITLE_FIXTURES:
+        value = int(got[text]) if got[text] is not None else None
+        assert value == expected, repr(text)
 
 
 def test_choice_jsontype_classification_on_sample(ch):
@@ -443,6 +466,11 @@ def test_every_spec_executes_against_live_clickhouse(ch):
             {**gov._default_filters(), "query": "gip", "category_id": 21,
              "forum_status": "open", "sort_by": "most_posts"},
         ],
+        # The citation graph was the one section neither sweep executed —
+        # added with WL-039, whose regex change lands exactly there. Its SQL
+        # is range-invariant, so the fingerprint dedup collapses the range
+        # variants to one execution per query.
+        "graph": [gov._default_filters()],
     }
     range_variants = [
         gov._range_state("", ""),
@@ -548,3 +576,50 @@ def test_delegation_specs_execute_against_live_clickhouse(ch):
                 except Exception as exc:  # noqa: BLE001 — collecting every failure
                     failures.append(f"delegations:{spec.key}: {exc}")
     assert not failures, "delegation specs failed:\n" + "\n".join(failures)
+
+
+def _treasury_db_reachable(ch) -> bool:
+    try:
+        ch.run_query(
+            "SELECT 1 FROM rpc_state_indexer.census_publications LIMIT 1",
+            GOV_DB, requested_max_rows=1, audience="internal", fetch_mode="auto",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def test_treasury_specs_execute_against_live_clickhouse(ch):
+    """Every treasury section spec against the real balances view. Added after
+    the holder census grew token_balances to billions of rows and the old
+    asof-JOIN date resolution OOMed the whole section (Code 241, server-wide
+    cap) — no test executed this plane, so the regression arrived with the
+    data, invisibly. The fix (dates from census_publications + an IN-prune
+    beside every asof/months join) only proves itself against a real server."""
+    from cerebro_mcp.tools.visualization import governance_explorer as gov
+
+    if not _treasury_db_reachable(ch):
+        pytest.skip("rpc_state_indexer.census_publications not reachable")
+
+    filter_variants = [
+        gov._default_filters(),
+        {**gov._default_filters(), "chain_id": 1, "sort_by": "supply_share"},
+    ]
+    range_state = gov._range_state("", "")
+    failures: list[str] = []
+    seen: set = set()
+    for filters in filter_variants:
+        for spec in gov._treasury_specs(range_state, filters):
+            fingerprint = (spec.sql, tuple(sorted((spec.parameters or {}).items())))
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            try:
+                ch.run_query(
+                    spec.sql, GOV_DB, requested_max_rows=100,
+                    audience="internal", fetch_mode="auto",
+                    parameters=spec.parameters or None,
+                )
+            except Exception as exc:  # noqa: BLE001 — collecting every failure
+                failures.append(f"treasury:{spec.key}: {exc}")
+    assert not failures, "treasury specs failed:\n" + "\n".join(failures)

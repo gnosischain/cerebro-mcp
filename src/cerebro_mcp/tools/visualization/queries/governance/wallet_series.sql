@@ -4,7 +4,9 @@ picked AS (
     SELECT t.token_address AS p_token, uniqExact(t.balance_raw) AS changes
     FROM @src AS t
     INNER JOIN months AS m ON t.snapshot_date = m.month_end
-    WHERE t.job_name = '@job' AND t.chain_id = @chain
+    WHERE t.job_name = '@job'
+      AND t.snapshot_date IN (SELECT month_end FROM months)
+      AND t.chain_id = @chain
       AND t.wallet_address = {addr:String} AND t.balance_raw != 0
     GROUP BY p_token
     ORDER BY (p_token = '@gno') DESC, changes DESC, p_token
@@ -21,7 +23,9 @@ SELECT @chain AS chain_id, m.bucket AS bucket,
 FROM @src AS t
 INNER JOIN months AS m ON t.snapshot_date = m.month_end
 INNER JOIN picked AS pk ON pk.p_token = t.token_address
-WHERE t.job_name = '@job' AND t.chain_id = @chain
+WHERE t.job_name = '@job'
+  AND t.snapshot_date IN (SELECT month_end FROM months)
+  AND t.chain_id = @chain
   AND t.wallet_address = {addr:String} AND t.balance_raw != 0
 GROUP BY bucket, token_address
 ORDER BY bucket, token_address

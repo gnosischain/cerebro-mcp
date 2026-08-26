@@ -7,7 +7,10 @@
 -- likes undercount the counters (Discourse who-liked visibility limit) —
 -- the UI carries the disclosure. Two time tokens because the receive arm
 -- must prefix the predicate column (both joined tables carry created_at).
-SELECT u.id AS user_id, u.username, u.name, u.trust_level,
+-- No username/name here (WL-039 privacy alignment): aggregation payloads key
+-- on user_id; names stay only on verbatim-post surfaces (topic_posts,
+-- search_text), where showing the author as published is attribution.
+SELECT u.id AS user_id, u.trust_level,
        u.post_count AS lifetime_posts, u.topic_count AS lifetime_topics,
        u.likes_received, u.likes_given, u.days_visited,
        coalesce(p.posts_in_range, 0) AS posts_in_range,

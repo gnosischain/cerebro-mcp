@@ -13,7 +13,8 @@ SELECT @chain AS chain_id, '@label' AS entity_label,
        CAST(NULL AS Nullable(Float64)) AS value_usd
 FROM @src AS t
 INNER JOIN asof AS a ON t.snapshot_date = a.as_of
-WHERE t.job_name = '@job' AND t.chain_id = @chain
+WHERE t.job_name = '@job' AND t.snapshot_date IN (SELECT as_of FROM asof)
+  AND t.chain_id = @chain
   AND t.wallet_address = {addr:String}
 GROUP BY chain_id, entity_label, wallet_address, is_ltd
 ORDER BY wallet_address

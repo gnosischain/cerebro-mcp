@@ -13,6 +13,8 @@ SELECT
         AND t.wallet_address NOT IN (@ltd_list)) AS gno_units_ex_ltd
 FROM @src AS t
 @months_join
-WHERE t.job_name = '@job' AND @chain_sql AND @ltd_sql
+WHERE t.job_name = '@job'
+  AND t.snapshot_date IN (SELECT month_end FROM months)
+  AND @chain_sql AND @ltd_sql
 GROUP BY chain_id, bucket
 ORDER BY bucket, chain_id

@@ -328,6 +328,14 @@ export function OverviewSection(props: SectionProps) {
             {alltimeRows.length > 0
               ? <ChartCard renderer="svg" chartId="cow-chain-totals" hideId spec={totalsBarSpec} />
               : <div className="cow-empty">No all-time totals available.</div>}
+            {/* Visible twin of the info-popover disclosure: this panel ignores
+                the trailing-window selector, and the coverage strip's window
+                text sits right above it — without this line the two read as a
+                contradiction. */}
+            <p className="cow-caption">
+              All indexed history — ignores the trailing-window selector. Each network
+              spans its own indexed range.
+            </p>
           </ChartSection>
         </GroupGate>
       </div>
@@ -337,6 +345,9 @@ export function OverviewSection(props: SectionProps) {
             {alltimeRows.length > 0
               ? <ChartCard renderer="svg" chartId="cow-alltime-share" hideId spec={alltimePieSpec} />
               : <div className="cow-empty">No all-time totals available.</div>}
+            <p className="cow-caption">
+              All indexed history — ignores the trailing-window selector.
+            </p>
           </ChartSection>
         </GroupGate>
         <GroupGate props={props} group="breakdown">

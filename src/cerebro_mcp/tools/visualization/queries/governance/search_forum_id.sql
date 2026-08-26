@@ -7,7 +7,9 @@ FROM (
   FROM governance_db.forum_topics FINAL
   WHERE id = {n:UInt32}
   UNION ALL
-  SELECT 'forum_user', toString(id), username, 'forum_user',
+  -- De-identified label (WL-039): the caller typed the id; the candidate
+  -- label adds no name. Names stay only on verbatim-post surfaces.
+  SELECT 'forum_user', toString(id), concat('User #', toString(id)), 'forum_user',
          toInt64(post_count), 0
   FROM governance_db.forum_users FINAL
   WHERE id = {n:UInt32}

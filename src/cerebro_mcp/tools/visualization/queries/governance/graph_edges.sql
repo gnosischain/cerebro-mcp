@@ -6,10 +6,14 @@ WITH topic_gip AS (
 ),
 cites AS (
   -- Every GIP number appearing in a post body. extractAll + arrayJoin gives one
-  -- row per MENTION, so the edge weight counts citations, not posts.
+  -- row per MENTION, so the edge weight counts citations, not posts. The
+  -- @gip_pattern here is GIP_MENTION_PATTERN_SQL — deliberately UNANCHORED,
+  -- unlike the canonical title-identity pattern the src side uses: a mention
+  -- mid-body is exactly what an edge IS. toUInt32OrNull for type symmetry with
+  -- the title side.
   SELECT p.topic_id AS topic_id,
          p.created_at AS created_at,
-         toInt32OrNull(arrayJoin(extractAll(p.raw, '@gip_pattern'))) AS dst_gip
+         toUInt32OrNull(arrayJoin(extractAll(p.raw, '@gip_pattern'))) AS dst_gip
   FROM @gov_db.forum_posts AS p FINAL
 )
 SELECT tg.src_gip AS src_gip,

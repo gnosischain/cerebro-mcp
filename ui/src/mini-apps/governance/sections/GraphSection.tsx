@@ -7,6 +7,7 @@ import { GipBadge } from "../components/GipBadge";
 import {
   GIP_STAGE_COLOR,
   GIP_STAGE_ORDER,
+  danglingCitations,
   drawableEdges,
   gipDegrees,
   gipTimelineOption,
@@ -95,6 +96,7 @@ export function GraphSection({ ctx }: { ctx: GovViewContext }) {
   );
 
   const drawable = useMemo(() => drawableEdges(nodes, edges), [nodes, edges]);
+  const dangling = useMemo(() => danglingCitations(nodes, edges), [nodes, edges]);
   const degrees = useMemo(() => gipDegrees(drawable), [drawable]);
   const isolated = useMemo(
     () => nodes.filter((n) => !degrees.has(n.gip)).length,
@@ -163,7 +165,8 @@ export function GraphSection({ ctx }: { ctx: GovViewContext }) {
         <span className="gov-graph-summary">
           <strong>{fmtNum(nodes.length)}</strong> GIPs ·{" "}
           <strong>{fmtNum(drawable.reduce((sum, e) => sum + e.weight, 0))}</strong> citations ·{" "}
-          <strong>{fmtNum(nodes.length - isolated)}</strong> connected
+          <strong>{fmtNum(nodes.length - isolated)}</strong> connected ·{" "}
+          <strong>{fmtNum(dangling)}</strong> dangling dropped
         </span>
         <label>
           Layout

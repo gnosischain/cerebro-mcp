@@ -218,10 +218,6 @@ def test_every_fragment_that_renders_inline_carries_a_rationale():
     UNDOCUMENTED = {
         "cow/_cte_checkpoints", "cow/_cte_owner_months", "cow/_cte_token_metadata",
         "cow/_cte_token_metadata_multichain", "cow/_pred_native_price_window",
-        "governance/_cte_treasury_asof_one_chain",
-        "governance/_cte_treasury_asof_per_chain",
-        "governance/_cte_treasury_months_one_chain",
-        "governance/_cte_treasury_months_per_chain",
     }
     missing, stale = [], []
     for app in sql_loader.apps():

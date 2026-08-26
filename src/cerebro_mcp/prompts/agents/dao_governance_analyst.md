@@ -62,17 +62,20 @@ Delegation semantics (embed these):
 
 ## Treasury plane — `rpc_state_indexer` (verified balances, NOT execution)
 
-Read `rpc_state_indexer.v_treasury_balances` (query **without FINAL** — it resolves dedup internally). Columns: `chain_id`, `snapshot_date`, `job_name`, `wallet_address`, `token_address`, `symbol`, `decimals`, `metadata_status`, `balance_raw`, `balance_units`, `anchor_block`, `anchor_hash`. Supply denominators come from `rpc_state_indexer.v_token_scalars_published` (`scalar_name = 'totalSupply'`).
+Read `rpc_state_indexer.v_treasury_balances` (query **without FINAL** — it resolves dedup internally). Columns: `chain_id`, `snapshot_date`, `job_name`, `wallet_address`, `token_address`, `symbol`, `decimals`, `metadata_status`, `balance_raw`, `balance_units`, `anchor_block`, `anchor_hash`. Supply denominators come from `rpc_state_indexer.v_token_scalars_published` (`scalar_name = 'totalSupply'`) — prune those reads by `snapshot_date` too, for the same reason as the next rule.
 
-Five rules, all load-bearing:
+Six rules, all load-bearing:
 
-- **Always pin `job_name = 'daily_treasury'`.** The view is NOT job-scoped: it spans every census job, including full-holders jobs with hundreds of thousands of rows per date. An unpinned read exhausts server memory and double-counts any token measured by two jobs.
-- **Resolve the as-of date PER CHAIN** (`max(snapshot_date)` grouped by `chain_id`). Chains are indexed independently and their latest snapshots can be years apart, so a global max blends one chain's current snapshot with another's stale one. Never sum across chains — the snapshots are not contemporaneous.
+- **Always pin `job_name = 'daily_treasury'`.** The view is NOT job-scoped: it spans every census job, and since the holder census landed its base table holds **billions** of rows. An unpinned read exhausts server memory and double-counts any token measured by two jobs.
+- **Never aggregate the view to find dates, and never rely on a JOIN to bound it.** `max(snapshot_date)` over the view FINAL-merges the whole census-era base table (Code 241 at the server-wide cap), and a JOIN against resolved dates does not prune — only constant-foldable predicates do. Resolve dates from `rpc_state_indexer.census_publications` (`WHERE job_name = 'daily_treasury' AND target_kind = 'token'`, key-pruned and authoritative — a date exists in the view iff published), then give EVERY view scan a `snapshot_date IN (SELECT ... FROM <that CTE>)` predicate, which folds to constants at plan time and prunes. Lesson: `fat-view-join-never-prunes`.
+- **Resolve the as-of date PER CHAIN** (grouped by `chain_id`). Chains are indexed independently and their latest snapshots can be years apart, so a global max blends one chain's current snapshot with another's stale one. Never sum across chains — the snapshots are not contemporaneous.
 - **`decimals` NULL means "not observed", never 0.** A 0-decimals token is legitimate, so scaling an unknown by `10^0` yields a plausible-looking wrong number. When `metadata_status != 'resolved'`, report the exact integer `balance_raw` and say the balance cannot be scaled. Most held tokens are currently unresolved — disclose that.
 - **No USD, no value ranking.** There is no price feed, so every USD figure is NULL. Do not rank tokens by "value" and do not compare balances across tokens — different units are not comparable. Share of a token's own total supply is the only dimensionless measure available, and a value `> 100%` means the contract's `balanceOf` is lying (a spoofed token), not that the treasury owns more than exists.
 - **A balance is a holding, never voting power** — the `gnosis.eth` strategy is a custom cross-chain method (see above). This rule is unchanged.
 
 Always cite the `anchor_block` behind a treasury figure: every number is attributable to an immutable finalized block, which is what distinguishes this plane from a portfolio API.
+
+Time-series over this plane are **bounded**: the mini-app's history datasets read the latest **24 month-end snapshots per chain** (`TREASURY_HISTORY_MONTHS` — the view costs ~0.4s per selected date, so full history exceeds the interactive budget), and every history dataset's basis discloses the bound. Match that discipline in ad-hoc series: sample month-ends from `census_publications`, bound the set, and say so. Full history returns when the indexer materializes a treasury slice.
 
 ## Domain semantics (embed these, do not improvise)
 

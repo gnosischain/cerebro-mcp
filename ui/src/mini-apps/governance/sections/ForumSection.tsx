@@ -232,11 +232,16 @@ export function ForumSection({ ctx }: { ctx: GovViewContext }) {
               columnLabels={COLUMN_LABELS}
               sourceLabel="Forum activity (forum.gnosis.io)"
               onCellClick={(column, _value, row) => {
-                if (column !== "username") return;
+                // Post-de-identification the User ID column IS the identity
+                // column, so it carries the drill-through.
+                if (column !== "user_id") return;
                 const id = row[contributorIndex.get("user_id") ?? -1] ?? row[contributorIndex.get("id") ?? -1];
                 if (id !== undefined && id !== null && id !== "") ctx.onEntity("forum_user", String(id));
               }}
               renderCell={(column, value) => {
+                if (column === "user_id") {
+                  return <span className="gov-mono">{String(value ?? "")}</span>;
+                }
                 if (column === "last_post_at") {
                   return <span className="gov-mono">{String(value ?? "").slice(0, 10)}</span>;
                 }

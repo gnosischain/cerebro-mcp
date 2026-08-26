@@ -1,6 +1,8 @@
 -- One topic's likes over time at (bucket, post) grain — the topic drill-down
--- stacks these per post (top posts named with their author, the rest folded
--- into a COUNTED "Other posts" series client-side). Buckets are ADAPTIVE:
+-- stacks these per post (top posts labeled by post number, the rest folded
+-- into a COUNTED "Other posts" series client-side; no author names here —
+-- WL-039 privacy alignment keeps names on verbatim-post surfaces only).
+-- Buckets are ADAPTIVE:
 -- daily while the topic's like history spans <= 120 days (a topic's hot life
 -- is usually weeks — weekly buckets flatten it), weekly beyond that. 120
 -- mirrors the day/week cliff of the section charts' _bucket() helper. The
@@ -20,7 +22,6 @@ SELECT if((SELECT days FROM span) <= 120,
           toStartOfWeek(l.created_at, 1)) AS bucket,
        if((SELECT days FROM span) <= 120, 'day', 'week') AS bucket_unit,
        fp.post_number AS post_number,
-       any(fp.username) AS username,
        count() AS likes
 FROM governance_db.forum_likes AS l FINAL
 LEFT JOIN governance_db.forum_posts AS fp FINAL ON fp.id = l.post_id

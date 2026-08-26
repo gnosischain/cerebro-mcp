@@ -9,7 +9,7 @@ import { SignalingNote } from "../components/SignalingNote";
 import { activityComboOption } from "../model/chartOptions";
 import { COLUMN_LABELS, hiddenColumnsFor } from "../model/columns";
 import { parseActivity } from "../model/parseRows";
-import { firstRow, fmtNum, KpiRow, pickNumber, pickString, useDataset, type GovViewContext } from "../sections/common";
+import { firstRow, fmtNum, KpiRow, pickNumber, useDataset, type GovViewContext } from "../sections/common";
 
 // Forum contributor profile. No wallet linkage, ever — forum identities are
 // never merged with Snapshot voter addresses.
@@ -24,14 +24,19 @@ export function ContributorDetail({ ctx }: { ctx: GovViewContext }) {
     { field: "post_count", label: "Posts", type: "bar" },
     { field: "topics_started", label: "Topics started", type: "line" },
   ]), [activityDs]);
-  const username = pickString(profile, ["username"]) || entity?.label || entity?.identifier || "";
+  // De-identified handle (WL-039): the profile payload carries no username —
+  // the stable id IS the identity here. Names appear only on verbatim-post
+  // surfaces (TopicDetail), where showing the author as published is
+  // attribution.
+  const userId = pickNumber(profile, ["user_id"]);
+  const handle = `User #${userId ?? entity?.identifier ?? "?"}`;
 
   return (
     <div className="gov-entity">
       <MaIdentity
         label="FORUM CONTRIBUTOR · forum.gnosis.io"
-        value={username}
-        onCopy={() => void navigator.clipboard?.writeText(username)}
+        value={handle}
+        onCopy={() => void navigator.clipboard?.writeText(handle)}
       />
 
       <DatasetPanel title="Contributor profile" descriptor={ctx.descriptors.contributor_profile} groupLoaded emptyLabel="Contributor not found.">
@@ -94,7 +99,7 @@ export function ContributorDetail({ ctx }: { ctx: GovViewContext }) {
           datasetKey="contributor_posts"
           descriptor={postsDescriptor}
           fetchRows={ctx.fetchRows}
-          scope={`contributor_${entity?.identifier ?? username}`}
+          scope={`contributor_${entity?.identifier ?? userId ?? "unknown"}`}
           label="Export posts CSV"
           excludeColumns={["raw_markdown", "raw", "cooked_html", "cooked"]}
         />

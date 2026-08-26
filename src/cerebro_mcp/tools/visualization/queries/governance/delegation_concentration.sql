@@ -21,5 +21,8 @@ SELECT tier,
        total_value,
        arraySum(arraySlice(values, 1, tier)) / nullIf(total_value, 0) AS share
 FROM sorted
-ARRAY JOIN [toUInt32(5), toUInt32(10), toUInt32(20)] AS tier
+-- Canonical space-level tiers (dbt api_governance_concentration_latest,
+-- population delegates_by_delegators) — shared with the voter concentration
+-- files, so all concentration surfaces read on one scale.
+ARRAY JOIN [toUInt32(10), toUInt32(20), toUInt32(50)] AS tier
 ORDER BY tier

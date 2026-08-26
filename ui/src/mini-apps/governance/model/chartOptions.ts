@@ -792,6 +792,17 @@ export function drawableEdges(nodes: GipNode[], edges: GipEdge[]): GipEdge[] {
   return edges.filter((e) => present.has(e.src) && present.has(e.dst));
 }
 
+/** Summed weight of the edges drawableEdges() drops. A deliberate exclusion
+ * must be COUNTED: the graph summary discloses how many citations point at
+ * GIP numbers that exist only as mentions, so a shrinking graph reads as
+ * "N dangling dropped", never as silently fewer citations. */
+export function danglingCitations(nodes: GipNode[], edges: GipEdge[]): number {
+  const present = new Set(nodes.map((n) => n.gip));
+  return edges
+    .filter((e) => !present.has(e.src) || !present.has(e.dst))
+    .reduce((sum, e) => sum + e.weight, 0);
+}
+
 /** Size = forum posts, i.e. how much was SAID. Influence has its own axis, so
  * conflating the two here would spend two channels on one measure. Clamped so a
  * 1-post stub is still clickable and a 300-post megathread cannot eat the plot. */
@@ -1155,31 +1166,19 @@ export function likesByCategoryOption(
   } as EChartsOption;
 }
 
-/** Topic drill-down: that topic's likes over time, stacked per POST. Top
- * posts stay named with their author ("Post #3 · martin" — a bare index is
- * opaque without scrolling to the thread); the rest fold into the counted
- * residual band. post_number 0 is a like whose post left the index —
- * rendered as "Unknown post", never silently dropped. The series KEY stays
- * the post number (identity); the author is display text only, and a
- * caller-supplied username is untrusted display text (sanitized). */
+/** Topic drill-down: that topic's likes over time, stacked per POST, labeled
+ * by post number. The payload carries no author names (WL-039 privacy
+ * alignment — names stay on verbatim-post surfaces only); the series KEY was
+ * always the post number (identity). post_number 0 is a like whose post left
+ * the index — rendered as "Unknown post", never silently dropped. */
 export function topicLikesOption(rows: Array<Record<string, unknown>>): EChartsOption {
-  const authorByPost = new Map<string, string>();
-  for (const row of rows) {
-    const key = String(row.post_number ?? "");
-    const author = sanitizeSymbol(row.username);
-    if (key !== "" && author && !authorByPost.has(key)) authorByPost.set(key, author);
-  }
   const spec = stackedSeriesOption(rows, {
     xField: "bucket",
     valueField: "likes",
     seriesField: "post_number",
     kind: "bar",
     maxSeries: 6,
-    seriesLabeler: (key) => {
-      if (key === "0") return "Unknown post";
-      const author = authorByPost.get(key);
-      return author ? `Post #${key} · ${author}` : `Post #${key}`;
-    },
+    seriesLabeler: (key) => (key === "0" ? "Unknown post" : `Post #${key}`),
     yName: "likes",
   }) as EChartsOption & { xAxis?: Record<string, unknown> };
   // Buckets are adaptive (daily for short-lived topics, weekly otherwise) —

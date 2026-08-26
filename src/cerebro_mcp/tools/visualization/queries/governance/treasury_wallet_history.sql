@@ -4,8 +4,12 @@ top_wallets AS (
     SELECT t.chain_id AS w_chain, t.wallet_address AS w_wallet,
            max(t.balance_units) AS peak
     FROM @src AS t
-    WHERE t.job_name = '@job' AND @chain_sql AND @ltd_sql
-      AND t.token_address = @focus_sql AND t.balance_raw != 0
+    -- Peak over month-end snapshots (the same dates the series shows) — an
+    -- unpruned all-days scan of the view OOMs; see _cte_treasury_asof_per_chain.
+    WHERE t.job_name = '@job'
+      AND t.snapshot_date IN (SELECT month_end FROM months)
+      AND @chain_sql AND @ltd_sql
+      AND @focus_pred AND t.balance_raw != 0
     GROUP BY w_chain, w_wallet
     ORDER BY w_chain, peak DESC, w_wallet
     LIMIT 5 BY w_chain
@@ -20,7 +24,9 @@ FROM @src AS t
 @months_join
 LEFT JOIN top_wallets AS tw
        ON tw.w_chain = t.chain_id AND tw.w_wallet = t.wallet_address
-WHERE t.job_name = '@job' AND @chain_sql AND @ltd_sql
-  AND t.token_address = @focus_sql AND t.balance_raw != 0
+WHERE t.job_name = '@job'
+  AND t.snapshot_date IN (SELECT month_end FROM months)
+  AND @chain_sql AND @ltd_sql
+  AND @focus_pred AND t.balance_raw != 0
 GROUP BY chain_id, bucket, wallet_address
 ORDER BY bucket, chain_id, wallet_address
