@@ -102,6 +102,16 @@ Supplying your own `transformations` on the panel disables the auto-pivot
 - `category_state_over_time` -> `state_timeline` (supply `value_mappings`).
 - `tabular` -> `table`.
 
+Stacking is a SEMANTIC choice, not a style: multi-series bar/area panels stack
+by default (`stacking: "auto"`), which is only honest when the series are
+ADDITIVE. Cumulative tiers (top 10/20/50) or mixed measures (posts vs
+participants) double-count when stacked — a tier chart once rendered a 250%
+bar. Set `stacking: "none"` for grouped side-by-side bars in those cases
+(or restructure cumulative tiers into non-overlapping increments if you want
+a stack that totals the widest tier); `"percent"` normalizes a true
+composition to 100%. Only `barchart_*`, `timeseries_area`, and
+`timeseries_bar` accept an explicit value — the schema rejects it elsewhere.
+
 ## Unit hygiene
 
 - Ratios as `percentunit` only if the SQL returns 0-1. Otherwise use `percent`

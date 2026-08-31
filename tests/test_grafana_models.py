@@ -52,6 +52,37 @@ def test_unit_allowlist_accepts_known():
     assert _panel(unit="currencyUSD").unit == "currencyUSD"
 
 
+# --- stacking ------------------------------------------------------------
+# Only the stacked-series viz families draw it; an explicit value anywhere
+# else would be silently ignored, so the model rejects it at parse time.
+
+def test_explicit_stacking_rejected_on_non_stackable_viz():
+    with pytest.raises(ValidationError, match="stacking"):
+        _panel(viz="stat", stacking="none")
+
+
+def test_stacking_auto_valid_everywhere():
+    assert _panel(viz="stat", stacking="auto").stacking == "auto"
+
+
+def test_explicit_stacking_accepted_on_stackable_viz():
+    p = _panel(
+        title="Tiers", role="breakdown", viz="barchart_vertical",
+        data_shape="category_value_multi", stacking="none",
+        sql_query="SELECT p AS category, t AS series, v AS value FROM c",
+    )
+    assert p.stacking == "none"
+
+
+def test_unknown_stacking_value_rejected():
+    with pytest.raises(ValidationError):
+        _panel(
+            title="Tiers", role="breakdown", viz="barchart_vertical",
+            data_shape="category_value_multi", stacking="grouped",
+            sql_query="SELECT p AS category, t AS series, v AS value FROM c",
+        )
+
+
 # --- uniqueness ----------------------------------------------------------
 
 def test_duplicate_panel_titles_rejected():

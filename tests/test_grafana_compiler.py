@@ -191,6 +191,67 @@ def test_per_viz_option_builders():
     assert "cellOptions" in by_title["Top users"]["fieldConfig"]["defaults"]["custom"]
 
 
+# --- stacking control ----------------------------------------------------
+# "auto" keeps the shape-based defaults; an explicit spec value wins. Grouped
+# bars exist because stacking is semantic: cumulative or mixed-measure series
+# double-count when stacked (WL-042: a top-10/20/50 tier chart rendered a
+# 250% stack).
+
+
+def test_stacking_auto_defaults_unchanged():
+    d = GrafanaDashboardDef(uid="u", title="t", panels=[
+        {"title": "Multi", "role": "breakdown", "viz": "barchart_vertical",
+         "data_shape": "category_value_multi",
+         "sql_query": "SELECT p AS category, t AS series, v AS value FROM c",
+         "unit": "percentunit"},
+        {"title": "Single", "role": "breakdown", "viz": "barchart_vertical",
+         "data_shape": "category_value",
+         "sql_query": "SELECT stage AS category, n AS value FROM f",
+         "unit": "short"},
+    ])
+    out = compile_grafana_dashboard(d)
+    by_title = {p["title"]: p for p in out["panels"] if p.get("type") != "row"}
+    assert by_title["Multi"]["options"]["stacking"] == "normal"
+    assert by_title["Single"]["options"]["stacking"] == "none"
+
+
+def test_stacking_none_gives_grouped_barchart():
+    d = GrafanaDashboardDef(uid="u", title="t", panels=[
+        {"title": "Tiers", "role": "breakdown", "viz": "barchart_vertical",
+         "data_shape": "category_value_multi", "stacking": "none",
+         "sql_query": "SELECT p AS category, tier AS series, share AS value FROM c",
+         "unit": "percentunit"},
+    ])
+    out = compile_grafana_dashboard(d)
+    panel = out["panels"][0]
+    assert panel["options"]["stacking"] == "none"
+    # the long-format pivot is orthogonal to stacking and must survive
+    assert panel["transformations"] == [{
+        "id": "groupingToMatrix",
+        "options": {"columnField": "series", "rowField": "category",
+                    "valueField": "value"},
+    }]
+
+
+def test_stacking_explicit_modes_timeseries():
+    d = GrafanaDashboardDef(uid="u", title="t", panels=[
+        {"title": "Bars", "role": "trend", "viz": "timeseries_bar",
+         "data_shape": "time_series_multi", "stacking": "percent",
+         "sql_query": "SELECT ts AS time, c AS label, v AS value FROM e",
+         "unit": "short"},
+        {"title": "Area", "role": "trend", "viz": "timeseries_area",
+         "data_shape": "time_series_multi", "stacking": "none",
+         "sql_query": "SELECT ts AS time, c AS label, v AS value FROM e",
+         "unit": "short"},
+    ])
+    out = compile_grafana_dashboard(d)
+    by_title = {p["title"]: p for p in out["panels"] if p.get("type") != "row"}
+    bars = by_title["Bars"]["fieldConfig"]["defaults"]["custom"]
+    area = by_title["Area"]["fieldConfig"]["defaults"]["custom"]
+    assert bars["stacking"] == {"mode": "percent", "group": "A"}
+    assert area["stacking"] == {"mode": "none", "group": "A"}
+
+
 def test_heatmap_timeseries_multi_calculates_true():
     d = GrafanaDashboardDef(uid="u", title="t", panels=[
         {"title": "H", "role": "breakdown", "viz": "heatmap",

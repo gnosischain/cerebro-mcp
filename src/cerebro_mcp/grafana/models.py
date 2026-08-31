@@ -23,6 +23,8 @@ from cerebro_mcp.grafana.styles import (
     PanelRole,
     ROLE_ALLOWED_VIZ,
     ROLE_DEFAULT_VIZ,
+    STACKABLE_VIZ,
+    Stacking,
     VIZ_ACCEPTS_SHAPE,
     Viz,
     bounds_for_unit,
@@ -68,6 +70,12 @@ class GrafanaPanelDef(BaseModel):
     # gauge bounds (required for gauge unless the unit implies bounds).
     min: float | None = None
     max: float | None = None
+    # Stacking for the stacked-series viz families (STACKABLE_VIZ). "auto"
+    # keeps the shape-based default: multi-series shapes stack, single-series
+    # do not. Set "none" for grouped bars when series are cumulative or not
+    # additive — stacking such series double-counts (WL-042: tier chart
+    # summed to 250%). "percent" normalizes a true composition to 100%.
+    stacking: Stacking = "auto"
     # Only honored when viz=stat and data_shape=single_value.
     sparkline_sql: str | None = None
     # Required for state_timeline / status_history.
@@ -120,6 +128,16 @@ class GrafanaPanelDef(BaseModel):
         if viz in ("state_timeline", "status_history") and not self.value_mappings:
             raise ValueError(
                 f"viz '{viz}' requires value_mappings (state -> color)"
+            )
+
+        # stacking is only drawn by the stacked-series viz families; an
+        # explicit value anywhere else would be silently ignored, so fail
+        # loudly at parse time. "auto" is always valid.
+        if self.stacking != "auto" and viz not in STACKABLE_VIZ:
+            raise ValueError(
+                f"stacking '{self.stacking}' is only supported for viz "
+                f"{sorted(STACKABLE_VIZ)}; viz '{viz}' does not draw stacked "
+                f"series — leave stacking='auto'"
             )
 
         # Long-format shapes get a compiler-added pivot transformation that

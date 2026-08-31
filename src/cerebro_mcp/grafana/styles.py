@@ -48,6 +48,23 @@ Viz = Literal[
     "table",
 ]
 
+# "auto" keeps the shape-based default: multi-series shapes stack, single-series
+# do not. Explicit values exist because stacking is a SEMANTIC choice the shape
+# alone cannot decide: cumulative or mixed-measure series double-count when
+# stacked (a top-10/20/50 tier chart rendered a 250% bar on WL-042) and need
+# "none" (grouped bars); true compositions may want "percent".
+Stacking = Literal["auto", "normal", "none", "percent"]
+
+# Viz families that draw stacked series. An explicit (non-"auto") stacking on
+# any other viz would be silently ignored, so the panel model rejects it at
+# parse time instead.
+STACKABLE_VIZ: frozenset[str] = frozenset({
+    "barchart_vertical",
+    "barchart_horizontal",
+    "timeseries_area",
+    "timeseries_bar",
+})
+
 # Constrained unit vocabulary. Wrong unit (percent vs percentunit) is the #1
 # marketing-dashboard footgun, so the schema validates against this set.
 ALLOWED_UNITS: frozenset[str] = frozenset({

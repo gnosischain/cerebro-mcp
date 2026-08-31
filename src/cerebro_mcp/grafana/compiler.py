@@ -164,13 +164,24 @@ def _options_timeseries(panel: GrafanaPanelDef) -> dict:
     }
 
 
+def _stacking_mode(panel: GrafanaPanelDef, multi: bool) -> str:
+    """Resolve a panel's stacking mode. An explicit spec value wins; "auto"
+    keeps the shape-based default (multi-series shapes stack, single-series
+    do not). Cumulative or mixed-measure series need an explicit "none" —
+    stacking them double-counts (WL-042: a top-10/20/50 tier barchart
+    rendered a 250% stack)."""
+    if panel.stacking != "auto":
+        return panel.stacking
+    return "normal" if multi else "none"
+
+
 def _options_barchart(panel: GrafanaPanelDef) -> dict:
     horizontal = panel.effective_viz == "barchart_horizontal"
     return {
         "legend": {"displayMode": "list", "placement": "bottom"},
         "orientation": "horizontal" if horizontal else "vertical",
         "showValue": "auto",
-        "stacking": "normal" if panel.data_shape == "category_value_multi" else "none",
+        "stacking": _stacking_mode(panel, panel.data_shape == "category_value_multi"),
         "xTickLabelRotation": 0 if horizontal else -30,
     }
 
@@ -266,12 +277,12 @@ def _custom_field_config(panel: GrafanaPanelDef) -> dict:
         multi = panel.data_shape == "time_series_multi"
         return {"drawStyle": "line", "lineWidth": 1,
                 "fillOpacity": 40 if multi else 20,
-                "stacking": {"mode": "normal" if multi else "none", "group": "A"},
+                "stacking": {"mode": _stacking_mode(panel, multi), "group": "A"},
                 "spanNulls": False, "showPoints": "never"}
     if viz == "timeseries_bar":
         multi = panel.data_shape == "time_series_multi"
         return {"drawStyle": "bars", "fillOpacity": 70,
-                "stacking": {"mode": "normal" if multi else "none", "group": "A"}}
+                "stacking": {"mode": _stacking_mode(panel, multi), "group": "A"}}
     if viz == "table":
         return {"align": "auto", "cellOptions": {"type": "auto"}}
     return {}
