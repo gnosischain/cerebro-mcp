@@ -148,11 +148,18 @@ def dataset_token_addresses(
     token_columns: re.Pattern[str],
     native_token: str | None = None,
     cap_per_chain: int = 500,
+    default_chain_id: int = 0,
 ) -> dict[int, set[str]]:
     """Collect distinct token addresses per chain from attached datasets.
 
     ``token_columns`` is the consuming app's own column-name pattern — the
     schema belongs to the app, not to CoinGecko.
+
+    ``default_chain_id`` is for a SINGLE-CHAIN app, which has no reason to
+    project ``chain_id`` into every dataset just to be understood here. Without
+    it such an app resolves chain 0 on every row and this returns nothing at
+    all — silently, since an empty overlay is indistinguishable from "no tokens
+    have icons".
     """
     per_chain: dict[int, set[str]] = {}
     for dataset in datasets.values():
@@ -165,7 +172,9 @@ def dataset_token_addresses(
         chain_index = (
             dataset.columns.index("chain_id") if "chain_id" in dataset.columns else -1
         )
-        fallback_chain = int(dataset.parameters.get("chain_id") or 0) if dataset.parameters else 0
+        fallback_chain = default_chain_id
+        if dataset.parameters:
+            fallback_chain = int(dataset.parameters.get("chain_id") or default_chain_id)
         for row in dataset.rows:
             chain_id = fallback_chain
             if 0 <= chain_index < len(row) and row[chain_index] is not None:
@@ -179,8 +188,16 @@ def dataset_token_addresses(
             if len(bucket) >= cap_per_chain:
                 continue
             for index in token_indexes:
-                if index < len(row):
-                    value = normalize_hex(str(row[index] or ""))
+                if index >= len(row):
+                    continue
+                cell = row[index]
+                # A cell may hold ONE address or an array of them: a pool with
+                # more than two assets carries its token set as an Array(String),
+                # and reading that with str() would yield the repr of a list and
+                # silently match nothing.
+                values = cell if isinstance(cell, (list, tuple)) else [cell]
+                for item in values:
+                    value = normalize_hex(str(item or ""))
                     if value == native_token or _ADDRESS_RE.fullmatch(value):
                         bucket.add(value)
     return per_chain

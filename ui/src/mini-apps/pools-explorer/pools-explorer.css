@@ -1,0 +1,210 @@
+/* Pool Liquidity Explorer. Every selector starts with `.plx-` — this sheet is
+ * imported only by pools-explorer-main.tsx, but an unscoped rule in a
+ * stylesheet is how graph-explorer.css once broke charts two tabs away. No
+ * html/body/#root rules, no 100vh: the fold is filled by the chrome's flex
+ * chain (.ma-chrome > .ma-body). Only tokens defined in themes/tokens.css are
+ * read (a var() on an undefined token drops the whole declaration). */
+
+.plx-body{background:var(--bg)}
+.plx-loading{min-height:60vh;display:grid;place-items:center;background:var(--bg);color:var(--text-secondary);font:14px var(--font-mono)}
+
+/* ---- chrome: controls, sub-bar, status line, candidates, breadcrumbs ---- */
+.plx-controls{display:flex;align-items:center;gap:8px}
+.plx-controls button{border:1px solid var(--border);background:var(--surface-2);color:var(--text-primary);border-radius:7px;padding:6px 9px;font:12px var(--font-body);cursor:pointer}
+.plx-controls button:disabled{opacity:.5;cursor:default}
+.plx-subbar{display:flex;align-items:center;gap:8px;width:100%;justify-content:space-between;padding:7px 12px;background:var(--surface);border-bottom:1px solid var(--border)}
+.plx-statusline{position:sticky;top:0;z-index:6;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 16px;border-bottom:1px solid var(--border);background:var(--surface);color:var(--text-muted);font:11px var(--font-mono)}
+.plx-statusline span+span:before{content:"·";margin-right:8px;color:var(--border-hover)}
+.plx-candidates{margin:12px 16px;padding:12px;border:1px solid var(--accent-border);border-radius:10px;background:var(--surface);display:grid;gap:7px}
+.plx-candidates>strong{font-size:13px;color:var(--accent-text)}
+.plx-candidates button{display:grid;grid-template-columns:170px minmax(220px,1fr) 110px;gap:10px;text-align:left;border:1px solid var(--border);background:var(--surface-2);color:var(--text-secondary);border-radius:7px;padding:8px;cursor:pointer}
+.plx-candidates button:hover{border-color:var(--primary)}
+.plx-candidates code{overflow:hidden;text-overflow:ellipsis;color:var(--text-primary)}
+.plx-breadcrumbs{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--text-muted);font-size:12px;margin:12px 16px 0}
+.plx-breadcrumbs button{border:1px solid var(--border);background:var(--surface-2);color:var(--text-primary);border-radius:999px;padding:4px 11px;cursor:pointer;font-size:12px}
+.plx-breadcrumbs button:hover{border-color:var(--primary)}
+.plx-breadcrumbs .is-current{border:1px solid var(--accent-border);background:var(--accent-bg);color:var(--accent-text);border-radius:999px;padding:4px 11px}
+.plx-crumb-item{display:inline-flex;align-items:center;gap:6px}
+.plx-crumb-sep{color:var(--border-hover)}
+.plx-warn-strip{display:flex;flex-wrap:wrap;gap:6px;margin:10px 16px 0}
+.plx-warn-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;border:1px solid var(--warning);background:var(--warning-bg);color:var(--warning);font-size:11.5px}
+.plx-content{max-width:1500px;margin:0 auto;padding:18px 20px 64px}
+.plx-content .ma-section{margin-top:16px}
+
+/* ---- panel states (failed datasets stay VISIBLE) ---- */
+.plx-group-error{margin-top:16px;display:flex;align-items:center;gap:12px;padding:14px;border:1px solid var(--error);border-radius:8px;background:var(--error-bg);color:var(--error);font-size:12px}
+.plx-group-error button,.plx-panel-error button,.plx-group-banner button{flex:0 0 auto;border:1px solid var(--border-hover);background:var(--surface-2);color:var(--text-primary);border-radius:7px;padding:5px 12px;cursor:pointer}
+.plx-panel-error{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:14px;border:1px solid var(--error);border-radius:8px;background:var(--error-bg);font-size:12px}
+.plx-panel-error strong{color:var(--error);display:block;margin-bottom:4px}
+.plx-panel-error span{color:var(--text-secondary);word-break:break-word;font-family:var(--font-mono);font-size:11px}
+.plx-group-banner{margin-top:14px;display:flex;align-items:center;gap:12px;padding:11px 14px;border:1px solid var(--warning);border-radius:8px;background:var(--warning-bg);color:var(--warning);font-size:12.5px}
+.plx-ribbon{margin-bottom:8px;padding:7px 11px;border:1px solid var(--warning);border-radius:7px;background:var(--warning-bg);color:var(--warning);font-size:12px}
+.plx-stale-badge{display:inline-block;padding:1px 7px;border-radius:999px;border:1px solid var(--warning);background:var(--warning-bg);color:var(--warning);font:10px var(--font-mono);letter-spacing:.05em}
+.plx-empty{min-height:120px;display:grid;place-items:center;padding:16px;text-align:center;color:var(--text-muted);border:1px dashed var(--border);border-radius:8px;font-size:12.5px}
+.plx-skel{margin-top:16px;display:grid;gap:10px}
+.plx-skel__block{height:220px;border-radius:10px}
+.plx-stateonly{margin-top:16px;display:grid;gap:8px;padding:16px 18px;border:1px dashed var(--warning);border-radius:10px;background:var(--warning-bg);color:var(--text-secondary);font-size:12.5px;line-height:1.5}
+.plx-stateonly strong{color:var(--warning);font-size:13px}
+.plx-stateonly code{color:var(--text-primary);font-family:var(--font-mono);font-size:11.5px}
+
+/* ---- KPI row, strips, hints ---- */
+.plx-kpi-head{display:flex;align-items:flex-start;gap:12px;margin-top:14px}
+.plx-kpi-head .ma-kpi-grid{flex:1;margin:0}
+.plx-kpi-head__meta{flex:0 0 auto;padding-top:6px}
+.plx-strip{display:flex;align-items:center;gap:8px 20px;flex-wrap:wrap;padding:2px 2px 10px;color:var(--text-secondary);font-size:12px}
+.plx-strip strong{color:var(--text-primary);font:600 13px var(--font-mono);margin:0 3px}
+.plx-hint{margin-top:8px;color:var(--text-muted);font:11px var(--font-body);line-height:1.4}
+.plx-ok{color:var(--success)}
+.plx-warn{color:var(--warning)}
+.plx-section-actions{display:inline-flex;align-items:center;gap:10px}
+.plx-chip{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;border:1px solid var(--accent-border);background:var(--accent-bg);color:var(--accent-text);font:11px var(--font-mono);white-space:nowrap}
+.plx-chip--warn{border-color:var(--warning);background:var(--warning-bg);color:var(--warning)}
+.plx-grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:0 16px;align-items:stretch}
+.plx-grid-2>.ma-section,.plx-grid-2>*{min-width:0}
+.plx-grid-2>.ma-section{display:flex;flex-direction:column}
+.plx-grid-2>.ma-section>.ma-section-body{flex:1}
+.plx-freshness{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.plx-fresh-chip{display:inline-flex;align-items:center;gap:7px;flex-wrap:wrap;padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface-2);font:11px var(--font-mono);color:var(--text-secondary)}
+.plx-fresh-chip strong{color:var(--text-primary);font-weight:600}
+.plx-job{padding:4px 0 10px}
+.plx-job+.plx-job{border-top:1px solid var(--section-divider)}
+.plx-job__name{color:var(--accent-text);font:600 12px var(--font-mono)}
+.plx-job .plx-kpi-head{margin-top:8px}
+
+/* ---- info popover ---- */
+.plx-info{position:relative;display:inline-block;font:11px var(--font-body);color:var(--text-secondary)}
+.plx-info__summary{cursor:pointer;white-space:nowrap;color:var(--text-muted);border:0;background:transparent;font:inherit;padding:0}
+.plx-info__summary span{margin-left:3px}
+.plx-info[data-open] .plx-info__summary{color:var(--primary)}
+.plx-info__panel{position:absolute;right:0;top:calc(100% + 7px);z-index:30;width:min(440px,calc(100vw - 32px));padding:11px 13px;border:1px solid var(--border-hover);border-radius:8px;background:var(--surface-2);box-shadow:0 14px 35px rgba(0,0,0,.35);color:var(--text-secondary);font:12px/1.5 var(--font-body);white-space:normal;text-align:left}
+.plx-info__panel strong{color:var(--text-primary)}
+.plx-info-blocks{display:grid;gap:9px}
+.plx-info-blocks p{margin:2px 0 0}
+.plx-info-blocks__coverage{font:10.5px var(--font-mono);color:var(--text-muted)}
+
+/* ---- badges + cells ---- */
+.plx-badges{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+.plx-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;border:1px solid var(--border);background:var(--surface-2);color:var(--text-secondary);font:10.5px var(--font-mono);white-space:nowrap}
+.plx-badge--unresolved{border-color:var(--warning);background:var(--warning-bg);color:var(--warning)}
+.plx-badge--probed{border-color:var(--success);background:var(--success-bg);color:var(--success)}
+.plx-badge--state-only{border-color:var(--warning);background:var(--warning-bg);color:var(--warning)}
+.plx-badge--reserves-only{color:var(--text-muted)}
+.plx-badge--live{border-color:var(--success);color:var(--success)}
+.plx-badge--dead{color:var(--text-muted)}
+.plx-class{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;border:1px solid var(--border);background:var(--surface-2);color:var(--text-secondary);font:10.5px var(--font-body);white-space:nowrap}
+.plx-class--uniswap-v3{border-color:rgba(255,122,156,.45);color:var(--text-primary)}
+.plx-class--swapr-v3-algebra{border-color:rgba(103,232,249,.45);color:var(--text-primary)}
+.plx-class--balancer-v2,.plx-class--balancer-v3{border-color:rgba(180,240,60,.45);color:var(--text-primary)}
+.plx-fee{display:inline-flex;align-items:center;padding:2px 7px;border-radius:5px;background:var(--surface-3);color:var(--text-primary);font:11px var(--font-mono);white-space:nowrap}
+.plx-fee--dyn{color:var(--accent-text)}
+.plx-family{color:var(--text-secondary);font-size:12px}
+.plx-price{font-variant-numeric:tabular-nums;color:var(--text-primary)}
+.plx-price--raw{color:var(--text-secondary)}
+.plx-price sup,.plx-amount sup{margin-left:3px;color:var(--warning);font:9px var(--font-mono)}
+.plx-liq{font-variant-numeric:tabular-nums;color:var(--text-primary);font-family:var(--font-mono)}
+.plx-liq--empty{color:var(--text-muted)}
+.plx-amount{font-variant-numeric:tabular-nums}
+.plx-amount--raw{color:var(--text-secondary)}
+.plx-num{font-variant-numeric:tabular-nums}
+.plx-time{font:12px var(--font-mono);color:var(--text-secondary)}
+.plx-bool{color:var(--text-muted)}
+.plx-bool--yes{color:var(--success)}
+.plx-pool-cell{display:inline-flex;align-items:center;gap:8px;max-width:360px}
+.plx-pool-cell code{color:var(--accent-text)}
+.plx-pool-cell__name{color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plx-token{display:inline-flex;align-items:center;gap:6px}
+.plx-token-btn{border:0;background:transparent;padding:0;cursor:pointer;color:inherit;font:inherit}
+.plx-token-btn:hover .ma-token__label{color:var(--primary)}
+.plx-token-list{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap}
+.plx-pair{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.plx-pair__item{display:inline-flex;align-items:center;gap:4px}
+.plx-pair__sep{color:var(--text-muted);margin:0 3px}
+.plx-pair--empty{color:var(--text-muted)}
+/* ---- chain-state overlay marker ----
+ * Read live over RPC, not from a publication-verified snapshot. Deliberately
+ * NOT the warning tone: `unresolved` (amber) means "no name exists"; this is
+ * "a name exists, read from current chain state". A dotted border carries the
+ * "unverified" reading everywhere it appears — chip, label and figure — while
+ * the accent tone keeps it clearly distinct from the amber disclosure. */
+.plx-chainmark{display:inline-flex;align-items:center;padding:1px 6px;border-radius:999px;border:1px dotted var(--accent-border);background:var(--accent-bg);color:var(--accent-text);font:10px var(--font-mono);letter-spacing:.03em;white-space:nowrap;cursor:help}
+.plx-token--chain .ma-token__label{border-bottom:1px dotted var(--accent-border)}
+.plx-price--chain,.plx-amount--chain{color:var(--text-primary);border-bottom:1px dotted var(--accent-border)}
+.plx-price--chain sup,.plx-amount--chain sup{color:var(--accent-text)}
+.plx-labelcov{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap}
+.plx-labelcov__chain{color:var(--accent-text);border-bottom:1px dotted var(--accent-border)}
+.plx-labelcov__note{color:var(--warning)}
+.plx-labelcov__retry{border:1px solid var(--border-hover);background:var(--surface-2);color:var(--text-primary);border-radius:6px;padding:1px 8px;font:10px var(--font-mono);cursor:pointer}
+
+.plx-checks{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.plx-check{padding:1px 6px;border-radius:999px;border:1px solid var(--border);color:var(--text-secondary);font:10px var(--font-mono)}
+.plx-check--warn{border-color:var(--warning);color:var(--warning);background:var(--warning-bg)}
+.plx-table .ptable__cell--clickable{cursor:pointer}
+.plx-table .ptable__cell--clickable:hover{color:var(--primary);background:var(--accent-bg)}
+.plx-table .ptable__error{padding:8px 12px;color:var(--error);background:var(--error-bg);font-size:12px}
+
+/* ---- filter bars ---- */
+.plx-filterbar{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;padding:10px 12px;margin-top:4px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px}
+.plx-filterbar label{display:flex;flex-direction:column;gap:4px;color:var(--text-secondary);font-size:11px}
+.plx-filterbar input,.plx-filterbar select{border:1px solid var(--border);background:var(--bg);color:var(--text-primary);border-radius:7px;padding:6px 9px;font:12px var(--font-body);min-width:120px}
+.plx-filterbar input[type=text]{min-width:200px;font-family:var(--font-mono)}
+.plx-filterbar input[type=number]{min-width:90px}
+.plx-filterbar input[type=date]{font-family:var(--font-mono)}
+.plx-filterbar input:disabled{opacity:.5}
+.plx-filterbar__check{flex-direction:row!important;align-items:center;gap:6px!important;padding-bottom:8px}
+.plx-filterbar button{border:1px solid var(--border);background:var(--surface);color:var(--text-primary);border-radius:7px;padding:7px 12px;font:12px var(--font-body);cursor:pointer}
+.plx-filterbar__apply{border-color:var(--accent-border)!important;background:var(--accent-bg)!important;color:var(--accent-text)!important}
+.plx-filterbar button:disabled{opacity:.5;cursor:default}
+
+/* ---- entity: header, sub-tabs ---- */
+.plx-entity{display:grid;gap:4px}
+.plx-header{display:grid;gap:10px;padding:14px 16px;border:1px solid var(--border);border-radius:12px;background:var(--surface);margin-top:12px}
+.plx-header .ma-identity{margin:0}
+.plx-header__pair{display:flex;align-items:center;gap:14px;flex-wrap:wrap;color:var(--text-secondary);font-size:12.5px}
+.plx-header__price{display:inline-flex;align-items:center;gap:6px}
+.plx-header__price .plx-price{font:600 15px var(--font-mono)}
+.plx-header__unit{color:var(--text-muted);font:11px var(--font-mono)}
+.plx-header__addr{color:var(--text-muted);font:11px var(--font-mono)}
+.plx-subtabs{margin:10px 0 0}
+.plx-subtabs .tabbar__tab{padding:8px 13px;font-size:12.5px}
+
+/* ---- profile controls, date picker, concentration ---- */
+.plx-profile-controls{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;padding:12px 0 4px}
+.plx-profile-controls label{display:flex;flex-direction:column;gap:4px;color:var(--text-muted);font:10.5px var(--font-mono);letter-spacing:.04em;text-transform:uppercase}
+.plx-flip{border:1px solid var(--border-hover);background:var(--surface-2);color:var(--text-primary);border-radius:999px;padding:5px 13px;cursor:pointer;font:12px var(--font-mono)}
+.plx-flip.is-active{color:var(--primary);background:var(--accent-bg);border-color:var(--accent-border)}
+.plx-datepicker{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0 2px;color:var(--text-secondary);font-size:12px}
+.plx-datepicker__label{color:var(--text-muted);font:10.5px var(--font-mono);letter-spacing:.04em;text-transform:uppercase}
+.plx-datepicker__presets{display:inline-flex;align-items:center;gap:4px}
+.plx-datepicker__presets button{border:1px solid var(--border);background:var(--surface-2);color:var(--text-secondary);border-radius:7px;padding:4px 10px;font:11px var(--font-mono);cursor:pointer}
+.plx-datepicker__presets button.is-active{color:var(--accent-text);background:var(--accent-bg);border-color:var(--accent-border)}
+.plx-datepicker__presets button:disabled{opacity:.45;cursor:default}
+.plx-datepicker input[type=date]{border:1px solid var(--border);background:var(--surface-2);color:var(--text-primary);border-radius:7px;padding:5px 8px;font:12px var(--font-mono)}
+.plx-datepicker__bounds{color:var(--text-muted);font:10.5px var(--font-mono)}
+.plx-conc{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.plx-conc__cell{display:grid;gap:3px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)}
+.plx-conc__band{color:var(--text-muted);font:10.5px var(--font-mono);letter-spacing:.04em;text-transform:uppercase}
+.plx-conc__cell strong{color:var(--text-primary);font:600 18px var(--font-mono)}
+.plx-conc__meta{color:var(--text-muted);font:10.5px var(--font-mono)}
+
+/* ---- heatmap window bar + legend ---- */
+.plx-heatmap-window{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding-bottom:8px}
+.plx-heatmap-window__label{color:var(--text-secondary);font-size:12px}
+.plx-heatmap-window>div[role=group]{display:flex;gap:6px;margin-right:10px}
+.plx-heatmap-window button{border:1px solid var(--border);background:var(--surface-2);color:var(--text-secondary);border-radius:7px;padding:4px 12px;font:11px var(--font-mono);cursor:pointer}
+.plx-heatmap-window button.is-active{color:var(--accent-text);background:var(--accent-bg);border-color:var(--accent-border)}
+.plx-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:2px 0 8px;color:var(--text-secondary)}
+.plx-legend table{border-collapse:collapse}
+.plx-legend th,.plx-legend td{padding:1px 6px;font:400 10px var(--font-mono);text-align:center;color:var(--text-muted);white-space:nowrap}
+.plx-legend tbody th{text-align:right;color:var(--text-secondary)}
+.plx-legend__unit{text-align:right!important;color:var(--text-secondary)!important}
+.plx-legend i{display:block;width:30px;height:11px;border-radius:2px}
+.plx-legend__note{display:flex;align-items:center;gap:6px;font:400 10px var(--font-mono);color:var(--text-muted)}
+.plx-legend__dash{display:inline-block;width:16px;height:0;border-top:1px dashed var(--text-secondary)}
+
+@media(max-width:900px){
+  .plx-subbar{align-items:stretch;flex-direction:column}
+  .plx-content{padding:12px}
+  .plx-candidates button{grid-template-columns:1fr}
+  .plx-grid-2{grid-template-columns:1fr}
+  .plx-filterbar input[type=text]{min-width:150px}
+}

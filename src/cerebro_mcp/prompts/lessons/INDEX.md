@@ -32,6 +32,14 @@ separate corpus.
   44,635 votes without changing any total.
 - [ch-bare-limit-nondeterministic](ch-bare-limit-nondeterministic.md) `observed` —
   `LIMIT` without a total `ORDER BY` returned 17 distinct result sets in 20 calls.
+- [ch-folded-projection-loses-its-type](ch-folded-projection-loses-its-type.md)
+  `observed` — a projection ClickHouse folds to a constant arrives with a different
+  wire type, so the same date column was `2026-09-16` on one path and `20712` on
+  another. `toDate`, `CAST` and `materialize` all still return the integer.
+- [onchain-text-needs-a-printability-check](onchain-text-needs-a-printability-check.md)
+  `observed` — a decoded ERC-20 symbol is attacker-authored bytes; control bytes
+  are valid UTF-8, so the obvious replacement-character guard passes them straight
+  into the UI. `isprintable()` plus a length bound is the check that works.
 - [dataset-column-order-is-a-contract](dataset-column-order-is-a-contract.md)
   `observed` — reordering a SELECT list re-labelled every field for consumers that
   read rows positionally.

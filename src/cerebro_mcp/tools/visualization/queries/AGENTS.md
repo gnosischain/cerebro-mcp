@@ -92,4 +92,4 @@ This is the single most common "my fix did nothing" in this layer.
 
 ## Before you finish
 
-`.venv/bin/python -m pytest tests/test_sql_loader.py tests/test_governance_explorer.py tests/test_cow_explorer.py -q`
+`.venv/bin/python -m pytest tests/test_sql_loader.py tests/test_governance_explorer.py tests/test_cow_explorer.py tests/test_pools_explorer.py -q`

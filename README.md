@@ -29,7 +29,7 @@ Cerebro MCP is a FastMCP server exposing **192 static tools** (plus **7 dynamica
 - number verification tool that checks arithmetic and cross-references before reporting
 - MCP prompts and resources that guide clients, but do not run automatically on their own
 - security audit layer with tool risk classification, suspicious-call detection, and append-only JSONL logging
-- React + ECharts **mini-apps** — ten interactive surfaces (Report Renderer, Portfolio, Graph Explorer, Metric Lab, Contract Explorer, Model Lineage, Data Catalog, CoW Explorer, Governance Explorer, Report Studio) served via `ui://cerebro/<app>` resources and as standalone web apps at `GET /app/{app_id}` — see [`docs/MINI_APPS.md`](docs/MINI_APPS.md) for the full tour
+- React + ECharts **mini-apps** — eleven interactive surfaces (Report Renderer, Portfolio, Graph Explorer, Metric Lab, Contract Explorer, Model Lineage, Data Catalog, CoW Explorer, Governance Explorer, Pool Liquidity Explorer, Report Studio) served via `ui://cerebro/<app>` resources and as standalone web apps at `GET /app/{app_id}` — see [`docs/MINI_APPS.md`](docs/MINI_APPS.md) for the full tour
 - direct JSON-RPC reads against EVM contracts (`contract_explore`, `contract_call_function`, `contract_decode_transaction_input`, `contract_decode_receipt_logs`) — backs the Contract Explorer mini-app and is the preferred path for *single-address current state* (vs. dbt for sweeps / historical / USD)
 - bulk RPC scans for on-chain forensics (`rpc_scan_logs`, `rpc_batch_call`, `rpc_read_storage`, `rpc_get_code`, `rpc_scan_traces`, `rpc_trace_transaction`, `rpc_find_block` — opt-in via `RPC_SCAN_ENABLED`): adaptive-chunked log sweeps, Multicall3 view-function sweeps across thousands of addresses at a pinned block, storage/bytecode classification, and native-value traces, all streaming into ClickHouse `scratch.rpc_*` tables for SQL analysis with resumable jobs — see [`docs/rpc/rpc_scan_overview.md`](docs/rpc/rpc_scan_overview.md)
 
@@ -90,6 +90,7 @@ Cerebro ships with **35 agent personas** loadable via `get_agent_persona(role)`.
 | `chain_state_analyst` | point-in-time chain state reads — current balances, supply, owner/paused/allowance flags via RPC |
 | `cow_analyst` | CoW Protocol internals — solver competitions, batch auctions, order lifecycle, settlements |
 | `dao_governance_analyst` | GnosisDAO Snapshot proposals, votes, voters, forum activity, GIP cross-links |
+| `pool_liquidity_analyst` | Gnosis Chain DEX pool liquidity over `rpc_state_indexer` — Uniswap v3 / Swapr (Algebra) tick profiles, Balancer reserves, fee accrual; raw units, no dbt joins |
 | `grafana_architect` | KPI-first Grafana dashboard composition (row roles, panel viz / data-shape contracts) |
 | `storyteller_context`, `storyteller_narrative`, `storyteller_visual_designer`, `storyteller_writer`, `storyteller_critic`, `storyteller_accessibility` | Sub-phases of the storyteller pipeline — invoked by `storyteller_orchestrator` |
 

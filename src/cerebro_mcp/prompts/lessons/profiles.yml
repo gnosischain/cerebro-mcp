@@ -79,6 +79,11 @@ profiles:
           construct can satisfy an assertion that it is present.
         lesson: sql-guard-counts-comments-as-code
       - text: >-
+          Emit every Date/DateTime column with toString(). A projection ClickHouse
+          folds to a constant loses the type the driver needs, and toDate(), CAST
+          and materialize() all still hand back the raw day number.
+        lesson: ch-folded-projection-loses-its-type
+      - text: >-
           These views are written continuously. Prove a rewrite equivalent with
           BOTH forms inside ONE query — two separate runs measure the write.
         lesson: live-table-invalidates-cross-query-diff
@@ -92,6 +97,7 @@ profiles:
       - ch-final-three-way-rule
       - ch-cte-inlined-per-reference
       - ch-output-alias-shadows-column
+      - ch-folded-projection-loses-its-type
       - ch-alias-in-where-illegal-aggregation
       - ch-bare-limit-nondeterministic
       - ch-union-arm-needs-own-alias
@@ -123,6 +129,7 @@ profiles:
           "unknown" marker.
     hazards:
       - ch-output-alias-shadows-column
+      - ch-folded-projection-loses-its-type
       - ch-cte-inlined-per-reference
       - ch-bare-limit-nondeterministic
       - dataset-column-order-is-a-contract
@@ -138,6 +145,12 @@ profiles:
           must be COUNTED. Never let either disappear.
         lesson: failed-dataset-must-stay-visible
       - text: >-
+          A contract-supplied string (an ERC-20 symbol or name) is
+          attacker-authored: accept it only after an isprintable() check and a
+          length bound. Control bytes are valid UTF-8, so a replacement-character
+          guard does not catch them.
+        lesson: onchain-text-needs-a-printability-check
+      - text: >-
           Any spec feeding a paged table needs a deterministic ORDER BY.
         lesson: ch-bare-limit-nondeterministic
       - text: >-
@@ -151,6 +164,7 @@ profiles:
           generic result envelope).
     hazards:
       - failed-dataset-must-stay-visible
+      - onchain-text-needs-a-printability-check
       - dataset-column-order-is-a-contract
       - ch-final-three-way-rule
       - sql-guard-counts-comments-as-code

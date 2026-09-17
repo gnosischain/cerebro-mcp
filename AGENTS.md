@@ -45,10 +45,10 @@ only locally is at most `observed` with a "pending deploy" note.
 
 | Path | What it is |
 |---|---|
-| `src/cerebro_mcp/server.py` | FastMCP server; ~192 tool registrations + the MCP instructions block |
+| `src/cerebro_mcp/server.py` | FastMCP server; ~197 tool registrations + the MCP instructions block |
 | `src/cerebro_mcp/tools/` | tool implementations, grouped by domain (`analytics/`, `visualization/`, `semantic/`, `governance/`, `web3/`, `workflow/`) |
 | `src/cerebro_mcp/tools/visualization/queries/` | hand-written `.sql` for the mini-app planes, loaded by `sql_loader` |
-| `src/cerebro_mcp/prompts/agents/` | 35 analyst personas + 2 shared contracts, served by `get_agent_persona` |
+| `src/cerebro_mcp/prompts/agents/` | 36 analyst personas + 2 shared contracts, served by `get_agent_persona` |
 | `src/cerebro_mcp/prompts/lessons/` | this repo's lesson corpus (package data) |
 | `src/cerebro_mcp/semantic/` | model search, SQL compiler, graph profiles |
 | `src/cerebro_mcp/loaders/` | manifest / semantic registry / knowledge-artifact loaders |
@@ -62,7 +62,7 @@ only locally is at most `observed` with a "pending deploy" note.
 .venv/bin/python -m pytest tests/ -q      # ~2,104 pass / 19 skip
 npm test --prefix ui                      # ~820
 make bench-check                          # THE gate: pytest + deterministic suites
-make build-ui                             # all 11 mini-app bundles
+make build-ui                             # all 12 mini-app bundles
 make build-ui-<app>                       # one app: builds AND copies into static/
 make dev                                  # serves LIVE source, not the bundles
 ```

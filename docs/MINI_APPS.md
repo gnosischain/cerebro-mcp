@@ -21,6 +21,7 @@ it, how to develop it, and how it talks to the backend.
 | Contract Explorer  | `ui://cerebro/contract_explorer`   | Per-contract: ABI, callable functions, view-call, tx decode  | `open_contract_explorer`      |
 | CoW Data Explorer  | `ui://cerebro/cow_explorer`        | Indexed CoW fills, markets, intents, auctions, solvers, and entity evidence | `open_cow_explorer` |
 | Governance Explorer | `ui://cerebro/governance`         | GnosisDAO Snapshot signaling + forum activity: proposals, votes, voters, forum, GIP/discussion cross-links | `open_governance` |
+| Pool Liquidity Explorer | `ui://cerebro/pools_explorer` | Gnosis Chain DEX pool liquidity from the state indexer: tick-level liquidity profiles, reserves, fee accrual, publication coverage | `open_pools_explorer` |
 
 All apps share the same plumbing:
 
@@ -416,6 +417,77 @@ against the real backend run `make build-ui-governance` and restart the
 server (the standalone route serves the static bundle — check
 `/app/governance/health` for the live bundle's sha256/mtime). The opt-in live
 smoke suite is `CEREBRO_LIVE_CH_SMOKE=1 pytest tests/test_governance_live_smoke.py`.
+
+---
+
+## Pool Liquidity Explorer
+
+`open_pools_explorer` (+ `load_pools_explorer_section`, `load_pools_explorer_datasets`,
+`search_pools_explorer`, `load_pools_explorer_entity`) — read-only over
+`rpc_state_indexer`, the state indexer's daily verified reads at pinned finalized
+blocks on Gnosis Chain (chain 100).
+
+### The three pool states
+
+Two indexer jobs feed the app and the difference between them is its central fact:
+
+| State | Source | What exists |
+|---|---|---|
+| **Probed** (~427 of 2,519 CL pools/day) | `daily_cl_liquidity` | slot0 price, in-range liquidity, fee-growth accumulators, and every initialized tick — so a liquidity profile can be drawn |
+| **State-only** (~2,092/day) | `daily_cl_liquidity` | the same state, but the indexer judged the pool below its activity threshold and did not read the ticks. It records that by adding `cl_below_active_threshold` to `checks_passed` |
+| **Reserves-only** (1,501 Balancer v2/v3 pools) | `daily_pool_reserves` | raw token balances only — no ticks, no slot0 price, no fee accumulators |
+
+The UI badges all three and renders a stub, never an empty chart, where a dataset
+cannot exist. A missing panel reads as "there is no liquidity", which would be false.
+
+### Rules specific to this plane
+
+- **Only `rpc_state_indexer`.** No dbt model is joined. That is a product decision:
+  the dbt pool models carry USD prices and whitelist symbols, and mixing them in
+  would make it impossible to say which numbers are chain-verified at a pinned
+  block and which are modelled.
+- **Prices are raw by default.** `price_raw` is token1 atoms per token0 atom from
+  `sqrtPriceX96` and is always honest. `price_adjusted` needs BOTH tokens' decimals
+  and is NULL when the plane does not have them.
+- **Token labels come from two places, and the app always says which.** The state
+  indexer catalogues tokens inside a census job's own universe; the pool jobs sweep
+  pool *addresses*, not their assets, so it has metadata for 68 of the 3,400 tokens
+  these pools hold — the rest were never asked about, not failures. The app-only
+  `load_pools_token_metadata` reads those live over Multicall3 (`token_rpc.py`) and
+  patches them in as a SEPARATE `token_overlay`, each entry carrying `source: "rpc"`
+  and the block it was read at. An indexer value is verified at a pinned finalized
+  block with a publication behind it; an overlay value is current chain state with
+  neither, so the overlay never overwrites a dataset column and the UI marks values
+  that came from it. A token that does not answer is absent from the overlay rather
+  than present with a blank symbol, so it keeps rendering as a short address.
+  `system_status` reports whether the Gnosis RPC endpoint is configured — without
+  that line an unset endpoint looks exactly like "those tokens have no metadata".
+- **FINAL has exactly one home.** `config_registry` is a ReplacingMergeTree and
+  takes it. The `v_*` views resolve dedup internally and must never be FINAL'd. The
+  raw `pool_*` tables are never read at all: their sort key includes `attempt_id`,
+  so even FINAL leaves one row per retry.
+- **Dates resolve from `census_publications`**, never by aggregating a view, and
+  every view scan carries a constant-folding `IN` prune beside its join
+  (`fat-view-join-never-prunes`).
+- **Every date column is an ISO string.** With an unbounded as-of predicate
+  ClickHouse folds the aggregate to a constant and the driver returns the raw day
+  number, so the same column arrived as `2026-09-16` on one path and `20712` on
+  another. `toDate()`, `CAST` and `materialize()` all still return the integer;
+  only `toString()` survives the fold.
+- **The profile is recomputed from ticks**, not read from
+  `v_pool_liquidity_profile`: the derived view only starts 2025-09-01 while the tick
+  view reaches back to 2023-10. `tests/test_pools_explorer_live_smoke.py` asserts
+  the two agree as a set where they overlap, and that the range containing the
+  current tick carries exactly the pool's reported liquidity.
+
+### Sections
+
+`overview` (universe, class/fee mix, tick coverage, growth, concentration),
+`pools` (the 4,022-pool directory with server-side filters and sorts), `tokens`,
+`coverage` (per-job calendars, gaps, metadata coverage), plus the `pool` and
+`token` entity drill-downs. The pool drill-down streams `profile`, `history`,
+`fees` and an on-demand `heatmap` group; a profile date change is one additive
+`load_pools_explorer_datasets` call carrying `as_of`, not a reload.
 
 ---
 

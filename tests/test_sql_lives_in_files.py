@@ -153,7 +153,10 @@ def test_the_builder_allowlist_is_shrink_only():
     )
 
 
-@pytest.mark.parametrize("name", ["governance_explorer.py", "cow_explorer.py"])
+@pytest.mark.parametrize(
+    "name",
+    ["governance_explorer.py", "cow_explorer.py", "pools_explorer.py"],
+)
 def test_the_mini_app_backends_are_clean_and_stay_clean(name):
     """The two planes the rule was written for. Named explicitly rather than left
     to the parametrized sweep so that adding either to KNOWN_BUILDERS cannot
