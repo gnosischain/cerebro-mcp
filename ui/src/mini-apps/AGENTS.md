@@ -12,7 +12,7 @@ The server serves git-tracked bundles from `src/cerebro_mcp/static/`, **not**
   copies into `static/`);
 - `make dev` serves live source and therefore **cannot reproduce a bundle bug**;
 - shared code (`components/ChartCard.tsx`, `themes/global.css`, the graph-explorer
-  canvas) means one edit can require rebuilding all 11 apps.
+  canvas) means one edit can require rebuilding all 12 apps.
 
 Never claim a UI change works without having rebuilt.
 

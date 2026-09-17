@@ -225,6 +225,10 @@ RETRIEVAL_CASES = [
     ("unknown identifier 47 union arm group by", "ch-union-arm-needs-own-alias"),
     ("grafana panel renders one garbled series verify ok", "grafana-table-format-needs-pivot-transform"),
     ("whole section fails total memory limit 10 GiB view", "fat-view-join-never-prunes"),
+    ("date column renders as a five digit number",
+     "ch-folded-projection-loses-its-type"),
+    ("token symbol renders as boxes or blank",
+     "onchain-text-needs-a-printability-check"),
     ("eval scenario fails after corpus rebuilt score unchanged",
      "eval-single-id-pin-on-shared-symptom"),
 ]

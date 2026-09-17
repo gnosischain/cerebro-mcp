@@ -1,11 +1,13 @@
 """Lint tests for the domain data-plane personas.
 
-cow_analyst and dao_governance_analyst work over curated raw ClickHouse
-databases (cow_db / governance_db) that have NO dbt models or semantic
-coverage; chain_state_analyst is the lean point-in-time RPC reader.
+cow_analyst, dao_governance_analyst and pool_liquidity_analyst work over
+curated raw ClickHouse databases (cow_db / governance_db /
+rpc_state_indexer) that have NO dbt models or semantic coverage;
+chain_state_analyst is the lean point-in-time RPC reader.
 These tests lock in the load-bearing content of each persona: the
 anti-discovery instruction, the domain safety rules (FINAL, dedup keys,
-quorum vocabulary), and the forensics escalation path.
+quorum vocabulary, raw units / no dbt joins), and the forensics
+escalation path.
 """
 
 from __future__ import annotations
@@ -19,11 +21,16 @@ from mcp.server.fastmcp import FastMCP
 from cerebro_mcp.tools.governance.agents import _VALID_ROLES, register_agent_tools
 
 
-DOMAIN_ROLES = ["cow_analyst", "dao_governance_analyst", "chain_state_analyst"]
+DOMAIN_ROLES = [
+    "cow_analyst",
+    "dao_governance_analyst",
+    "chain_state_analyst",
+    "pool_liquidity_analyst",
+]
 
 # Personas over curated raw DBs must tell the agent NOT to run dbt
 # discovery — the semantic registry has zero coverage for their domain.
-CURATED_DB_ROLES = ["cow_analyst", "dao_governance_analyst"]
+CURATED_DB_ROLES = ["cow_analyst", "dao_governance_analyst", "pool_liquidity_analyst"]
 
 
 def _load_persona(role: str) -> str:
@@ -125,3 +132,45 @@ def test_chain_state_analyst_stays_lean():
     content = _load_persona("chain_state_analyst").lower()
     assert "reconcile two independent ways" not in content
     assert "residual-bucket ledger" not in content or "no residual-bucket" in content
+
+
+# ── pool_liquidity_analyst content ───────────────────────────────
+
+
+def test_pool_liquidity_analyst_load_bearing_content():
+    content = _load_persona("pool_liquidity_analyst")
+    lower = content.lower()
+    assert "config_registry" in content, "the pool universe comes from config_registry"
+    assert "FINAL" in content, "config_registry is the one FINAL in the plane"
+    assert "v_pool_cl_state_published" in content, (
+        "state must be read from the published view, never the raw table"
+    )
+    assert "census_publications" in content, "as-of dates resolve from census_publications"
+    assert "cl_below_active_threshold" in content, "state-only pools must be disclosed"
+    assert "open_pools_explorer" in content, "mini-app is the default visual path"
+    assert "raw units" in lower, "prices default to raw units"
+    assert "uniqExact" in content, "pools are counted with uniqExact"
+    # A "never" within 120 chars of "dbt": the persona must forbid dbt joins.
+    assert re.search(r"never[^\n]{0,120}dbt", lower) or re.search(
+        r"dbt[^\n]{0,120}never", lower
+    ), "must forbid joining dbt models"
+
+
+def test_pool_liquidity_analyst_never_finals_a_view():
+    """FINAL belongs to config_registry alone in this plane: the published
+    v_* views resolve dedup internally and the raw pool_* tables (keyed by
+    attempt_id, so FINAL still duplicates) must not be read at all."""
+    content = _load_persona("pool_liquidity_analyst")
+    sql = "\n".join(
+        line for line in content.splitlines() if not line.lstrip().startswith("--")
+    )
+    assert not re.search(r"\bv_\w+(\s+AS\s+\w+)?\s+FINAL\b", sql), (
+        "a v_* view must never be read with FINAL"
+    )
+    assert re.search(r"config_registry\s+AS\s+\w+\s+FINAL", sql), (
+        "config_registry must be read with FINAL (alias before FINAL)"
+    )
+    for raw in ("pool_cl_state", "pool_tick_liquidity", "pool_token_balances"):
+        assert not re.search(rf"rpc_state_indexer\.{raw}\b", sql), (
+            f"the raw table {raw} must never appear in a query"
+        )

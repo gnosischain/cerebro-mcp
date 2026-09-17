@@ -127,6 +127,11 @@ TOOL_META: dict[str, Meta] = {
         "tier": "advanced",
         "tags": ["governance", "snapshot", "gnosisdao", "proposals", "votes", "forum", "gip", "quorum"],
     },
+    "open_pools_explorer": {
+        "domain": "visualization",
+        "tier": "advanced",
+        "tags": ["pools", "liquidity", "concentrated liquidity", "uniswap v3", "swapr", "algebra", "balancer", "ticks", "reserves", "gnosis", "rpc_state_indexer"],
+    },
     # ── web3 / rpc (advanced) ────────────────────────────────────────
     "list_chains": {"domain": "web3", "tier": "basic", "tags": ["chain", "rpc", "multichain"]},
     "contract_explore": {"domain": "web3", "tier": "advanced", "tags": ["contract", "abi", "address"]},

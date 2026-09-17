@@ -358,3 +358,91 @@ export const METRIC_LAB_HELP: HelpContent = {
     },
   ],
 };
+
+export const POOLS_EXPLORER_HELP: HelpContent = {
+  title: "Pool Liquidity Explorer",
+  intro:
+    "Where liquidity sits on Gnosis Chain DEX pools — concentrated-liquidity profiles, reserves, fee accrual and indexer coverage, read only from the publication-verified rpc_state_indexer plane. No USD, no dbt joins.",
+  sections: [
+    {
+      heading: "What you're looking at",
+      body: (
+        <>
+          <p>
+            Two daily indexer jobs publish pool state: <strong>daily_cl_liquidity</strong>{" "}
+            (slot0-style state and initialized ticks for Uniswap v3 and Swapr v3 / Algebra
+            pools) and <strong>daily_pool_reserves</strong> (raw token balances for those
+            pools plus Balancer v2 / v3). Every figure is pinned to a publication date and
+            its anchor block.
+          </p>
+          <p>
+            Only pools above the active-liquidity threshold are <strong>probed</strong> for
+            ticks. The rest are <strong>state only</strong>: they have a tick, price and
+            liquidity but no profile — the app shows that as a stub, never as an empty
+            chart. Balancer pools are <strong>reserves only</strong>.
+          </p>
+        </>
+      ),
+    },
+    {
+      heading: "Units",
+      body: (
+        <ul>
+          <li>
+            <strong>Price</strong> is token1 per token0 (address-ascending). It is
+            decimals-adjusted only when BOTH token decimals are resolved; otherwise it is
+            marked <em>raw</em> (token1-raw per token0-raw). Nothing is guessed — most
+            Circles CRC20 tokens are unresolved.
+          </li>
+          <li>
+            <strong>Liquidity (L)</strong> is the raw Uniswap-style figure. It is never
+            summed across pairs and never converted to USD.
+          </li>
+          <li>
+            <strong>Amounts</strong> are units where decimals are known, raw base units
+            (flagged) otherwise.
+          </li>
+        </ul>
+      ),
+    },
+    {
+      heading: "The profile",
+      body: (
+        <ul>
+          <li>
+            The tick axis IS a log price axis (price = 1.0001^tick). Tick / Price / % from
+            current are relabelings of the same bars — switching them never reloads.
+          </li>
+          <li>
+            Bars are the ranges between consecutive initialized ticks. A full-range
+            position is drawn as a band and never sets the zoom window; the outer segments
+            reaching the tick boundary are drawn clipped with dashed edges.
+          </li>
+          <li>
+            Concentration shares are tick-weighted (Σ L × overlap / Σ L × width); a
+            full-range position dominates the denominator by construction.
+          </li>
+          <li>
+            <strong>Over time</strong> loads a heatmap of active liquidity per tick bucket
+            across sampled probed dates (on demand — it is the heaviest query). Relative
+            mode centres every date on its own current tick.
+          </li>
+          <li>
+            The as-of picker re-runs only the profile at another publication date; a
+            request with no publication shifts to the nearest earlier one and says so.
+          </li>
+        </ul>
+      ),
+    },
+    {
+      heading: "Coverage",
+      body: (
+        <p>
+          The Coverage section is the honesty panel: pools published per day and job,
+          missing and partial days (2026-08-23 published 1,082 of 2,519 CL pools), and how
+          thin token metadata is. Judge every other view's completeness against it.
+        </p>
+      ),
+    },
+  ],
+};

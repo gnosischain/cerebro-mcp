@@ -530,6 +530,29 @@ def register_metadata_tools(mcp, ch: ClickHouseManager):
         # use different loaders and are not gated by this flag. A deployment that
         # merely forgot the env var looks identical to a healthy one in every
         # other line of this report; that cost a full diagnostic session once.
+        # A capability that is merely unconfigured must be distinguishable from
+        # one that is broken: without this line an unset RPC endpoint shows up
+        # only as a Pool Explorer whose tokens never get labelled, which reads
+        # as "those tokens have no metadata" (lesson:
+        # default-off-flag-fails-silently).
+        lines.append("\n## Token metadata over RPC\n")
+        try:
+            from cerebro_mcp.tools.visualization import token_rpc
+
+            available = token_rpc.is_configured(100)
+            lines.append(f"- **Gnosis RPC configured:** {available}")
+            if not available:
+                lines.append(
+                    "- **Effect:** the Pool Liquidity Explorer cannot label the "
+                    "~3,300 pool tokens the state indexer has no metadata for; "
+                    "they stay as short addresses with raw-unit amounts. Set "
+                    "`RPC_URL_GNOSIS` to enable."
+                )
+            else:
+                lines.append(f"- **Cached tokens:** {token_rpc.cache_size()}")
+        except Exception as exc:  # pragma: no cover - defensive
+            lines.append(f"- **Status unavailable:** {exc}")
+
         lines.append("\n## Semantic Layer\n")
         lines.append(f"- **SEMANTIC_ENABLED:** {settings.SEMANTIC_ENABLED}")
         if not settings.SEMANTIC_ENABLED:
@@ -1307,6 +1330,7 @@ Available personas:
 | `cow_analyst` | CoW Protocol internals — solvers, auctions, order lifecycle over cow_db |
 | `dao_governance_analyst` | Snapshot signaling + forum analytics over governance_db (FINAL discipline) |
 | `chain_state_analyst` | Point-in-time on-chain reads without forensic ceremony |
+| `pool_liquidity_analyst` | Gnosis DEX pool liquidity — CL tick profiles, reserves, fee accrual over rpc_state_indexer (raw units, no dbt joins) |
 
 ## Prompts
 

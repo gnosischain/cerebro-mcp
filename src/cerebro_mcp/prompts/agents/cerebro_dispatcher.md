@@ -51,7 +51,7 @@ Used for `specialist_topic` and for filling specialists inside a `full_report` c
 |---|---|
 | DAU / WAU / MAU / retention / cohort / funnel / new-vs-returning | `growth_analyst` |
 | forecast / "next N days" / seasonality / decomposition / trend extrapolation | `forecasting_analyst` |
-| TVL / liquidation / utilization / pool / LP / impermanent loss / protocol comparison | `defi_analyst` (cross-DEX comparison; CoW protocol internals → `cow_analyst`) |
+| TVL / liquidation / utilization / pool / LP / impermanent loss / protocol comparison | `defi_analyst` (cross-DEX comparison; CoW protocol internals → `cow_analyst`; tick-level liquidity or raw reserves as the chain reports them → `pool_liquidity_analyst`) |
 | staking / APY / supply / concentration / HHI / Gini / Nakamoto / validator economics | `tokenomics_analyst` |
 | client diversity / p2p / nodes / decentralization / geographic distribution | `network_health_analyst` |
 | bridge / cross-chain / netflow / flow anomaly / bridge-security | `bridge_security_analyst` |
@@ -60,11 +60,12 @@ Used for `specialist_topic` and for filling specialists inside a `full_report` c
 | "is this significant" / methodology challenge / sample size review / p-hacking check | `statistical_reviewer` |
 | CoW / solver / settlement / batch auction / surplus / order flow / open intents / clearing price | `cow_analyst` |
 | Snapshot proposal / vote / quorum / GIP / forum / governance participation | `dao_governance_analyst` |
+| concentrated liquidity / Uniswap v3 / Swapr / Algebra / tick range / liquidity profile / in-range liquidity / pool reserves / Balancer pool reserves on Gnosis Chain (raw on-chain units, no USD) | `pool_liquidity_analyst` (USD-valued TVL or swap volume → `defi_analyst`) |
 | current on-chain state beyond one call — proxy implementation / storage slot / bytecode identity / live balances for a handful of addresses | `chain_state_analyst` |
 
 ### Domains with no semantic coverage
 
-`cow_db` and `governance_db` are curated raw indexer databases outside the semantic registry and dbt catalog. Their specialists (`cow_analyst`, `dao_governance_analyst`) skip `search_models` / `discover_models` **by design** — dbt discovery returns only noise for these topics. They use `describe_table` instead (on curated raw databases it satisfies the chart-gate discovery and lineage requirements) and default visual deliverables to the gate-free mini-apps (`open_cow_explorer`, `open_governance`). Do not flag the missing discovery calls as a gate violation for these domains.
+`cow_db`, `governance_db`, and `rpc_state_indexer` are curated raw indexer databases outside the semantic registry and dbt catalog. Their specialists (`cow_analyst`, `dao_governance_analyst`, `pool_liquidity_analyst`) skip `search_models` / `discover_models` **by design** — dbt discovery returns only noise for these topics. They use `describe_table` instead (on curated raw databases it satisfies the chart-gate discovery and lineage requirements) and default visual deliverables to the gate-free mini-apps (`open_cow_explorer`, `open_governance`, `open_pools_explorer`). Do not flag the missing discovery calls as a gate violation for these domains. `pool_liquidity_analyst` additionally never joins dbt models — it reports raw on-chain units with no USD — so route USD-valued or volume questions to `defi_analyst` instead of, or alongside, it.
 
 ## Clarifying-question policy
 

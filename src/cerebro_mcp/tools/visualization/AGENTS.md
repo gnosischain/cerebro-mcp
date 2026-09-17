@@ -13,9 +13,10 @@ a kind prefix — `_cte_`, `_pred_`, `_join_`, `_anchor_`, `_expr_`. Full ration
 [`queries/AGENTS.md`](queries/AGENTS.md) Rule 0; enforced by
 `tests/test_sql_lives_in_files.py`.
 
-`governance_explorer.py` and `cow_explorer.py` are both clean and test-pinned as
-such. `metric_lab.py` (a runtime query compiler) and `mini_apps.py` (the generic
-`count() OVER ()` result envelope) are exempt, with reasons recorded in the test.
+`governance_explorer.py`, `cow_explorer.py` and `pools_explorer.py` are all clean
+and test-pinned as such. `metric_lab.py` (a runtime query compiler) and
+`mini_apps.py` (the generic `count() OVER ()` result envelope) are exempt, with
+reasons recorded in the test.
 
 `cow_explorer.py` was the debt this rule was written against: 32 SQL-bearing
 literals — anchor sub-selects, three copies of a UNION-arm envelope, two search

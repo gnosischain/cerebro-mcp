@@ -80,6 +80,7 @@ SPECIALISTS_DISPATCHER_MUST_NAME = [
     "cow_analyst",
     "dao_governance_analyst",
     "chain_state_analyst",
+    "pool_liquidity_analyst",
 ]
 
 
@@ -176,6 +177,7 @@ def test_dispatcher_prompt_registered_in_templates():
         "cow_analyst",
         "dao_governance_analyst",
         "chain_state_analyst",
+        "pool_liquidity_analyst",
     ],
 )
 def test_existing_roles_still_registered(role):
