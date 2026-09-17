@@ -204,6 +204,7 @@ profiles:
         lesson: css-undefined-token-drops-rule
     hazards:
       - stale-prebuilt-miniapp-bundle
+      - docker-rebuilds-ui-from-its-own-list
       - shared-stylesheet-unscoped-selectors
       - failed-dataset-must-stay-visible
       - css-undefined-token-drops-rule

@@ -12,6 +12,11 @@ COPY ui/package.json ui/package-lock.json ./
 RUN npm ci
 COPY ui/ .
 # Build every mini-app entry (mirrors `make build-ui`), not just the report app.
+# This list and the Makefile's `build-ui` fan-out are the SAME list written twice.
+# They drifted once: pools-explorer was added to the Makefile and not here, and
+# because line ~44 `rm -rf`s the committed assets before copying the built ones
+# back, the image shipped the app's HTML with no JS — a blank page, no error.
+# tests/test_docker_ui_entries.py now pins the two lists together.
 # `report` must run first — it is the only entry that empties dist/ (see
 # vite.config.ts `emptyOutDir`); every later entry accumulates into the same
 # dist/. Building them here means CI always ships fresh bundles, so the served
@@ -26,7 +31,8 @@ RUN CEREBRO_UI_ENTRY=report          npm run build \
  && CEREBRO_UI_ENTRY=reportStudio    npm run build \
  && CEREBRO_UI_ENTRY=dataCatalog CEREBRO_UI_OUT_DIR=dist-data-catalog npm run build \
  && CEREBRO_UI_ENTRY=cowExplorer CEREBRO_UI_OUT_DIR=dist-cow-explorer npm run build \
- && CEREBRO_UI_ENTRY=governance CEREBRO_UI_OUT_DIR=dist-governance npm run build
+ && CEREBRO_UI_ENTRY=governance CEREBRO_UI_OUT_DIR=dist-governance npm run build \
+ && CEREBRO_UI_ENTRY=poolsExplorer CEREBRO_UI_OUT_DIR=dist-pools-explorer npm run build
 
 # Stage 2: Build the Python package
 FROM python:3.12-slim
@@ -55,6 +61,8 @@ COPY --from=ui-builder /ui/dist-cow-explorer/cow-explorer.html src/cerebro_mcp/s
 COPY --from=ui-builder /ui/dist-cow-explorer/assets/   src/cerebro_mcp/static/assets/cow_explorer/
 COPY --from=ui-builder /ui/dist-governance/governance.html src/cerebro_mcp/static/governance.html
 COPY --from=ui-builder /ui/dist-governance/assets/     src/cerebro_mcp/static/assets/governance/
+COPY --from=ui-builder /ui/dist-pools-explorer/pools-explorer.html src/cerebro_mcp/static/pools_explorer.html
+COPY --from=ui-builder /ui/dist-pools-explorer/assets/ src/cerebro_mcp/static/assets/pools_explorer/
 
 RUN pip install --no-cache-dir . && \
     useradd -r -u 1000 cerebro && \

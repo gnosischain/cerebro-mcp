@@ -229,6 +229,8 @@ RETRIEVAL_CASES = [
      "ch-folded-projection-loses-its-type"),
     ("token symbol renders as boxes or blank",
      "onchain-text-needs-a-printability-check"),
+    ("blank page in production but works locally",
+     "docker-rebuilds-ui-from-its-own-list"),
     ("eval scenario fails after corpus rebuilt score unchanged",
      "eval-single-id-pin-on-shared-symptom"),
 ]

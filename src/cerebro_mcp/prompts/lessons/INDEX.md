@@ -147,6 +147,11 @@ separate corpus.
 
 ## Build, deploy and gates
 
+- [docker-rebuilds-ui-from-its-own-list](docker-rebuilds-ui-from-its-own-list.md)
+  `observed` — the image wipes the committed `static/assets` and rebuilds from a list
+  only the Dockerfile holds, so a mini-app added to Vite and the Makefile but not there
+  ships its HTML with no JS: a blank page in production that works on every laptop.
+
 - [stale-prebuilt-miniapp-bundle](stale-prebuilt-miniapp-bundle.md) `observed` — the
   mini-apps are served from git-tracked prebuilt bundles, so a source edit changes
   nothing until `make build-ui-<app>`; and a served-bundle bug cannot reproduce under
