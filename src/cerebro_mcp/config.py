@@ -465,10 +465,16 @@ class Settings(BaseSettings):
     # (names kept, schemas dropped); see _slim_tools_list_response.
     THINKING_MAX_STEPS_PER_SESSION: int = 1000
 
-    # Databases accessible via the MCP server
+    # Databases accessible via the MCP server. This list gates the `database`
+    # argument of execute_query / describe_table / list_tables; it is not a
+    # grant — the MCP's ClickHouse user must also hold SELECT on the database.
+    # celo_execution (cryo-indexer, Celo) and envio_ga (envio_ga-indexer) were
+    # added 2026-09-23 so the operations runbooks' freshness and coverage checks
+    # for those two ingestors can run through the MCP like every other one.
     ALLOWED_DATABASES: list[str] = [
         "execution",
         "execution_live",
+        "celo_execution",
         "consensus",
         "crawlers_data",
         "nebula",
@@ -478,6 +484,7 @@ class Settings(BaseSettings):
         "governance_db",
         "rpc_log_indexer",
         "rpc_state_indexer",
+        "envio_ga",
     ]
 
     # Non-dbt databases with authoritative curated schemas. describe_table on
