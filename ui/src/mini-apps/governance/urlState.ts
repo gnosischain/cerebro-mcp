@@ -1,16 +1,25 @@
 // Standalone-page URL state. Managed query keys only — writeUrl deletes
 // EXACTLY these before re-setting, so unmanaged params (?token=… auth and
 // anything else) always survive. No governance key is named `token`.
-// Defaults are omitted to keep shared links clean: section=overview and the
-// all-history date range produce no params.
+// Defaults are omitted to keep shared links clean: section=overview, the
+// all-history date range and the default treasury view produce no params.
+// Always replaceState: a filter change is not a navigation, and pushState
+// would make Back step through every toggle.
 
-import { DEFAULT_TREASURY_TAB, isTreasuryTab, type TreasuryTabId } from "./model/treasuryTabs";
+import { isTreasuryContext } from "./state/overlay";
+import {
+  TREASURY_URL_KEYS,
+  treasuryViewFromParams,
+  writeTreasuryParams,
+  type TreasuryViewState,
+} from "./state/treasuryView";
 import type { GovernanceViewState, GovSection } from "./types";
 
 const URL_KEYS = [
   "section", "q", "days", "start", "end",
   "pstate", "ptype", "quorum", "cat", "fstatus", "sort",
-  "entity", "id", "ttab",
+  "entity", "id",
+  ...TREASURY_URL_KEYS,
 ];
 
 export interface GovUrlState {
@@ -28,20 +37,20 @@ export interface GovUrlState {
   sort: string;
   entity: string;
   id: string;
-  /** Frontend-only treasury sub-tab; "" when absent or unrecognised. A valid
-   * value implies section=treasury (readUrl coerces `section` accordingly). */
-  ttab: TreasuryTabId | "";
+  /** Treasury view keys PRESENT in the URL (client-only; see
+   * state/treasuryView.ts). Any of them implies section=treasury. */
+  treasury: Partial<TreasuryViewState>;
 }
 
 export function readUrl(): GovUrlState {
   const p = new URLSearchParams(window.location.search);
   const days = p.get("days");
-  const rawTab = p.get("ttab") || "";
-  const ttab: TreasuryTabId | "" = isTreasuryTab(rawTab) ? rawTab : "";
+  const treasury = treasuryViewFromParams(p);
+  const hasTreasury = Object.keys(treasury).length > 0;
   return {
-    // A valid sub-tab implies its host section — ttab is client-only, so a
+    // A treasury key implies its host section — they are client-only, so a
     // link like ?ttab=wallets must still land on treasury.
-    section: ttab ? "treasury" : ((p.get("section") as GovSection | null) ?? ""),
+    section: hasTreasury ? "treasury" : ((p.get("section") as GovSection | null) ?? ""),
     q: p.get("q") || "",
     days: days === null || days === "" || !Number.isFinite(Number(days)) ? null : Number(days),
     start: p.get("start") || "",
@@ -54,14 +63,13 @@ export function readUrl(): GovUrlState {
     sort: p.get("sort") || "",
     entity: p.get("entity") || "",
     id: p.get("id") || "",
-    ttab,
+    treasury,
   };
 }
 
 export function writeUrl(
   state: GovernanceViewState,
-  ttab: TreasuryTabId | null = null,
-  push = false,
+  treasuryView: TreasuryViewState | null = null,
 ): void {
   const p = new URLSearchParams(window.location.search);
   URL_KEYS.forEach((key) => p.delete(key));
@@ -86,13 +94,10 @@ export function writeUrl(
     p.set("entity", state.selected_entity.entity_type);
     p.set("id", state.selected_entity.identifier);
   }
-  // Only meaningful on the treasury section, and the default tab is omitted so
-  // an ordinary treasury link stays clean.
-  if (state.section === "treasury" && ttab && ttab !== DEFAULT_TREASURY_TAB) {
-    p.set("ttab", ttab);
-  }
+  // The treasury view travels on the treasury section AND its entity pages
+  // (a wallet page honours the hidden-token toggle), never elsewhere.
+  if (treasuryView && isTreasuryContext(state)) writeTreasuryParams(p, treasuryView);
   const qs = p.toString();
   const url = window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
-  if (push) window.history.pushState({}, "", url);
-  else window.history.replaceState({}, "", url);
+  window.history.replaceState({}, "", url);
 }

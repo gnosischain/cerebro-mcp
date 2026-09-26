@@ -9,8 +9,9 @@ scope: >-
   every place a contract-supplied string reaches a surface a person reads —
   ERC-20 symbol/name over RPC (tools/visualization/token_rpc.py), decoded call
   returns in rpc_scan/decoding.py, contract_explorer output, and any future
-  token-labelling path. Not the SQL planes, where symbols arrive already
-  resolved by an indexer.
+  token-labelling path — and, since 2026-09-25, the governance treasury SQL
+  plane, which classifies indexer-resolved symbols/names (spam: lure, obfuscated,
+  impersonation) in _expr_treasury_spam_reason.sql and sanitizes them in the UI.
 symptom: >-
   a token symbol that renders as blank, as boxes, as a run of invisible
   characters, or as a line of text far longer than a symbol — with no error
@@ -31,6 +32,13 @@ evidence:
   - tests/test_token_rpc.py::test_an_absurdly_long_symbol_is_rejected
   - >-
     fix in tree 2026-09-17, pending deploy — status stays observed until merged
+  - >-
+    verified 2026-09-25: `isprintable()` accepts U+034F (combining grapheme
+    joiner) — "US͏DC" passed every guard and rendered as a USDC. The treasury
+    classifier matches Unicode categories Mn/Me/Cf/Co/Cc, spacing-modifier
+    letters and homoglyph scripts instead, after stripping emoji variation
+    selectors (a bare Mn rule flagged "Raid Guild Token ⚔️" via U+FE0F);
+    parity pinned by tests/treasury_spam_fixtures.py in Python and ClickHouse
 ---
 
 ## Symptom

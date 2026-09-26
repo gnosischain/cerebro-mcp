@@ -32,17 +32,12 @@ const FROZEN_SECTION_GROUPS: Record<string, Record<string, string[]>> = {
   graph: {
     core: ["graph_nodes", "graph_edges"],
   },
+  // Mirrors treasuryColumns.json `groups.treasury` (treasuryRows.test.ts pins
+  // the JSON side). Both chains and every wallet in every dataset; the
+  // insights / token_history groups and their datasets are gone.
   treasury: {
     core: ["treasury_summary", "treasury_holdings", "treasury_by_wallet"],
-    insights: ["treasury_coverage"],
-    history: [
-      "treasury_chain_history",
-      "treasury_wallet_history",
-    ],
-    // treasury_token_history is deliberately alone — it is the app's most
-    // expensive read and grouping it with its siblings delayed them behind the
-    // 3-worker pool.
-    token_history: ["treasury_token_history"],
+    history: ["treasury_history", "treasury_history_coverage"],
   },
 };
 
@@ -52,10 +47,14 @@ const FROZEN_ENTITY_DATASETS: Record<string, string[]> = {
   forum_topic: ["topic_detail", "topic_posts", "topic_proposal_links", "topic_polls", "topic_likes_activity"],
   forum_user: ["contributor_profile", "contributor_posts", "contributor_activity"],
   treasury_token: [
-    "treasury_token_detail", "treasury_token_holders", "treasury_token_holder_series",
+    "treasury_token_detail", "treasury_token_holders",
+    "treasury_token_holder_series", "treasury_token_price_history",
+    "treasury_token_months",
   ],
   treasury_wallet: [
-    "treasury_wallet_detail", "treasury_wallet_positions", "treasury_wallet_series",
+    "treasury_wallet_detail", "treasury_wallet_positions",
+    "treasury_wallet_series", "treasury_wallet_chains",
+    "treasury_wallet_months",
   ],
 };
 
@@ -120,6 +119,14 @@ describe("devFixture consistency", () => {
       .sort();
     const actual = Object.keys(MOCK_PAYLOAD.view_state!.loaded_groups!).sort();
     expect(actual).toEqual(expected);
+  });
+
+  it("the retired treasury datasets are gone from the fixture", () => {
+    for (const key of [
+      "treasury_coverage", "treasury_chain_history", "treasury_wallet_history", "treasury_token_history",
+    ]) {
+      expect(MOCK_PAYLOAD.datasets![key], key).toBeUndefined();
+    }
   });
 
   it("fixture descriptors are shaped like real ones", () => {

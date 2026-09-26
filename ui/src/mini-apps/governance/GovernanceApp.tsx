@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MiniAppChrome } from "../shared/MiniAppChrome";
 import { TabBar } from "../shared/TabBar";
 import { ToastStack } from "../shared/ToastStack";
@@ -17,7 +17,7 @@ import { VoterDetail } from "./detail/VoterDetail";
 import { devPayload } from "./devFixture";
 import { buildModelContextLines, type GovAggregates } from "./model/contextPrompt";
 import { parseSpaceSummary } from "./model/parseRows";
-import { DEFAULT_TREASURY_TAB, type TreasuryTabId } from "./model/treasuryTabs";
+import { PROVENANCE_LINE } from "./model/treasuryCopy";
 import { DelegationsSection } from "./sections/DelegationsSection";
 import { TreasurySection } from "./sections/TreasurySection";
 import { ForumSection } from "./sections/ForumSection";
@@ -29,12 +29,20 @@ import type { GovViewContext } from "./sections/common";
 import {
   crumbCall,
   entityCall,
+  returnSectionFor,
   sectionReturnCall,
   seedCall,
   trailForDisplay,
   type GovSectionId,
 } from "./state/navigation";
+import { isTreasuryContext, overlayRequestKey, shouldRequestOverlay } from "./state/overlay";
+import { resolveWarnings } from "./state/warnings";
 import { buildSearchArgs, buildSectionToolArgs, EMPTY_DRAFT, type GovFilterDraft } from "./state/toolArgs";
+import {
+  applyTreasuryPatch,
+  initialTreasuryView,
+  type TreasuryViewState,
+} from "./state/treasuryView";
 import type { GovEntityType, GovernanceViewState } from "./types";
 import { readUrl, writeUrl, type GovUrlState } from "./urlState";
 
@@ -66,32 +74,11 @@ const LARGE_DATASETS = new Set([
   // descriptor pages; full hydration would buy nothing.
   "forum_polls",
   "most_liked_topics",
-  // treasury_holdings is deliberately NOT here: USD ranking happens client-side
-  // (prices are an overlay, not a SQL column), and sorting a server-paged
-  // preview would rank only the visible page. At ~361 rows against the 10k
-  // hydration cap this costs one extra fetch.
+  // The treasury datasets are deliberately NOT here: every treasury filter is
+  // client-side (chain, Gnosis Ltd., hidden tokens) and the charts need the
+  // FULL history (~5k rows against the 10k hydration cap), so they hydrate
+  // completely and the charts wait for `phase === "complete"`.
 ]);
-
-/** Frozen warning-code vocabulary → user copy. Unknown strings (human
- * messages with spaces) pass through unchanged. */
-const WARNING_COPY: Record<string, string> = {
-  query_failed: "A dataset failed to load; others remain available.",
-  result_truncated: "Result capped at the newest 10,000 rows — narrow filters for the full set.",
-};
-
-/** Routine, non-actionable notices are surfaced quietly per-panel (empty
- * states) or via the FreshnessStrip STALE chip — never as a top banner. Only
- * genuine problems (a failed query, a truncated result, or a free-text error)
- * reach the compact warning strip. */
-const QUIET_WARNINGS = new Set([
-  "source_stale", "no_data", "stale_scope", "unsupported_choice_shape",
-]);
-
-function resolveWarnings(state: GovernanceViewState): string[] {
-  return [...new Set([...(state.coverage_warnings ?? []), ...(state.warnings ?? [])])]
-    .filter((warning) => !QUIET_WARNINGS.has(warning))
-    .map((warning) => WARNING_COPY[warning] ?? warning);
-}
 
 function draftFromState(state: GovernanceViewState): GovFilterDraft {
   const range = state.date_range;
@@ -110,11 +97,6 @@ function draftFromState(state: GovernanceViewState): GovFilterDraft {
     category_id: state.filters.category_id,
     forum_status: state.filters.forum_status,
     sort_by: state.filters.sort_by,
-    // Treasury-only; optional on the wire, defaulted here so the draft is
-    // always complete.
-    chain_id: state.filters.chain_id ?? 0,
-    asset: state.filters.asset ?? "",
-    exclude_ltd: state.filters.exclude_ltd ?? false,
   };
 }
 
@@ -156,12 +138,6 @@ export default function GovernanceApp() {
   const groupLoader = useGroupLoader(callTool, "load_governance_datasets");
   const [draft, setDraft] = useState<GovFilterDraft>(EMPTY_DRAFT);
   const [search, setSearch] = useState("");
-  // Treasury sub-tab. Lives HERE, not in TreasurySection: the section unmounts
-  // on an entity drill-down, so component state would silently reset the tab
-  // every time the user came back from a token or wallet page.
-  const [treasuryTab, setTreasuryTab] = useState<TreasuryTabId>(
-    () => (typeof window !== "undefined" ? readUrl().ttab : "") || DEFAULT_TREASURY_TAB,
-  );
   const previousSection = useRef<GovSectionId>("overview");
   const bootScopeRef = useRef("");
   // De-dup key for the overlay call + the one-shot retry ledger, so a re-render
@@ -174,6 +150,21 @@ export default function GovernanceApp() {
   if (urlSeedRef.current === undefined) {
     urlSeedRef.current = typeof window !== "undefined" ? readUrl() : null;
   }
+  // The treasury keys the URL carried at boot (the seed above is consumed by
+  // the first apply; these must outlive it for the hint merge below).
+  const urlTreasuryRef = useRef<Partial<TreasuryViewState>>(urlSeedRef.current?.treasury ?? {});
+  // Client-side treasury view (tab, chain, Gnosis Ltd., hidden tokens, history
+  // controls). Lives HERE, not in TreasurySection: the section unmounts on an
+  // entity drill-down, and the view must survive the round trip.
+  const [treasuryView, setTreasuryView] = useState<TreasuryViewState>(
+    () => initialTreasuryView(urlTreasuryRef.current),
+  );
+  const updateTreasuryView = useCallback((patch: Partial<TreasuryViewState>) => {
+    setTreasuryView((prev) => applyTreasuryPatch(prev, patch));
+  }, []);
+  // "Now" for snapshot staleness, fixed per mount so renders agree.
+  const [now] = useState(() => Date.now());
+  const hintsAppliedRef = useRef(false);
 
   const aggregates = useMemo<GovAggregates>(() => {
     const empty: GovAggregates = {};
@@ -200,10 +191,34 @@ export default function GovernanceApp() {
     if (!state) return;
     if (state.section !== "entity") previousSection.current = state.section;
     setDraft(draftFromState(state));
-    if (typeof window !== "undefined" && window.__MINI_APP_API__) writeUrl(state, treasuryTab);
-    updateModelContext(buildModelContextLines(state, aggregates));
+    if (typeof window !== "undefined" && window.__MINI_APP_API__) writeUrl(state, treasuryView);
+    updateModelContext(buildModelContextLines(state, aggregates, treasuryView));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.scope_id, state?.applied_request_id]);
+
+  // The server's treasury filters are INITIAL-VIEW HINTS (an assistant opening
+  // the treasury on one chain): merged once, and only where the URL is silent.
+  useEffect(() => {
+    if (!state || hintsAppliedRef.current) return;
+    hintsAppliedRef.current = true;
+    const hinted = initialTreasuryView(urlTreasuryRef.current, state.filters);
+    setTreasuryView((prev) => (
+      prev.chain === hinted.chain && prev.exLtd === hinted.exLtd
+        ? prev
+        : { ...prev, chain: hinted.chain, exLtd: hinted.exLtd }
+    ));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.scope_id]);
+
+  // A treasury view change is client-side: no tool call, just the URL
+  // (standalone, replaceState) and the host's model context.
+  const treasuryViewKey = JSON.stringify(treasuryView);
+  useEffect(() => {
+    if (!state || !isTreasuryContext(state)) return;
+    if (typeof window !== "undefined" && window.__MINI_APP_API__) writeUrl(state, treasuryView);
+    updateModelContext(buildModelContextLines(state, aggregates, treasuryView));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [treasuryViewKey]);
 
   // Deferred-load driver: open_governance attaches NO datasets. This effect
   // (a) applies the initial section once — consuming the one-shot URL seed —
@@ -233,37 +248,38 @@ export default function GovernanceApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view?.view_id, state?.scope_id, loadedGroupsKey, groupLoader.tick]);
 
-  // CoinGecko icon + spot-price overlay for the treasury tab. Runs AFTER the
-  // datasets settle because it resolves the tokens actually on screen, and it
-  // never blocks a data load: the server returns whatever is cached and reports
-  // `overlay_pending` when a background fetch will find more. Pricing needs two
-  // hops (contract -> coin id -> quote), so exactly one retry is scheduled — the
-  // server chains both hops in a single pass to make that sufficient.
-  const revisionsKey = JSON.stringify(state?.dataset_revisions ?? {});
+  // CoinGecko icons + the spot FALLBACK quotes, for the treasury section AND
+  // its wallet / token pages (a cold link to a wallet page used to get no
+  // icons and no spot subtotal). Runs AFTER the datasets settle because it
+  // resolves the tokens actually loaded, and it never blocks a data load: the
+  // server returns whatever is cached and reports `overlay_pending` when a
+  // background fetch will find more. Pricing needs two hops (contract -> coin
+  // id -> quote), so exactly one retry is scheduled.
+  const overlayKey = view && state ? overlayRequestKey(view.view_id, state) : "";
   useEffect(() => {
     if (!view || !state) return;
-    if (state.section !== "treasury") return;
-    if (Object.keys(state.dataset_revisions ?? {}).length === 0) return;
+    if (!shouldRequestOverlay(state)) return;
     const viewId = view.view_id;
+    const key = overlayKey;
     const timer = setTimeout(() => {
-      if (overlayKeyRef.current === `${viewId}|${revisionsKey}`) return;
-      overlayKeyRef.current = `${viewId}|${revisionsKey}`;
+      if (overlayKeyRef.current === key) return;
+      overlayKeyRef.current = key;
+      // The overlay is an enhancement: a failed request leaves icons and the
+      // spot subtotal "pending", never an unhandled rejection.
+      const warn = (err: unknown) => console.warn("[governance] overlay request failed", err);
       void callTool("load_governance_overlays", { view_id: viewId }).then((result) => {
         const payload = result as { warnings?: string[] } | null;
-        if (
-          payload?.warnings?.includes("overlay_pending")
-          && !overlayRetriedRef.current.has(revisionsKey)
-        ) {
-          overlayRetriedRef.current.add(revisionsKey);
+        if (payload?.warnings?.includes("overlay_pending") && !overlayRetriedRef.current.has(key)) {
+          overlayRetriedRef.current.add(key);
           setTimeout(() => {
-            void callTool("load_governance_overlays", { view_id: viewId });
+            void callTool("load_governance_overlays", { view_id: viewId }).catch(warn);
           }, 5000);
         }
-      });
+      }).catch(warn);
     }, 800);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view?.view_id, state?.section, revisionsKey]);
+  }, [overlayKey, state?.section]);
 
   if (!view || !state) {
     return <div className="gov-loading">Loading Governance Explorer…</div>;
@@ -290,7 +306,9 @@ export default function GovernanceApp() {
     groupLoader.sync(viewId, section, [group], state.scope_id);
   };
 
-  const activeSection: GovSectionId = state.section === "entity" ? previousSection.current : state.section;
+  // Treasury entities belong to Treasury even from a cold link (where there
+  // is no previous section and the fallback would read "← Overview").
+  const activeSection: GovSectionId = returnSectionFor(state, previousSection.current);
   const persistentWarnings = resolveWarnings(state);
   const trail = trailForDisplay(state.breadcrumbs ?? []);
 
@@ -310,6 +328,7 @@ export default function GovernanceApp() {
     openLink: (url) => void openLink(url),
     sendMessage,
     aggregates,
+    treasury: { view: treasuryView, update: updateTreasuryView, now },
   };
 
   const controls = (
@@ -368,6 +387,7 @@ export default function GovernanceApp() {
   // The graph tab is the app's only full-canvas section, and three separate
   // layout decisions key off it. Named once so they cannot drift apart.
   const isGraph = state.section === "graph";
+  const isTreasury = isTreasuryContext(state);
 
   return (
     <MiniAppChrome
@@ -385,11 +405,24 @@ export default function GovernanceApp() {
           every panel's source label, and behind the graph toolbar's View SQL. */}
       {!isGraph && (
         <div className="gov-statusline">
-          <span>Gnosis DAO governance</span>
-          <span>Snapshot signaling + forum activity — not binding execution</span>
-          <span>{loader.loading ? "Loading…" : "Ready"}</span>
-          {state.section !== "overview" && (
-            <FreshnessStrip freshness={state.freshness} />
+          {isTreasury ? (
+            <>
+              {/* Treasury provenance, not the Snapshot/forum clocks: those
+                  describe different sources and would read as the treasury's
+                  freshness. Each chain's as-of sits in the treasury toolbar. */}
+              <span>GnosisDAO treasury</span>
+              <span>{PROVENANCE_LINE}</span>
+              <span>{loader.loading ? "Loading…" : "Ready"}</span>
+            </>
+          ) : (
+            <>
+              <span>Gnosis DAO governance</span>
+              <span>Snapshot signaling + forum activity — not binding execution</span>
+              <span>{loader.loading ? "Loading…" : "Ready"}</span>
+              {state.section !== "overview" && (
+                <FreshnessStrip freshness={state.freshness} />
+              )}
+            </>
           )}
         </div>
       )}
@@ -413,9 +446,9 @@ export default function GovernanceApp() {
         <div className="gov-breadcrumbs">
           <button
             type="button"
-            onClick={() => loader.enqueue(sectionReturnCall(viewId, previousSection.current, draft))}
+            onClick={() => loader.enqueue(sectionReturnCall(viewId, activeSection, draft))}
           >
-            ← {SECTIONS.find((section) => section.id === previousSection.current)?.label ?? "Back"}
+            ← {SECTIONS.find((section) => section.id === activeSection)?.label ?? "Back"}
           </button>
           {trail.map((crumb, index) => {
             const isCurrent =
@@ -458,16 +491,7 @@ export default function GovernanceApp() {
         ) : state.section === "graph" ? (
           <GraphSection ctx={ctx} />
         ) : state.section === "treasury" ? (
-          <TreasurySection
-            ctx={ctx}
-            tab={treasuryTab}
-            onTab={(next) => {
-              setTreasuryTab(next);
-              if (typeof window !== "undefined" && window.__MINI_APP_API__) {
-                writeUrl(state, next);
-              }
-            }}
-          />
+          <TreasurySection ctx={ctx} />
         ) : (
           <DelegationsSection ctx={ctx} />
         )}

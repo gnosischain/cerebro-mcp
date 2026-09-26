@@ -1,7 +1,10 @@
 // Ask-Cerebro prompt + host model-context lines. Pure string builders so the
 // exact wording is unit-testable without a host.
 
+import { isTreasuryContext } from "../state/overlay";
+import { describeTreasuryView, type TreasuryViewState } from "../state/treasuryView";
 import type { GovernanceViewState, GovSourceFreshness } from "../types";
+import { PROVENANCE_LINE } from "./treasuryCopy";
 
 export const SIGNALING_DISCLAIMER =
   "Note: this data covers Snapshot off-chain signaling and forum activity only — "
@@ -52,14 +55,34 @@ function entityLine(state: GovernanceViewState): string {
     + (entity.label ? ` ("${entity.label}")` : "");
 }
 
+/** The treasury view line, or "" outside treasury contexts. The treasury
+ * filters are client-side, so the host would otherwise never learn which
+ * chain / Ltd. / hidden-token view the user is actually looking at. */
+export function treasuryViewLine(
+  state: GovernanceViewState,
+  treasuryView?: TreasuryViewState | null,
+): string {
+  if (!treasuryView || !isTreasuryContext(state)) return "";
+  return describeTreasuryView(treasuryView);
+}
+
 /** The full prompt handed to `sendMessage` by the Ask Cerebro button. */
-export function buildAskPrompt(state: GovernanceViewState, aggregates: GovAggregates): string {
+export function buildAskPrompt(
+  state: GovernanceViewState,
+  aggregates: GovAggregates,
+  treasuryView?: TreasuryViewState | null,
+): string {
   const lines: string[] = [
     "I am looking at the Gnosis DAO Governance Explorer.",
     `Section: ${state.section}`,
   ];
   const entity = entityLine(state);
   if (entity) lines.push(entity);
+  const treasury = treasuryViewLine(state, treasuryView);
+  if (treasury) {
+    lines.push(`Treasury view: ${treasury}`);
+    lines.push(`Treasury data: ${PROVENANCE_LINE}`);
+  }
   const filters = activeFilters(state);
   lines.push(`Filters: ${filters.length > 0 ? filters.join(", ") : "none"}`);
   lines.push(`Date range: ${rangeLabel(state)}`);
@@ -81,6 +104,7 @@ export function buildAskPrompt(state: GovernanceViewState, aggregates: GovAggreg
 export function buildModelContextLines(
   state: GovernanceViewState,
   aggregates: GovAggregates,
+  treasuryView?: TreasuryViewState | null,
 ): Record<string, unknown> {
   const lines: Record<string, unknown> = {
     app: "Governance Explorer (Snapshot signaling + forum activity; not binding execution)",
@@ -92,6 +116,11 @@ export function buildModelContextLines(
   };
   const entity = entityLine(state);
   if (entity) lines.selected_entity = entity;
+  const treasury = treasuryViewLine(state, treasuryView);
+  if (treasury) {
+    lines.treasury_view = treasury;
+    lines.treasury_provenance = PROVENANCE_LINE;
+  }
   for (const [label, value] of Object.entries(aggregates)) lines[`aggregate: ${label}`] = value;
   return lines;
 }

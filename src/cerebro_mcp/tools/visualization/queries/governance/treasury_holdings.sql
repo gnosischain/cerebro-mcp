@@ -1,36 +1,25 @@
-@asof_cte,
-supply AS (
-  SELECT s.chain_id AS supply_chain_id,
-         s.token_address AS supply_token,
-         argMax(s.scalar_raw, s.snapshot_date) AS total_supply_raw
-  FROM @scalars AS s
-  -- The date prune is load-bearing: the published-scalars view aggregates the
-  -- whole census_publications table (all jobs) without it — code 241. It also
-  -- pins supply to the SAME as-of date as the balances it denominates.
-  WHERE s.job_name = '@job' AND s.scalar_name = 'totalSupply'
-    AND s.snapshot_date IN (SELECT as_of FROM asof)
-  GROUP BY s.chain_id, s.token_address
-)
-SELECT
-  t.chain_id AS chain_id,
-  t.token_address AS token_address,
-  anyHeavy(t.symbol) AS symbol,
-  anyHeavy(t.decimals) AS decimals,
-  anyHeavy(t.metadata_status) AS metadata_status,
-  anyHeavy(t.metadata_status) = 'resolved' AS metadata_known,
-  uniqExact(t.wallet_address) AS wallets_holding,
-  toString(sum(t.balance_raw)) AS balance_total_raw,
-  if(anyHeavy(t.decimals) IS NULL, NULL, sum(t.balance_units)) AS balance_units,
-  if(anyHeavy(sp.total_supply_raw) = 0, NULL,
-     toFloat64(sum(t.balance_raw)) / toFloat64(anyHeavy(sp.total_supply_raw)))
-    AS supply_share,
-  CAST(NULL AS Nullable(Float64)) AS value_usd
-FROM @src AS t
-INNER JOIN asof AS a ON t.chain_id = a.chain_id AND t.snapshot_date = a.as_of
-LEFT JOIN supply AS sp
-       ON sp.supply_chain_id = t.chain_id AND sp.supply_token = t.token_address
-WHERE t.job_name = '@job' AND t.snapshot_date IN (SELECT as_of FROM asof)
-  AND @chain_sql AND @asset_sql AND @ltd_sql
-  AND t.balance_raw != 0
-GROUP BY t.chain_id, t.token_address
+-- Every token held at each chain's as-of, ALL classes (spam and retired mirrors
+-- included, flagged, so the UI can reveal them with a reason and count them).
+-- USD is the hub price through the registry; spot_eligible marks the only rows a
+-- CoinGecko spot quote may be applied to: REVIEWED real tokens with no hub price
+-- (class listed) and known decimals. Unreviewed tokens are never spot-valued — a
+-- scam token can carry a CoinGecko listing, and a fabricated value is worse than
+-- an honest "unpriced".
+WITH @pipeline,
+@rollup
+SELECT ht_chain AS chain_id, ht_token AS token_address, ht_symbol AS symbol,
+       ht_name AS name, ht_reg_symbol AS registry_symbol, ht_asset AS asset_key,
+       ht_asset_class AS asset_class, ht_dec AS decimals, ht_meta AS metadata_status,
+       ht_class AS token_class, ht_spam AS spam_reason, ht_wallets AS wallets_holding,
+       toString(ht_raw) AS balance_total_raw,
+       if(ht_dec IS NULL, NULL, ht_units) AS balance_units,
+       if(ht_dec IS NULL, NULL, ht_units_ex) AS balance_units_ex_ltd,
+       ht_share AS supply_share, ht_collisions AS symbol_collisions,
+       ht_price AS price_usd,
+       if(ht_price_day IS NULL, NULL, toString(ht_price_day)) AS price_date,
+       if(ht_price IS NULL, '', if(ht_basis = 'proxy', 'hub_proxy', 'hub')) AS price_source,
+       ht_value AS value_usd, ht_value_ex AS value_usd_ex_ltd,
+       toUInt8(ht_class = 'listed' AND ht_dec IS NOT NULL) AS spot_eligible,
+       toString(ht_date) AS token_date, toString(ht_as_of) AS as_of
+FROM shaped
 ORDER BY @sort_fragment

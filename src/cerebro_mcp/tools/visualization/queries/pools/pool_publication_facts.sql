@@ -2,6 +2,12 @@
 -- block it was pinned to, and exactly which integrity checks passed. This is
 -- where "why is the tick table empty" gets its answer, so the raw checks array
 -- is emitted rather than a summarised verdict.
+--
+-- Only the SERVED publication of each job: the attempt v_publications_current
+-- selected, which is the one the state and balances views' numbers come from. A
+-- re-census leaves several raw rows for the same pool-day, and listing them all
+-- made the panel show two provenances for one set of numbers.
+-- Lesson: published-is-not-served.
 @asof_cte,
 @reserves_asof_cte
 SELECT
@@ -26,6 +32,7 @@ LEFT JOIN @db.@anchors_view AS a
        ON a.chain_id = p.chain_id AND a.snapshot_date = p.snapshot_date
 WHERE p.target_kind = 'pool' AND p.chain_id = @chain
   AND p.target_address = {pool:String}
-  AND ((p.job_name = '@cl_job' AND p.snapshot_date IN (SELECT as_of FROM asof))
-    OR (p.job_name = '@reserves_job' AND p.snapshot_date IN (SELECT ras_of FROM rasof)))
+  AND ((p.job_name = '@cl_job' AND p.snapshot_date = (SELECT as_of FROM asof))
+    OR (p.job_name = '@reserves_job' AND p.snapshot_date = (SELECT ras_of FROM rasof)))
+  AND @served_pred
 ORDER BY job_name, snapshot_date

@@ -225,6 +225,8 @@ RETRIEVAL_CASES = [
     ("unknown identifier 47 union arm group by", "ch-union-arm-needs-own-alias"),
     ("grafana panel renders one garbled series verify ok", "grafana-table-format-needs-pivot-transform"),
     ("whole section fails total memory limit 10 GiB view", "fat-view-join-never-prunes"),
+    ("month missing from history chart though publications exist for the date",
+     "published-is-not-served"),
     ("date column renders as a five digit number",
      "ch-folded-projection-loses-its-type"),
     ("token symbol renders as boxes or blank",

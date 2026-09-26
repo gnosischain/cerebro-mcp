@@ -1,360 +1,703 @@
-// Pure transforms over the three treasury HISTORY datasets
-// (treasury_chain_history, treasury_token_history, treasury_wallet_history).
+// Pure transforms over the treasury history datasets (the `treasury_history`
+// grain fan-out, its month coverage, and the entity series).
 //
-// These rows are WIDE and carry an explicit chain_id, deliberately NOT the
-// long {metric, metric_value} shape parseActivity pivots: that pivot keys only
-// on `bucket`, so two chains reporting the same month would silently overwrite
-// each other and the survivor would look like a complete series. Every
-// function here therefore takes a chainId and filters by it. Nothing in this
-// module ever merges two chains into one series — the chains are indexed
-// independently (chain 1 runs to 2026-07, chain 100 stops at 2022-11), so a
-// blended series would describe no real portfolio.
+// Four rules this module exists to enforce:
 //
-// Everything is pure and injectable so the panels stay testable without a
-// price feed, a view, or a chart runtime.
+//   1. A month the upstream did not serve at all ('gap') or never published
+//      ('unpublished') is a GAP, not a dip: null for EVERY band, marked on the
+//      chart. A 'partial' month IS drawn (from what was served) and disclosed
+//      with the registry symbols it is missing. Coverage says which is which.
+//   2. A month that was served and in which a thing was not held is a real 0.
+//   3. Ranking only considers keys that carry value. An unpriced or spam token
+//      has no value in history and must never take a top-N slot — the old
+//      chart filled its five bands alphabetically with unpriced tokens.
+//   4. Everything the ranking drops is folded into "Other (+k)", so the stack
+//      still sums to the NAV line, and the fold count is disclosed.
+//
+// Month arithmetic is integer arithmetic on 'YYYY-MM-01' strings — never Date
+// parsing, which would let the viewer's timezone move a month boundary.
 
 import { shortAddr } from "../../../utils/format";
-import { finite } from "../../shared/rowDataset";
-import { sanitizeSymbol } from "../../shared/TokenIdentity";
+import { chainName, chainsIn, type ChainFilter } from "./treasuryChains";
+import type { CoverageRow, HistoryRow, HolderSeriesRow, WalletSeriesRow } from "./treasuryRows";
 
-type Row = Record<string, unknown>;
+export type MonthStatus = "ok" | "incomplete" | "missing" | "before";
+export type StackMode = "asset" | "chain" | "wallet" | "class";
+export type Measure = "usd" | "gno";
+export type HistoryRange = "1y" | "3y" | "all";
 
-/** Series cap. The mini theme palette has 6 colours but two of them are both
- * violet, so 5 is the real ceiling before two series become indistinguishable. */
-export const DEFAULT_MAX_SERIES = 5;
+/** Bands a viewer can tell apart (the mini palette's five usable hues). */
+export const DEFAULT_MAX_BANDS = 5;
 
-/** The server folds the small-wallet tail into this literal wallet id. */
-const OTHER_WALLET = "other";
+// ---------------------------------------------------------------------------
+// Month arithmetic
+// ---------------------------------------------------------------------------
 
-/** Buckets are 'YYYY-MM-01', so byte order already IS chronological order.
- * Comparing strings avoids Date parsing, which would drag the viewer's
- * timezone into a pure transform and can shift a UTC month boundary by a day. */
-function compareBucket(a: string, b: string): number {
-  if (a < b) return -1;
-  return a > b ? 1 : 0;
+/** year * 12 + (month - 1), or null for a non-bucket. */
+export function monthIndex(bucket: string): number | null {
+  const match = /^(\d{4})-(\d{2})/.exec(bucket ?? "");
+  if (!match) return null;
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  return Number(match[1]) * 12 + (month - 1);
 }
 
-function bucketOf(row: Row): string {
-  const raw = row.bucket;
-  if (raw === null || raw === undefined) return "";
-  return String(raw);
+export function bucketOfIndex(index: number): string {
+  const year = Math.floor(index / 12);
+  const month = index - year * 12 + 1;
+  return `${year}-${month < 10 ? `0${month}` : month}-01`;
 }
 
-/** The address is the identity — lowercased so a checksummed and a lowercase
- * spelling of the same token never split into two series. */
-function tokenOf(row: Row): string {
-  return String(row.token_address ?? "").trim().toLowerCase();
+export function addMonths(bucket: string, months: number): string {
+  const index = monthIndex(bucket);
+  return index === null ? "" : bucketOfIndex(index + months);
 }
 
-function walletOf(row: Row): string {
-  return String(row.wallet_address ?? "").trim().toLowerCase();
+/** Every month from `start` to `end` inclusive, across year boundaries. */
+export function monthSpine(start: string, end: string): string[] {
+  const from = monthIndex(start);
+  const to = monthIndex(end);
+  if (from === null || to === null || to < from) return [];
+  const out: string[] = [];
+  for (let index = from; index <= to; index += 1) out.push(bucketOfIndex(index));
+  return out;
 }
 
-/** ClickHouse sends UInt8 flags as 0/1, but a JSON round-trip or a fixture can
- * hand back a bool or a string. Accept all three rather than trusting one.
- *
- * Exported because `finite()` returns null for booleans, so the obvious
- * `finite(row.is_ltd)` silently reads every Ltd wallet as not-Ltd. One
- * implementation, not two. */
-export function truthy(value: unknown): boolean {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const text = value.trim().toLowerCase();
-    return text === "true" || text === "1";
-  }
-  return (finite(value) ?? 0) > 0;
+/** The last 12 / 36 months of a spine, or all of it. */
+export function windowSpine<T>(spine: T[], range: HistoryRange): T[] {
+  if (range === "all") return spine;
+  const months = range === "1y" ? 12 : 36;
+  return spine.length > months ? spine.slice(spine.length - months) : spine;
 }
 
-function onChain(rows: Row[], chainId: number): Row[] {
-  // finite() so a stringly '1' from the wire matches the numeric argument.
-  return rows.filter((row) => finite(row.chain_id) === chainId);
-}
+// ---------------------------------------------------------------------------
+// Month statuses
+// ---------------------------------------------------------------------------
 
-export interface ChainHistoryPoint {
+/** A month a chain's upstream did not fully serve. "missing" months are
+ * blanked; "incomplete" (partial) months are drawn from what was served. */
+export interface MonthIssue {
   bucket: string;
-  tokensHeld: number | null;
-  tokensNamed: number | null;
-  walletsHolding: number | null;
-  positions: number | null;
-  gnoUnits: number | null;
-  gnoUnitsExLtd: number | null;
-  anchorBlock: number | null;
+  status: "incomplete" | "missing";
+  /** The coverage row behind it (null when inferred from absent data). */
+  coverage: CoverageRow | null;
 }
 
-/** Chain-level monthly series for ONE chain, oldest first. Every measure stays
- * nullable: a missing count is not a zero count, and the callers dash-guard it. */
-export function chainHistory(rows: Row[], chainId: number): ChainHistoryPoint[] {
-  return onChain(rows, chainId)
-    .flatMap((row) => {
-      const bucket = bucketOf(row);
-      if (!bucket) return [];
-      return [{
+export type ChainIssues = Map<number, MonthIssue[]>;
+
+export interface HistoryFrame {
+  buckets: string[];
+  statuses: MonthStatus[];
+  /** Per chain: first bucket with history (the "tracked since" month). */
+  firstByChain: Map<number, string>;
+  /** Partial and missing months per chain, for disclosure. */
+  issuesByChain: ChainIssues;
+}
+
+/** Months drawn with values: served in full ("ok") or in part ("incomplete"). */
+export function isDrawnStatus(status: MonthStatus): boolean {
+  return status === "ok" || status === "incomplete";
+}
+
+function minBucket(a: string, b: string): string {
+  if (!a) return b;
+  if (!b) return a;
+  return a < b ? a : b;
+}
+
+function maxBucket(a: string, b: string): string {
+  return a > b ? a : b;
+}
+
+/** Status of one chain's month. `first` = the chain's first month of history
+ * ("" = none). 'partial' -> "incomplete" (drawn, disclosed); 'gap' and
+ * 'unpublished' -> "missing" (blanked). */
+export function chainMonthStatus(
+  bucket: string,
+  first: string,
+  coverage: CoverageRow | undefined,
+  hasData: boolean,
+): MonthStatus {
+  if (!first || bucket < first) return "before";
+  if (coverage) {
+    if (coverage.status === "complete") return "ok";
+    if (coverage.status === "partial") return "incomplete";
+    return "missing"; // gap | unpublished
+  }
+  // No coverage row (the coverage dataset failed, or the month is newer than
+  // it): data proves the month was served. Without data we cannot tell "held
+  // nothing" from "not served", and a 0 would be a claim — so it is a gap.
+  return hasData ? "ok" : "missing";
+}
+
+/**
+ * The month axis and per-month status for the chains in scope.
+ *
+ * `dataBuckets` are the months each chain actually carries history rows for.
+ * The axis starts at the earliest chain's first month and ends at the latest
+ * month any chain reports. A chain's months before its own first month are
+ * "before" (ignored for the combined status — they are not gaps); a combined
+ * month is blank if ANY started chain is missing then (every band of a stack
+ * shares that month's total), and drawn-but-disclosed if any is partial.
+ *
+ * With `startAtData`, a chain's history starts at its first DATA month only
+ * (entity pages: a wallet's history starts at its first position, not at the
+ * census start of its chain).
+ */
+export function historyFrame(args: {
+  chains: number[];
+  coverage: CoverageRow[] | null;
+  dataBuckets: Map<number, Set<string>>;
+  startAtData?: boolean;
+}): HistoryFrame {
+  const coverageByChain = new Map<number, Map<string, CoverageRow>>();
+  for (const row of args.coverage ?? []) {
+    const perChain = coverageByChain.get(row.chainId) ?? new Map<string, CoverageRow>();
+    perChain.set(row.bucket, row);
+    coverageByChain.set(row.chainId, perChain);
+  }
+  const firstByChain = new Map<number, string>();
+  let start = "";
+  let end = "";
+  for (const chainId of args.chains) {
+    const data = args.dataBuckets.get(chainId) ?? new Set<string>();
+    let first = "";
+    let last = "";
+    for (const bucket of data) {
+      first = minBucket(first, bucket);
+      last = maxBucket(last, bucket);
+    }
+    const cov = coverageByChain.get(chainId);
+    if (!args.startAtData && cov) {
+      for (const row of cov.values()) {
+        if (row.status === "complete" || row.status === "partial") first = minBucket(first, row.bucket);
+      }
+    }
+    if (!first) continue;
+    // A month the upstream reports on — including a gap — extends the axis;
+    // an 'unpublished' tail does not.
+    if (cov) {
+      for (const row of cov.values()) {
+        if (row.status !== "unpublished" && row.bucket >= first) last = maxBucket(last, row.bucket);
+      }
+    }
+    firstByChain.set(chainId, first);
+    start = minBucket(start, first);
+    end = maxBucket(end, last);
+  }
+  const buckets = start && end ? monthSpine(start, end) : [];
+  const issuesByChain: ChainIssues = new Map();
+  const statuses = buckets.map((bucket) => {
+    const perChain: MonthStatus[] = [];
+    for (const chainId of args.chains) {
+      const coverage = coverageByChain.get(chainId)?.get(bucket);
+      const status = chainMonthStatus(
         bucket,
-        tokensHeld: finite(row.tokens_held),
-        tokensNamed: finite(row.tokens_named),
-        walletsHolding: finite(row.wallets_holding),
-        positions: finite(row.positions),
-        gnoUnits: finite(row.gno_units),
-        gnoUnitsExLtd: finite(row.gno_units_ex_ltd),
-        anchorBlock: finite(row.anchor_block),
-      }];
-    })
-    .sort((a, b) => compareBucket(a.bucket, b.bucket));
-}
-
-/** Distinct chain ids present, ascending — drives the per-chain panel split. */
-export function chainsIn(rows: Row[]): number[] {
-  const seen = new Set<number>();
-  for (const row of rows) {
-    const id = finite(row.chain_id);
-    if (id !== null) seen.add(id);
-  }
-  return [...seen].sort((a, b) => a - b);
-}
-
-export interface TokenSeries {
-  token: string;
-  label: string;
-  ambiguous: boolean;
-  points: Array<{ bucket: string; units: number | null; usd: number | null }>;
-  /** Constant spot price used for every point, or null when unpriced. Consumed
-   * by `constantPriceStackOption`, which excludes any series without one. */
-  price: number | null;
-  latestUsd: number | null;
-}
-
-interface TokenAccumulator {
-  token: string;
-  symbol: string;
-  /** Bucket the symbol above came from — metadata resolves over time, so the
-   * newest spelling wins rather than whichever row happened to arrive first. */
-  symbolBucket: string;
-  units: Map<string, number | null>;
-}
-
-/** Display name for a caption. Ambiguous symbols carry their address because
- * the whole point of the ambiguity flag is that "USDC" alone identifies
- * nothing — 19 distinct tokens in this treasury claim that symbol. */
-function displayName(series: Pick<TokenSeries, "label" | "ambiguous" | "token">): string {
-  return series.ambiguous ? `${series.label} (${shortAddr(series.token)})` : series.label;
-}
-
-/** Per-token series for one chain. `priceFor` is injected so this module stays
- *  pure and testable. usd is units x CURRENT spot => a constant-price
- *  revaluation; the CALLER must caption it as such.
- *  Series are ordered latestUsd DESC NULLS LAST then label, and capped at
- *  `maxSeries` (default 5). Returns `dropped` so the caller can name what was
- *  omitted in a caption rather than silently losing it. */
-export function tokenSeries(
-  rows: Row[],
-  chainId: number,
-  priceOf: (token: string) => number | null,
-  opts?: { maxSeries?: number },
-): { series: TokenSeries[]; dropped: string[] } {
-  // A negative or fractional cap would make slice() silently drop from the
-  // END of the kept list instead of the tail — clamp before it can.
-  const cap = Math.max(0, Math.floor(opts?.maxSeries ?? DEFAULT_MAX_SERIES));
-
-  const scoped = onChain(rows, chainId);
-  const byToken = new Map<string, TokenAccumulator>();
-  // Sanitized symbol -> the distinct addresses claiming it. Built per chain:
-  // USDC on mainnet and USDC on Gnosis Chain are different addresses for the
-  // same real asset, and flagging that cross-chain pair as ambiguous would cry
-  // wolf on the signal that has to stay meaningful for the 19 fake USDCs.
-  const claims = new Map<string, Set<string>>();
-
-  for (const row of scoped) {
-    const bucket = bucketOf(row);
-    const token = tokenOf(row);
-    if (!bucket || !token) continue;
-
-    let acc = byToken.get(token);
-    if (!acc) {
-      acc = { token, symbol: "", symbolBucket: "", units: new Map() };
-      byToken.set(token, acc);
+        firstByChain.get(chainId) ?? "",
+        coverage,
+        args.dataBuckets.get(chainId)?.has(bucket) ?? false,
+      );
+      if (status === "incomplete" || status === "missing") {
+        const list = issuesByChain.get(chainId) ?? [];
+        list.push({ bucket, status, coverage: coverage ?? null });
+        issuesByChain.set(chainId, list);
+      }
+      perChain.push(status);
     }
-    if (compareBucket(bucket, acc.symbolBucket) >= 0) {
-      acc.symbol = String(row.symbol ?? "");
-      acc.symbolBucket = bucket;
-    }
-    // Map keyed by bucket, so a duplicated (token, bucket) row collapses to one
-    // point instead of drawing a vertical spike. Last row wins.
-    acc.units.set(bucket, finite(row.balance_units));
-
-    const clean = sanitizeSymbol(row.symbol);
-    if (clean) {
-      const holders = claims.get(clean) ?? new Set<string>();
-      holders.add(token);
-      claims.set(clean, holders);
-    }
-  }
-
-  // The chain's newest bucket. latestUsd is measured HERE, not at each series'
-  // own last point: a token dumped in 2021 would otherwise be ranked on a
-  // balance it no longer holds and would take one of the five slots from a
-  // position that still exists.
-  let latestBucket = "";
-  for (const acc of byToken.values()) {
-    for (const bucket of acc.units.keys()) {
-      if (compareBucket(bucket, latestBucket) > 0) latestBucket = bucket;
-    }
-  }
-
-  const all: TokenSeries[] = [...byToken.values()].map((acc) => {
-    const clean = sanitizeSymbol(acc.symbol);
-    // Unnamed tokens fall back to the address, which is unique by construction
-    // and therefore never ambiguous.
-    const label = clean || shortAddr(acc.token);
-    const ambiguous = clean !== "" && (claims.get(clean)?.size ?? 0) > 1;
-    // One price lookup per token, so every point in a series is revalued at the
-    // same constant — that is the definition of the revaluation being claimed.
-    const price = priceOf(acc.token);
-    const points = [...acc.units.entries()]
-      .sort((a, b) => compareBucket(a[0], b[0]))
-      .map(([bucket, units]) => ({
-        bucket,
-        units,
-        // null propagates: unpriced, or decimals never observed. A 0 here would
-        // assert the position is worthless, which is a different claim.
-        usd: units === null || price === null ? null : units * price,
-      }));
-    const latestUnits = latestBucket ? acc.units.get(latestBucket) ?? null : null;
-    return {
-      token: acc.token,
-      label,
-      ambiguous,
-      points,
-      // Carried, not just used above: constantPriceStackOption reads the price
-      // off the series to decide what it can revalue. Without it every series
-      // is excluded "for want of a price" and the chart renders empty while
-      // captioning priced tokens as unpriced.
-      price,
-      latestUsd: latestUnits === null || price === null ? null : latestUnits * price,
-    };
+    return combineStatuses(perChain);
   });
+  return { buckets, statuses, firstByChain, issuesByChain };
+}
 
-  all.sort((a, b) => {
-    if (a.latestUsd !== b.latestUsd) {
-      // NULLS LAST: unpriced and no-longer-held are both "cannot be ranked",
-      // and neither may outrank a position with a real measured value.
-      if (a.latestUsd === null) return 1;
-      if (b.latestUsd === null) return -1;
-      return b.latestUsd - a.latestUsd;
-    }
-    return a.label.localeCompare(b.label);
-  });
+/** Combine per-chain statuses of one month: chains that had not started are
+ * ignored; any missing chain makes the month missing (every band of a stack
+ * shares the month's total, so one blank chain blanks the month); any partial
+ * chain makes it incomplete (still drawn). */
+export function combineStatuses(statuses: MonthStatus[]): MonthStatus {
+  const started = statuses.filter((status) => status !== "before");
+  if (started.length === 0) return "before";
+  if (started.includes("missing")) return "missing";
+  if (started.includes("incomplete")) return "incomplete";
+  return "ok";
+}
 
+/** A frame restricted to the requested window (1Y / 3Y / All). */
+export function windowFrame(frame: HistoryFrame, range: HistoryRange): HistoryFrame {
+  if (range === "all") return frame;
   return {
-    series: all.slice(0, cap),
-    dropped: all.slice(cap).map(displayName),
+    ...frame,
+    buckets: windowSpine(frame.buckets, range),
+    statuses: windowSpine(frame.statuses, range),
   };
 }
 
-export interface WalletSeries {
-  wallet: string;
+/** Buckets with chain-grain history rows, per chain — the section's data months. */
+export function chainDataBuckets(rows: HistoryRow[]): Map<number, Set<string>> {
+  const out = new Map<number, Set<string>>();
+  for (const row of rows) {
+    if (row.grain !== "chain") continue;
+    const set = out.get(row.chainId) ?? new Set<string>();
+    set.add(row.bucket);
+    out.set(row.chainId, set);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Facts: (bucket, key, value) triples per stack mode
+// ---------------------------------------------------------------------------
+
+export interface Fact {
+  bucket: string;
+  key: string;
   label: string;
-  isLtd: boolean;
+  value: number | null;
+  /** Fixed hue (the Gnosis Ltd. band, chain bands). */
+  color?: string;
+}
+
+export interface FactOptions {
+  mode: StackMode;
+  measure: Measure;
+  chain: ChainFilter;
+  exLtd: boolean;
+}
+
+/** Fixed amber for the Gnosis Ltd. band: the DAO/Ltd split is the point of a
+ * wallet stack, so its hue must not move with legend order. */
+export const LTD_BAND_COLOR = "#F5B14C";
+
+export const CHAIN_BAND_COLORS: Record<number, string> = { 1: "#7B9CE1", 100: "#34d399" };
+
+/** GNO units stack only by chain or wallet: a GNO measure across assets or
+ * asset classes would add GNO to stablecoins. */
+export function measureAllowed(mode: StackMode, measure: Measure): boolean {
+  return measure === "usd" || mode === "chain" || mode === "wallet";
+}
+
+function assetLabels(rows: HistoryRow[]): Map<string, string> {
+  const symbols = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (row.grain !== "token") continue;
+    const key = row.assetKey || `${row.chainId}:${row.token}`;
+    const set = symbols.get(key) ?? new Set<string>();
+    if (row.registrySymbol) set.add(row.registrySymbol);
+    symbols.set(key, set);
+  }
+  // One registry symbol -> that symbol ("WETH"); several across chains
+  // ("USDC" + "USDC.e") -> the asset key; none -> the short address.
+  const out = new Map<string, string>();
+  for (const [key, set] of symbols) {
+    const merged = !key.includes(":");
+    const [first] = [...set];
+    if (set.size === 1) out.set(key, first);
+    else if (set.size > 1) out.set(key, merged ? key : first);
+    else out.set(key, merged ? key : shortAddr(key.slice(key.indexOf(":") + 1)));
+  }
+  return out;
+}
+
+/** The facts behind one stack mode, honouring the chain filter and the
+ * Gnosis Ltd. exclusion (ex-Ltd companion columns for aggregates; Ltd rows
+ * dropped at wallet grain). */
+export function historyFacts(rows: HistoryRow[], opts: FactOptions): Fact[] {
+  const chains = new Set<number>(chainsIn(opts.chain));
+  const measure = measureAllowed(opts.mode, opts.measure) ? opts.measure : "usd";
+  const out: Fact[] = [];
+  if (opts.mode === "chain") {
+    for (const row of rows) {
+      if (row.grain !== "chain" || !chains.has(row.chainId)) continue;
+      const value = measure === "usd"
+        ? (opts.exLtd ? row.navUsdExLtd : row.navUsd)
+        : (opts.exLtd ? row.gnoUnitsExLtd : row.gnoUnits);
+      out.push({
+        bucket: row.bucket,
+        key: String(row.chainId),
+        label: chainName(row.chainId),
+        value,
+        color: CHAIN_BAND_COLORS[row.chainId],
+      });
+    }
+    return out;
+  }
+  if (opts.mode === "wallet") {
+    for (const row of rows) {
+      if (row.grain !== "wallet" || !chains.has(row.chainId)) continue;
+      if (opts.exLtd && row.isLtd) continue;
+      out.push({
+        bucket: row.bucket,
+        key: row.wallet,
+        label: row.walletLabel ? `${row.walletLabel} (${shortAddr(row.wallet)})` : shortAddr(row.wallet),
+        value: measure === "usd" ? row.navUsd : row.gnoUnits,
+        color: row.isLtd ? LTD_BAND_COLOR : undefined,
+      });
+    }
+    return out;
+  }
+  const labels = opts.mode === "asset" ? assetLabels(rows) : null;
+  for (const row of rows) {
+    if (row.grain !== "token" || !chains.has(row.chainId)) continue;
+    // The token grain is registry-priced tokens only; a stray non-priced row
+    // (a retired mirror, say) is not part of NAV and must not be stacked.
+    if (row.tokenClass !== "priced") continue;
+    const value = opts.exLtd ? row.navUsdExLtd : row.navUsd;
+    if (opts.mode === "asset") {
+      const key = row.assetKey || `${row.chainId}:${row.token}`;
+      out.push({ bucket: row.bucket, key, label: labels?.get(key) ?? key, value });
+    } else {
+      const key = row.assetClass || "Other";
+      out.push({ bucket: row.bucket, key, label: key, value });
+    }
+  }
+  return out;
+}
+
+/** Wallet page: one wallet's priced positions, stacked by asset. */
+export function walletSeriesFacts(rows: WalletSeriesRow[]): Fact[] {
+  return rows
+    .filter((row) => row.tokenClass === "priced")
+    .map((row) => ({
+      bucket: row.bucket,
+      key: row.assetKey || row.token,
+      label: row.registrySymbol || shortAddr(row.token),
+      value: row.valueUsd,
+    }));
+}
+
+/** Asset page: one token's holders over time, in USD or units. */
+export function holderSeriesFacts(
+  rows: HolderSeriesRow[],
+  opts: { measure: "usd" | "units"; exLtd: boolean },
+): Fact[] {
+  return rows
+    .filter((row) => !(opts.exLtd && row.isLtd))
+    .map((row) => ({
+      bucket: row.bucket,
+      key: row.wallet,
+      label: row.label ? `${row.label} (${shortAddr(row.wallet)})` : shortAddr(row.wallet),
+      value: opts.measure === "usd" ? row.valueUsd : row.units,
+      color: row.isLtd ? LTD_BAND_COLOR : undefined,
+    }));
+}
+
+/** Months (per chain) that carry any fact — the data months of an entity. */
+export function factBuckets(facts: Fact[], chainId: number): Map<number, Set<string>> {
+  const set = new Set<string>();
+  for (const fact of facts) {
+    if (fact.value !== null && fact.value !== 0) set.add(fact.bucket);
+  }
+  return new Map([[chainId, set]]);
+}
+
+// ---------------------------------------------------------------------------
+// Stacking
+// ---------------------------------------------------------------------------
+
+export interface StackBand {
+  key: string;
+  /** Series id: `${prefix}:${key}`, or "other" for the fold. */
+  id: string;
+  label: string;
+  data: Array<number | null>;
   isOther: boolean;
-  points: Array<{ bucket: string; units: number | null }>;
+  color?: string;
+  /** Keys folded into this band (Other only). */
+  folded: string[];
 }
 
-interface WalletAccumulator {
-  wallet: string;
-  isLtd: boolean;
-  flagBucket: string;
-  units: Map<string, number | null>;
+export interface StackResult {
+  buckets: string[];
+  statuses: MonthStatus[];
+  bands: StackBand[];
+  /** Per-month stack total: equals the NAV line in drawn months, null in gaps. */
+  totals: Array<number | null>;
+  /** Months left blank (nothing served / not published upstream). */
+  gaps: string[];
+  /** Months drawn from a partial upstream snapshot (disclosed, not blanked). */
+  partial: string[];
 }
 
-/** Per-wallet series for one chain, one token. The literal wallet 'other' is
- *  the server-folded tail — flag it, label it "Other", and always sort it LAST
- *  regardless of size, so it never reads as a real wallet. */
-export function walletSeries(rows: Row[], chainId: number): WalletSeries[] {
-  const byWallet = new Map<string, WalletAccumulator>();
+/** A blanked month: nothing served, or nothing published. */
+export function isGapStatus(status: MonthStatus): boolean {
+  return status === "missing";
+}
 
-  for (const row of onChain(rows, chainId)) {
-    const bucket = bucketOf(row);
-    const wallet = walletOf(row);
-    if (!bucket || !wallet) continue;
-
-    let acc = byWallet.get(wallet);
-    if (!acc) {
-      acc = { wallet, isLtd: false, flagBucket: "", units: new Map() };
-      byWallet.set(wallet, acc);
-    }
-    // is_ltd is a per-wallet classification, so the newest bucket wins: an old
-    // snapshot can predate the wallet being classified at all.
-    if (compareBucket(bucket, acc.flagBucket) >= 0) {
-      acc.isLtd = truthy(row.is_ltd);
-      acc.flagBucket = bucket;
-    }
-    acc.units.set(bucket, finite(row.units));
+/**
+ * Stack `facts` onto the frame's months: the top `maxBands` keys by value over
+ * the window, the rest folded into "Other (+k)". Values are null for EVERY
+ * band in a blanked month and 0 for a key not held in a drawn month.
+ */
+export function stackFacts(
+  facts: Fact[],
+  frame: Pick<HistoryFrame, "buckets" | "statuses">,
+  opts: { prefix: string; maxBands?: number } = { prefix: "band" },
+): StackResult {
+  const maxBands = Math.max(1, Math.floor(opts.maxBands ?? DEFAULT_MAX_BANDS));
+  const bucketIndex = new Map(frame.buckets.map((bucket, index) => [bucket, index]));
+  const valueByKey = new Map<string, Map<number, number>>();
+  const labelByKey = new Map<string, string>();
+  const colorByKey = new Map<string, string>();
+  for (const fact of facts) {
+    const index = bucketIndex.get(fact.bucket);
+    if (index === undefined) continue;
+    if (!labelByKey.has(fact.key)) labelByKey.set(fact.key, fact.label);
+    if (fact.color && !colorByKey.has(fact.key)) colorByKey.set(fact.key, fact.color);
+    if (fact.value === null) continue;
+    const perKey = valueByKey.get(fact.key) ?? new Map<number, number>();
+    perKey.set(index, (perKey.get(index) ?? 0) + fact.value);
+    valueByKey.set(fact.key, perKey);
   }
+  const okIndexes = frame.statuses
+    .map((status, index) => (isDrawnStatus(status) ? index : -1))
+    .filter((index) => index >= 0);
 
-  let latestBucket = "";
-  for (const acc of byWallet.values()) {
-    for (const bucket of acc.units.keys()) {
-      if (compareBucket(bucket, latestBucket) > 0) latestBucket = bucket;
-    }
-  }
+  // Rank ONLY keys that carry value in a served month of the window.
+  const scored = [...valueByKey.entries()]
+    .map(([key, values]) => ({
+      key,
+      score: okIndexes.reduce((acc, index) => acc + Math.max(0, values.get(index) ?? 0), 0),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score
+      || (labelByKey.get(a.key) ?? a.key).localeCompare(labelByKey.get(b.key) ?? b.key));
+  const overflow = scored.length > maxBands;
+  const kept = overflow ? scored.slice(0, maxBands - 1) : scored;
+  const folded = overflow ? scored.slice(maxBands - 1).map((entry) => entry.key) : [];
 
-  const ranked = [...byWallet.values()].map((acc) => ({
-    latest: latestBucket ? acc.units.get(latestBucket) ?? null : null,
-    series: {
-      wallet: acc.wallet,
-      isOther: acc.wallet === OTHER_WALLET,
-      // 'other' is a bucket, not an address — shortAddr would render it as the
-      // literal word and invite reading it as a wallet the reader could look up.
-      label: acc.wallet === OTHER_WALLET ? "Other" : shortAddr(acc.wallet),
-      isLtd: acc.isLtd,
-      points: [...acc.units.entries()]
-        .sort((a, b) => compareBucket(a[0], b[0]))
-        .map(([bucket, units]) => ({ bucket, units })),
-    } satisfies WalletSeries,
+  const valueAt = (key: string, index: number) => valueByKey.get(key)?.get(index) ?? 0;
+  const series = (keys: string[]) => frame.buckets.map((_, index) => (
+    isDrawnStatus(frame.statuses[index]) ? keys.reduce((acc, key) => acc + valueAt(key, index), 0) : null
+  ));
+
+  const bands: StackBand[] = kept.map(({ key }) => ({
+    key,
+    id: `${opts.prefix}:${key}`,
+    label: labelByKey.get(key) ?? key,
+    data: series([key]),
+    isOther: false,
+    color: colorByKey.get(key),
+    folded: [],
   }));
-
-  ranked.sort((a, b) => {
-    // The folded tail sorts last unconditionally — it can easily out-mass every
-    // named wallet, and leading with it would read as one giant holder.
-    if (a.series.isOther !== b.series.isOther) return a.series.isOther ? 1 : -1;
-    if (a.latest !== b.latest) {
-      if (a.latest === null) return 1;
-      if (b.latest === null) return -1;
-      return b.latest - a.latest;
-    }
-    return a.series.label.localeCompare(b.series.label);
-  });
-
-  return ranked.map((entry) => entry.series);
+  if (folded.length > 0) {
+    bands.push({
+      key: "other",
+      id: "other",
+      label: `Other (+${folded.length})`,
+      data: series(folded),
+      isOther: true,
+      folded,
+    });
+  }
+  const allKeys = [...valueByKey.keys()];
+  return {
+    buckets: frame.buckets,
+    statuses: frame.statuses,
+    bands,
+    totals: series(allKeys),
+    gaps: frame.buckets.filter((_, index) => isGapStatus(frame.statuses[index])),
+    partial: frame.buckets.filter((_, index) => frame.statuses[index] === "incomplete"),
+  };
 }
 
-/** Sparkline values for one token across the whole series, oldest->newest.
- *  Returns [] when fewer than 2 points: a single point drawn as a flat line
- *  would read as "held, unchanged", which is a different claim. */
-export function sparkValues(rows: Row[], chainId: number, token: string): number[] {
-  const want = token.trim().toLowerCase();
-  const units = new Map<string, number | null>();
-  for (const row of onChain(rows, chainId)) {
-    const bucket = bucketOf(row);
-    if (!bucket || tokenOf(row) !== want) continue;
-    units.set(bucket, finite(row.balance_units));
-  }
-  const values = [...units.entries()]
-    .sort((a, b) => compareBucket(a[0], b[0]))
-    // NaN, not 0, for an unscalable bucket: sparkPoints() skips non-finite
-    // entries while keeping their x-slot, so the gap stays a gap.
-    .map(([, value]) => (value === null ? Number.NaN : value));
-  // Two DRAWABLE points, not two rows: sparkPoints renders a lone finite value
-  // as a midline, which is the "held, unchanged" claim we refuse to make.
-  return values.filter(Number.isFinite).length < 2 ? [] : values;
+// ---------------------------------------------------------------------------
+// Breadth, sparklines, first-priced markers
+// ---------------------------------------------------------------------------
+
+export interface BreadthSeries {
+  priced: Array<number | null>;
+  listed: Array<number | null>;
+  unverified: Array<number | null>;
+  /** Present only when hidden tokens are shown. */
+  spam: Array<number | null> | null;
+  positions: Array<number | null>;
 }
 
-/** Union of buckets across the given points, ascending — the shared x-axis. */
-export function bucketsOf(points: Array<{ bucket: string }>[]): string[] {
-  const seen = new Set<string>();
-  for (const series of points) {
-    for (const point of series) {
-      if (point.bucket) seen.add(point.bucket);
+/** Token counts by class per month (summed over the chains in scope) and the
+ * position count; null in blanked months, like every other history series. */
+export function breadthSeries(
+  rows: HistoryRow[],
+  frame: Pick<HistoryFrame, "buckets" | "statuses">,
+  opts: { chain: ChainFilter; showHidden: boolean },
+): BreadthSeries {
+  const chains = new Set<number>(chainsIn(opts.chain));
+  const index = new Map(frame.buckets.map((bucket, i) => [bucket, i]));
+  const blank = () => frame.buckets.map(() => 0 as number | null);
+  const acc = { priced: blank(), listed: blank(), unverified: blank(), spam: blank(), positions: blank() };
+  for (const row of rows) {
+    if (row.grain !== "chain" || !chains.has(row.chainId)) continue;
+    const i = index.get(row.bucket);
+    if (i === undefined) continue;
+    const add = (series: Array<number | null>, value: number | null) => {
+      series[i] = (series[i] ?? 0) + (value ?? 0);
+    };
+    add(acc.priced, row.pricedTokens);
+    add(acc.listed, row.listedTokens);
+    add(acc.unverified, row.unverifiedTokens);
+    add(acc.spam, row.hiddenSpamTokens);
+    add(acc.positions, row.positions);
+  }
+  const gapped = (series: Array<number | null>) => series.map((value, i) => (
+    isDrawnStatus(frame.statuses[i]) ? value : null
+  ));
+  return {
+    priced: gapped(acc.priced),
+    listed: gapped(acc.listed),
+    unverified: gapped(acc.unverified),
+    spam: opts.showHidden ? gapped(acc.spam) : null,
+    positions: gapped(acc.positions),
+  };
+}
+
+/** Months a sparkline covers. */
+export const SPARK_MONTHS = 24;
+
+/**
+ * Sparkline values per token (`chain:token`) and per merged asset
+ * (`asset:<asset_key>`), over the last 24 months of the frame: USD value in
+ * drawn months (0 when not held), NaN in blanked months so the line breaks
+ * there instead of dipping. Keys with no value at all get no sparkline.
+ */
+export function sparkIndex(
+  rows: HistoryRow[],
+  frame: Pick<HistoryFrame, "buckets" | "statuses">,
+  opts: { chain: ChainFilter; exLtd: boolean },
+): Map<string, number[]> {
+  const buckets = frame.buckets.slice(-SPARK_MONTHS);
+  const statuses = frame.statuses.slice(-SPARK_MONTHS);
+  const index = new Map(buckets.map((bucket, i) => [bucket, i]));
+  const chains = new Set<number>(chainsIn(opts.chain));
+  const values = new Map<string, number[]>();
+  const touch = (key: string) => {
+    let series = values.get(key);
+    if (!series) {
+      series = buckets.map((_, i) => (isDrawnStatus(statuses[i]) ? 0 : Number.NaN));
+      values.set(key, series);
+    }
+    return series;
+  };
+  for (const row of rows) {
+    if (row.grain !== "token" || row.tokenClass !== "priced" || !chains.has(row.chainId)) continue;
+    const i = index.get(row.bucket);
+    if (i === undefined || !isDrawnStatus(statuses[i])) continue;
+    const value = (opts.exLtd ? row.navUsdExLtd : row.navUsd) ?? 0;
+    touch(`${row.chainId}:${row.token}`)[i] += value;
+    if (row.assetKey) touch(`asset:${row.assetKey}`)[i] += value;
+  }
+  for (const [key, series] of values) {
+    if (!series.some((value) => Number.isFinite(value) && value !== 0)) values.delete(key);
+  }
+  return values;
+}
+
+export interface PricedMarker {
+  bucket: string;
+  key: string;
+  label: string;
+}
+
+/**
+ * "First priced" markers: assets whose hub price series starts mid-history,
+ * so the stack steps up because the asset BECAME VALUED, not because it was
+ * bought. The contract only carries priced months in the token grain (a
+ * registry token without a hub price that month is class 'listed'), so the
+ * evidence is indirect and read conservatively:
+ *
+ *   * definitive — token-grain rows with a NULL price before the first priced
+ *     month (held, not yet priced);
+ *   * otherwise — in the month a token first appears in the token grain, the
+ *     chain grain's `listed_tokens` falls from the previous month by at least
+ *     the number of tokens first priced that month (each can have moved from
+ *     listed to priced). Fewer, or no previous month to compare: no marker —
+ *     a new acquisition must never be labelled "priced".
+ *
+ * Only markers inside the frame, after its first month, are returned.
+ */
+export function firstPricedMarkers(
+  rows: HistoryRow[],
+  frame: Pick<HistoryFrame, "buckets">,
+  opts: { chain: ChainFilter },
+): PricedMarker[] {
+  const chains = new Set<number>(chainsIn(opts.chain));
+  const listed = new Map<string, number | null>();
+  const byToken = new Map<string, { chainId: number; first: string; firstPriced: string; key: string; label: string }>();
+  for (const row of rows) {
+    if (!chains.has(row.chainId)) continue;
+    if (row.grain === "chain") {
+      listed.set(`${row.chainId}|${row.bucket}`, row.listedTokens);
+      continue;
+    }
+    if (row.grain !== "token") continue;
+    const id = `${row.chainId}:${row.token}`;
+    const entry = byToken.get(id) ?? {
+      chainId: row.chainId,
+      first: "",
+      firstPriced: "",
+      key: row.assetKey || id,
+      label: row.registrySymbol || shortAddr(row.token),
+    };
+    entry.first = minBucket(entry.first, row.bucket);
+    if (row.priceUsd !== null) entry.firstPriced = minBucket(entry.firstPriced, row.bucket);
+    byToken.set(id, entry);
+  }
+  const firstChainBucket = new Map<number, string>();
+  for (const key of listed.keys()) {
+    const [chain, bucket] = key.split("|");
+    const chainId = Number(chain);
+    firstChainBucket.set(chainId, minBucket(firstChainBucket.get(chainId) ?? "", bucket));
+  }
+  // Tokens first priced in each (chain, month).
+  const newlyPriced = new Map<string, number>();
+  for (const entry of byToken.values()) {
+    if (!entry.firstPriced) continue;
+    const key = `${entry.chainId}|${entry.firstPriced}`;
+    newlyPriced.set(key, (newlyPriced.get(key) ?? 0) + 1);
+  }
+  const start = frame.buckets[0] ?? "";
+  const end = frame.buckets[frame.buckets.length - 1] ?? "";
+  const byAsset = new Map<string, PricedMarker>();
+  for (const entry of byToken.values()) {
+    if (!entry.firstPriced || entry.firstPriced <= start || entry.firstPriced > end) continue;
+    let evidence = entry.firstPriced > entry.first;
+    if (!evidence && entry.firstPriced > (firstChainBucket.get(entry.chainId) ?? "")) {
+      const now = listed.get(`${entry.chainId}|${entry.firstPriced}`);
+      const before = listed.get(`${entry.chainId}|${addMonths(entry.firstPriced, -1)}`);
+      const count = newlyPriced.get(`${entry.chainId}|${entry.firstPriced}`) ?? 0;
+      evidence = now !== undefined && now !== null && before !== undefined && before !== null
+        && before - now >= count && count > 0;
+    }
+    if (!evidence) continue;
+    const existing = byAsset.get(entry.key);
+    if (!existing || entry.firstPriced < existing.bucket) {
+      byAsset.set(entry.key, { bucket: entry.firstPriced, key: entry.key, label: entry.label });
     }
   }
-  return [...seen].sort(compareBucket);
+  return [...byAsset.values()].sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0));
+}
+
+/** Sparkline values per `chain:token` from an entity series (the wallet
+ * page's positions): same rules as `sparkIndex` — last 24 months of the
+ * frame, 0 when not held in a served month, NaN in gap months. */
+export function seriesSparkIndex(
+  rows: Array<{ bucket: string; chainId: number; token: string; value: number | null }>,
+  frame: Pick<HistoryFrame, "buckets" | "statuses">,
+): Map<string, number[]> {
+  const buckets = frame.buckets.slice(-SPARK_MONTHS);
+  const statuses = frame.statuses.slice(-SPARK_MONTHS);
+  const index = new Map(buckets.map((bucket, i) => [bucket, i]));
+  const values = new Map<string, number[]>();
+  for (const row of rows) {
+    const i = index.get(row.bucket);
+    if (i === undefined || !isDrawnStatus(statuses[i])) continue;
+    const key = `${row.chainId}:${row.token}`;
+    let series = values.get(key);
+    if (!series) {
+      series = buckets.map((_, j) => (isDrawnStatus(statuses[j]) ? 0 : Number.NaN));
+      values.set(key, series);
+    }
+    series[i] += row.value ?? 0;
+  }
+  for (const [key, series] of values) {
+    if (!series.some((value) => Number.isFinite(value) && value !== 0)) values.delete(key);
+  }
+  return values;
 }

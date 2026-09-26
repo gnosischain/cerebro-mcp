@@ -25,7 +25,7 @@ const RAW_NOTE =
 const FULL_RANGE_NOTE =
   "A full-range position (both edges at the tick boundary) dominates any tick-weighted denominator by construction; concentration shares disclose that rather than hide it.";
 const PUBLISHED_NOTE =
-  "Read only from the publication-verified views (`v_pool_*_published`, one row per pool and date); as-of dates resolve from `census_publications`.";
+  "Read only from the publication-verified views (`v_pool_*_published`, one row per pool and date). The as-of is the newest COMPLETE served day (`v_publications_current`): a day the indexer is still writing, or stopped part-way through, is skipped rather than shown half-filled.";
 const RESERVES_HISTORY_NOTE =
   "Reserves are indexed from 2022-12-12; CL state from 2023-09-25; initialized ticks from 2023-10.";
 
@@ -37,7 +37,7 @@ export const DATASET_DOCS: Record<string, DatasetDoc> = {
   },
   source_freshness: {
     what: "The two publication clocks: the latest CL-state publication and the latest reserves publication, with their anchor blocks and pool counts.",
-    method: "Read from `census_publications` only (no view scans). A source is STALE when its latest snapshot is more than two days old.",
+    method: "Read from `census_publications` only (no view scans): the newest PUBLISHED day, which can run a day ahead of the as-of while the indexer is still writing it. A source is STALE when its latest snapshot is more than two days old.",
   },
   pools_by_class_fee: {
     what: "Pools by class (Uniswap v3, Swapr v3 / Algebra, Balancer v2 / v3) and fee band, with how many are live and how many are probed.",
@@ -88,12 +88,12 @@ export const DATASET_DOCS: Record<string, DatasetDoc> = {
   },
   // ---- pool entity ----------------------------------------------------------
   pool_detail: {
-    what: "The directory row for one pool plus its lifetime facts: days live, pool id (Balancer), and the first date a profile is available (first probed publication).",
+    what: "The directory row for one pool plus its lifetime facts: days live, pool id (Balancer), and the first date a profile is available (first served day with initialized ticks).",
     method: `Same joins as the directory, bound to a single pool address; N-asset pools carry their reserves as paired reserve_tokens / reserve_raw arrays. The entity label is the class plus a short address — never a token symbol. ${RAW_NOTE}`,
   },
   pool_publication_facts: {
-    what: "The publication rows behind this pool's as-of snapshot: anchor block and hash, block time, publication and attempt ids, integrity mode, executor kind, how many observations the run wrote, and every check that passed.",
-    method: "Both jobs' rows at the as-of date joined to the canonical day anchors. `cl_below_active_threshold` in checks_passed means the pool was NOT probed for ticks.",
+    what: "The served publication behind this pool's as-of snapshot, one per job: anchor block and hash, block time, publication and attempt ids, integrity mode, executor kind, how many observations the run wrote, and every check that passed.",
+    method: "Each job's row at its as-of date for the attempt the indexer serves (`v_publications_current`) — a re-census attempt is not listed — joined to the canonical day anchors. `cl_below_active_threshold` in checks_passed means the pool was NOT probed for ticks.",
   },
   pool_profile_at: {
     what: "Where the liquidity sits: one row per range between consecutive initialized ticks at the as-of date, with active liquidity, the price bounds, and flags for gaps, the range containing the current tick, and full-range positions.",

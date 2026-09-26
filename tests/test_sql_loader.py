@@ -167,7 +167,7 @@ def test_comment_headers_are_stripped_from_every_template():
     for app, name, needle in [
         ("cow", "_anchor_trades", "base"),
         ("cow", "activity", "11 GiB"),
-        ("governance", "treasury_token_history", "scan"),
+        ("governance", "_cte_treasury_asof_positions", "argMax"),
     ]:
         raw = (sql_loader.QUERIES_DIR / app / f"{name}.sql").read_text()
         assert raw.lstrip().startswith("--"), f"{app}/{name} has no header"

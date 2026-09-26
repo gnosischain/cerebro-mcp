@@ -107,6 +107,7 @@ profiles:
       - live-table-invalidates-cross-query-diff
       - orphaned-sql-template-never-wired
       - fat-view-join-never-prunes
+      - published-is-not-served
     validation:
       - .venv/bin/python -m pytest tests/test_sql_loader.py -q
     guide: src/cerebro_mcp/tools/visualization/queries/AGENTS.md
@@ -170,6 +171,7 @@ profiles:
       - sql-guard-counts-comments-as-code
       - live-table-invalidates-cross-query-diff
       - orphaned-sql-template-never-wired
+      - published-is-not-served
     guide: src/cerebro_mcp/tools/visualization/AGENTS.md
 
   - name: miniapp_ui

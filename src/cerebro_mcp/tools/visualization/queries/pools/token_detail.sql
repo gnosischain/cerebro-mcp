@@ -33,7 +33,7 @@ SELECT
   countIf(st.liquidity > 0) AS live_pools,
   countIf(pr.ticks_probed) AS probed_pools,
   toString((SELECT as_of FROM asof)) AS as_of,
-  toString((SELECT max(ras_of) FROM rasof)) AS reserves_as_of,
+  toString((SELECT ras_of FROM rasof)) AS reserves_as_of,
   toString(sum(toUInt256OrZero(if(has(rs.r_tokens, {token:String}),
     rs.r_balances[indexOf(rs.r_tokens, {token:String})], '0')))) AS total_reserve_raw,
   if(m.decimals IS NULL, NULL,

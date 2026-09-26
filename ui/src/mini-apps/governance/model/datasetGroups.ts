@@ -51,17 +51,13 @@ export const SECTION_GROUPS: Record<string, Record<string, readonly string[]>> =
   graph: {
     core: ["graph_nodes", "graph_edges"],
   },
+  // Mirrors treasuryColumns.json `groups.treasury`. Every section dataset
+  // carries BOTH chains and ALL wallets — the chain / Gnosis Ltd. filters are
+  // client-side — and `treasury_history` is ONE grain fan-out (chain | wallet
+  // | token), so stack totals equal the NAV line by construction.
   treasury: {
     core: ["treasury_summary", "treasury_holdings", "treasury_by_wallet"],
-    insights: ["treasury_coverage"],
-    history: [
-      "treasury_chain_history",
-      "treasury_wallet_history",
-    ],
-    // treasury_token_history is ALONE on purpose — the most expensive read in the
-    // app, and grouping it with its siblings delayed them behind a 3-worker pool.
-    // Mirrors the backend comment in governance_explorer.py.
-    token_history: ["treasury_token_history"],
+    history: ["treasury_history", "treasury_history_coverage"],
   },
 };
 
@@ -72,11 +68,18 @@ export const ENTITY_DATASETS: Record<string, readonly string[]> = {
   voter: ["voter_profile", "voter_votes", "voter_participation"],
   forum_topic: ["topic_detail", "topic_posts", "topic_proposal_links", "topic_polls", "topic_likes_activity"],
   forum_user: ["contributor_profile", "contributor_posts", "contributor_activity"],
+  // Chain-pinned bundles (treasuryColumns.json `entity_bundles`). `*_months`
+  // is the coverage query pinned to the entity's chain, so a page opened from
+  // a cold link still knows which months are gaps.
   treasury_token: [
-    "treasury_token_detail", "treasury_token_holders", "treasury_token_holder_series",
+    "treasury_token_detail", "treasury_token_holders",
+    "treasury_token_holder_series", "treasury_token_price_history",
+    "treasury_token_months",
   ],
   treasury_wallet: [
-    "treasury_wallet_detail", "treasury_wallet_positions", "treasury_wallet_series",
+    "treasury_wallet_detail", "treasury_wallet_positions",
+    "treasury_wallet_series", "treasury_wallet_chains",
+    "treasury_wallet_months",
   ],
 };
 

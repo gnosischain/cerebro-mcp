@@ -209,6 +209,7 @@ def build_icon_overlay(
     token_columns: re.Pattern[str],
     native_token: str | None = None,
     native_icon_urls: dict[int, str] | None = None,
+    wanted: dict[int, set[str]] | None = None,
 ) -> tuple[dict[str, dict[str, str]], bool]:
     """Resolve icon URLs for every token visible in the attached datasets.
 
@@ -218,11 +219,15 @@ def build_icon_overlay(
 
     A token with no known icon is OMITTED, never mapped to a placeholder — the
     client renders a monogram from the absence.
+
+    ``wanted`` overrides the dataset scan with an explicit ``{chain: {token}}``
+    set, for an app that must NOT resolve every visible token (the governance
+    treasury never asks CoinGecko about tokens it has classified as spam).
     """
     overlay: dict[str, dict[str, str]] = {}
     any_pending = False
     natives = native_icon_urls or {}
-    addresses = dataset_token_addresses(
+    addresses = wanted if wanted is not None else dataset_token_addresses(
         datasets, token_columns=token_columns, native_token=native_token
     )
     for chain_id, tokens in addresses.items():
@@ -503,6 +508,7 @@ def build_price_overlay(
     datasets: dict[str, CachedDataset],
     *,
     token_columns: re.Pattern[str],
+    wanted: dict[int, set[str]] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Spot USD for every token visible in the attached datasets.
 
@@ -514,8 +520,13 @@ def build_price_overlay(
 
     A token CoinGecko does not list is omitted, never priced at 0 — the client
     renders "unpriced", which is the truthful reading.
+
+    ``wanted`` overrides the dataset scan with an explicit ``{chain: {token}}``
+    set: the governance treasury prices its tokens from the dbt price hub and
+    only asks CoinGecko for the real, unpriced remainder (spot fallback).
     """
-    wanted = dataset_token_addresses(datasets, token_columns=token_columns)
+    if wanted is None:
+        wanted = dataset_token_addresses(datasets, token_columns=token_columns)
     prices, pending = price_map_nowait(wanted)
     by_chain = {
         str(chain_id): dict(chain_prices)

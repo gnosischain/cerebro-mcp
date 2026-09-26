@@ -44,8 +44,10 @@ export interface GovFilters {
   category_id: number;
   forum_status: string;
   sort_by: string;
-  /** Treasury-only. Optional so existing filter literals stay valid; the
-   * backend always returns them and defaults them to 0/""/false. */
+  /** Treasury INITIAL-VIEW HINTS only (e.g. an assistant opening the treasury
+   * on Gnosis Chain). The UI seeds its client-side view from them once and
+   * never sends them back: the treasury datasets always carry both chains and
+   * every wallet, and filtering is client-side (state/treasuryView.ts). */
   chain_id?: number;
   asset?: string;
   exclude_ltd?: boolean;
@@ -98,20 +100,22 @@ export interface GovCoverage {
   warning_codes?: string[];
 }
 
-/** CoinGecko spot prices, patched in by `load_governance_overlays`.
+/** CoinGecko spot quotes, patched in by `load_governance_overlays`.
  *
- * Tagged and nested so a HISTORICAL source is a drop-in with no call-site
- * change: `priceFor(src, chain, token, date)` ignores `date` for "spot" (and
- * the caller must then caption the chart as a constant-price revaluation) and
- * resolves it for "historical".
- *
- * A token CoinGecko does not list is ABSENT, never priced 0 — this treasury
- * holds 19 distinct tokens spoofing the symbol `USDC`, and a fabricated $0
- * would make them indistinguishable from the real one. */
+ * A FALLBACK only: treasury USD is server-side (dbt price hub via a reviewed
+ * address registry). Quotes exist only for `spot_eligible` rows and apply only
+ * where the row's `value_usd` is NULL; they are never used in history. Parsed
+ * by model/treasuryValue.ts `spotSourceFrom`, which accepts ONLY kind "spot".
+ * A token CoinGecko does not list is ABSENT, never priced 0. */
 export interface GovPriceOverlay {
-  kind: "spot" | "historical";
-  /** chainId -> lowercase token address -> USD (spot) or {date: USD}. */
-  by_chain: Record<string, Record<string, number | Record<string, number>>>;
+  kind: "spot";
+  /** "spot_fallback". */
+  role?: string;
+  /** chainId -> lowercase token address -> USD. */
+  by_chain: Record<string, Record<string, number>>;
+  /** chainId -> token addresses whose quote the server refused as implausible
+   * (held share of supply > 50%, or units x spot beyond that chain's hub NAV). */
+  excluded_implausible?: Record<string, string[]>;
 }
 
 export interface GovernanceViewState {
@@ -141,7 +145,8 @@ export interface GovernanceViewState {
    * `__tests__/askCerebro.test.ts` and `devFixture.ts` at `tsc` time while
    * vitest still passes. */
   icon_overlay?: Record<string, Record<string, string>>;
-  price_overlay?: GovPriceOverlay;
+  /** `{}` until the overlay lands. */
+  price_overlay?: GovPriceOverlay | Record<string, never>;
   /** ISO instant the quotes were taken. A price without a timestamp is not
    * evidence — every USD figure renders this alongside it. */
   price_overlay_at?: string;

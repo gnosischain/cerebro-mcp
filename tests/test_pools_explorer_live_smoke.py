@@ -41,6 +41,9 @@ EXPECTED_RELATIONS = {
                             "anchor_hash", "published_at", "publication_id",
                             "attempt_id", "integrity_mode", "block_reference_kind",
                             "executor_kind", "observations_total"},
+    # What the v_pool_* views actually serve (lesson: published-is-not-served).
+    "v_publications_current": {"chain_id", "job_name", "target_kind",
+                               "target_address", "snapshot_date", "attempt_id"},
     "v_pool_cl_state_published": {"chain_id", "job_name", "pool_address",
                                   "snapshot_date", "sqrt_price_x96", "current_tick",
                                   "liquidity", "tick_spacing", "fee", "tick_count",
@@ -93,12 +96,10 @@ def _rows(ch, sql, params=None, max_rows=200):
 def live_pools(ch):
     """Pools picked from the data at run time, not pinned: a hardcoded address
     rots the day the indexer's universe changes, and the properties under test
-    (probed / state-only / reserves-only) are what matter, not the identity."""
-    as_of = _rows(ch, f"""
-        SELECT toString(max(snapshot_date)) FROM {px.POOLS_DB}.{px.PUB_TABLE}
-        WHERE job_name = '{px.CL_JOB}' AND target_kind = 'pool'
-          AND chain_id = {px.CHAIN_ID}
-    """)[0][0]
+    (probed / state-only / reserves-only) are what matter, not the identity.
+    The as-of is the app's own SERVED resolution: the raw max(snapshot_date) is a
+    day still being written for hours every morning."""
+    as_of = _rows(ch, f"{px._asof_cte('')}\nSELECT toString((SELECT as_of FROM asof))")[0][0]
     probed = _rows(ch, f"""
         SELECT s.pool_address FROM {px.POOLS_DB}.{px.STATE_VIEW} AS s
         WHERE s.chain_id = {px.CHAIN_ID} AND s.job_name = '{px.CL_JOB}'
@@ -333,6 +334,123 @@ def test_a_requested_date_the_indexer_skipped_resolves_backwards(ch):
     resolved = str(result.rows[0][index["as_of"]])
     assert resolved <= "2026-03-02"
     assert resolved >= px.FIRST_DATE.isoformat()
+
+
+def _complete_day(days: list[tuple[str, int, int]]) -> str:
+    """The complete-day rule, re-derived in Python from (date, published,
+    served) rows ascending — independently of the SQL window functions."""
+    complete = []
+    for i, (day, published, served) in enumerate(days):
+        prior = [s for _, _, s in days[max(0, i - px.ASOF_PEAK_DAYS):i]]
+        if served >= px.ASOF_COMPLETENESS_RATIO * max(published, max(prior, default=0)):
+            complete.append(day)
+    if complete:
+        return max(complete)
+    return max((d for d, _, s in days if s > 0), default="1970-01-01")
+
+
+def test_the_as_of_is_the_newest_complete_served_day(ch):
+    """Lesson: published-is-not-served. The resolver's answers and the raw
+    ingredients they are judged on come from ONE query (lesson:
+    live-table-invalidates-cross-query-diff); the rule is then re-derived here.
+    The dates cover the latest (the CL job publishes over 1-4.5 hours every
+    morning, so the raw max is often half-written), a day the indexer stopped
+    part-way through (2026-08-23: 1,082 of 2,519 pools when this was written),
+    a re-censused day, and one from an older era of the universe. Nothing is
+    pinned to today's data: a repaired day simply becomes complete here too."""
+    pub = f"{px.POOLS_DB}.{px.PUB_TABLE}"
+    served = f"{px.POOLS_DB}.{px.SERVED_VIEW}"
+    for requested in ("", "2026-08-23", "2026-09-10", "2025-06-15"):
+        bound = "snapshot_date <= {as_of:Date}" if requested else "1"
+        params = {"as_of": requested} if requested else None
+        sql = f"""
+{px._asof_cte(requested)},
+{px._reserves_asof_cte()},
+t_cand AS (
+  SELECT job_name AS t_job, snapshot_date AS t_date, uniqExact(target_address) AS t_pub
+  FROM {pub}
+  WHERE job_name IN ('{px.CL_JOB}', '{px.RESERVES_JOB}') AND target_kind = 'pool'
+    AND chain_id = {px.CHAIN_ID} AND {bound}
+  GROUP BY t_job, t_date ORDER BY t_date DESC LIMIT {px.ASOF_CANDIDATE_DAYS * 3} BY t_job
+),
+t_srv AS (
+  SELECT job_name AS u_job, snapshot_date AS u_date, uniqExact(target_address) AS u_srv
+  FROM {served}
+  WHERE job_name IN ('{px.CL_JOB}', '{px.RESERVES_JOB}') AND target_kind = 'pool'
+    AND chain_id = {px.CHAIN_ID} AND snapshot_date IN (SELECT t_date FROM t_cand)
+  GROUP BY u_job, u_date
+)
+SELECT toString((SELECT as_of FROM asof)) AS resolved,
+       toString((SELECT ras_of FROM rasof)) AS reserves_resolved,
+       -- Arrays of strings, not tuples: the driver hands a named tuple back as
+       -- a dict, and unpacking a dict yields its KEYS.
+       groupArray([toString(t_job), toString(t_date), toString(t_pub), toString(u_srv)])
+         AS days
+FROM t_cand LEFT JOIN t_srv ON t_srv.u_job = t_cand.t_job AND t_srv.u_date = t_cand.t_date
+"""
+        resolved, reserves_resolved, days = _rows(ch, sql, params)[0]
+        cl = sorted((d, int(p), int(s)) for job, d, p, s in days if job == px.CL_JOB)
+        expected = _complete_day(cl[-px.ASOF_CANDIDATE_DAYS:])
+        assert resolved == expected, (requested, resolved, expected, cl[-10:])
+        # Reserves: the same rule over the reserves candidates on or before it.
+        rs = sorted((d, int(p), int(s)) for job, d, p, s in days
+                    if job == px.RESERVES_JOB and d <= resolved)
+        if len(rs) >= px.ASOF_CANDIDATE_DAYS:
+            assert reserves_resolved == _complete_day(rs[-px.ASOF_CANDIDATE_DAYS:]), requested
+        assert reserves_resolved <= resolved
+
+
+def test_a_re_censused_day_fans_no_pool_out(ch):
+    """A re-census writes a second raw publication for a pool-day. Before the
+    served pin, every probe-joined dataset counted such a pool twice:
+    pools_summary reported 4,215 configured pools on 2026-09-10 against a
+    4,022-pool registry, the directory listed 193 pools twice, and a pool's
+    history drew the day twice. Checked on the most recent CL day that has
+    duplicate publications, whichever that is when this runs."""
+    pub = f"{px.POOLS_DB}.{px.PUB_TABLE}"
+    rows = _rows(ch, f"""
+        SELECT toString(snapshot_date) AS d, count() - uniqExact(target_address) AS extra
+        FROM {pub}
+        WHERE job_name = '{px.CL_JOB}' AND target_kind = 'pool' AND chain_id = {px.CHAIN_ID}
+        GROUP BY snapshot_date HAVING extra > 0
+        ORDER BY snapshot_date DESC LIMIT 1
+    """)
+    if not rows:
+        pytest.skip("no CL day carries duplicate publications")
+    day = rows[0][0]
+    summary = next(s for s in px._overview_specs(day, "90d") if s.key == "pools_summary")
+    configured, configured_cl, published_cl, registry = _rows(ch, f"""
+        SELECT s.pools_configured, s.pools_configured_cl, s.pools_published_cl,
+               (SELECT count() FROM {px.POOLS_DB}.config_registry AS c FINAL
+                WHERE c.chain_id = {px.CHAIN_ID} AND c.job_name = '{px.RESERVES_JOB}'
+                  AND c.target_kind = 'pool' AND c.enabled = 1) AS registry
+        FROM ({summary.sql}) AS s
+    """, summary.parameters)[0]
+    assert int(configured) == int(registry), (day, configured, registry)
+    assert int(published_cl) <= int(configured_cl), day
+    directory = px._pools_specs(day, px._default_filters())[0]
+    n, unique = _rows(ch, f"SELECT count(), uniqExact(pool_address) FROM ({directory.sql})",
+                      directory.parameters)[0]
+    assert int(n) == int(unique) == int(registry), (day, n, unique, registry)
+
+    pool = _rows(ch, f"""
+        SELECT target_address FROM {pub}
+        WHERE job_name = '{px.CL_JOB}' AND target_kind = 'pool' AND chain_id = {px.CHAIN_ID}
+          AND snapshot_date = toDate('{day}')
+        GROUP BY target_address HAVING count() > 1 ORDER BY target_address LIMIT 1
+    """)[0][0]
+    for spec in px._pool_entity_specs(pool, day, "90d", "90d", True):
+        if spec.key not in ("pool_detail", "pool_publication_facts",
+                            "pool_state_history", "pool_fee_growth"):
+            continue
+        result = _run(ch, spec, max_rows=1000)
+        index = {name: i for i, name in enumerate(result.columns)}
+        if spec.key == "pool_detail":
+            assert len(result.rows) == 1, (spec.key, pool, day)
+            continue
+        keys = [tuple(row[index[c]] for c in ("job_name", "snapshot_date") if c in index)
+                for row in result.rows]
+        assert len(keys) == len(set(keys)), (spec.key, pool, day)
 
 
 def test_every_date_column_arrives_as_a_string(ch, live_pools):

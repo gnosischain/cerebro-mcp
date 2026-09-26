@@ -29,8 +29,10 @@ The concrete cost of the Python-side version: the treasury month-end restriction
 here as two concatenated string literals, so the reason it joined on **both**
 `chain_id` and `snapshot_date` — chains publish independently and are months apart,
 so matching the date alone sums two chains' different dates into one bucket — was
-recorded nowhere. It is now `queries/governance/_join_treasury_months.sql`, with
-that paragraph in it.
+recorded nowhere. It moved into a `.sql` file with that paragraph in it; since
+2026-09-25 the same chain-pairing rule lives in
+`queries/governance/_cte_treasury_month_served.sql` (a tuple IN on
+`(chain_id, snapshot_date)`), whose header carries it.
 
 ## Dataset contract
 

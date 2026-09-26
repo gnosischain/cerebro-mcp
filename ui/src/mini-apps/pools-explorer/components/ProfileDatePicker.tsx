@@ -1,9 +1,9 @@
 // Profile as-of date: presets + a bounded <input type=date>. Bounded by the
-// pool's first probed publication (below it there is no profile) and its
+// pool's first served day with ticks (below it there is no profile) and its
 // latest publication. Changes are DEBOUNCED 400 ms into ONE additive
 // `pool.profile` group load (PROFILE-DATE-HOOK); the server may shift the
-// request to the nearest earlier publication (`as_of_shifted`) — the applied
-// date comes back in the dataset rows and is shown as a clamped chip.
+// request to the nearest earlier complete served day (`as_of_shifted`) — the
+// applied date comes back in the dataset rows and is shown as a clamped chip.
 
 import { useEffect, useRef, useState } from "react";
 
@@ -114,7 +114,7 @@ export function ProfileDatePicker(props: ProfileDatePickerProps) {
         }}
       />
       {applied && (
-        <span className={`plx-chip${shifted ? " plx-chip--warn" : ""}`} title={shifted ? `Requested ${requested}; the nearest earlier publication is ${applied}` : "Applied publication date"}>
+        <span className={`plx-chip${shifted ? " plx-chip--warn" : ""}`} title={shifted ? `Requested ${requested}; the nearest earlier complete served day is ${applied}` : "Applied snapshot date"}>
           {shifted ? `shifted to ${fmtDate(applied)}` : fmtDate(applied)}
         </span>
       )}

@@ -74,7 +74,7 @@ const PRICE_COLUMN_RE = /^(?:price_raw|price_adjusted|price_lower_raw|price_uppe
 const UNITS_COLUMN_RE = /(?:_units|_units_est)$/;
 const BOOL_COLUMN_RE = /^(?:is_live|is_gap|contains_current_tick|is_full_range|matches_state_liquidity|is_below_current|is_resolved|token_is_token0|net_sum_zero_passed|reconciles_passed)$/;
 const TICK_COLUMN_RE = /^(?:tick|tick_lower|tick_upper|current_tick|width_ticks|distance_ticks|tick_spacing|band_ticks|tick_bucket_lo|tick_bucket_hi|axis_lo|axis_hi|tick_step)$/;
-const INT_COLUMN_RE = /^(?:pools|live_pools|probed_pools|pools_[a-z_]+|ranges|ranges_in_band|tick_count|n_assets|days_published|days_live|anchor_block|deployment_block|latest_anchor_block|universe_size|known|unknown|expected_pools|publications_total|gap_days|token_index|bucket_order|dates_total|dates_sampled|date_step_days|cl_pools|reserves_only_pools|decimals|evidence_count|attempt_id)$/;
+const INT_COLUMN_RE = /^(?:pools|live_pools|probed_pools|pools_[a-z_]+|ranges|ranges_in_band|tick_count|n_assets|days_published|days_live|anchor_block|deployment_block|latest_anchor_block|universe_size|known|unknown|expected_pools|publications_total|gap_days|token_index|bucket_order|dates_total|dates_sampled|date_step_days|cl_pools|reserves_only_pools|decimals|evidence_count)$/;
 
 /** Heuristic cell kind for columns without an explicit config entry. */
 export function kindForColumn(name: string): CellKind {
@@ -87,7 +87,9 @@ export function kindForColumn(name: string): CellKind {
   if (name === "fee_band") return "feeBand";
   if (name === "ticks_probed") return "probe";
   if (name === "checks_passed") return "list";
-  if (name === "anchor_hash" || name === "publication_id") return "hash";
+  // attempt_id is a UUID like publication_id — it sat in INT_COLUMN_RE, so every
+  // attempt rendered as "—" in the provenance table (a UUID is not a number).
+  if (name === "anchor_hash" || name === "publication_id" || name === "attempt_id") return "hash";
   if (BOOL_COLUMN_RE.test(name)) return "bool";
   if (PRICE_COLUMN_RE.test(name)) return "price";
   if (LIQUIDITY_COLUMN_RE.test(name)) return "liquidity";

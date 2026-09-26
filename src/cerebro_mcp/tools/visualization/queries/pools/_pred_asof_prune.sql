@@ -1,5 +1,11 @@
 -- The prune every scan of a dated view must carry beside its as-of join. A
--- JOIN key never prunes a ClickHouse scan; this uncorrelated IN folds to a
--- constant set at plan time and prunes partitions and the primary key.
--- Lesson: fat-view-join-never-prunes.
-@alias.snapshot_date IN (SELECT as_of FROM asof)
+-- JOIN key never prunes a ClickHouse scan; this uncorrelated scalar subquery is
+-- evaluated at plan time, folds to a constant and prunes partitions and the
+-- primary key. Lesson: fat-view-join-never-prunes.
+--
+-- A scalar `=`, not `IN (SELECT as_of FROM asof)`: ClickHouse computes identical
+-- scalar subqueries ONCE per query, but builds an IN set per subquery context and
+-- re-runs the CTE chain behind each one. Harmless while the resolver was a bare
+-- max(); the served resolver reads v_publications_current, and four IN prunes
+-- took pools_summary from 1.45s to 2.72s (measured 2026-09-26).
+@alias.snapshot_date = (SELECT as_of FROM asof)

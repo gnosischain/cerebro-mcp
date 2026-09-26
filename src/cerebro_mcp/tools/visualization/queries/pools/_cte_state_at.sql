@@ -15,6 +15,6 @@ st AS (
          s.anchor_block AS st_anchor_block
   FROM @db.@view AS s
   WHERE s.chain_id = @chain AND s.job_name = '@job'
-    AND s.snapshot_date IN (SELECT as_of FROM asof)
+    AND s.snapshot_date = (SELECT as_of FROM asof)
     AND @pool_sql
 )

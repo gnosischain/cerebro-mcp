@@ -19,11 +19,11 @@ Instead: the relation map below is your discovery surface. Relation and column n
 
 ## Non-negotiable: FINAL, as-of dates, and the published views
 
-Three rules every query in this plane obeys (lessons `ch-final-three-way-rule` and `fat-view-join-never-prunes`):
+Three rules every query in this plane obeys (lessons `ch-final-three-way-rule`, `published-is-not-served` and `fat-view-join-never-prunes`):
 
 1. **`config_registry` is the ONLY relation that takes `FINAL`** — always `FROM rpc_state_indexer.config_registry AS c FINAL` (alias before FINAL). It is ReplacingMergeTree; without FINAL a re-registered pool appears twice.
-2. **Never `FINAL` on any `v_*` view, and never read the raw `pool_cl_state` / `pool_tick_liquidity` / `pool_token_balances` tables.** Their ordering key includes `attempt_id`, so FINAL still returns one row per attempt and every aggregate double-counts. The `*_published` views INNER JOIN `census_publications` and are unique per `(pool_address, snapshot_date)` — read those, without FINAL. `census_publications` itself is plain MergeTree: no FINAL either.
-3. **Resolve dates from `census_publications`, then prune every view scan with `snapshot_date IN (SELECT as_of FROM asof)`.** `census_publications` is the cheap authoritative table (~6M small rows; per-day aggregates in ~0.1 s), and a date exists in a published view iff it was published. Never `max(snapshot_date)` over a view (it merges the whole base table first), never rely on a JOIN against resolved dates to bound a scan (a JOIN never prunes — only constant-foldable `IN (...)` / `=` predicates do), and never read `v_publications_current` (6.5 s per call; everything it offers comes from `census_publications` in 0.1 s). Single-pool history is bounded by `pool_address = '<address>'` plus a constant date window instead.
+2. **Never `FINAL` on any `v_*` view, and never read the raw `pool_cl_state` / `pool_tick_liquidity` / `pool_token_balances` tables.** Their ordering key includes `attempt_id`, so FINAL still returns one row per attempt and every aggregate double-counts. The `*_published` views INNER JOIN `v_publications_current` (the one served attempt per pool-day) and are unique per `(pool_address, snapshot_date)` — read those, without FINAL. `census_publications` itself is plain MergeTree: no FINAL either.
+3. **Resolve dates from SERVED publications, then prune every view scan with `snapshot_date = (SELECT as_of FROM asof)`.** A `census_publications` row is what an attempt WROTE; the views serve only the attempt `v_publications_current` selects (registered config hash, canonical anchor, verified, conflict-free). Take CANDIDATE days from `census_publications` (cheap), read `v_publications_current` for exactly those days, and use the newest COMPLETE one: served pools >= 98% of both that day's published count and the most any of the previous 7 candidates served (the toolkit's first query). The raw `max(snapshot_date)` is wrong twice over: the CL job publishes over 1-4.5 hours every morning, so it is often a half-written day, and a run can stop part-way and never finish (2026-08-23: 1,082 of 2,519 pools). Never read `v_publications_current` unbounded — it OOMs at 2 GiB over the pool jobs' history; bound it by candidate days, one date, or one `target_address` (~0.3 s each). Never `max(snapshot_date)` over a `v_pool_*` view (it merges the whole base table first), and never rely on a JOIN against resolved dates to bound a scan (a JOIN never prunes — only constant-foldable predicates do). Prune with the scalar `= (SELECT as_of FROM asof)`, not `IN (SELECT as_of FROM asof)`: ClickHouse runs identical scalar subqueries once per query but re-runs the whole resolver for every IN. Single-pool history is bounded by `pool_address = '<address>'` plus a constant date window instead.
 
 Always pin `chain_id = 100` and the `job_name` (`'daily_cl_liquidity'` for CL state and ticks, `'daily_pool_reserves'` for reserves) on every read of every relation.
 
@@ -33,13 +33,13 @@ Always pin `chain_id = 100` and the `job_name` (`'daily_cl_liquidity'` for CL st
 |---|---|
 | `config_registry` (**FINAL required — the only one**) | The pool universe. `target_kind = 'pool'`, `target_address` = pool address (lowercase; joins the views' `pool_address` without `lower()`), `enabled = 1`. `canonical_config_json.target.{pool_class, assets[{token}], pool_id, deployment_block}` — extract with `JSONExtractString(canonical_config_json, 'target', 'pool_class')` and `arrayMap(x -> JSONExtractString(x, 'token'), JSONExtractArrayRaw(canonical_config_json, 'target', 'assets'))`; assets are address-ascending, so `assets[1]` is token0 and `assets[2]` is token1. `fee` and `tick_spacing` are NOT here — read them from the state view. Two jobs: `daily_cl_liquidity` — 2,521 CL pools (`uniswap_v3` 142 + `swapr_v3_algebra` 2,379), published since 2023-09-25; `daily_pool_reserves` — 4,022 pools (the same CL pools + `balancer_v2` 1,302 + `balancer_v3` 199), reserves only, published since 2022-12-12. Pool family: `cl` for `uniswap_v3` / `swapr_v3_algebra`, `reserves_only` for `balancer_v2` / `balancer_v3`. |
 | `v_pool_cl_state_published` | One row per CL pool per published day: `sqrt_price_x96` (UInt256), `current_tick`, `liquidity` (UInt256 — `L` active at the current tick), `fee_growth_global_0_x128` / `fee_growth_global_1_x128` (UInt256 accumulators), `tick_spacing`, `fee` (pips), `tick_count`, `pool_class`, `anchor_block`, `anchor_hash`. Never FINAL. |
-| `v_pool_tick_liquidity_published` | Initialized ticks: `tick`, `liquidity_gross` (UInt256), `liquidity_net` (Int256), `fee_growth_outside_0_x128` / `fee_growth_outside_1_x128`. **Only pools above the indexer's active threshold are probed** — the rest carry `cl_below_active_threshold` in `census_publications.checks_passed` and are state-only (no ticks, no profile). Live-verified 2026-09-16: 2,519 CL pools published, 427 probed, 2,092 below threshold — 810 of those are live (`liquidity > 0`) but state-only. Never FINAL. |
+| `v_pool_tick_liquidity_published` | Initialized ticks: `tick`, `liquidity_gross` (UInt256), `liquidity_net` (Int256), `fee_growth_outside_0_x128` / `fee_growth_outside_1_x128`. **Only pools above the indexer's active threshold are probed** — the rest carry `cl_below_active_threshold` in `census_publications.checks_passed` and are state-only (no ticks, no profile). On a served state row `tick_count > 0` is exactly that attempt's probe verdict (all 874,228 served CL pool-days agree, verified 2026-09-26). Live-verified 2026-09-16: 2,519 CL pools published, 427 probed, 2,092 below threshold — 810 of those are live (`liquidity > 0`) but state-only. Never FINAL. |
 | `v_pool_liquidity_profile` | Derived active-liquidity ranges (`tick_lower`, `tick_upper`, `active_liquidity`) — but only since 2025-09-01. Prefer recomputing from ticks with `sum(liquidity_net) OVER (PARTITION BY pool_address, snapshot_date ORDER BY tick)` + `leadInFrame(tick)` (toolkit below): it reproduces the view exactly and covers 2023-10 onward. Keep the view as a cross-check oracle only. |
 | `v_pool_token_balances_published` | `balance_raw` (UInt256) per `(pool_address, token_address, snapshot_date)` from job `daily_pool_reserves` — the reserves plane for every pool and the ONLY plane for Balancer pools (Balancer v2 pools carry a `pool_id` in the config; up to 8 tokens). Never FINAL. |
 | `v_token_metadata_current` | `symbol`, `name`, `decimals` (Nullable), `resolution_status` per `(chain_id, token_address)`. Covers only ~68 of the 3,400 pool tokens — the pool jobs sweep pool ADDRESSES, not their assets, so the rest were never asked about rather than having failed. Label a token it does not cover by its short address, or resolve it over RPC (below). |
-| `census_publications` | The cheap authoritative publication ledger: `(chain_id, job_name, target_kind, target_address, snapshot_date)` → `anchor_block`, `anchor_hash`, `attempt_id`, `universe_size`, `checks_passed Array(String)`, `published_at`. Resolve as-of dates here (`max(snapshot_date) WHERE job_name = 'daily_cl_liquidity' AND target_kind = 'pool'`), read probe flags here (`NOT has(checks_passed, 'cl_below_active_threshold')`), count coverage here (`uniqExact(target_address)` per date). Plain MergeTree, no FINAL. |
+| `census_publications` | The raw publication ledger — what each attempt WROTE: `(chain_id, job_name, target_kind, target_address, snapshot_date)` → `anchor_block`, `anchor_hash`, `attempt_id`, `universe_size`, `checks_passed Array(String)`, `published_at`. A re-census writes a SECOND row for the same pool-day (20 CL days and 256 reserves days so far), so count with `uniqExact(target_address)` and never join a per-pool fact from it without pinning the served attempt — `(target_address, attempt_id) IN (SELECT target_address, attempt_id FROM rpc_state_indexer.v_publications_current WHERE ... AND snapshot_date = <as_of>)`; the unpinned probe join counted 193 CL pools twice on 2026-09-10. Take as-of CANDIDATES here, never the as-of itself (rule 3). Plain MergeTree, no FINAL. |
 | `v_day_anchors_canonical` | `snapshot_date` → `block_number`, `block_hash`, `block_timestamp` per chain: the block behind every daily snapshot. |
-| `v_publications_current` | **Do not read** — see rule 3 above. |
+| `v_publications_current` | What the views SERVE: one eligible, conflict-free attempt per `(job_name, target_address, snapshot_date)` — `attempt_id`, `anchor_block`, `published_at`, no `checks_passed`. Read it ONLY bounded (candidate days, one date, or one `target_address`; ~0.3 s) — unbounded it OOMs. See rule 3. |
 
 ## Decision table — pick the lightest path
 
@@ -55,12 +55,29 @@ Always pin `chain_id = 100` and the `job_name` (`'daily_cl_liquidity'` for CL st
 
 ## ClickHouse toolkit (verified 2026-09-17 — still `describe_table` first)
 
-### Latest-day CL pool directory, as-of resolved from census and every scan pruned
+### Latest-day CL pool directory, as-of resolved from SERVED publications and every scan pruned
 ```sql
-WITH asof AS (
-  SELECT max(snapshot_date) AS as_of
+WITH cand AS (                        -- the newest published days: candidates only (cheap)
+  SELECT snapshot_date AS d, uniqExact(target_address) AS published
   FROM rpc_state_indexer.census_publications
   WHERE chain_id = 100 AND job_name = 'daily_cl_liquidity' AND target_kind = 'pool'
+  GROUP BY d ORDER BY d DESC LIMIT 21
+),
+srv AS (                              -- what the views serve, on those days only
+  SELECT snapshot_date AS d2, count() AS served
+  FROM rpc_state_indexer.v_publications_current
+  WHERE chain_id = 100 AND job_name = 'daily_cl_liquidity' AND target_kind = 'pool'
+    AND snapshot_date IN (SELECT d FROM cand)
+  GROUP BY d2
+),
+days AS (                             -- complete: >= 98% of published AND of the prior-7 peak
+  SELECT c.d AS d, s.served AS served,
+         s.served >= 0.98 * greatest(c.published,
+           max(s.served) OVER (ORDER BY c.d ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING)) AS complete
+  FROM cand AS c LEFT JOIN srv AS s ON s.d2 = c.d
+),
+asof AS (
+  SELECT if(countIf(complete) > 0, maxIf(d, complete), maxIf(d, served > 0)) AS as_of FROM days
 ),
 cfg AS (
   SELECT c.target_address AS pool_address,
@@ -69,36 +86,27 @@ cfg AS (
                   JSONExtractArrayRaw(c.canonical_config_json, 'target', 'assets')) AS assets
   FROM rpc_state_indexer.config_registry AS c FINAL
   WHERE c.chain_id = 100 AND c.job_name = 'daily_cl_liquidity' AND c.target_kind = 'pool' AND c.enabled = 1
-),
-probe AS (
-  SELECT target_address AS pool_address,
-         argMax(NOT has(checks_passed, 'cl_below_active_threshold'), published_at) AS ticks_probed
-  FROM rpc_state_indexer.census_publications
-  WHERE chain_id = 100 AND job_name = 'daily_cl_liquidity' AND target_kind = 'pool'
-    AND snapshot_date IN (SELECT as_of FROM asof)
-  GROUP BY pool_address
 )
 SELECT s.pool_address, cfg.pool_class, cfg.assets[1] AS token0, cfg.assets[2] AS token1,
-       s.snapshot_date AS as_of, s.anchor_block, s.fee, s.tick_spacing, s.current_tick,
+       toString(s.snapshot_date) AS as_of, s.anchor_block, s.fee, s.tick_spacing, s.current_tick,
        pow(toFloat64(s.sqrt_price_x96) / pow(2, 96), 2) AS price_raw,     -- token1-raw per token0-raw
        toString(s.liquidity) AS liquidity_raw, toFloat64(s.liquidity) AS liquidity_float,
-       s.tick_count, probe.ticks_probed
+       s.tick_count, s.tick_count > 0 AS ticks_probed    -- the served attempt's probe verdict
 FROM rpc_state_indexer.v_pool_cl_state_published AS s
 INNER JOIN cfg ON cfg.pool_address = s.pool_address
-LEFT JOIN probe ON probe.pool_address = s.pool_address
 WHERE s.chain_id = 100 AND s.job_name = 'daily_cl_liquidity'
-  AND s.snapshot_date IN (SELECT as_of FROM asof)
+  AND s.snapshot_date = (SELECT as_of FROM asof)
   AND s.liquidity > 0
 ORDER BY liquidity_float DESC
 LIMIT 20
 ```
-0.25 s over all 2,519 pools. `liquidity_float` ranks pools only for display — `L` is pair-specific (rule 3). Filters go on table-qualified columns (`s.liquidity`), never on an output alias: an alias shadows the same-named column and a `WHERE` on it silently returns nothing.
+~0.9 s over all 2,519 pools, most of it the served read (measured 2026-09-26). `liquidity_float` ranks pools only for display — `L` is pair-specific (rule 3). Filters go on table-qualified columns (`s.liquidity`), never on an output alias: an alias shadows the same-named column and a `WHERE` on it silently returns nothing.
 
 ### Single-pool liquidity profile, recomputed from ticks (covers 2023-10 onward)
 ```sql
-WITH asof AS (                                   -- the pool's own latest publication
+WITH asof AS (           -- the pool's own latest SERVED day: one pool's calendar, ~0.3 s
   SELECT max(snapshot_date) AS as_of
-  FROM rpc_state_indexer.census_publications
+  FROM rpc_state_indexer.v_publications_current
   WHERE chain_id = 100 AND job_name = 'daily_cl_liquidity' AND target_kind = 'pool'
     AND target_address = '0x0cf44132a7df09ba82d5c4010e73e151d31a42ae'
 ),
@@ -107,14 +115,14 @@ state AS (
   FROM rpc_state_indexer.v_pool_cl_state_published AS s
   WHERE s.chain_id = 100 AND s.job_name = 'daily_cl_liquidity'
     AND s.pool_address = '0x0cf44132a7df09ba82d5c4010e73e151d31a42ae'
-    AND s.snapshot_date IN (SELECT as_of FROM asof)
+    AND s.snapshot_date = (SELECT as_of FROM asof)
 ),
 ticks AS (
   SELECT t.tick, t.liquidity_net AS net
   FROM rpc_state_indexer.v_pool_tick_liquidity_published AS t
   WHERE t.chain_id = 100 AND t.job_name = 'daily_cl_liquidity'
     AND t.pool_address = '0x0cf44132a7df09ba82d5c4010e73e151d31a42ae'
-    AND t.snapshot_date IN (SELECT as_of FROM asof)
+    AND t.snapshot_date = (SELECT as_of FROM asof)
 ),
 ranges AS (
   SELECT tick AS tick_lower,
@@ -139,9 +147,9 @@ Returns 20 ranges for this Uniswap pool (spacing 10, so its full-range position 
 
 ### Fee accrual estimate from the fee-growth accumulators (single pool, 90 days)
 ```sql
-WITH asof AS (
+WITH asof AS (           -- the pool's own latest SERVED day
   SELECT max(snapshot_date) AS as_of
-  FROM rpc_state_indexer.census_publications
+  FROM rpc_state_indexer.v_publications_current
   WHERE chain_id = 100 AND job_name = 'daily_cl_liquidity' AND target_kind = 'pool'
     AND target_address = '0x0cf44132a7df09ba82d5c4010e73e151d31a42ae'
 ),
@@ -199,8 +207,8 @@ labelled as such. A decimals value you do NOT have is never assumed to be 18.
 6. **Balancer pools are reserves-only**: no ticks, no profile, no `sqrt_price`, no fee growth. Their only plane is `v_pool_token_balances_published` under `daily_pool_reserves`.
 7. **Count pools with `uniqExact(pool_address)`** (`uniqExact(target_address)` in census) — never bare `count()`, which counts pool-days.
 8. **UInt256 arithmetic:** `toFloat64(...)` for math (`liquidity`, `sqrt_price_x96`, `fee_growth_*`, `balance_raw`), `toString(...)` to display an exact raw integer. Compare `Int256` with `UInt256` via `toInt256(...)`.
-9. **Every figure carries `snapshot_date` and `anchor_block`.** "Today" is the latest published date resolved from `census_publications`, disclosed as stale when older than 2 days. Coverage is not uniform — 2026-08-23 published 1,082 of 2,519 CL pools — so check `uniqExact(target_address)` per date before any trend claim.
-10. **`checks_passed` is data, not inference.** `cl_liquidity_net_sum_zero` and `cl_active_liquidity_reconciles` exist only for probed pools; `cl_below_active_threshold` marks state-only pools. Quote the flags; do not derive probing from `tick_count`.
+9. **Every figure carries `snapshot_date` and `anchor_block`.** "Today" is the newest complete SERVED date (rule 3), disclosed as stale when older than 2 days. Coverage is not uniform — 2026-08-23 published 1,082 of 2,519 CL pools — so check `uniqExact(target_address)` per date before any trend claim.
+10. **`checks_passed` is data, not inference.** `cl_liquidity_net_sum_zero` and `cl_active_liquidity_reconciles` exist only for probed pools; `cl_below_active_threshold` marks state-only pools. Quote the flags from the SERVED attempt's publication row (rule 3), never from an unpinned one. On a served state row, `tick_count > 0` is the same verdict (verified over all 874,228 served CL pool-days, 2026-09-26) and needs no join to the raw ledger — any other inference from `tick_count` is not.
 
 ## Handoffs
 
@@ -211,5 +219,5 @@ labelled as such. A decimals value you do NOT have is never assumed to be 18.
 ## Success metrics
 
 - Scalar answers in ≤3 tool calls; zero `search_models` / `discover_models` calls; zero joins to dbt models.
-- Every query: `config_registry` with FINAL and nothing else with FINAL; every view scan pruned by an `IN (...)` on census-resolved dates or a single-pool bind; chain and job pinned.
+- Every query: `config_registry` with FINAL and nothing else with FINAL; every view scan pruned by a scalar `= (SELECT as_of FROM asof)` on SERVED-resolved dates (`IN` only for a set of dates) or a single-pool bind; chain and job pinned.
 - Every figure carries its as-of date and `anchor_block`; every price is labelled raw or decimals-adjusted; every state-only pool is disclosed as such rather than reported as zero.

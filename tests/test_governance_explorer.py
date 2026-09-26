@@ -231,8 +231,7 @@ def _all_specs() -> list[governance_explorer.QuerySpec]:
     })
     specs += governance_explorer._graph_specs(range_state)
     specs += governance_explorer._treasury_specs(range_state, {
-        **defaults, "chain_id": 100, "asset": ASSET, "exclude_ltd": True,
-        "sort_by": "supply_share",
+        **defaults, "chain_id": 100, "exclude_ltd": True, "sort_by": "supply_share",
     })
     for kind, identifier in (
         ("proposal", PROPOSAL_ID), ("voter", VOTER),
@@ -529,8 +528,11 @@ def test_every_spec_targets_governance_db_with_final_order_by_and_binds():
     # string (even in a comment) skip the governance_db existence check.
     external_plane_refs = (
         f"{governance_explorer.DELEGATE_DB}.{governance_explorer.DELEGATE_VIEW}",
-        f"{governance_explorer.TREASURY_DB}.{governance_explorer.TREASURY_VIEW}",
-        f"{governance_explorer.TREASURY_DB}.{governance_explorer.TREASURY_SCALARS_VIEW}",
+        # Treasury: the served two-step read (lesson: published-is-not-served).
+        f"{governance_explorer.TREASURY_DB}.{governance_explorer.TREASURY_BALANCES_TABLE}",
+        f"{governance_explorer.TREASURY_DB}.{governance_explorer.TREASURY_SERVED_VIEW}",
+        f"{governance_explorer.TREASURY_DB}.{governance_explorer.TREASURY_PUB_TABLE}",
+        governance_explorer.TREASURY_PRICE_HUB,
     )
     specs = _all_specs()
     assert specs
@@ -998,29 +1000,68 @@ def test_concentration_tiers_are_the_canonical_10_20_50_everywhere():
         assert "toUInt32(5)" not in sql_code(spec.sql), spec.key
 
 
-def test_treasury_dates_resolve_from_publications_and_every_scan_is_pruned():
-    """Since the holder census landed, token_balances holds billions of rows
-    and v_treasury_balances FINAL-merges all of it. Two rules keep the plane
-    alive: (1) snapshot dates resolve from census_publications, never by
-    aggregating the view; (2) every view scan carries an IN-prune beside its
-    asof/months join — the JOIN alone never prunes, the uncorrelated IN folds
-    to constants at plan time and does."""
-    treasury = [s for s in _all_specs() if "v_treasury_balances" in s.sql]
-    assert treasury, "treasury specs missing from the sweep"
-    prunes = (
-        "snapshot_date IN (SELECT as_of FROM asof)",
-        "snapshot_date IN (SELECT month_end FROM months)",
-        "IN (SELECT chain_id, month_end FROM months)",
+_T_BALANCES = f"{governance_explorer.TREASURY_DB}.{governance_explorer.TREASURY_BALANCES_TABLE}"
+_T_SERVED = f"{governance_explorer.TREASURY_DB}.{governance_explorer.TREASURY_SERVED_VIEW}"
+
+
+def _treasury_read_problems(code: str) -> list[str]:
+    """Problems with a treasury statement's read path; empty means compliant.
+
+    Shared by the guard and its negative fixture, so the guard is proven to
+    reject the pattern it exists to reject."""
+    problems: list[str] = []
+    job = governance_explorer.TREASURY_JOB
+    if _T_BALANCES in code:
+        if "argMax(b.balance_raw, b.insert_version)" not in code:
+            problems.append("balances read without the argMax dedup")
+        if "b.attempt_id)" not in code:
+            problems.append("balances read not pinned to the served attempt")
+        if f"b.job_name = '{job}'" not in code:
+            problems.append("balances read without the job pin")
+        if ("b.snapshot_date >= today() -" not in code
+                and "b.snapshot_date IN (SELECT c_date FROM cand)" not in code):
+            problems.append("balances read without a constant date bound")
+        if _T_SERVED not in code:
+            problems.append("balances read without served publications")
+    if re.search(r"max\(snapshot_date\)\s+AS\s+(as_of|month_end)\b", code):
+        problems.append("dates resolved from raw publications")
+    if governance_explorer.TREASURY_CANONICAL_VIEW in code:
+        problems.append("reads the canonical view (18s for full history)")
+    return problems
+
+
+def _every_treasury_spec() -> list[governance_explorer.QuerySpec]:
+    specs = governance_explorer._treasury_specs(
+        governance_explorer._range_state("", ""), governance_explorer._default_filters()
     )
-    for spec in treasury:
+    for kind, ident in (("treasury_token", f"1:{ASSET}"), ("treasury_wallet", f"100:{VOTER}")):
+        specs += governance_explorer._entity_specs(kind, ident)
+    return specs
+
+
+def test_treasury_dates_resolve_from_served_publications_and_every_scan_is_pruned():
+    """A raw census_publications row is not a served snapshot: 2026-07-28..08-15 on
+    Ethereum were published under an interim config hash and served nothing, and
+    resolving month-ends from raw publications emptied the July bucket. Every
+    treasury read resolves dates from v_publications_current and reads
+    token_balances for exactly the served attempts, bounded three ways."""
+    specs = _every_treasury_spec()
+    assert len(specs) >= 15
+    reads = 0
+    for spec in specs:
         code = sql_code(spec.sql)
-        assert "census_publications" in code, spec.key
-        # No date aggregation over the fat view, anywhere.
-        assert not re.search(
-            r"max\(snapshot_date\)[^)]*\n?[^)]*FROM\s+rpc_state_indexer\.v_treasury_balances",
-            code,
-        ), spec.key
-        assert any(p in code for p in prunes), spec.key
+        assert _treasury_read_problems(code) == [], spec.key
+        reads += _T_BALANCES in code
+    assert reads >= 11, "the served two-step read vanished from the treasury specs"
+
+    # Negative fixture: the pre-2026-09 shape (raw as-of, no attempt pin) MUST fail.
+    old_shape = (
+        "WITH asof AS (SELECT chain_id, max(snapshot_date) AS as_of "
+        "FROM rpc_state_indexer.census_publications GROUP BY chain_id)\n"
+        "SELECT sum(b.balance_raw) FROM rpc_state_indexer.token_balances AS b "
+        "WHERE b.snapshot_date IN (SELECT as_of FROM asof)"
+    )
+    assert len(_treasury_read_problems(old_shape)) >= 4
 
 
 def test_re_delegations_uses_the_canonical_repointed_definition():
@@ -1412,173 +1453,150 @@ def test_governance_web_routes_health_asset_and_dispatch():
 # ---------------------------------------------------------------------------
 
 
-def test_treasury_specs_always_pin_the_job_and_never_use_final():
-    """The upstream view is NOT job-scoped: it spans every census job, including
-    the full_holders jobs (185M+ rows) whose universes contain the treasury
-    wallets. An unpinned read exhausts server memory and double-counts any token
-    measured by two jobs, so the pin is the load-bearing guard on this plane."""
-
-    specs = governance_explorer._treasury_specs(
-        governance_explorer._range_state("", ""),
-        governance_explorer._default_filters(),
-    )
-    assert specs
-    job_pin = f"job_name = '{governance_explorer.TREASURY_JOB}'"
-    for spec in specs:
-        code = sql_code(spec.sql)
-        assert job_pin in code, spec.key
-        # v_treasury_balances resolves ReplacingMergeTree dedup internally.
-        assert "FINAL" not in code.upper(), spec.key
-        # As-of is resolved per chain; a global max would blend one chain's
-        # current snapshot with another's stale one.
-        assert "GROUP BY chain_id" in code, spec.key
-
-
-def test_treasury_usd_stays_a_typed_null_until_the_price_plane_is_wired():
-    """NULL, never 0. A fabricated zero valuation is worse than no valuation."""
-
-    specs = {
+def _treasury_section(filters: dict | None = None) -> dict[str, governance_explorer.QuerySpec]:
+    return {
         spec.key: spec
         for spec in governance_explorer._treasury_specs(
             governance_explorer._range_state("", ""),
-            governance_explorer._default_filters(),
+            filters or governance_explorer._default_filters(),
         )
     }
-    for key in ("treasury_summary", "treasury_holdings", "treasury_by_wallet"):
-        assert "CAST(NULL AS Nullable(Float64))" in specs[key].sql, key
-    # Coverage encodes price absence as a dimension row, not a column.
-    assert "'usd_price'" in specs["treasury_coverage"].sql
 
 
-def test_treasury_filters_are_section_scoped_and_reach_the_fingerprint():
-    for kwargs in ({"chain_id": 1}, {"asset": ASSET}, {"exclude_ltd": True}):
+def test_treasury_specs_pin_the_job_never_use_final_and_keep_chains_apart():
+    """token_balances spans every census job (the full_holders jobs included), so
+    the job pin is load-bearing; FINAL is forbidden on a billions-row raw table
+    (argMax replaces it); and chains publish independently, so every window and
+    served lookup partitions on the chain."""
+    job_pin = f"job_name = '{governance_explorer.TREASURY_JOB}'"
+    for spec in _every_treasury_spec():
+        code = sql_code(spec.sql)
+        assert job_pin in code, spec.key
+        assert not re.search(r"\bFINAL\b", code), spec.key
+    code = sql_code(_treasury_section()["treasury_summary"].sql)
+    assert "OVER (PARTITION BY chain_id, snapshot_date)" in code
+    assert "OVER (PARTITION BY w_chain)" in code
+    history = sql_code(_treasury_section()["treasury_history"].sql)
+    assert "(chain_id, snapshot_date) IN (SELECT c_chain, c_date FROM cand)" in history
+
+
+def test_treasury_usd_comes_from_the_hub_through_the_registry_symbol():
+    """The on-chain symbol is attacker-authored (18 contracts here claim USDC), so
+    the price join keys on the REVIEWED registry symbol only, and only the
+    priced class carries a value — never a fabricated 0."""
+    for spec in _every_treasury_spec():
+        code = sql_code(spec.sql)
+        if "classified AS (" not in code:
+            continue
+        assert "ASOF LEFT JOIN hubp AS h ON h.h_sym = q.x_psym" in code, spec.key
+        assert "if(e.x_date < r.reg_to, r.reg_psym, '') AS x_psym" in code, spec.key
+        assert "if(x_class = 'priced', x_units * x_price, NULL) AS x_value" in code, spec.key
+        assert not re.search(r"h_sym\s*=\s*[\w.]*x_symbol", code), spec.key
+        assert "WHERE upper(symbol) IN {hub_syms:Array(String)}" in code, spec.key
+        assert spec.parameters["hub_syms"], spec.key
+
+
+def test_treasury_filters_are_client_side_view_hints():
+    """chain_id / exclude_ltd stay validated and section-scoped, but they never
+    change the SQL: every dataset carries both chains and all wallets, so one
+    cached load serves every toggle. The dead `asset` filter is gone."""
+    for kwargs in ({"chain_id": 1}, {"exclude_ltd": True}):
         with pytest.raises(ValueError, match="only to the treasury section"):
             governance_explorer._validate_filters(
                 "proposals", "", "", "", "", 0, "", "", **kwargs
             )
     with pytest.raises(ValueError, match="chain_id must be one of"):
         governance_explorer._validate_filters("treasury", "", "", "", "", 0, "", "", 42)
-    with pytest.raises(ValueError, match="asset must be"):
+    with pytest.raises(TypeError):
         governance_explorer._validate_filters(
-            "treasury", "", "", "", "", 0, "", "", 0, "not-an-address"
+            "treasury", "", "", "", "", 0, "", "", 0, False, ASSET
         )
-
-    # Each filter must change the scope fingerprint, or a cached scope is served
-    # for the wrong toggle state.
-    range_state = governance_explorer._range_state("", "")
-    base = governance_explorer._validate_filters("treasury", "", "", "", "", 0, "", "")
-    seen = {governance_explorer._section_fingerprint("treasury", range_state, base)}
-    for kwargs in ({"chain_id": 1}, {"asset": ASSET}, {"exclude_ltd": True}):
-        variant = governance_explorer._validate_filters(
-            "treasury", "", "", "", "", 0, "", "", **kwargs
-        )
-        fingerprint = governance_explorer._section_fingerprint(
-            "treasury", range_state, variant
-        )
-        assert fingerprint not in seen, kwargs
-        seen.add(fingerprint)
+    base = {key: (spec.sql, spec.parameters) for key, spec in _treasury_section().items()}
+    for hint in ({"chain_id": 1}, {"chain_id": 100}, {"exclude_ltd": True}):
+        variant = _treasury_section({**governance_explorer._default_filters(), **hint})
+        assert {key: (spec.sql, spec.parameters) for key, spec in variant.items()} == base, hint
 
 
-def test_treasury_ltd_exclusion_is_explicit_in_sql_and_disclosed_in_basis():
-    """The Ltd wallet is ~46% of GNO holdings — the toggle roughly halves the
-    headline, so it must be visible in both the SQL and the coverage basis."""
-
-    defaults = governance_explorer._default_filters()
-    off = governance_explorer._treasury_specs(
-        governance_explorer._range_state("", ""), defaults
-    )[0]
-    on = governance_explorer._treasury_specs(
-        governance_explorer._range_state("", ""), {**defaults, "exclude_ltd": True}
-    )[0]
-    ltd = governance_explorer.LTD_WALLETS[0]
-    assert "NOT IN" not in off.sql.replace(f"NOT IN ('{ltd}')", "", 1)
-    assert f"NOT IN ('{ltd}')" in on.sql
-    assert "all treasury wallets" in off.basis
-    assert "Ltd wallets excluded" in on.basis
+def test_treasury_ltd_is_companion_columns_never_a_filter():
+    """The Ltd wallet holds ~46% of Ethereum GNO — the toggle roughly halves the
+    headline — so it is exposed as explicit *_ex_ltd columns the UI switches
+    between, never as a hidden server-side WHERE."""
+    specs = _treasury_section()
+    for key in ("treasury_summary", "treasury_holdings", "treasury_history"):
+        code = sql_code(specs[key].sql)
+        assert "_ex_ltd" in code, key
+        assert "NOT c.x_is_ltd" in code, key
+        assert specs[key].parameters["ltd"] == list(governance_explorer.LTD_WALLETS), key
+    assert "has({ltd:Array(String)}, wallet_address) AS is_ltd" in sql_code(
+        specs["treasury_by_wallet"].sql
+    )
 
 
-def test_treasury_history_never_blends_chains_onto_one_series():
-    """Chains publish independently and their latest snapshots are years apart.
-
-    Every history row therefore carries chain_id in its own column and every
-    aggregate groups by it, so a client cannot accidentally sum two chains onto
-    one axis. (The LONG metric/metric_value shape would have been unsafe here:
-    parseActivity's pivot keys only on `bucket`, so two chains emitting the same
-    metric name at the same bucket would silently overwrite each other.)
-    """
-    specs = {
-        spec.key: spec
-        for spec in governance_explorer._treasury_specs(
-            governance_explorer._range_state("", ""),
-            governance_explorer._default_filters(),
-        )
+def test_treasury_history_is_full_one_scan_and_never_blends_chains():
+    """History is FULL (no month-count bound) and ONE fan-out scan, so every chart
+    reads the same snapshot and a stacked total equals the NAV line."""
+    specs = _treasury_section()
+    assert {key for key in specs if "history" in key} == {
+        "treasury_history", "treasury_history_coverage",
     }
-    history = [key for key in specs if key.endswith("_history")]
-    assert set(history) == {
-        "treasury_chain_history", "treasury_token_history", "treasury_wallet_history",
-    }
-    for key in history:
-        sql = specs[key].sql
-        assert "chain_id AS chain_id" in sql, key
-        # Month-end sampling is resolved PER CHAIN, never globally.
-        assert "GROUP BY chain_id, bucket" in sql, key
-        assert "metric_value" not in sql, key
+    history = specs["treasury_history"]
+    code = sql_code(history.sql)
+    assert "GROUP BY grain, chain_id, bucket, wallet_address, token_address" in code
+    assert "ARRAY JOIN [('chain', '', ''), ('wallet', c.x_wallet, ''), ('token', '', c.x_token)]" in code
+    # The only LIMIT is the per-month candidate-day window, never a month count.
+    assert re.findall(r"LIMIT\s+\d+\s+BY\s+([^\n]+)", code) == [
+        "c_chain, toStartOfMonth(c_date)"
+    ]
+    assert "FULL history" in history.basis and "24" not in history.basis
+    assert history.cache_ttl_seconds == governance_explorer.TREASURY_HISTORY_TTL
+    assert history.exact_count is False
+    coverage = sql_code(specs["treasury_history_coverage"].sql)
+    for status in ("'complete'", "'partial'", "'gap'", "'unpublished'"):
+        assert status in coverage
 
 
-def test_treasury_history_ranks_by_position_changes_not_longevity():
-    """Airdropped dust is held by every wallet from the moment it lands and then
-    never moves, so ranking history candidates by longevity or wallet count puts
-    spam first — measured: it selected ABSHIBA.com/MVDG/TICK while dropping COW,
-    SAFE and wstETH. Counting distinct balances over the series inverts that.
-    """
-    spec = next(
-        s for s in governance_explorer._treasury_specs(
-            governance_explorer._range_state("", ""),
-            governance_explorer._default_filters(),
+def test_treasury_warning_scan_discloses_partial_snapshots_and_gaps():
+    def dataset(columns, rows):
+        return CachedDataset(
+            columns=columns, column_types=["str"] * len(columns), rows=rows,
+            stats=DatasetStats(row_count=len(rows), rows_returned=len(rows), mode="exact_capped"),
+            sql="--", database="governance_db", parameters={},
         )
-        if s.key == "treasury_token_history"
+
+    summary = dataset(
+        ["chain_id", "as_of", "as_of_status", "carried_tokens", "hub_latest_date"],
+        [[1, "2026-09-24", "partial", 3, "2026-09-20"], [100, None, "no_served_snapshot", 0, None]],
     )
-    code = sql_code(spec.sql)
-    # `changes` is a WINDOW, not a second GROUP BY pass — that second pass was
-    # what referenced `per_bucket` twice and doubled the scan. Both forms were
-    # verified equal on live data (309 tokens, 0 disagreements, identical
-    # checksum), so this asserts the cheap one is the one that shipped.
-    assert (
-        "uniqExact(b.balance_raw_sum) OVER (PARTITION BY b.chain_id, b.token_address)"
-        in code
-    )
-    assert "changes DESC" in code
-    # Selection is dense_rank, not `LIMIT n BY`. dense_rank ranks DISTINCT
-    # ordering-key values and the key ends in `token_address`, so one rank is
-    # one token however many buckets it spans. Proven to pick the same set as
-    # the old `LIMIT 24 BY` (0 divergent tokens).
-    assert "dense_rank() OVER (" in code
-    assert f"rnk <= {governance_explorer.TREASURY_HISTORY_TOKENS}" in code
-    # The tie-break must stay TOTAL. Most candidates tie at changes=1, so
-    # without a unique final key the selected set follows the query plan.
-    assert "changes DESC, token_address" in code
+    assert governance_explorer._treasury_warning_scan(summary, "treasury_summary") == [
+        "treasury_asof_partial", "treasury_chain_unserved", "treasury_price_hub_stale",
+        "treasury_tokens_carried",
+    ]
+    months = dataset(["chain_id", "status"], [[1, "complete"], [1, "gap"], [100, "partial"]])
+    for key in ("treasury_history_coverage", "treasury_wallet_months", "treasury_token_months"):
+        assert governance_explorer._treasury_warning_scan(months, key) == [
+            "treasury_history_gap", "treasury_history_partial",
+        ]
 
 
-def test_treasury_wallet_history_follows_the_focused_asset():
-    """With no focus the per-wallet stack is GNO; focusing an asset retargets it,
-    and the asset must arrive BOUND, never interpolated into the SQL text."""
-    range_state = governance_explorer._range_state("", "")
-    default = next(
-        s for s in governance_explorer._treasury_specs(
-            range_state, governance_explorer._default_filters())
-        if s.key == "treasury_wallet_history"
-    )
-    assert governance_explorer.GNO_TOKENS[1] in default.sql
-    assert "asset" not in default.parameters
+def test_every_treasury_warning_code_has_frontend_copy():
+    """The warning strip passes an unknown string through unchanged, so a code
+    the server emits without frontend copy reaches the page RAW —
+    "treasury_history_partial" sat in a yellow chip above the treasury. Every code
+    _treasury_warning_scan can produce must be a key of the frontend's map."""
+    import inspect
+    from pathlib import Path
 
-    focused = next(
-        s for s in governance_explorer._treasury_specs(
-            range_state, {**governance_explorer._default_filters(), "asset": ASSET})
-        if s.key == "treasury_wallet_history"
-    )
-    assert "{asset:String}" in focused.sql
-    assert focused.parameters["asset"] == ASSET
-    assert ASSET not in focused.sql
+    source = inspect.getsource(governance_explorer._treasury_warning_scan)
+    codes = set(re.findall(r'codes\.add\("(treasury_[a-z_]+)"\)', source))
+    statuses = re.search(r"for status in \(([^)]*)\)", source)
+    assert statuses and 'f"treasury_history_{status}"' in source
+    codes |= {f"treasury_history_{s}" for s in re.findall(r'"(\w+)"', statuses.group(1))}
+    assert len(codes) == 7, codes  # the sweep found the vocabulary, not nothing
+
+    ui = (Path(__file__).resolve().parents[1]
+          / "ui/src/mini-apps/governance/state/warnings.ts").read_text(encoding="utf-8")
+    copy = ui[ui.index("export const WARNING_COPY"):ui.index("export const QUIET_WARNINGS")]
+    assert sorted(c for c in codes if f"\n  {c}:" not in copy) == []
 
 
 def test_governance_resource_declares_the_coingecko_image_hosts():
@@ -1599,114 +1617,97 @@ def test_governance_resource_declares_the_coingecko_image_hosts():
     assert not any("api.coingecko.com" in d for d in domains)
 
 
-def test_overlay_tool_never_fabricates_a_price_for_an_unlisted_token(monkeypatch):
-    """Absence, not zero. 19 distinct tokens in this treasury spoof the symbol
-    USDC; pricing an unlisted one at 0 would make it look merely worthless
-    instead of unidentifiable."""
+def test_overlay_prices_only_spot_eligible_rows_and_never_fabricates(monkeypatch):
+    """The overlay is the SPOT FALLBACK only: a reviewed token the hub cannot price
+    (spot_eligible) may get today's CoinGecko quote; hub-priced tokens and spam
+    never reach the price endpoint, spam gets no icon, an unlisted token is absent
+    (never 0), and a quote that would dominate its chain's hub total is dropped."""
     from cerebro_mcp.tools.visualization import coingecko
 
     coingecko.reset_caches_for_tests()
     monkeypatch.setattr(coingecko, "_EXECUTOR", type("E", (), {
         "submit": staticmethod(lambda fn, *a: fn(*a)),
     })())
-    real, spoof = "0x" + "11" * 20, "0x" + "22" * 20
-    monkeypatch.setattr(coingecko, "fetch_coin_index",
-                        lambda: {"ethereum": {real: "real-coin"}})
-    monkeypatch.setattr(coingecko, "fetch_prices", lambda ids: {"real-coin": 4.0})
-    monkeypatch.setattr(coingecko, "fetch_icon_map", lambda chain: {})
+    listed, spam, hub, unlisted, whale = ("0x" + c * 20 for c in ("11", "22", "33", "44", "55"))
+    requested: list[set[str]] = []
+    monkeypatch.setattr(coingecko, "fetch_coin_index", lambda: {"ethereum": {
+        listed: "listed-coin", spam: "spam-coin", hub: "hub-coin", whale: "whale-coin",
+    }})
 
-    server, ch = _server()
+    def fake_prices(ids):
+        requested.append(set(ids))
+        return {"listed-coin": 4.0, "spam-coin": 9.0, "hub-coin": 7.0, "whale-coin": 5.0}
+
+    monkeypatch.setattr(coingecko, "fetch_prices", fake_prices)
+    monkeypatch.setattr(coingecko, "fetch_icon_map", lambda chain: {
+        listed: "https://assets.coingecko.com/l.png", spam: "https://assets.coingecko.com/s.png",
+    })
+
+    server, _ = _server()
     view_id = _tool(server, "open_governance")().structuredContent["view_id"]
-    _tool(server, "load_governance_section")(
-        view_id=view_id, request_id=1, section="treasury"
-    )
-    dataset = CachedDataset(
-        columns=["chain_id", "token_address"], column_types=["int", "str"],
-        rows=[[1, real], [1, spoof]],
-        stats=DatasetStats(row_count=2, rows_returned=2, mode="exact_capped"),
-        sql="--", database="governance_db", parameters={},
-    )
-    mini_apps.attach_dataset(view_id, "treasury_holdings", dataset)
+    _tool(server, "load_governance_section")(view_id=view_id, request_id=1, section="treasury")
 
+    def dataset(columns, rows):
+        return CachedDataset(
+            columns=columns, column_types=["str"] * len(columns), rows=rows,
+            stats=DatasetStats(row_count=len(rows), rows_returned=len(rows), mode="exact_capped"),
+            sql="--", database="governance_db", parameters={},
+        )
+
+    mini_apps.attach_dataset(view_id, "treasury_holdings", dataset(
+        ["chain_id", "token_address", "token_class", "balance_units", "spot_eligible"],
+        [[1, listed, "listed", 10.0, 1], [1, spam, "spam", 1e12, 0], [1, hub, "priced", 5.0, 0],
+         [1, unlisted, "listed", 3.0, 1], [1, whale, "listed", 1e9, 1]],
+    ))
+    mini_apps.attach_dataset(view_id, "treasury_summary", dataset(
+        ["chain_id", "nav_usd"], [[1, 1_000_000.0]],
+    ))
     for _ in range(2):  # first call warms the background pass
         result = _tool(server, "load_governance_overlays")(view_id=view_id)
     patch = result.structuredContent["patch"]
-    assert patch["price_overlay"]["kind"] == "spot"
-    assert patch["price_overlay"]["by_chain"]["1"] == {real: 4.0}
-    assert spoof not in patch["price_overlay"]["by_chain"]["1"]
+    overlay = patch["price_overlay"]
+    assert overlay["kind"] == "spot" and overlay["role"] == "spot_fallback"
+    assert overlay["by_chain"]["1"] == {listed: 4.0}
+    assert overlay["excluded_implausible"] == {"1": [whale]}
+    assert all(spam not in ids and "hub-coin" not in ids for ids in requested)
+    assert spam not in patch["icon_overlay"].get("1", {})
+    assert listed in patch["icon_overlay"]["1"]
     assert patch["price_overlay_at"].endswith("Z")
     coingecko.reset_caches_for_tests()
 
 
+#: Declared multi-reference allowances. ClickHouse inlines a CTE per reference, so
+#: every extra reference re-runs its source; these two read small sources and each
+#: extra reference is an IN-prune or a per-chain roll-up of that small result:
+#:   picked — the served as-of window (v_publications_current, ~0.3s): the
+#:            positions IN-prune, the attribute join, and a per-chain as-of roll-up;
+#:   cand   — candidate days from raw census_publications (~0.3s): the served
+#:            lookup's two IN-prunes, the balance read's date prune, and (coverage
+#:            only) the raw lookup's two prunes and the calendar spine.
+_TREASURY_CTE_ALLOWANCE = {"picked": 3, "cand": 6}
+
+
 def test_treasury_specs_reference_each_cte_once():
-    """ClickHouse INLINES a CTE per reference, so an N-reference CTE is an
-    N-times re-scan — not a shared subresult.
+    """Every treasury CTE is referenced once, except the declared cheap sources.
 
-    treasury_coverage originally read `held` from four UNION ALL arms. That is
-    the clearest way to write it and it worked at 231 held tokens, then blew the
-    2 GiB per-query cap at ~390 and took the whole panel down with a code 241.
-    It now aggregates once and pivots with ARRAY JOIN.
-
-    Any treasury CTE referenced more than ONCE is the same trap re-set.
-
-    The threshold used to be 2, which let `treasury_token_history` reference
-    `per_bucket` twice and time out in production at 6 effective scans of the
-    view (code 159, 20s interactive budget). The 2 was never a considered
-    allowance either: the counter ran over the raw template, so the cost-history
-    comments naming `months` inflated the count and the real code references
-    were never isolated. Comments stripped, all seven specs reference every CTE
-    exactly once — so 1 is the enforceable number, not a stretch goal.
-
-    A spec that genuinely needs two references should say so here with its
-    measured cost, not relax the bound silently.
-
-    DECLARED two-reference allowance — `asof` and `months`: since the holder
-    census grew token_balances to billions of rows, these CTEs read
-    census_publications (123 MiB; ~1s per scan measured 2026-08-26), and their
-    SECOND reference is the `snapshot_date IN (SELECT ... FROM asof/months)`
-    prune that folds to constants and saves the view scan the JOIN alone
-    cannot prune — it replaced a 10.8 GiB code-241 OOM with a ~2.4s query.
-    The allowance is conditional: a spec spending it must actually carry the
-    prune, so it cannot be silently reused for a fat second scan.
+    Measured history of this trap: a four-arm UNION ALL over `held` blew the 2 GiB
+    cap at ~390 tokens; `per_bucket` referenced twice timed out at 6 scans. The
+    served two-step read keeps every fat source (balances, eligibility views)
+    single-reference; only the small date-resolution CTEs are shared.
     """
-    specs = governance_explorer._treasury_specs(
-        governance_explorer._range_state("", ""),
-        governance_explorer._default_filters(),
-    )
-    PRUNE_CTES = {"asof", "months"}
     seen = 0
-    for spec in specs:
-        # Comments stripped FIRST — see sql_code(). A prose mention of a CTE is
-        # not a scan, and this counter cannot tell the difference.
+    for spec in _every_treasury_spec():
         code = sql_code(spec.sql)
-        # Both spellings: a leading `WITH foo AS (` and a continuation
-        # `,\nfoo AS (`. The original pattern only matched line-initial
-        # names, so the FIRST CTE of every spec went unchecked.
         names = re.findall(r"(?:^|\bWITH\s+)(\w+) AS \(", code, re.MULTILINE)
         for name in names:
-            # `<name> AS (` is the definition; every other bare mention reads it.
             uses = len(re.findall(rf"\b{name}\b", code)) - 1
-            # Up to 3: join + main-scan prune, plus a picker-CTE prune where a
-            # top-N picker also scans the view (treasury_wallet_history).
-            if name in PRUNE_CTES and 2 <= uses <= 3:
-                assert f"IN (SELECT" in code and f"FROM {name})" in code, (
-                    f"{spec.key}: CTE `{name}` spends its second reference on "
-                    f"something other than the IN-prune"
-                )
-                assert "census_publications" in code, (
-                    f"{spec.key}: the two-reference allowance is for the cheap "
-                    f"publications source only"
-                )
-                seen += 1
-                continue
-            assert uses <= 1, (
-                f"{spec.key}: CTE `{name}` is referenced {uses}x — ClickHouse "
-                f"inlines it per reference, so that is {uses} scans of its source"
+            limit = _TREASURY_CTE_ALLOWANCE.get(name, 1)
+            assert uses <= limit, (
+                f"{spec.key}: CTE `{name}` is referenced {uses}x (allowed {limit}) — "
+                "ClickHouse inlines it per reference"
             )
             seen += 1
-    # The loop must actually have found CTEs. Without this the whole test passes
-    # vacuously the day the `WITH` spelling changes.
-    assert seen >= 10, f"CTE guard matched only {seen} CTEs — regex has drifted"
+    assert seen >= 150, f"CTE guard matched only {seen} CTEs — regex has drifted"
 
 
 # ---------------------------------------------------------------------------
@@ -1729,8 +1730,8 @@ def _treasury_entity_specs():
 
 
 def test_treasury_entity_identifier_carries_the_chain():
-    """A bare address is not an identity here: 23 of the 24 census wallets exist
-    verbatim on BOTH chains, so an address alone is ambiguous 96% of the time."""
+    """A bare address is not an identity here: every census wallet exists verbatim
+    on BOTH chains, so an address alone is always ambiguous."""
 
     for kind in ("treasury_token", "treasury_wallet"):
         assert governance_explorer._validate_entity_identifier(
@@ -1741,28 +1742,28 @@ def test_treasury_entity_identifier_carries_the_chain():
                 governance_explorer._validate_entity_identifier(kind, bad)
 
 
-def test_treasury_entity_specs_pin_the_job_the_chain_and_never_use_final():
-    """The same three invariants as the section specs. The entity specs pin the
-    chain to a literal instead of grouping per chain — an entity IS one chain by
-    construction, so pinning is strictly stronger than not blending."""
+#: Entity specs that deliberately read BOTH chains or no chain-scoped source first.
+_CHAIN_PIN_EXEMPT = {
+    "treasury_wallet_chains",        # the same address on every chain (switcher)
+    "treasury_token_price_history",  # registry + hub; the chain pin is in the WHERE
+}
 
+
+def test_treasury_entity_specs_pin_the_job_the_chain_and_order_rows():
     specs = _treasury_entity_specs()
-    assert len(specs) == 12
+    assert len(specs) == 20
     job_pin = f"job_name = '{governance_explorer.TREASURY_JOB}'"
     for spec in specs:
-        assert job_pin in spec.sql, spec.key
-        assert "FINAL" not in spec.sql.upper(), spec.key
-        assert re.search(r"chain_id = \d+", spec.sql), spec.key
-        # The as-of / month CTE must be chain-pinned too, or the entity would
-        # resolve its snapshot date against the OTHER chain — Ethereum publishes
-        # to 2026-07 while Gnosis Chain stops in 2022-12, so a blended as-of
-        # returns an empty page rather than an obviously wrong one.
-        head = spec.sql.split("\n)", 1)[0]
-        assert re.search(r"chain_id = \d+", head), f"{spec.key}: leading CTE not chain-pinned"
-        # The paging layer rejects a spec without one. A single-row detail query
-        # is only stable if the statement SAYS it is — this shipped broken once,
-        # and the *_detail specs are exactly the ones that look exempt.
-        assert "ORDER BY" in spec.sql, spec.key
+        code = sql_code(spec.sql)
+        assert job_pin in code, spec.key
+        assert not re.search(r"\bFINAL\b", code), spec.key
+        assert "ORDER BY" in code, spec.key
+        if spec.key in _CHAIN_PIN_EXEMPT:
+            continue
+        # The leading CTE must be chain-pinned, or the entity resolves its dates
+        # against the OTHER chain.
+        head = code.split("\n),", 1)[0]
+        assert re.search(r"chain_id = (1|100)\b", head), f"{spec.key}: leading CTE not chain-pinned"
 
 
 def test_treasury_entity_addresses_are_bound_parameters_never_interpolated():
@@ -1773,50 +1774,30 @@ def test_treasury_entity_addresses_are_bound_parameters_never_interpolated():
         normalized = governance_explorer._validate_entity_identifier(kind, ident)
         address = normalized.split(":", 1)[1]
         for spec in governance_explorer._entity_specs(kind, normalized):
-            assert spec.parameters == {"addr": address}, spec.key
-            assert "{addr:String}" in spec.sql, spec.key
             assert address not in spec.sql, spec.key
+            if spec.key.endswith("_months"):
+                # Month completeness is chain-level: it names no address at all.
+                assert "addr" not in spec.parameters, spec.key
+                continue
+            assert spec.parameters["addr"] == address, spec.key
+            assert "{addr:String}" in spec.sql, spec.key
+            # Every bind the SQL names is present, and nothing else is passed.
+            named = set(re.findall(r"\{([a-z_][a-z0-9_]*):", spec.sql))
+            assert named == set(spec.parameters), spec.key
 
 
-def test_treasury_entity_specs_reference_each_cte_once():
-    """Same trap as treasury_coverage: ClickHouse inlines a CTE per reference,
-    so an N-reference CTE is an N-times re-scan, not a shared subresult."""
-
-    for spec in _treasury_entity_specs():
-        for name in re.findall(r"^\s*(\w+) AS \(", spec.sql, re.MULTILINE):
-            uses = len(re.findall(rf"\b{name}\b", spec.sql)) - 1
-            assert uses <= 2, (
-                f"{spec.key}: CTE `{name}` is referenced {uses}x — ClickHouse "
-                "will re-scan it that many times"
-            )
-
-
-def test_treasury_entity_usd_stays_a_typed_null():
-    """NULL, never 0 — pricing is a client-side overlay on this plane too."""
-
-    keys = {
-        "treasury_token_detail", "treasury_token_holders",
-        "treasury_wallet_detail", "treasury_wallet_positions",
-    }
-    for spec in _treasury_entity_specs():
-        if spec.key in keys:
-            assert "CAST(NULL AS Nullable(Float64))" in spec.sql, spec.key
-
-
-def test_treasury_entity_label_is_never_the_token_symbol():
-    """Breadcrumbs render their label raw and a token symbol is attacker-authored
-    — 19 addresses in this treasury claim 'USDC'. The detail specs compose
-    `entity_label` from the chain name and the address instead."""
-
-    assert governance_explorer._ENTITY_LABEL_COLUMN["treasury_token"] == "entity_label"
-    assert governance_explorer._ENTITY_LABEL_COLUMN["treasury_wallet"] == "entity_label"
-    for spec in _treasury_entity_specs():
-        if spec.key.endswith("_detail"):
-            # A string LITERAL composed from the chain name and the address —
-            # never a column read off a row. A `symbol` column may still exist
-            # for display (TokenIdentity sanitizes it); it just must not be what
-            # names the breadcrumb.
-            assert re.search(r"'[^']+ 0x\w{4}\u2026\w{4}' AS entity_label", spec.sql), spec.key
+def test_treasury_entity_label_comes_from_trusted_sources_only():
+    """Breadcrumbs render their label raw and a token symbol is attacker-authored:
+    labels come from the reviewed registry or the attributed wallet list, else the
+    chain name and a short address — never from a dataset row."""
+    assert "treasury_token" not in governance_explorer._ENTITY_LABEL_COLUMN
+    label = governance_explorer._treasury_entity_label
+    assert label("treasury_wallet", "1:0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f") == (
+        "GNO Main Treasury \u00b7 Ethereum 0x458c\u20265e6f"
+    )
+    spoof = "1:0x357eb8dc76920a7a00d8e3059cdb0249aceb2df7"  # on-chain symbol "USDC"
+    assert label("treasury_token", spoof) == "Ethereum 0x357e\u20262df7"
+    assert label("treasury_token", "1:0x6810e776880c02933d47db1b9fc05908e5386b96").startswith("GNO ")
 
 
 # ---------------------------------------------------------------------------

@@ -153,6 +153,20 @@ def load_sql(app: str, name: str, /, **fragments: object) -> str:
     return _TOKEN.sub(replace, template)
 
 
+def compact(sql: str) -> str:
+    """Drop indentation and blank lines from a RENDERED statement.
+
+    ``settings.MAX_QUERY_LENGTH`` (10,000 characters, enforced in
+    clients/clickhouse.py) must also fit the exact-count wrapper mini_apps adds
+    around a spec, and the served-read pipelines are long. Leading and trailing
+    whitespace carries no meaning in these statements — comment lines are already
+    stripped, and none has a multi-line string literal or a trailing ``--``
+    comment — so this buys ~15% without changing a single token. Line breaks
+    are kept, so ClickHouse error positions still read.
+    """
+    return "\n".join(line.strip() for line in sql.splitlines() if line.strip())
+
+
 def available(app: str) -> list[str]:
     """Every template name shipped for an app, sorted.
 

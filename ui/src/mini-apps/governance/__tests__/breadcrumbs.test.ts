@@ -6,6 +6,7 @@ import {
   BREADCRUMB_CAP,
   crumbCall,
   draftFromSeed,
+  returnSectionFor,
   seedCall,
   sectionFromSeed,
   sectionReturnCall,
@@ -23,7 +24,7 @@ function seed(overrides: Partial<GovUrlState> = {}): GovUrlState {
   return {
     section: "", q: "", days: null, start: "", end: "",
     pstate: "", ptype: "", quorum: "", cat: 0, fstatus: "", sort: "",
-    entity: "", id: "", ttab: "",
+    entity: "", id: "", treasury: {},
     ...overrides,
   };
 }
@@ -140,5 +141,42 @@ describe("entity+id URL deep-link seeding", () => {
     expect(sectionFromSeed(seed({ section: "forum" }), "overview")).toBe("forum");
     expect(sectionFromSeed(seed(), "overview")).toBe("overview");
     expect(sectionFromSeed(seed({ section: "entity" as GovUrlState["section"] }), "voters")).toBe("voters");
+  });
+});
+
+describe("returnSectionFor — the back button's section", () => {
+  it("treasury entities return to Treasury, even from a cold link", () => {
+    for (const entityType of ["treasury_wallet", "treasury_token"] as const) {
+      const state = {
+        section: "entity" as const,
+        selected_entity: { entity_type: entityType, identifier: "1:0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", label: "" },
+      };
+      // A cold link has no previous section; the fallback is "overview".
+      expect(returnSectionFor(state, "overview")).toBe("treasury");
+    }
+  });
+
+  it("other entities return to where the user came from", () => {
+    const state = {
+      section: "entity" as const,
+      selected_entity: { entity_type: "proposal" as const, identifier: "0xabc", label: "" },
+    };
+    expect(returnSectionFor(state, "voters")).toBe("voters");
+  });
+
+  it("outside an entity page it is the current section", () => {
+    expect(returnSectionFor({ section: "forum", selected_entity: null }, "overview")).toBe("forum");
+  });
+
+  it("a treasury seed still short-circuits to its entity", () => {
+    const call = seedCall("v1", seed({ entity: "treasury_wallet", id: "100:0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", section: "treasury", treasury: { chain: 100 } }), "overview", EMPTY_DRAFT);
+    expect(call).toMatchObject({ __tool: "load_governance_entity", entity_type: "treasury_wallet", identifier: "100:0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f" });
+  });
+
+  it("a treasury section seed sends no treasury filters", () => {
+    const call = seedCall("v1", seed({ section: "treasury", treasury: { chain: 100, exLtd: true } }), "overview", EMPTY_DRAFT);
+    expect(call).toMatchObject({ __tool: "load_governance_section", section: "treasury" });
+    expect(Object.keys(call)).not.toContain("chain_id");
+    expect(Object.keys(call)).not.toContain("exclude_ltd");
   });
 });

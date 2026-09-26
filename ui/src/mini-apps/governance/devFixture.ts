@@ -4,9 +4,19 @@
 // met / missed / unspecified / pending, single + ranked + malformed vote
 // choices, the full post-body fallback chain (raw markdown with a [quote]
 // block, cooked-only with a benign XSS probe, empty-both), and both
-// link_source tiers.
+// link_source tiers. The treasury datasets come from devFixtureTreasury.ts,
+// whose header names the SQL files it mirrors.
 
 import type { DatasetDescriptor, MiniAppPayload } from "../shared/miniAppTypes";
+import {
+  FIXTURE_SPOT_AT,
+  T,
+  TREASURY_ICON_OVERLAY,
+  TREASURY_PRICE_OVERLAY,
+  treasuryEntityDatasets,
+  treasurySectionDatasets,
+  W_MAIN,
+} from "./devFixtureTreasury";
 import type { GovEntityType, GovernanceViewState } from "./types";
 
 function descriptor(key: string, columns: string[], rows: unknown[][]): DatasetDescriptor {
@@ -663,140 +673,15 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
         ["2026-07", 40, 20, 20, "month"],
       ],
     ),
-    // Treasury: verified balances at a pinned finalized block. Rows exercise
-    // the states that matter — a fully resolved token (GNO), a 6-decimal one
-    // (USDC), an unresolved token whose decimals were never observed (must
-    // render "not scalable" + the exact integer, never a scaled guess), and a
-    // legitimate 0-decimals token (must NOT be confused with unknown).
-    treasury_summary: descriptor(
-      "treasury_summary",
-      ["chain_id", "as_of", "anchor_block", "anchor_hash", "tokens_held", "wallets_tracked", "positions", "tokens_named", "gno_units", "gno_units_ex_ltd", "metadata_known_share", "nav_usd"],
-      [[1, "2026-07-27", 25627590, `0x${"13".repeat(32)}`, 231, 23, 2485, 27, 784931.82, 424520.82, 0.1169, null]],
-    ),
-    treasury_holdings: descriptor(
-      "treasury_holdings",
-      ["chain_id", "token_address", "symbol", "decimals", "metadata_status", "metadata_known", "wallets_holding", "balance_total_raw", "balance_units", "supply_share", "value_usd"],
-      [
-        [1, "0x1a5f9352af8af974bfc03399e3767df6370d82e4", "OWL", 18, "resolved", 1, 2, "1087933347759016548062892", 1087933.35, 0.2486, null],
-        [1, "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 1, 5, "784931822290089813540215", 784931.82, 0.0785, null],
-        [1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC", 6, "resolved", 1, 3, "621494537595", 621494.54, 0.0000124, null],
-        [1, "0x2ec109a0cefec70661a242a8b54cae8f45630397", null, null, "failed", 0, 23, "10000000000000000000", null, null, null],
-        [1, "0x78a25f62c52973abdb2f467116df97a1f57fe211", "PTS", 0, "resolved", 1, 23, "5700", 5700, null, null],
-      ],
-    ),
-    treasury_by_wallet: descriptor(
-      "treasury_by_wallet",
-      ["chain_id", "wallet_address", "is_ltd", "tokens_held", "unnamed_positions", "gno_units", "value_usd"],
-      [
-        [1, "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 102, 101, 414931.58, null],
-        [1, "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 100, 99, 360411, null],
-        [1, "0x689d4bd36bc1938af5ca2673c3c753235e3b4d2b", 0, 98, 97, 5000, null],
-        [1, "0x4971dd016127f390a3ef6b956ff944d0e2e1e462", 0, 152, 131, 3738.19, null],
-        [1, "0x7eea4286e9e82ba332f49400d037609bb1cf00da", 0, 100, 98, 851.05, null],
-      ],
-    ),
-    treasury_coverage: descriptor(
-      "treasury_coverage",
-      ["dimension", "known", "unknown", "pct_known"],
-      [
-        ["decimals", 27, 204, 0.1169],
-        ["metadata", 27, 204, 0.1169],
-        ["symbol", 27, 204, 0.1169],
-        ["usd_price", 0, 231, 0],
-      ],
-    ),
-    // Treasury history. Wide rows keyed by (chain_id, bucket) — chains are
-    // separate rows and are never blended onto one axis. Both chains appear so
-    // the dev view exercises the two-panel split and the stale-chain path.
-    treasury_chain_history: descriptor(
-      "treasury_chain_history",
-      ["chain_id", "bucket", "anchor_block", "tokens_held", "tokens_named", "wallets_holding", "positions", "gno_units", "gno_units_ex_ltd"],
-      [
-        [1, "2026-05-01", 25218797, 236, 236, 23, 2473, 784834.32, 424423.32],
-        [1, "2026-06-01", 25433938, 240, 240, 23, 2477, 784931.82, 424520.82],
-        [1, "2026-07-01", 25627590, 231, 231, 23, 2485, 784931.82, 424520.82],
-        [100, "2022-10-01", 25012345, 14, 14, 24, 96, 62192.91, 62192.91],
-        [100, "2022-11-01", 25236302, 14, 14, 24, 98, 62192.91, 62192.91],
-      ],
-    ),
-    treasury_token_history: descriptor(
-      "treasury_token_history",
-      ["chain_id", "bucket", "token_address", "symbol", "decimals", "metadata_status", "balance_units", "balance_total_raw", "wallets_holding"],
-      [
-        [1, "2026-06-01", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 784931.82, "784931822290089813540215", 5],
-        [1, "2026-06-01", "0xdef1ca1fb7fbcdc777520aa7f396b4e015f497ab", "COW", 18, "resolved", 56680422.1, "56680422101900000000000000", 3],
-        [1, "2026-07-01", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 784931.82, "784931822290089813540215", 5],
-        [1, "2026-07-01", "0xdef1ca1fb7fbcdc777520aa7f396b4e015f497ab", "COW", 18, "resolved", 56680422.1, "56680422101900000000000000", 3],
-        [100, "2022-11-01", "0x9c58bacc331c9aa871afd802db6379a98e80cedb", "GNO", 18, "resolved", 62192.91, "62192908894379965000000", 4],
-      ],
-    ),
-    treasury_wallet_history: descriptor(
-      "treasury_wallet_history",
-      ["chain_id", "bucket", "wallet_address", "is_ltd", "units", "units_raw"],
-      [
-        [1, "2026-06-01", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 414931.58, "414931579828128603923740"],
-        [1, "2026-06-01", "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 360411, "360410999999999999999999"],
-        [1, "2026-06-01", "other", 0, 5851.05, "5851050000000000000000"],
-        [1, "2026-07-01", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 414931.58, "414931579828128603923740"],
-        [1, "2026-07-01", "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 360411, "360410999999999999999999"],
-        [1, "2026-07-01", "other", 0, 5851.05, "5851050000000000000000"],
-      ],
-    ),
-    // Treasury entity bundles (WL-039 fixture sweep; reach them in dev with
-    // ?entity=treasury_wallet:1:0x458c... / ?entity=treasury_token:1:0x6810...).
-    // The wallet is treasury_by_wallet's top row; the token is mainnet GNO.
-    // value_usd mirrors the SQL's CAST(NULL ...): always null, never 0.
-    treasury_wallet_detail: descriptor(
-      "treasury_wallet_detail",
-      ["chain_id", "entity_label", "wallet_address", "is_ltd", "as_of", "anchor_block", "tokens_held", "tokens_named", "unnamed_positions", "gno_units", "value_usd"],
-      [[1, "Ethereum 0x458c…5e6f", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, "2026-07-27", 25627590, 102, 1, 101, 414931.58, null]],
-    ),
-    treasury_wallet_positions: descriptor(
-      "treasury_wallet_positions",
-      ["chain_id", "token_address", "symbol", "decimals", "metadata_status", "symbol_collisions", "wallets_holding", "balance_total_raw", "balance_units", "treasury_share", "value_usd"],
-      [
-        [1, "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 0, 5, "414931579828128603923740", 414931.58, 0.5286, null],
-        [1, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC", 6, "resolved", 0, 3, "321494537595", 321494.54, 0.5173, null],
-        // Unresolved metadata: decimals unknown, units NOT scalable.
-        [1, "0x2ec109a0cefec70661a242a8b54cae8f45630397", null, null, "failed", 0, 23, "10000000000000000000", null, 1, null],
-      ],
-    ),
-    treasury_wallet_series: descriptor(
-      "treasury_wallet_series",
-      ["chain_id", "bucket", "token_address", "symbol", "decimals", "metadata_status", "balance_units", "balance_total_raw", "wallets_holding"],
-      [
-        [1, "2026-06-01", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 414931.58, "414931579828128603923740", 5],
-        [1, "2026-06-01", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC", 6, "resolved", 301494.54, "301494537595", 3],
-        [1, "2026-07-01", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", 414931.58, "414931579828128603923740", 5],
-        [1, "2026-07-01", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC", 6, "resolved", 321494.54, "321494537595", 3],
-      ],
-    ),
-    treasury_token_detail: descriptor(
-      "treasury_token_detail",
-      ["chain_id", "entity_label", "token_address", "symbol", "decimals", "metadata_status", "as_of", "anchor_block", "wallets_holding", "balance_total_raw", "balance_units", "symbol_collisions", "supply_share", "value_usd"],
-      [[1, "Ethereum GNO", "0x6810e776880c02933d47db1b9fc05908e5386b96", "GNO", 18, "resolved", "2026-07-27", 25627590, 5, "784931822290089813540215", 784931.82, 0, 0.0785, null]],
-    ),
-    treasury_token_holders: descriptor(
-      "treasury_token_holders",
-      ["chain_id", "wallet_address", "is_ltd", "balance_total_raw", "balance_units", "treasury_share", "value_usd"],
-      [
-        [1, "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, "414931579828128603923740", 414931.58, 0.5286, null],
-        [1, "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, "360410999999999999999999", 360411, 0.4592, null],
-        [1, "0x689d4bd36bc1938af5ca2673c3c753235e3b4d2b", 0, "9588467961961218516441", 9588.47, 0.0122, null],
-      ],
-    ),
-    treasury_token_holder_series: descriptor(
-      "treasury_token_holder_series",
-      ["chain_id", "bucket", "wallet_address", "is_ltd", "units", "units_raw"],
-      [
-        [1, "2026-06-01", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 414931.58, "414931579828128603923740"],
-        [1, "2026-06-01", "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 360411, "360410999999999999999999"],
-        [1, "2026-06-01", "other", 0, 9588.47, "9588467961961218516441"],
-        [1, "2026-07-01", "0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", 0, 414931.58, "414931579828128603923740"],
-        [1, "2026-07-01", "0x604e4557e9020841f4e8eb98148de3d3cdea350c", 1, 360411, "360410999999999999999999"],
-        [1, "2026-07-01", "other", 0, 9588.47, "9588467961961218516441"],
-      ],
-    ),
+    // Treasury: generated from one position model in devFixtureTreasury.ts,
+    // which mirrors the SQL contract (model/treasuryColumns.json) column for
+    // column. The entity bundles below are the defaults for
+    // ?entity=treasury_wallet:1:0x458c... and ?entity=treasury_token:1:<GNO>;
+    // devPayload swaps in the right bundle for any other identifier, so the
+    // same wallet on chain 100 works too.
+    ...treasurySectionDatasets(),
+    ...treasuryEntityDatasets("treasury_wallet", `1:${W_MAIN}`),
+    ...treasuryEntityDatasets("treasury_token", `1:${T.GNO_1}`),
     // Proposal entity datasets (for dev-rendering ProposalDetail incl. the
     // vote-trend chart). proposal_votes / proposal_forum_links are above.
     proposal_detail: descriptor(
@@ -870,8 +755,7 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
       "voters.core": false, "voters.insights": false,
       "forum.core": false, "forum.insights": false, "forum.engagement": false,
       "delegations.core": false, "delegations.insights": false,
-      "treasury.core": false, "treasury.insights": false, "treasury.history": false,
-      "treasury.token_history": false,
+      "treasury.core": false, "treasury.history": false,
       "graph.core": false,
     },
     section_fingerprints: { overview: "dev" },
@@ -888,6 +772,12 @@ export const MOCK_PAYLOAD: MiniAppPayload<GovernanceViewState> = {
       snapshot: { latest_ingested_at: "2026-07-22T05:00:00Z", latest_activity_at: "2026-06-25T12:00:00Z", stale: true },
       forum: { latest_ingested_at: "2026-07-22T05:00:00Z", latest_activity_at: "2026-07-22T03:40:00Z", stale: false },
     },
+    // What load_governance_overlays patches in: CoinGecko icons, and spot
+    // quotes as a FALLBACK for spot-eligible rows with no hub value (never
+    // used in history). One quote is refused as implausible.
+    icon_overlay: TREASURY_ICON_OVERLAY,
+    price_overlay: TREASURY_PRICE_OVERLAY,
+    price_overlay_at: FIXTURE_SPOT_AT,
   },
 };
 
@@ -918,6 +808,7 @@ const DEV_ENTITY_TYPES: GovEntityType[] = [
  *   ?entity=forum_user:301          ?entity=forum_topic:12131
  *   ?entity=voter:0x6666...         ?entity=proposal:0xa1a1...
  *   ?entity=treasury_wallet:1:0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f
+ *   ?entity=treasury_wallet:100:0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f
  *   ?entity=treasury_token:1:0x6810e776880c02933d47db1b9fc05908e5386b96
  */
 export function devPayload(search: string): MiniAppPayload<GovernanceViewState> {
@@ -929,8 +820,14 @@ export function devPayload(search: string): MiniAppPayload<GovernanceViewState> 
     const entityType = entity.slice(0, sep) as GovEntityType;
     const identifier = entity.slice(sep + 1);
     if (DEV_ENTITY_TYPES.includes(entityType) && identifier) {
+      // Treasury entities carry their chain in the identifier; build the bundle
+      // for exactly that `<chain>:<address>` so both chains are reachable.
+      const datasets = entityType === "treasury_wallet" || entityType === "treasury_token"
+        ? { ...MOCK_PAYLOAD.datasets, ...treasuryEntityDatasets(entityType, identifier) }
+        : MOCK_PAYLOAD.datasets;
       return {
         ...MOCK_PAYLOAD,
+        datasets,
         view_state: {
           ...state,
           section: "entity",

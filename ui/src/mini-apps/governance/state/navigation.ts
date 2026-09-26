@@ -5,7 +5,7 @@
 // loader: `{ __tool, ...args }` where `request_id` is a placeholder the
 // loader overwrites with its own monotonic id.
 
-import type { GovBreadcrumb, GovEntityType, GovSection } from "../types";
+import type { GovBreadcrumb, GovEntityType, GovSection, GovernanceViewState } from "../types";
 import type { GovUrlState } from "../urlState";
 import {
   buildEntityArgs,
@@ -71,6 +71,20 @@ export function entityCall(
 /** Breadcrumb chip click → reload that entity. */
 export function crumbCall(viewId: string, crumb: GovBreadcrumb): GovToolCall {
   return entityCall(viewId, crumb.entity_type, crumb.identifier);
+}
+
+/** The section the back button returns to (and the section tab highlighted)
+ * while an entity page is open. Treasury entities always belong to Treasury —
+ * even from a cold link, where there is no previous section and the fallback
+ * used to read "← Overview" on a wallet page. */
+export function returnSectionFor(
+  state: Pick<GovernanceViewState, "section" | "selected_entity">,
+  previous: GovSectionId,
+): GovSectionId {
+  if (state.section !== "entity") return state.section;
+  const type = state.selected_entity?.entity_type;
+  if (type === "treasury_wallet" || type === "treasury_token") return "treasury";
+  return previous;
 }
 
 /** Leading breadcrumb chip → return to the section the user drilled in from. */

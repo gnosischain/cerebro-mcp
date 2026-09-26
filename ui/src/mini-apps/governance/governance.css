@@ -238,83 +238,6 @@
 .gov-ask-actions{display:flex;justify-content:flex-end;gap:8px}
 .gov-ask-actions button{border:1px solid var(--border-hover);background:var(--surface-2);color:var(--text-primary);border-radius:7px;padding:6px 13px;cursor:pointer}
 
-/* Per-chain treasury state card. Replaces the 7-item KPI row, which wrapped
-   4+3 inside .ma-kpi-grid's hard repeat(4,1fr) and read as broken layout. One
-   card PER CHAIN because the chains snapshot independently — chain 100 stops at
-   2022-11 — so a single blended row would silently average a current chain with
-   a stale one, and neither as-of would be stateable. */
-.gov-chain-card{display:grid;gap:10px;min-width:0;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface)}
-.gov-chain-card__head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;color:var(--text-secondary);font-size:12.5px}
-.gov-chain-card__head strong{color:var(--text-primary);font-size:13.5px}
-/* NAV figure. tabular-nums so the two chain cards' digits align vertically. */
-.gov-chain-card__nav{color:var(--text-primary);font:600 26px/1.1 var(--font-mono);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
-/* Caption slot directly under the figure: the qualifications that must travel
-   WITH the number ("62 of 231 priced", "spot revaluation"), never a paragraph
-   away where a screenshot of the figure alone would drop them. */
-.gov-chain-card__nav small{display:block;margin-top:4px;color:var(--text-muted);font:11.5px var(--font-body);font-variant-numeric:normal;letter-spacing:0}
-/* Unpriceable chain: muted so a dash never sits at full figure weight. */
-.gov-chain-card__nav--none{color:var(--text-muted)}
-.gov-chain-card__stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:9px 14px;margin:0}
-.gov-chain-card__stat{display:grid;gap:2px;min-width:0}
-.gov-chain-card__stat dt{color:var(--text-muted);font:10px var(--font-mono);letter-spacing:.05em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gov-chain-card__stat dd{margin:0;color:var(--text-primary);font:13px var(--font-mono);font-variant-numeric:tabular-nums}
-/* The one new colour literal in this file's portfolio block: amber marks the
-   ex-Ltd. figure so the DAO-wide GNO count can never be misread as the count net
-   of Gnosis Ltd. Same amber as .gov-stale-badge / .gov-choice-flag. */
-.gov-chain-card__stat--ltd dd{color:#fbbf24}
-.gov-chain-card__anchor{color:var(--text-muted);font:10.5px var(--font-mono);overflow-wrap:anywhere}
-
-/* Priced-coverage meter — "62 of 231 held tokens priced". COUNTS, never value:
-   the share of NAV the unpriced tail carries is by definition unknowable, so a
-   value-weighted fill here would be a fabricated number. */
-.gov-coverage-meter{height:6px;border-radius:999px;background:var(--surface-3);overflow:hidden}
-.gov-coverage-meter>span{display:block;height:100%;border-radius:999px;background:var(--primary)}
-
-/* Ranked token board: button rows, so every holding is keyboard-reachable and
-   the focused one is visibly focused. Head and rows share ONE template
-   (identity | chain | USD | share | units | wallets | spark | chevron) so the
-   columns actually line up; the head is sticky and the list scrolls internally
-   because 231 holdings must not push the rest of the page off screen. */
-.gov-token-board{display:grid;gap:2px;max-height:560px;overflow-y:auto;overscroll-behavior:contain}
-.gov-token-board__head,.gov-token-row{display:grid;grid-template-columns:minmax(140px,1.7fr) 84px 104px 76px 128px 52px 72px 14px;align-items:center;gap:10px;padding:6px 8px}
-.gov-token-board__head{position:sticky;top:0;z-index:1;background:var(--surface);border-bottom:1px solid var(--border);color:var(--text-muted);font:10px var(--font-mono);letter-spacing:.05em;text-transform:uppercase}
-.gov-token-board__head>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* Head labels for the numeric columns (USD, units, wallets) right-align to sit
-   over their digits. Positional because the head mirrors the fixed 8-cell
-   template above — there is no other cell order it can have. */
-.gov-token-board__head>*:nth-child(3),.gov-token-board__head>*:nth-child(5),.gov-token-board__head>*:nth-child(6){text-align:right}
-.gov-token-row{width:100%;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text-primary);text-align:left;font:12.5px var(--font-body);cursor:pointer}
-.gov-token-row>*{min-width:0}
-.gov-token-row:hover{background:var(--surface-2);border-color:var(--border)}
-.gov-token-row:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
-.gov-token-row--focused{background:var(--accent-bg);border-color:var(--accent-border)}
-.gov-token-row__chain{color:var(--text-secondary);font:11px var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.gov-token-row__usd{text-align:right;color:var(--text-primary);font:12px var(--font-mono);font-variant-numeric:tabular-nums}
-/* Unpriced is NOT zero. The dash renders muted so it reads as "no price known"
-   rather than as a small value that happens to round to nothing. */
-.gov-token-row__usd--none{color:var(--text-muted)}
-.gov-token-row__units{text-align:right;color:var(--text-secondary);font:11px var(--font-mono);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.gov-token-row__wallets{text-align:right;color:var(--text-muted);font:11px var(--font-mono);font-variant-numeric:tabular-nums}
-.gov-token-row__meter{height:5px;border-radius:999px;background:var(--surface-3);overflow:hidden}
-.gov-token-row__meter>span{display:block;height:100%;border-radius:999px;background:var(--primary)}
-.gov-token-row__spark{color:var(--primary);opacity:.7}
-.gov-token-row__spark svg{display:block;width:100%;height:20px}
-.gov-token-row__chevron{text-align:right;color:var(--text-muted);font:10px var(--font-mono)}
-
-/* Focused-token bar. Accent-tinted so a filtered board never looks unfiltered,
-   and the clear control is always present next to the thing it clears. */
-.gov-token-focus{display:flex;align-items:center;gap:10px 12px;flex-wrap:wrap;margin:0 0 10px;padding:8px 12px;border:1px solid var(--accent-border);border-radius:9px;background:var(--accent-bg);color:var(--text-primary);font-size:12.5px}
-.gov-token-focus__meta{display:flex;align-items:center;gap:5px 12px;flex-wrap:wrap;min-width:0;color:var(--text-secondary);font:11px var(--font-mono);font-variant-numeric:tabular-nums}
-.gov-token-focus__clear,.gov-token-focus button{margin-left:auto;flex:0 0 auto;border:1px solid var(--accent-border);background:var(--surface-2);color:var(--text-primary);border-radius:999px;padding:3px 11px;cursor:pointer;font:11px var(--font-mono)}
-.gov-token-focus__clear:hover,.gov-token-focus button:hover{border-color:var(--primary)}
-
-/* Excluded-set strip under a treemap. A treemap tile's AREA is its value, so an
-   unpriced holding has no honest tile — zero area would assert it is worthless.
-   The excluded set is therefore stated in words beside the chart, never drawn. */
-.gov-unpriced{margin-top:10px;padding:9px 12px;border:1px dashed var(--border-hover);border-radius:8px;color:var(--text-muted);font-size:11.5px;line-height:1.5}
-.gov-unpriced strong{color:var(--text-secondary);font-weight:600}
-.gov-unpriced code{font:11px var(--font-mono);color:var(--text-secondary)}
-
 /* Panel-scoped mode toggles, sized for the .ma-section-meta slot so a switch
    that changes one panel is never mistaken for a global control. */
 .gov-panel-modes{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
@@ -323,51 +246,163 @@
 .gov-panel-modes button.is-active{border-color:var(--accent-border);background:var(--accent-bg);color:var(--accent-text)}
 .gov-panel-modes button:disabled{opacity:.5;cursor:default}
 
-
-/* Wallet board — the per-wallet comparison surface. Mirrors .gov-token-board:
-   button rows in a shared grid template, because every row is a drill-down and
-   head/row cells must stay positionally aligned. Eight cells:
-   wallet | chain | tokens | unnamed | GNO | GNO value | Ltd | chevron */
-.gov-wallet-board{display:grid;gap:2px;max-height:520px;overflow-y:auto;overscroll-behavior:contain}
-.gov-wallet-board__head,.gov-wallet-row{display:grid;grid-template-columns:minmax(150px,1.5fr) 84px 64px 78px 116px 108px 52px 14px;align-items:center;gap:10px;padding:6px 8px}
-.gov-wallet-board__head{position:sticky;top:0;z-index:1;background:var(--surface);border-bottom:1px solid var(--border);color:var(--text-muted);font:10px var(--font-mono);letter-spacing:.05em;text-transform:uppercase}
-.gov-wallet-board__head>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.gov-wallet-row{width:100%;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text-primary);text-align:left;font:12.5px var(--font-body);cursor:pointer}
-.gov-wallet-row>*{min-width:0}
-.gov-wallet-row:hover{background:var(--surface-2);border-color:var(--border)}
-.gov-wallet-row:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
-.gov-wallet-row--focused{border-color:var(--accent-border);background:var(--accent-bg)}
-/* Every numeric column is tabular-nums and right-aligned: a comparison table
-   whose digits do not line up cannot actually be compared down the column. */
-.gov-wallet-row__num,.gov-wallet-board__head--num{text-align:right;color:var(--text-secondary);font:11px var(--font-mono);font-variant-numeric:tabular-nums}
-.gov-wallet-row__usd{text-align:right;color:var(--text-primary);font:12px var(--font-mono);font-variant-numeric:tabular-nums}
-.gov-wallet-row__usd--none{color:var(--text-muted);font-family:var(--font-body);font-size:11.5px}
-.gov-ltd-badge{display:inline-block;padding:1px 7px;border-radius:999px;border:1px solid rgba(251,191,36,.5);background:rgba(251,191,36,.12);color:#fbbf24;font:10px var(--font-mono)}
+.gov-ltd-badge{display:inline-block;padding:1px 7px;border-radius:999px;border:1px solid rgba(251,191,36,.5);background:rgba(251,191,36,.12);color:#fbbf24;font:10px var(--font-mono);white-space:nowrap}
 
 /* Treasury sub-tabs. Spacing only — the strip itself is the shared .tabbar. */
-.gov-subtabs{margin:2px 0 0}
+.gov-subtabs{margin:12px 0 0}
 .gov-subtabs .tabbar__tab{padding:8px 13px;font-size:12.5px}
+/* Four tabs with count badges outgrow a phone: scroll the strip sideways
+   rather than cutting "History" off (the strip holds no popovers to clip). */
+.gov-subtabs .tabbar{overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+
+/* ---------------------------------------------------------------------------
+   Treasury (.gov-trs-*). Every colour is an existing token (the tone-* RAG
+   tokens for warn/negative, accent-* for spot and the active chain); tables
+   grow with the page — no internal scroll box, no measured heights.
+   --------------------------------------------------------------------------- */
+.gov-trs-toolbar{display:flex;flex-direction:column;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface)}
+.gov-trs-toolbar__controls{display:flex;align-items:center;gap:10px 18px;flex-wrap:wrap}
+.gov-trs-toolbar__field{display:inline-flex;align-items:center;gap:8px;color:var(--text-secondary);font-size:12px}
+.gov-trs-toggle{display:inline-flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:12px;cursor:pointer;white-space:nowrap}
+.gov-trs-toggle input{accent-color:var(--primary);cursor:pointer}
+.gov-trs-toolbar__meta{display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap;font:11px var(--font-mono);color:var(--text-muted)}
+.gov-trs-asof{display:inline-flex;align-items:center;flex-wrap:wrap;gap:2px 6px;max-width:100%;padding:3px 9px;border:1px solid var(--border);border-radius:999px;background:var(--surface-2)}
+.gov-trs-asof>*{white-space:nowrap}
+.gov-trs-asof strong{color:var(--text-primary);font-weight:600}
+.gov-trs-prov{color:var(--text-muted)}
+.gov-trs-chip{display:inline-block;padding:1px 7px;border-radius:999px;border:1px solid var(--border);font:10px var(--font-mono);color:var(--text-secondary);white-space:nowrap;vertical-align:middle}
+.gov-trs-chip--warn{border-color:var(--tone-warning-border);background:var(--tone-warning-bg);color:var(--tone-warning-fg)}
+.gov-trs-chip--spot{border-color:var(--accent-border);background:var(--accent-bg);color:var(--accent-text)}
+
+/* KPI tiles stretch to share the row (the shared grid caps each tile at
+   192px, which left one orphan tile on a second row inside a panel). */
+.gov-trs-kpis .ma-kpi-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.gov-trs-scope{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin:12px 0 0;padding:8px 12px;border:1px dashed var(--border-hover);border-radius:8px;color:var(--text-secondary);font-size:12px;line-height:1.45}
+.gov-trs-scope__tag{font:10px var(--font-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted)}
+
+/* Token class badges: colour encodes TRUST, so only reviewed classes get the
+   accent; spam is the negative tone, a retired mirror the warning tone. */
+.gov-trs-badge{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;border:1px solid var(--border);font:10px var(--font-mono);color:var(--text-secondary);white-space:nowrap;vertical-align:middle}
+.gov-trs-badge--priced{border-color:var(--accent-border);background:var(--accent-bg);color:var(--accent-text)}
+.gov-trs-badge--listed{border-color:var(--tone-neutral-border);background:var(--tone-neutral-bg);color:var(--tone-neutral-fg)}
+.gov-trs-badge--unverified{border-style:dashed;border-color:var(--tone-neutral-border);color:var(--text-muted)}
+.gov-trs-badge--spam{border-color:var(--tone-negative-border);background:var(--tone-negative-bg);color:var(--tone-negative-fg)}
+.gov-trs-badge--retired_mirror{border-color:var(--tone-warning-border);background:var(--tone-warning-bg);color:var(--tone-warning-fg)}
+
+/* Values: unknown is muted prose ("unpriced"), never a figure that looks like
+   a small number. */
+.gov-trs-value{font:12px var(--font-mono);font-variant-numeric:tabular-nums;color:var(--text-primary);white-space:nowrap}
+.gov-trs-value--none{color:var(--text-muted);font-family:var(--font-body);font-size:11.5px}
+.gov-trs-mono{font-family:var(--font-mono);font-size:11.5px;font-variant-numeric:tabular-nums}
+
+.gov-trs-wallet{display:inline-flex;align-items:baseline;gap:7px;min-width:0;max-width:100%}
+.gov-trs-wallet__label{color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gov-trs-wallet__addr{font:11px var(--font-mono);color:var(--text-muted);white-space:nowrap}
+.gov-trs-wallet__addr--solo{color:var(--text-secondary);font-size:11.5px}
+
+/* Entity page header (wallet / asset). */
+.gov-trs-identity{display:grid;gap:5px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface)}
+.gov-trs-identity__kicker{font:10px var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)}
+.gov-trs-identity__name{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--text-primary);font-size:18px;font-weight:600;line-height:1.3}
+.gov-trs-identity__icon{width:22px;height:22px;border-radius:50%;border:1px solid var(--border)}
+.gov-trs-identity__addr{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.gov-trs-identity__addr code{font:12px var(--font-mono);color:var(--text-secondary);overflow-wrap:anywhere}
+.gov-trs-identity__addr button{border:1px solid var(--border);background:var(--surface-2);color:var(--text-primary);border-radius:6px;padding:2px 9px;font:11px var(--font-mono);cursor:pointer}
+.gov-trs-identity__addr button:hover{border-color:var(--primary)}
+.gov-trs-identity__source{color:var(--text-muted);font-size:11.5px}
+.gov-trs-entitybar{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;margin-top:10px}
+
+.gov-trs-switcher{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--border);border-radius:8px;background:var(--surface-1)}
+.gov-trs-switcher__btn{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--text-secondary);font:12px var(--font-body);cursor:pointer}
+.gov-trs-switcher__btn:hover:not(:disabled):not(.is-active){color:var(--text-primary);background:var(--surface-2)}
+.gov-trs-switcher__btn.is-active{border-color:var(--primary);background:var(--accent-bg);color:var(--text-primary)}
+.gov-trs-switcher__btn:disabled{opacity:.45;cursor:not-allowed}
+.gov-trs-switcher__note{font:10.5px var(--font-mono);color:var(--text-muted)}
+
+.gov-trs-linkbtn{border:0;background:transparent;padding:0;color:var(--primary);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.gov-trs-linkbtn:hover{color:var(--accent-text)}
+.gov-trs-callout{margin:10px 0 0;padding:8px 12px;border:1px solid var(--accent-border);border-radius:8px;background:var(--accent-bg);color:var(--text-primary);font-size:12.5px}
+.gov-trs-banner{margin-top:12px;padding:10px 14px;border:1px solid var(--tone-warning-border);border-radius:8px;background:var(--tone-warning-bg);color:var(--text-primary);font-size:12.5px;line-height:1.5}
+.gov-trs-banner--spam{border-color:var(--tone-negative-border);background:var(--tone-negative-bg)}
+.gov-trs-gapnote{display:grid;gap:2px;margin-top:8px}
+.gov-trs-gapnote p{margin:0;color:var(--tone-warning-fg);font-size:11.5px}
+.gov-trs-notes{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.gov-trs-notes__item{padding:7px 10px;border-left:3px solid var(--border-hover);border-radius:0 6px 6px 0;background:var(--surface-2);color:var(--text-secondary);font-size:12px;line-height:1.5}
+.gov-trs-notes__item.is-warn{border-left-color:var(--tone-warning-border)}
+.gov-trs-controls{display:flex;align-items:center;gap:10px 18px;flex-wrap:wrap;margin-top:14px}
+.gov-trs-controls__field{display:inline-flex;align-items:center;gap:8px;color:var(--text-secondary);font-size:12px}
+
+/* Tables: a real <table> (rows are clickable, cells hold their own buttons),
+   growing with the page. The wrapper only scrolls sideways on a narrow screen;
+   it holds no popovers, so its clipping cannot hide one. */
+.gov-trs-tablebar{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;margin-bottom:10px}
+.gov-trs-tablebar__end{margin-left:auto}
+.gov-trs-search{flex:1 1 220px;min-width:180px;max-width:360px;border:1px solid var(--border);background:var(--surface-2);color:var(--text-primary);border-radius:7px;padding:6px 10px;font:12px var(--font-body)}
+.gov-trs-search:focus{outline:2px solid var(--primary);outline-offset:-1px}
+.gov-trs-tablewrap{overflow-x:auto;overflow-y:visible}
+.gov-trs-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.gov-trs-table th{padding:7px 8px;border-bottom:1px solid var(--border);color:var(--text-muted);font:10px var(--font-mono);letter-spacing:.05em;text-align:left;text-transform:uppercase;white-space:nowrap}
+.gov-trs-table td{padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:middle;color:var(--text-primary)}
+.gov-trs-table .gov-trs-num{text-align:right}
+.gov-trs-row{cursor:pointer}
+.gov-trs-row:hover td{background:var(--surface-2)}
+.gov-trs-row.is-hidden td{opacity:.8}
+.gov-trs-asset{max-width:100%;border:0;background:transparent;padding:0;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.gov-trs-asset:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-radius:4px}
+.gov-trs-chainchips{display:inline-flex;gap:4px;flex-wrap:wrap}
+.gov-trs-chainchip{border:1px solid var(--border);background:var(--surface-2);color:var(--text-secondary);border-radius:999px;padding:1px 8px;font:10.5px var(--font-mono);cursor:pointer;white-space:nowrap}
+.gov-trs-chainchip:hover{border-color:var(--primary);color:var(--text-primary)}
+.gov-trs-chainchip strong{margin-left:4px;color:var(--text-primary);font-weight:600}
+.gov-trs-share{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;font:11px var(--font-mono);color:var(--text-secondary);white-space:nowrap}
+.gov-trs-share__bar{width:48px;height:5px;border-radius:999px;background:var(--surface-3);overflow:hidden}
+.gov-trs-share__bar>span{display:block;height:100%;border-radius:999px;background:var(--primary)}
+.gov-trs-price{display:inline-grid;justify-items:end;gap:1px}
+.gov-trs-price small{color:var(--text-muted);font:10px var(--font-mono)}
+.gov-trs-spark{display:block;width:72px;color:var(--primary);opacity:.75}
+.gov-trs-spark svg{display:block;width:72px;height:20px}
+.gov-trs-col-chev{width:14px;color:var(--text-muted);text-align:right}
+.gov-trs-table td small{color:var(--text-muted);font-size:10.5px}
+.gov-trs-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.gov-trs-tablefoot{margin-top:8px}
+
+/* Overview top-N lists. */
+.gov-trs-top{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.gov-trs-top button{display:grid;grid-template-columns:minmax(0,1fr) auto 64px;align-items:center;gap:10px;width:100%;padding:6px 8px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text-primary);text-align:left;font:12.5px var(--font-body);cursor:pointer}
+.gov-trs-top button:hover{background:var(--surface-2);border-color:var(--border)}
+.gov-trs-top button:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+.gov-trs-top__name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gov-trs-top__share{text-align:right;color:var(--text-muted);font:11px var(--font-mono)}
+
+/* Classification counts. */
+.gov-trs-classes{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:10px 24px}
+.gov-trs-classes dl{margin:0;display:grid;gap:6px}
+.gov-trs-classes__item{display:grid;grid-template-columns:170px minmax(0,1fr);gap:10px;align-items:baseline}
+.gov-trs-classes__item dt{color:var(--text-secondary);font:11px var(--font-mono)}
+.gov-trs-classes__item dd{margin:0;display:flex;align-items:baseline;gap:8px;color:var(--text-muted);font-size:12px;line-height:1.45}
+.gov-trs-classes__item dd strong{min-width:3ch;text-align:right;color:var(--text-primary);font:12px var(--font-mono)}
 
 @media(max-width:900px){
-  /* Wallet board: keep identity + the two figures that rank it; drop the rest.
-     display:none, not narrower — a squeezed cell still claims grid width. */
-  .gov-wallet-board__head,.gov-wallet-row{grid-template-columns:minmax(0,1fr) 96px 108px;gap:8px}
-  .gov-wallet-row__chain,.gov-wallet-row__unnamed,.gov-wallet-row__ltd,.gov-wallet-row__chevron{display:none}
-  .gov-wallet-board__head>*:nth-child(2),.gov-wallet-board__head>*:nth-child(4),.gov-wallet-board__head>*:nth-child(7),.gov-wallet-board__head>*:nth-child(8){display:none}
-
   .gov-subbar{align-items:stretch;flex-direction:column}
   .gov-subbar .ma-search{max-width:none}
   .gov-content{padding:12px}
   .gov-candidates button{grid-template-columns:1fr}
   .gov-choice{grid-template-columns:minmax(90px,140px) 1fr 90px}
   .gov-grid-2{grid-template-columns:1fr}
-  /* Token board narrows to identity | USD | units. The template is EXACTLY
-     three columns, so every other cell has to be removed outright — left in
-     place they would wrap onto phantom rows under the identity column. */
-  .gov-token-board__head,.gov-token-row{grid-template-columns:minmax(0,1fr) 92px 108px;gap:8px}
-  .gov-token-row__chain,.gov-token-row__meter,.gov-token-row__spark,.gov-token-row__wallets,.gov-token-row__chevron{display:none}
-  .gov-token-board__head>*:nth-child(2),.gov-token-board__head>*:nth-child(4),.gov-token-board__head>*:nth-child(6),.gov-token-board__head>*:nth-child(7),.gov-token-board__head>*:nth-child(8){display:none}
-  .gov-chain-card__nav{font-size:22px}
+  /* Treasury tables keep identity, chains and value; the secondary columns
+     go (display:none, not narrower — a squeezed column still claims width). */
+  .gov-trs-col-share,.gov-trs-col-price,.gov-trs-col-holders,.gov-trs-col-spark,.gov-trs-col-chev,.gov-trs-col-tokens{display:none}
+  .gov-trs-search{max-width:none}
+  .gov-trs-classes__item{grid-template-columns:1fr}
+  .gov-trs-top button{grid-template-columns:minmax(0,1fr) auto}
+  .gov-trs-top__share{display:none}
+}
+@media(max-width:720px){
+  .gov-trs-kpis .ma-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:600px){
+  /* Phone: identity and value first. The chain chips move to the entity
+     page's switcher; units and GNO are one tap away there too. */
+  .gov-trs-table--assets .gov-trs-col-chains,.gov-trs-col-units,.gov-trs-col-gno{display:none}
 }
 
 /* ---------------------------------------------------------------------------

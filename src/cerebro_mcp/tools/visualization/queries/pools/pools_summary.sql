@@ -8,7 +8,7 @@ anc AS (
   SELECT max(a.block_number) AS anchor_block,
          max(a.block_timestamp) AS anchor_timestamp
   FROM @db.@anchors_view AS a
-  WHERE a.chain_id = @chain AND a.snapshot_date IN (SELECT as_of FROM asof)
+  WHERE a.chain_id = @chain AND a.snapshot_date = (SELECT as_of FROM asof)
 )
 SELECT
   toString((SELECT as_of FROM asof)) AS as_of,
@@ -21,7 +21,7 @@ SELECT
   countIf(st.liquidity > 0) AS pools_live_cl,
   countIf(pr.ticks_probed) AS pools_probed,
   countIf(st.liquidity > 0 AND NOT pr.ticks_probed) AS pools_live_unprobed,
-  toString((SELECT max(ras_of) FROM rasof)) AS reserves_as_of,
+  toString((SELECT ras_of FROM rasof)) AS reserves_as_of,
   uniqExactIf(rs.r_pool, rs.r_pool != '') AS pools_with_reserves,
   uniqExactIf(rs.r_pool, rs.r_any_positive AND cfg.pool_family = 'reserves_only')
     AS pools_live_reserves_only

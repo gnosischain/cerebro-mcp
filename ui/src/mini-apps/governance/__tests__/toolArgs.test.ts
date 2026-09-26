@@ -62,6 +62,22 @@ describe("governance section tool args — frozen date-token encoding", () => {
   });
 });
 
+describe("treasury sends no filters", () => {
+  it("chain / Gnosis Ltd. / asset are client-side: never on the wire", () => {
+    const args = buildSectionToolArgs("v1", 1, "treasury", EMPTY_DRAFT);
+    for (const key of ["chain_id", "asset", "exclude_ltd"]) {
+      expect(Object.keys(args), key).not.toContain(key);
+    }
+    expect(args).toMatchObject({ view_id: "v1", section: "treasury" });
+  });
+
+  it("the draft no longer carries treasury filters at all", () => {
+    expect(Object.keys(EMPTY_DRAFT)).not.toContain("chain_id");
+    expect(Object.keys(EMPTY_DRAFT)).not.toContain("exclude_ltd");
+    expect(Object.keys(EMPTY_DRAFT)).not.toContain("asset");
+  });
+});
+
 describe("governance entity and search args", () => {
   it("builds entity args untouched", () => {
     expect(buildEntityArgs("v1", 4, "forum_topic", "12131")).toEqual({

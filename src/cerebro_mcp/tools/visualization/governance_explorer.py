@@ -5,8 +5,9 @@ GnosisDAO Snapshot proposals/votes/followers plus the Discourse forum
 (topics/posts/users/categories), the ``rpc_log_indexer`` DelegateRegistry
 plane, and the ``rpc_state_indexer`` treasury plane. Snapshot content is
 **off-chain signaling — never binding execution**, and there is still no
-execution or spend-attribution data here: treasury coverage is token
-*balances* at pinned finalized blocks, with no USD valuation.
+execution or spend-attribution data here: treasury coverage is ERC-20 token
+*balances* at pinned finalized blocks, valued in USD only through a reviewed
+address registry and the dbt daily price hub (see ``treasury_registry``).
 
 Frozen contract (mirrored byte-for-byte by the frontend, test-enforced on
 both sides):
@@ -55,7 +56,13 @@ from cerebro_mcp.clients.clickhouse import (
 )
 from cerebro_mcp.models.mini_app import MiniAppPayload, SummaryCard
 from cerebro_mcp.runtime.mini_app_cache import CachedDataset, FailureCache
-from cerebro_mcp.tools.visualization import coingecko, mini_apps, sql_loader, web_apps
+from cerebro_mcp.tools.visualization import (
+    coingecko,
+    mini_apps,
+    sql_loader,
+    treasury_registry,
+    web_apps,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,65 +83,76 @@ DELEGATE_DB = "rpc_log_indexer"
 DELEGATE_VIEW = "v_delegate_events_gnosis"
 #: Treasury plane (rpc-state-indexer output): verified ERC-20 balances for the
 #: GnosisDAO wallet set, each pinned to an immutable finalized block. Every
-#: figure carries ``anchor_block``/``anchor_hash`` — that attributability is the
-#: whole point of this plane over a portfolio API.
+#: figure carries its anchor block — that attributability is the whole point of
+#: this plane over a portfolio API.
 #:
-#: ``v_treasury_balances`` resolves ReplacingMergeTree dedup internally, so it is
-#: queried WITHOUT ``FINAL`` (same as the delegate view).
+#: Read path (lessons: published-is-not-served, fat-view-join-never-prunes,
+#: ch-final-three-way-rule). A raw ``census_publications`` row is NOT a served
+#: snapshot: only eligible, conflict-free publications are served, exactly
+#: ``v_publications_current``. Every treasury spec therefore
+#:   1. resolves its dates from SERVED publications (as-of: latest complete served
+#:      day; history: each token's latest served day per month), and
+#:   2. reads ``token_balances`` for exactly those served attempts — job pin,
+#:      constant date bound and a 4-tuple IN on ``attempt_id`` — deduplicating
+#:      with ``argMax(balance_raw, insert_version)`` (FINAL is forbidden on this
+#:      billions-row table, and FINAL alone would still mix attempts).
+#: The canonical ``v_treasury_balances`` view has the same semantics but its
+#: eligibility views cost ~18s for full history; it is kept only as the reference
+#: side of the live equivalence proof.
 #:
-#: CRITICAL: the view is NOT job-scoped upstream — it spans every census job,
-#: including the ``full_holders`` jobs whose universes contain the treasury
-#: wallets (billions of rows since the holder census landed). Every spec
-#: here MUST pin ``job_name = TREASURY_JOB``; an unpinned read exhausts server
-#: memory and double-counts any token measured by two jobs. Pinning alone is
-#: no longer enough — see TREASURY_PUB_TABLE below and the
-#: fat-view-join-never-prunes lesson for the date-resolution + prune contract.
+#: CRITICAL: ``token_balances`` spans every census job (the ``full_holders`` jobs
+#: included); every read MUST pin ``job_name = TREASURY_JOB``.
 TREASURY_DB = "rpc_state_indexer"
-TREASURY_VIEW = "v_treasury_balances"
-TREASURY_SCALARS_VIEW = "v_token_scalars_published"
 TREASURY_JOB = "daily_treasury"
-#: Snapshot-date resolution reads this base table, never the balances view:
-#: the view FINAL-merges token_balances (billions of rows since the holder
-#: census landed), so aggregating it for max(snapshot_date) OOMs at the
-#: server cap. Publications are authoritative for which dates exist — the
-#: view INNER JOINs them. See _cte_treasury_asof_per_chain.sql.
 TREASURY_PUB_TABLE = "census_publications"
+TREASURY_SERVED_VIEW = "v_publications_current"
+TREASURY_BALANCES_TABLE = "token_balances"
+TREASURY_METADATA_VIEW = "v_token_metadata_current"
+#: Reference side of the live equivalence proof only — never read by a spec.
+TREASURY_CANONICAL_VIEW = "v_treasury_balances"
+#: Daily USD prices (dbt). Joined ONLY through the reviewed registry's price
+#: symbol — never on an on-chain symbol, which spoofs copy.
+TREASURY_PRICE_HUB = "dbt.int_execution_token_prices_daily"
 #: Chains the treasury job publishes on. Labels only — the chain set actually
 #: shown is derived from the data, never assumed.
 TREASURY_CHAINS = {1: "Ethereum", 100: "Gnosis Chain"}
 #: GNO per chain — the one holding with an unambiguous governance meaning.
 #: Sourced from rpc-state-indexer's own catalog (config/ethereum/tokens.yaml,
 #: config/gnosis/jobs.yaml), not from a symbol lookup: symbols are attacker
-#: controlled, addresses are not.
+#: controlled, addresses are not. Mirrored by the registry's asset_key "GNO".
 GNO_TOKENS = {
     1: "0x6810e776880c02933d47db1b9fc05908e5386b96",
     100: "0x9c58bacc331c9aa871afd802db6379a98e80cedb",
 }
-#: Gnosis Ltd. — excluded from the DAO-scoped NAV convention. Identified in
+#: Gnosis Ltd. — excluded from the DAO-scoped NAV convention (the UI toggles it
+#: client-side from the ``*_ex_ltd`` companion columns). Identified in
 #: rpc-state-indexer's .agents/memory/treasury-sweep-pipeline.md and present as
-#: the last row of both chains' treasury_addresses.csv. Deliberately the ONLY
-#: labelled wallet: no other name is verifiable from either repo, and inventing
-#: labels for the remaining 22 would be fabricated provenance.
+#: the last row of both chains' treasury_addresses.csv.
 LTD_WALLETS = ("0x604e4557e9020841f4e8eb98148de3d3cdea350c",)
 #: Columns the overlay resolver scans for token addresses. Narrow on purpose:
 #: this plane names its token column exactly one way, and a loose pattern would
 #: sweep unrelated columns into a CoinGecko lookup.
 TREASURY_TOKEN_COLUMN_RE = re.compile(r"^token_address$")
-#: History grain. Chain 1 publishes month-end snapshots natively; chain 100
-#: published daily until it went stale. Sampling the LAST snapshot of each month
-#: is the only grain both chains share, and it keeps every history dataset at
-#: ~99 buckets total — small enough to hydrate fully and chart client-side.
-TREASURY_HISTORY_UNIT = "month"
-#: Candidate cap per chain for the token-history series set. NOT a display N:
-#: USD ranking happens client-side (prices are a frontend overlay), so the
-#: server ships a candidate pool and the UI picks its own top-N by value.
-TREASURY_HISTORY_TOKENS = 24
-#: Month-end dates per chain the history datasets read. The balances view
-#: costs ~0.4s per selected date (measured 2026-08-26: the full 52-date set
-#: ran 22s, over the 20s interactive budget), so history is BOUNDED to each
-#: chain's latest N month-ends and every history basis discloses it. Full
-#: history returns when the indexer materializes a treasury slice.
-TREASURY_HISTORY_MONTHS = 24
+#: As-of resolution: look back this many days for served snapshots; a day is
+#: complete when its served token count reaches this ratio of both the raw count
+#: that day and the window's peak; a token unserved on the as-of day is carried
+#: from its own latest served day at most this many days back (and counted).
+TREASURY_ASOF_WINDOW_DAYS = 21
+TREASURY_COMPLETENESS_RATIO = 0.98
+TREASURY_MAX_CARRY_DAYS = 7
+#: History: the last N raw-published days of each month are the candidate days;
+#: each token uses its latest served one (carries counted per bucket).
+TREASURY_MONTH_CANDIDATE_DAYS = 7
+#: A hub price older than this (days) never values a position.
+TREASURY_PRICE_MAX_AGE_DAYS = 7
+#: A CoinGecko spot quote is dropped (and counted) when it would value a position
+#: above this share of its chain's hub-priced holdings — a mispriced listing must
+#: never dominate the total. Spot applies to reviewed (listed) tokens only.
+TREASURY_SPOT_MAX_NAV_SHARE = 0.25
+#: Cache TTLs. As-of data changes with each daily census; history datasets change
+#: at most once a day and are the expensive reads, so they are cached for hours.
+TREASURY_ASOF_TTL = 1800
+TREASURY_HISTORY_TTL = 21600
 #: bytes32 of "gnosis.eth" (right-padded ASCII) — the Snapshot space id.
 GNOSIS_SPACE_ID = "0x676e6f7369732e65746800000000000000000000000000000000000000000000"
 #: The Snapshot space slug as it appears in ``governance_db.*.space_id``. The
@@ -288,17 +306,10 @@ SECTION_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "treasury": {
         "core": ("treasury_summary", "treasury_holdings", "treasury_by_wallet"),
-        "insights": ("treasury_coverage",),
-        "history": (
-            "treasury_chain_history",
-            "treasury_wallet_history",
-        ),
-        # treasury_token_history is ALONE in its group on purpose. It is the most
-        # expensive read in the app — it scans all history for every held token —
-        # and grouping it with its two siblings meant one slow dataset delayed the
-        # other two behind a worker pool of 3. Its own group lets it fail or lag
-        # without taking the rest of the history view with it.
-        "token_history": ("treasury_token_history",),
+        # Full history is ONE fan-out scan (grain chain|wallet|token) so every
+        # chart reads the same snapshot, plus its per-month completeness. Both
+        # are cached for hours (TREASURY_HISTORY_TTL) and loaded deferred.
+        "history": ("treasury_history", "treasury_history_coverage"),
     },
 }
 #: Entity drill-down bundles (FROZEN) — loaded by ``_apply_entity_load``
@@ -318,11 +329,13 @@ ENTITY_BUNDLES: dict[str, tuple[str, ...]] = {
     ),
     "treasury_token": (
         "treasury_token_detail", "treasury_token_holders",
-        "treasury_token_holder_series",
+        "treasury_token_holder_series", "treasury_token_price_history",
+        "treasury_token_months",
     ),
     "treasury_wallet": (
         "treasury_wallet_detail", "treasury_wallet_positions",
-        "treasury_wallet_series",
+        "treasury_wallet_series", "treasury_wallet_chains",
+        "treasury_wallet_months",
     ),
 }
 
@@ -336,7 +349,10 @@ SOURCE_LABELS = {
     #: "cross" (which is signaling + FORUM) — no forum data reaches these.
     "signaling_onchain": "Snapshot signaling + on-chain delegate registry",
     "delegation": "Snapshot delegate registry (on-chain: mainnet + Gnosis Chain)",
-    "treasury": "Verified treasury balances at pinned finalized blocks",
+    "treasury": (
+        "Served treasury balances at pinned finalized blocks; USD from the dbt "
+        "daily price hub through a reviewed address registry"
+    ),
 }
 
 PROPOSAL_STATES = {"", "active", "pending", "closed"}
@@ -390,24 +406,20 @@ DELEGATE_SORTS = {
     "recently_active": "last_delegation_at DESC, delegate",
     "first_seen": "first_delegation_at ASC, delegate",
 }
-#: Treasury holdings ordering. The default is deliberate: without a price feed
-#: there is NO value ranking, and the two obvious proxies both mislead — wallet
-#: count ranks airdrop spam first (spam hits every wallet by construction), and
-#: raw balance compares incomparable units. So the default surfaces what can be
-#: displayed truthfully (resolved metadata) and ranks it by share of the token's
-#: own supply, which is at least dimensionless. It is a display order, not a
-#: claim about treasury importance — the UI says so.
-#: ``supply_share > 1`` is arithmetically impossible for an honest token: the
-#: holding cannot exceed the token's own supply. The classic spoofed-token shape
-#: returns a constant balance to every caller, so N wallets each "hold" 100% and
-#: the total lands near N x supply. Those are demoted rather than allowed to top
-#: the list on a fabricated number.
+#: Treasury holdings ordering (display only — the UI re-sorts client-side).
+#: Default: hidden classes (spam, retired mirrors) last, then hub value, then
+#: breadth. ``supply_share > 1`` is arithmetically impossible for an honest token
+#: (a holding cannot exceed the token's own supply) — the classic spoof returns a
+#: constant balance to every caller — so that sort demotes it rather than let a
+#: fabricated number top the list.
 _PLAUSIBLE_SHARE = "ifNull(supply_share <= 1, 1) DESC"
+_HIDDEN_LAST = "(token_class IN ('spam', 'retired_mirror')) ASC"
 TREASURY_SORTS = {
-    "": f"metadata_known DESC, {_PLAUSIBLE_SHARE}, supply_share DESC NULLS LAST, token_address",
-    "supply_share": f"{_PLAUSIBLE_SHARE}, supply_share DESC NULLS LAST, token_address",
-    "wallets_holding": "wallets_holding DESC, token_address",
-    "symbol": "symbol ASC NULLS LAST, token_address",
+    "": f"{_HIDDEN_LAST}, value_usd DESC NULLS LAST, wallets_holding DESC, chain_id, token_address",
+    "value": f"{_HIDDEN_LAST}, value_usd DESC NULLS LAST, wallets_holding DESC, chain_id, token_address",
+    "supply_share": f"{_PLAUSIBLE_SHARE}, supply_share DESC NULLS LAST, chain_id, token_address",
+    "wallets_holding": "wallets_holding DESC, chain_id, token_address",
+    "symbol": "symbol ASC, chain_id, token_address",
 }
 SECTION_SORTS: dict[str, dict[str, str]] = {
     "overview": {"": ""},
@@ -583,8 +595,10 @@ def _default_filters() -> dict[str, Any]:
         "category_id": 0,
         "forum_status": "",
         "sort_by": "",
+        # Treasury VIEW hints only: the treasury datasets always carry both
+        # chains and every wallet (with ex-Ltd companion columns); the UI filters
+        # client-side and may seed its initial view from these.
         "chain_id": 0,
-        "asset": "",
         "exclude_ltd": False,
     }
 
@@ -599,7 +613,6 @@ def _validate_filters(
     forum_status: str,
     sort_by: str,
     chain_id: int = 0,
-    asset: str = "",
     exclude_ltd: bool = False,
 ) -> dict[str, Any]:
     """Validate every filter and its per-section applicability. Raises before
@@ -633,16 +646,11 @@ def _validate_filters(
     if text and section not in {"proposals", "forum"}:
         raise ValueError("query applies only to the proposals and forum sections")
     chain = int(chain_id or 0)
-    token = asset.strip().lower()
     ltd = bool(exclude_ltd)
-    if section != "treasury" and (chain or token or ltd):
-        raise ValueError(
-            "chain_id/asset/exclude_ltd apply only to the treasury section"
-        )
+    if section != "treasury" and (chain or ltd):
+        raise ValueError("chain_id/exclude_ltd apply only to the treasury section")
     if chain and chain not in TREASURY_CHAINS:
         raise ValueError(f"chain_id must be one of {sorted(TREASURY_CHAINS)}")
-    if token and not ADDRESS_RE.match(token):
-        raise ValueError("asset must be a lowercase 0x-prefixed 20-byte address")
     sort = sort_by.strip().lower()
     sorts = SECTION_SORTS[section]
     if sort not in sorts:
@@ -659,7 +667,6 @@ def _validate_filters(
         "forum_status": fstatus,
         "sort_by": sort,
         "chain_id": chain,
-        "asset": token,
         "exclude_ltd": ltd,
     }
 
@@ -1084,195 +1091,222 @@ def _graph_specs(range_state: dict[str, Any]) -> list[QuerySpec]:
     ]
 
 
-def _treasury_predicates(filters: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
-    """Chain / asset predicates for the treasury plane, plus their binds.
+_TREASURY_BIND_RE = re.compile(r"\{([a-z_][a-z0-9_]*):")
 
-    The job pin is NOT optional and is applied by every caller: the upstream
-    view spans all census jobs (see TREASURY_DB notes).
+
+def _tq(name: str) -> str:
+    """Fully qualified treasury-plane relation."""
+    return f"{TREASURY_DB}.{name}"
+
+
+def _compact_sql(sql: str) -> str:
+    """A rendered treasury statement without indentation (see sql_loader.compact):
+    the served-read pipeline is long, and ~1k characters per spec is the margin
+    that keeps it and the exact-count wrapper under MAX_QUERY_LENGTH."""
+    return sql_loader.compact(sql)
+
+
+def _treasury_binds(sql: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Exactly the ClickHouse binds a rendered treasury statement names.
+
+    Registry arrays, labels and classifier patterns come from
+    ``treasury_registry.bind_params``; ``extra`` carries per-spec values (the
+    entity address). A named bind with no value RAISES — the same both-directions
+    rule sql_loader applies to fragments — and unused binds are never passed, so
+    a spec's parameters (and its cache key) hold only what its SQL reads.
     """
-    params: dict[str, Any] = {}
-    chain_sql = "1"
-    if filters.get("chain_id"):
-        chain_sql = "t.chain_id = {chain_id:UInt64}"
-        params["chain_id"] = int(filters["chain_id"])
-    asset_sql = "1"
-    if filters.get("asset"):
-        asset_sql = "t.token_address = {asset:String}"
-        params["asset"] = str(filters["asset"])
-    return chain_sql, asset_sql, params
+    available = {
+        **treasury_registry.bind_params(),
+        "ltd": list(LTD_WALLETS),
+        **(extra or {}),
+    }
+    names = sorted(set(_TREASURY_BIND_RE.findall(sql)))
+    missing = [name for name in names if name not in available]
+    if missing:
+        raise ValueError(f"treasury SQL names binds with no value: {missing}")
+    return {name: available[name] for name in names}
 
 
-def _ltd_predicate(filters: dict[str, Any]) -> str:
-    """Ltd-wallet exclusion. LTD_WALLETS is a module constant, never user input.
+def _treasury_shared_ctes(base: str) -> dict[str, str]:
+    """Registry, hub, enrichment and classification over a base CTE (``abase``
+    for the as-of pipeline, ``mbase`` for the month pipeline)."""
+    spam = sql_loader.load_sql(
+        "governance", "_expr_treasury_spam_reason",
+        max_symbol_len=treasury_registry.MAX_SYMBOL_LEN,
+        max_name_len=treasury_registry.MAX_NAME_LEN,
+        mass_min_wallets=treasury_registry.MASS_AIRDROP_MIN_WALLETS,
+        mass_share=treasury_registry.MASS_AIRDROP_SHARE,
+    )
+    token_class = sql_loader.load_sql("governance", "_expr_treasury_token_class")
+    return {
+        "registry": sql_loader.load_sql("governance", "_cte_treasury_registry"),
+        "hub": sql_loader.load_sql("governance", "_cte_treasury_hub",
+                                   hub_table=TREASURY_PRICE_HUB),
+        "enrich": sql_loader.load_sql("governance", "_cte_treasury_enrich", base=base,
+                                      metadata=_tq(TREASURY_METADATA_VIEW)),
+        "classified": sql_loader.load_sql(
+            "governance", "_cte_treasury_classified", spam_expr=spam,
+            class_expr=token_class, max_price_age=TREASURY_PRICE_MAX_AGE_DAYS,
+        ),
+    }
 
-    Returns ``1`` when the toggle is off so the exclusion is always visible in
-    the SQL the UI shows, rather than being applied invisibly elsewhere.
-    """
-    if not filters.get("exclude_ltd") or not LTD_WALLETS:
-        return "1"
-    listed = ", ".join(f"'{address}'" for address in LTD_WALLETS)
-    return f"t.wallet_address NOT IN ({listed})"
+
+def _treasury_asof_pipeline(chain_pred: str) -> str:
+    """As-of CTE chain (served-date resolution → two-step positions →
+    classification), for the chains ``chain_pred`` admits. ``chain_pred`` is
+    either ``1`` or ``chain_id = <validated int>`` — never user text."""
+    common = {"pub": _tq(TREASURY_PUB_TABLE), "job": TREASURY_JOB,
+              "chain_pred": chain_pred, "window_days": TREASURY_ASOF_WINDOW_DAYS}
+    return sql_loader.load_sql(
+        "governance", "_cte_treasury_asof_pipeline",
+        asof=sql_loader.load_sql(
+            "governance", "_cte_treasury_asof", **common,
+            served=_tq(TREASURY_SERVED_VIEW), ratio=TREASURY_COMPLETENESS_RATIO,
+            max_carry_days=TREASURY_MAX_CARRY_DAYS,
+        ),
+        supply=sql_loader.load_sql("governance", "_cte_treasury_supply", **common),
+        positions=sql_loader.load_sql(
+            "governance", "_cte_treasury_asof_positions",
+            balances=_tq(TREASURY_BALANCES_TABLE), job=TREASURY_JOB,
+            window_days=TREASURY_ASOF_WINDOW_DAYS,
+        ),
+        base=sql_loader.load_sql("governance", "_cte_treasury_asof_base"),
+        **_treasury_shared_ctes("abase"),
+    )
+
+
+def _treasury_month_candidates(chain_pred: str) -> str:
+    return sql_loader.load_sql(
+        "governance", "_cte_treasury_month_candidates", pub=_tq(TREASURY_PUB_TABLE),
+        job=TREASURY_JOB, chain_pred=chain_pred,
+        candidate_days=TREASURY_MONTH_CANDIDATE_DAYS,
+    )
+
+
+def _treasury_month_served(token_pred: str) -> str:
+    return sql_loader.load_sql(
+        "governance", "_cte_treasury_month_served", served=_tq(TREASURY_SERVED_VIEW),
+        job=TREASURY_JOB, token_pred=token_pred,
+    )
+
+
+def _treasury_month_pipeline(chain_pred: str, token_pred: str, holder_pred: str) -> str:
+    """Month-end CTE chain for FULL history. ``token_pred`` narrows the served
+    lookup (one token, or registry tokens only); ``holder_pred`` narrows the
+    balance read to one wallet. Both are fixed fragments with bound params."""
+    return sql_loader.load_sql(
+        "governance", "_cte_treasury_month_pipeline",
+        candidates=_treasury_month_candidates(chain_pred),
+        served=_treasury_month_served(token_pred),
+        positions=sql_loader.load_sql(
+            "governance", "_cte_treasury_month_positions",
+            balances=_tq(TREASURY_BALANCES_TABLE), job=TREASURY_JOB,
+            holder_pred=holder_pred,
+        ),
+        **_treasury_shared_ctes("mbase"),
+    )
+
+
+def _treasury_coverage_sql(chain_pred: str) -> str:
+    return sql_loader.load_sql(
+        "governance", "treasury_history_coverage",
+        candidates=_treasury_month_candidates(chain_pred),
+        served=_treasury_month_served("1"),
+        registry=sql_loader.load_sql("governance", "_cte_treasury_registry"),
+        pub=_tq(TREASURY_PUB_TABLE), job=TREASURY_JOB, chain_pred=chain_pred,
+        ratio=TREASURY_COMPLETENESS_RATIO,
+    )
+
+
+def _treasury_chain_ids() -> str:
+    return "[" + ", ".join(str(chain) for chain in sorted(TREASURY_CHAINS)) + "]"
+
+
+_TREASURY_ASOF_BASIS = (
+    "latest COMPLETE served snapshot per chain (served >= "
+    f"{TREASURY_COMPLETENESS_RATIO:.0%} of published), pinned to its finalized "
+    f"anchor; a token unserved that day is carried from its own latest served day "
+    f"(at most {TREASURY_MAX_CARRY_DAYS} days) and counted; USD = ERC-20 token "
+    "holdings valued with the dbt daily price hub through the reviewed address "
+    "registry (native ETH/xDAI and non-tokenized positions are NOT indexed); spam "
+    "and retired mirror contracts are excluded from totals and counted"
+)
+_TREASURY_HISTORY_BASIS = (
+    "FULL history, one point per chain-month = each token's latest SERVED "
+    f"snapshot in the month's last {TREASURY_MONTH_CANDIDATE_DAYS} published days; "
+    "USD from the hub price on or before that day through the reviewed registry; "
+    "spot prices never enter history; chains never blended"
+)
 
 
 def _treasury_specs(
     range_state: dict[str, Any], filters: dict[str, Any]
 ) -> list[QuerySpec]:
-    """Verified treasury balances from the rpc-state-indexer plane.
+    """Treasury section datasets over the rpc-state-indexer plane.
 
-    Five invariants hold in every spec here:
+    Invariants (each test-pinned):
 
-    * ``job_name = TREASURY_JOB`` is pinned. The upstream view is not
-      job-scoped; without this a read spans the census jobs (billions of
-      rows), exhausts memory, and double-counts any token measured by two jobs.
-    * Snapshot dates resolve from ``TREASURY_PUB_TABLE`` — never by
-      aggregating the balances view — and every view scan carries a
-      ``snapshot_date IN (SELECT ...)`` prune beside its asof/months join,
-      because a JOIN alone never prunes the view (lesson:
-      fat-view-join-never-prunes; pinned by
-      test_treasury_dates_resolve_from_publications_and_every_scan_is_pruned).
-    * The as-of date is resolved PER CHAIN. Chains publish independently and
-      are months apart, so a global ``max(snapshot_date)`` would blend one
-      chain's current snapshot with another's stale one.
-    * The history datasets are BOUNDED to the latest TREASURY_HISTORY_MONTHS
-      month-ends per chain, and each history basis discloses the bound.
-    * ``decimals`` is Nullable and NULL means "not observed" — never 0. A
-      balance whose decimals are unknown is emitted raw with its status, and is
-      never scaled into a plausible-looking wrong number.
+    * Dates resolve from SERVED publications (``v_publications_current``), never
+      from raw ``census_publications`` alone — a published-but-ineligible day
+      emptied a whole month (lesson: published-is-not-served).
+    * Balances are read from ``token_balances`` for exactly the served attempts:
+      job pin + constant date bound + 4-tuple attempt IN, ``argMax`` dedup, no
+      FINAL (lesson: ch-final-three-way-rule, branch 3).
+    * USD comes only from the dbt price hub joined on the REGISTRY price symbol;
+      spam and retired mirrors are classified in SQL so every aggregate excludes
+      them identically.
+    * Every dataset carries BOTH chains and ALL wallets. The chain filter and
+      the Gnosis Ltd exclusion are client-side over ``*_ex_ltd`` companion
+      columns, so one cached load serves every filter combination.
 
     The date-range control does not apply: these are stock measures read at a
-    point in time, not flows over a window.
+    point in time (and full month-end history), not flows over a window.
     """
-    src = f"{TREASURY_DB}.{TREASURY_VIEW}"
-    scalars = f"{TREASURY_DB}.{TREASURY_SCALARS_VIEW}"
-    chain_sql, asset_sql, params = _treasury_predicates(filters)
-    ltd_sql = _ltd_predicate(filters)
+    del range_state  # stock measures; see docstring
+    pipeline = _treasury_asof_pipeline("1")
     sort_fragment = TREASURY_SORTS.get(filters.get("sort_by", ""), TREASURY_SORTS[""])
-    gno_sql = "multiIf(" + ", ".join(
-        f"t.chain_id = {chain}, '{address}'" for chain, address in sorted(GNO_TOKENS.items())
-    ) + ", '')"
-    ltd_list = ", ".join(f"'{address}'" for address in LTD_WALLETS) or "''"
-    # Per-chain as-of. Repeated per spec rather than materialized: the frozen
-    # QuerySpec contract is one self-contained statement per dataset.
-    pub = f"{TREASURY_DB}.{TREASURY_PUB_TABLE}"
-    asof_cte = sql_loader.load_sql("governance", "_cte_treasury_asof_per_chain", pub=pub, job=TREASURY_JOB)
-    # Per-chain month-end sampling for the history datasets. Same per-chain
-    # discipline as asof: a global month-end would pin one chain's date onto
-    # the other's rows.
-    months_cte = sql_loader.load_sql("governance", "_cte_treasury_months_per_chain", pub=pub, job=TREASURY_JOB, history_months=TREASURY_HISTORY_MONTHS)
-    months_join = sql_loader.load_sql("governance", "_join_treasury_months")
-    #: The focus token for the per-wallet history: the selected asset when one
-    #: is focused, otherwise GNO — the holding with an unambiguous governance
-    #: meaning on both chains. A PREDICATE, not an expression: the old
-    #: `t.token_address = multiIf(t.chain_id, ...)` form put an expression on
-    #: both sides, defeating the (chain, job, token) index and costing ~15s of
-    #: the wallet-history budget; the constant tuple-IN prunes token ranges.
-    if filters.get("asset"):
-        focus_pred = "t.token_address = {asset:String}"
-    else:
-        gno_tuples = ", ".join(
-            f"({chain}, '{address}')" for chain, address in sorted(GNO_TOKENS.items())
-        )
-        focus_pred = f"(t.chain_id, t.token_address) IN ({gno_tuples})"
+    rollup = sql_loader.load_sql("governance", "_cte_treasury_token_rollup")
 
-    treasury_summary = sql_loader.load_sql("governance", "treasury_summary", asof_cte=asof_cte, gno_sql=gno_sql, ltd_list=ltd_list, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql)
-
-    treasury_holdings = sql_loader.load_sql("governance", "treasury_holdings", asof_cte=asof_cte, scalars=scalars, job=TREASURY_JOB, src=src, chain_sql=chain_sql, asset_sql=asset_sql, ltd_sql=ltd_sql, sort_fragment=sort_fragment)
-
-    treasury_by_wallet = sql_loader.load_sql("governance", "treasury_by_wallet", asof_cte=asof_cte, ltd_list=ltd_list, gno_sql=gno_sql, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql)
-
-    # The trust panel. Every dimension the tab cannot yet display is counted
-    # here rather than silently rendered as absent.
-    # Coverage counts every dimension in ONE pass over `held`, then pivots with
-    # ARRAY JOIN. The obvious shape — four `SELECT ... FROM held` arms glued by
-    # UNION ALL — reads better but ClickHouse INLINES a CTE per reference, so it
-    # re-scanned and re-joined the whole snapshot four times and blew the 2 GiB
-    # per-query cap once the treasury passed ~390 held tokens. Aggregate once,
-    # reshape after.
-    treasury_coverage = sql_loader.load_sql("governance", "treasury_coverage", asof_cte=asof_cte, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql)
-
-    # Whole-treasury shape per month: counts (always comparable) plus GNO in
-    # units. Chains stay in separate rows via the chain_id column — the client
-    # splits panels on it and never overlays two chains on one axis.
-    treasury_chain_history = sql_loader.load_sql("governance", "treasury_chain_history", months_cte=months_cte, gno_sql=gno_sql, ltd_list=ltd_list, src=src, months_join=months_join, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql)
-
-    # Per-token monthly series for a CANDIDATE pool, ranked by how often the
-    # position actually changed.
-    #
-    # Ranking by longevity or wallet count both fail here, and fail toward
-    # spam: an airdropped token is held by every wallet from the moment it
-    # lands and never moves again, so it beats a real position on both. Counting
-    # distinct balances over the series inverts that — a dusted token has ONE
-    # value forever, while a managed position has many. GNO is pinned first.
-    #
-    # The client picks its own top-N by USD out of this pool, which also filters
-    # the residual spam for free: none of it is priced.
-    # The month-end restriction is a tuple IN inside the raw scan, not a JOIN, and
-    # `per_bucket` is referenced ONCE. Both are load-bearing: this spec timed out in
-    # production at 6 effective scans of the view (~2.7s each). See the cost history
-    # at the top of treasury_token_history.sql.
-    treasury_token_history = sql_loader.load_sql("governance", "treasury_token_history", months_cte=months_cte, asof_cte_body=asof_cte[5:], src=src, job=TREASURY_JOB, chain_sql=chain_sql, asset_sql=asset_sql, ltd_sql=ltd_sql, gno_picked_sql=gno_sql.replace("t.chain_id", "chain_id"), history_tokens=TREASURY_HISTORY_TOKENS)
-
-    # Per-wallet monthly series for ONE token — the focused asset, else GNO.
-    # Same unit throughout, so the stack total is meaningful and folding the
-    # tail into 'other' is a legitimate sum (unlike stacking across tokens).
-    treasury_wallet_history = sql_loader.load_sql("governance", "treasury_wallet_history", months_cte=months_cte, src=src, job=TREASURY_JOB, chain_sql=chain_sql, ltd_sql=ltd_sql, focus_pred=focus_pred, ltd_list=ltd_list, months_join=months_join)
-
-    scope = "; Ltd wallets excluded" if filters.get("exclude_ltd") else "; all treasury wallets"
-    history_basis = (
-        f"latest {TREASURY_HISTORY_MONTHS} month-end snapshots per chain "
-        f"(bounded — the balances plane grew too large for full history within "
-        f"the interactive budget); chains never blended{scope}"
+    summary = sql_loader.load_sql(
+        "governance", "treasury_summary", pipeline=pipeline,
+        chain_ids=_treasury_chain_ids(), hub_table=TREASURY_PRICE_HUB,
     )
+    holdings = sql_loader.load_sql(
+        "governance", "treasury_holdings", pipeline=pipeline, rollup=rollup,
+        sort_fragment=sort_fragment,
+    )
+    by_wallet = sql_loader.load_sql("governance", "treasury_by_wallet", pipeline=pipeline)
+    history = sql_loader.load_sql(
+        "governance", "treasury_history",
+        pipeline=_treasury_month_pipeline("1", "1", "1"),
+    )
+    coverage = _treasury_coverage_sql("1")
+
+    def spec(key: str, title: str, sql: str, basis: str, ttl: int,
+             exact: bool = True) -> QuerySpec:
+        compact = _compact_sql(sql)
+        return QuerySpec(key, title, compact, _treasury_binds(compact), basis,
+                         "treasury", ttl, exact_count=exact)
+
     return [
-        QuerySpec(
-            "treasury_summary", "Treasury summary", treasury_summary, dict(params),
-            f"latest published snapshot per chain, pinned to its finalized anchor{scope}",
-            "treasury", 900,
-        ),
-        QuerySpec(
-            "treasury_holdings", "Holdings by token", treasury_holdings, dict(params),
-            "non-zero balances at each chain's latest snapshot; share of the token's own "
-            f"total supply. NOT a value ranking — no price feed{scope}",
-            "treasury",
-        ),
-        QuerySpec(
-            "treasury_by_wallet", "Holdings by wallet", treasury_by_wallet, dict(params),
-            f"per-wallet token counts and GNO at each chain's latest snapshot{scope}",
-            "treasury",
-        ),
-        QuerySpec(
-            "treasury_coverage", "Data coverage", treasury_coverage, dict(params),
-            "what the plane can and cannot display for the held token set. "
-            "usd_price is 0%-known BY CONSTRUCTION, not by measurement: this "
-            "plane carries no price source, and valuation arrives on the client "
-            "from the CoinGecko overlay. Read it as 'no server-side pricing', "
-            "NOT as 'no token is priceable' — the holdings board shows the live "
-            "priced count",
-            "treasury", 900,
-        ),
-        # exact_count=False on all three history datasets. `exact_count` wraps the
-        # query in `count() OVER ()`, which forces the whole result to materialize
-        # before LIMIT — and these are the only treasury datasets that scan all
-        # history rather than one snapshot, so they are the ones that cannot afford
-        # it. Their output is well inside ROW_CAP, so the exact total the wrapper
-        # buys is a number nothing displays.
-        QuerySpec(
-            "treasury_chain_history", "Treasury over time", treasury_chain_history,
-            dict(params), history_basis, "treasury", exact_count=False,
-        ),
-        QuerySpec(
-            "treasury_token_history", "Holdings over time", treasury_token_history,
-            dict(params),
-            "candidate pool ranked by how often the position changed (airdropped "
-            f"dust never moves); {history_basis}",
-            "treasury", exact_count=False,
-        ),
-        QuerySpec(
-            "treasury_wallet_history", "Wallet split over time",
-            treasury_wallet_history, dict(params),
-            f"one token (focused asset, else GNO), top 5 wallets + other; {history_basis}",
-            "treasury", exact_count=False,
-        ),
+        spec("treasury_summary", "Treasury summary", summary,
+             _TREASURY_ASOF_BASIS, TREASURY_ASOF_TTL),
+        spec("treasury_holdings", "Holdings by token", holdings,
+             f"{_TREASURY_ASOF_BASIS}; every held token incl. hidden classes "
+             "(flagged with a reason)", TREASURY_ASOF_TTL),
+        spec("treasury_by_wallet", "Holdings by wallet", by_wallet,
+             f"{_TREASURY_ASOF_BASIS}; every labelled census wallet on every served "
+             f"chain (labels: {treasury_registry.WALLET_LABEL_SOURCE})",
+             TREASURY_ASOF_TTL),
+        # exact_count=False: the exact-count wrapper materializes the whole result
+        # before LIMIT, and these history reads are the expensive ones; their
+        # output stays well inside ROW_CAP (asserted by the live smoke).
+        spec("treasury_history", "Treasury over time", history,
+             _TREASURY_HISTORY_BASIS, TREASURY_HISTORY_TTL, exact=False),
+        spec("treasury_history_coverage", "History completeness", coverage,
+             "per chain-month: published vs served tokens, carries, and the registry "
+             "tokens missing a served snapshot; gap and unpublished months are never "
+             "drawn as zeros", TREASURY_HISTORY_TTL, exact=False),
     ]
 
 
@@ -1498,130 +1532,119 @@ def _contributor_entity_specs(identifier: str) -> list[QuerySpec]:
 def _treasury_entity_parts(identifier: str) -> tuple[int, str, dict[str, Any]]:
     """Split a validated ``<chain>:<address>`` id into its SQL inputs.
 
-    The chain is interpolated (it is an int already checked against
-    TREASURY_CHAINS) so the month/as-of CTEs can be chain-pinned rather than
-    grouped per chain; the address is always a bound parameter.
+    The chain is interpolated (an int already checked against TREASURY_CHAINS)
+    so the as-of/month CTEs are chain-pinned; the address is always a bound
+    parameter, never SQL text.
     """
     chain_text, address = identifier.split(":", 1)
     return int(chain_text), address, {"addr": address}
 
 
-def _treasury_entity_ctes(chain: int) -> tuple[str, str]:
-    """Chain-pinned ``asof`` and ``months`` CTEs.
-
-    The section specs group these per chain because they serve both chains at
-    once. An entity is one chain by construction, so pinning is both cheaper
-    and strictly stronger — there is no second chain to blend in.
-    """
-    pub = f"{TREASURY_DB}.{TREASURY_PUB_TABLE}"
-    asof = sql_loader.load_sql("governance", "_cte_treasury_asof_one_chain", pub=pub, job=TREASURY_JOB, chain=chain)
-    months = sql_loader.load_sql("governance", "_cte_treasury_months_one_chain", pub=pub, job=TREASURY_JOB, chain=chain, history_months=TREASURY_HISTORY_MONTHS)
-    return asof, months
+def _treasury_entity_spec(key: str, title: str, sql: str, basis: str, ttl: int,
+                          extra: dict[str, Any], exact: bool = True) -> QuerySpec:
+    compact = _compact_sql(sql)
+    return QuerySpec(key, title, compact, _treasury_binds(compact, extra), basis,
+                     "treasury", ttl, exact_count=exact)
 
 
 def _treasury_token_entity_specs(identifier: str) -> list[QuerySpec]:
-    """One token, on one chain: what it is, who holds it, how that moved.
+    """One token on one chain: identity, holders, full history, price history.
 
-    Two anti-spoof measures are computed here rather than left to the client,
-    because both need the whole chain's held set and the client only ever sees
-    one token's rows:
-
-    * ``symbol_collisions`` — how many OTHER held tokens claim this symbol. 19
-      distinct tokens in this treasury claim "USDC"; the real one and each fake
-      one all report 18, which is the honest answer: the symbol identifies
-      nothing, and the number says so instead of implying the high count means
-      "legitimate".
-    * ``treasury_share`` — a wallet's share of the treasury's whole position.
-      A contract that returns a constant balance to every caller yields exactly
-      1/n for all n wallets, which is a spoof signature no balance alone shows.
+    Classification and collision counts are computed over the chain's WHOLE held
+    set before the token filter — 18 tokens in this treasury claim "USDC", and
+    only the chain-wide view can say so. The as-of pipeline is chain-pinned; the
+    history reads only this token's served snapshots.
     """
     chain, address, params = _treasury_entity_parts(identifier)
-    src = f"{TREASURY_DB}.{TREASURY_VIEW}"
-    scalars = f"{TREASURY_DB}.{TREASURY_SCALARS_VIEW}"
-    asof_cte, months_cte = _treasury_entity_ctes(chain)
-    ltd_list = ", ".join(f"'{address_}'" for address_ in LTD_WALLETS) or "''"
-    label = f"{TREASURY_CHAINS[chain]} {address[:6]}…{address[-4:]}"
-
-    # Identity + the collision count, which needs the chain's whole held set.
-    # Held tokens aggregate to a few hundred rows before the window runs.
-    token_detail = sql_loader.load_sql("governance", "token_detail", asof_cte=asof_cte, src=src, scalars=scalars, job=TREASURY_JOB, chain=chain, label=label)
-
-    token_holders = sql_loader.load_sql("governance", "token_holders", asof_cte=asof_cte, src=src, job=TREASURY_JOB, chain=chain, ltd_list=ltd_list)
-
-    # Monthly per-wallet split for this token. Same shape as
-    # treasury_wallet_history so `walletSeries()` reads it unchanged.
-    holder_series = sql_loader.load_sql("governance", "holder_series", months_cte=months_cte, src=src, job=TREASURY_JOB, chain=chain, ltd_list=ltd_list)
-
+    chain_pred = f"chain_id = {chain}"
     chain_label = TREASURY_CHAINS[chain]
+    extra = {**params, "siblings": treasury_registry.siblings(chain, address)}
+    pipeline = _treasury_asof_pipeline(chain_pred)
+    rollup = sql_loader.load_sql("governance", "_cte_treasury_token_rollup")
+    detail = sql_loader.load_sql(
+        "governance", "token_detail", pipeline=pipeline, rollup=rollup,
+    )
+    holders = sql_loader.load_sql("governance", "token_holders", pipeline=pipeline)
+    holder_series = sql_loader.load_sql(
+        "governance", "holder_series",
+        pipeline=_treasury_month_pipeline(chain_pred, "target_address = {addr:String}", "1"),
+    )
+    prices = sql_loader.load_sql(
+        "governance", "token_price_history",
+        registry=sql_loader.load_sql("governance", "_cte_treasury_registry"),
+        hub=sql_loader.load_sql("governance", "_cte_treasury_hub",
+                                hub_table=TREASURY_PRICE_HUB),
+        chain=chain, pub=_tq(TREASURY_PUB_TABLE), job=TREASURY_JOB,
+    )
+    months = _treasury_coverage_sql(chain_pred)
     return [
-        QuerySpec(
-            "treasury_token_detail", "Token", token_detail, dict(params),
-            f"{chain_label}, latest published snapshot; symbol collisions counted "
-            "over the whole held set",
-            "treasury", 900,
-        ),
-        QuerySpec(
-            "treasury_token_holders", "Wallets holding it", token_holders,
-            dict(params),
-            f"{chain_label}, latest published snapshot; share is of the treasury's "
-            "own position, not of supply",
-            "treasury",
-        ),
-        QuerySpec(
-            "treasury_token_holder_series", "Wallet split over time",
-            holder_series, dict(params),
-            f"{chain_label}, month-end snapshots; top 6 wallets + other",
-            "treasury",
-        ),
+        _treasury_entity_spec(
+            "treasury_token_detail", "Token", detail,
+            f"{chain_label}; {_TREASURY_ASOF_BASIS}; symbol collisions counted over "
+            "the whole held set", TREASURY_ASOF_TTL, extra),
+        _treasury_entity_spec(
+            "treasury_token_holders", "Wallets holding it", holders,
+            f"{chain_label}; latest complete served snapshot; share is of the "
+            "treasury's own position, not of supply", TREASURY_ASOF_TTL, extra),
+        _treasury_entity_spec(
+            "treasury_token_holder_series", "Holdings over time", holder_series,
+            f"{chain_label}; {_TREASURY_HISTORY_BASIS}; every wallet",
+            TREASURY_HISTORY_TTL, extra, exact=False),
+        _treasury_entity_spec(
+            "treasury_token_price_history", "Price history", prices,
+            "daily dbt price-hub series through the reviewed registry, from the "
+            "token's first census publication; empty when the registry does not "
+            "price the token", TREASURY_HISTORY_TTL, extra, exact=False),
+        _treasury_entity_spec(
+            "treasury_token_months", "History completeness", months,
+            f"{chain_label}; per-month published vs served tokens",
+            TREASURY_HISTORY_TTL, extra, exact=False),
     ]
 
 
 def _treasury_wallet_entity_specs(identifier: str) -> list[QuerySpec]:
-    """One wallet, on one chain: what it holds now and how that moved.
-
-    This is where a wallet's full composition lives — and therefore the only
-    place its total can be valued. The Wallets board can only price GNO, because
-    ``treasury_by_wallet`` carries no per-token breakdown; it says so rather
-    than labelling a partial figure "wallet value".
-    """
+    """One wallet on one chain: summary, positions, full valued history, its
+    presence on every chain (the chain switcher) and month completeness."""
     chain, address, params = _treasury_entity_parts(identifier)
-    src = f"{TREASURY_DB}.{TREASURY_VIEW}"
-    asof_cte, months_cte = _treasury_entity_ctes(chain)
-    ltd_list = ", ".join(f"'{address_}'" for address_ in LTD_WALLETS) or "''"
-    gno = GNO_TOKENS.get(chain, "")
-    label = f"{TREASURY_CHAINS[chain]} {address[:6]}…{address[-4:]}"
-
-    wallet_detail = sql_loader.load_sql("governance", "wallet_detail", asof_cte=asof_cte, chain=chain, label=label, ltd_list=ltd_list, gno=gno, src=src, job=TREASURY_JOB)
-
-    # Positions carry the same two anti-spoof measures as the token page, so a
-    # wallet's list is readable without opening every token.
-    wallet_positions = sql_loader.load_sql("governance", "wallet_positions", asof_cte=asof_cte, chain=chain, src=src, job=TREASURY_JOB)
-
-    # Monthly per-token series for this wallet, ranked the same way as
-    # treasury_token_history: by how often the position actually moved, because
-    # airdropped dust is held from the moment it lands and never changes again.
-    wallet_series = sql_loader.load_sql("governance", "wallet_series", months_cte=months_cte, chain=chain, gno=gno, src=src, job=TREASURY_JOB, history_tokens=TREASURY_HISTORY_TOKENS)
-
+    chain_pred = f"chain_id = {chain}"
     chain_label = TREASURY_CHAINS[chain]
+    pipeline = _treasury_asof_pipeline(chain_pred)
+    detail = sql_loader.load_sql("governance", "wallet_detail", pipeline=pipeline)
+    positions = sql_loader.load_sql("governance", "wallet_positions", pipeline=pipeline)
+    # Only registry tokens can be valued in history; restricting the served
+    # lookup to them keeps the full-history read small.
+    series = sql_loader.load_sql(
+        "governance", "wallet_series",
+        pipeline=_treasury_month_pipeline(
+            chain_pred, "target_address IN {reg_token:Array(String)}",
+            "b.holder_address = {addr:String}",
+        ),
+    )
+    chains = sql_loader.load_sql(
+        "governance", "wallet_chains", pipeline=_treasury_asof_pipeline("1"),
+    )
+    months = _treasury_coverage_sql(chain_pred)
     return [
-        QuerySpec(
-            "treasury_wallet_detail", "Wallet", wallet_detail, dict(params),
-            f"{chain_label}, latest published snapshot", "treasury", 900,
-        ),
-        QuerySpec(
-            "treasury_wallet_positions", "Positions", wallet_positions,
-            dict(params),
-            f"{chain_label}, non-zero balances at the latest snapshot; share is of "
-            "the treasury's own position in each token",
-            "treasury",
-        ),
-        QuerySpec(
-            "treasury_wallet_series", "Positions over time", wallet_series,
-            dict(params),
-            f"{chain_label}, month-end snapshots; candidate pool ranked by how "
-            "often the position changed",
-            "treasury",
-        ),
+        _treasury_entity_spec(
+            "treasury_wallet_detail", "Wallet", detail,
+            f"{chain_label}; {_TREASURY_ASOF_BASIS}", TREASURY_ASOF_TTL, params),
+        _treasury_entity_spec(
+            "treasury_wallet_positions", "Positions", positions,
+            f"{chain_label}; every position at the latest complete served snapshot, "
+            "hidden classes flagged; share is of the treasury's own position",
+            TREASURY_ASOF_TTL, params),
+        _treasury_entity_spec(
+            "treasury_wallet_series", "Value over time", series,
+            f"{chain_label}; {_TREASURY_HISTORY_BASIS}; hub-priced registry tokens",
+            TREASURY_HISTORY_TTL, params, exact=False),
+        _treasury_entity_spec(
+            "treasury_wallet_chains", "Chains", chains,
+            "the same address at each served chain's latest complete snapshot",
+            TREASURY_ASOF_TTL, params),
+        _treasury_entity_spec(
+            "treasury_wallet_months", "History completeness", months,
+            f"{chain_label}; per-month published vs served tokens",
+            TREASURY_HISTORY_TTL, params, exact=False),
     ]
 
 
@@ -1687,6 +1710,8 @@ def _coverage_from_dataset(
         warning_codes.append("result_truncated")
     if spec.key in {"proposal_votes", "voter_votes"} and _choice_warning_scan(dataset):
         warning_codes.append("unsupported_choice_shape")
+    if spec.source == "treasury":
+        warning_codes.extend(_treasury_warning_scan(dataset, spec.key))
     coverage = {
         "basis": spec.basis,
         "source_kind": spec.source,
@@ -1703,6 +1728,52 @@ def _coverage_from_dataset(
         "warning_codes": warning_codes,
     }
     return coverage, warning_codes
+
+
+_TREASURY_MONTH_KEYS = {
+    "treasury_history_coverage", "treasury_wallet_months", "treasury_token_months",
+}
+
+
+def _treasury_warning_scan(dataset: CachedDataset, key: str) -> list[str]:
+    """Disclosure codes read from a treasury dataset's own rows (pure, no query).
+
+    Each code names something the numbers cannot say by themselves: an as-of that
+    is not a complete served day, a chain with nothing served, tokens carried from
+    an earlier day, a price hub lagging the balances, and months whose history is
+    partial, missing or never published.
+    """
+    columns = {name: index for index, name in enumerate(dataset.columns)}
+    codes: set[str] = set()
+
+    def cell(row: Any, name: str) -> Any:
+        index = columns.get(name, -1)
+        return row[index] if 0 <= index < len(row) else None
+
+    if key == "treasury_summary":
+        for row in dataset.rows:
+            status = str(cell(row, "as_of_status") or "")
+            if status == "partial":
+                codes.add("treasury_asof_partial")
+            elif status == "no_served_snapshot":
+                codes.add("treasury_chain_unserved")
+            if int(cell(row, "carried_tokens") or 0) > 0:
+                codes.add("treasury_tokens_carried")
+            as_of, hub = cell(row, "as_of"), cell(row, "hub_latest_date")
+            try:
+                if as_of and hub and (
+                    datetime.fromisoformat(str(hub)[:10])
+                    < datetime.fromisoformat(str(as_of)[:10]) - timedelta(days=2)
+                ):
+                    codes.add("treasury_price_hub_stale")
+            except ValueError:
+                codes.add("treasury_price_hub_stale")
+    elif key in _TREASURY_MONTH_KEYS:
+        statuses = {str(cell(row, "status") or "") for row in dataset.rows}
+        for status in ("gap", "partial", "unpublished"):
+            if status in statuses:
+                codes.add(f"treasury_history_{status}")
+    return sorted(codes)
 
 
 #: Negative-result cache: a failed dataset query is remembered so a manual
@@ -1863,7 +1934,6 @@ def _section_fingerprint(
         str(filters.get("forum_status", "")),
         str(filters.get("sort_by", "")),
         str(filters.get("chain_id", 0)),
-        str(filters.get("asset", "")),
         str(filters.get("exclude_ltd", False)),
     ])
 
@@ -1984,7 +2054,6 @@ def _apply_section_load(
     sort_by: str,
     force_refresh: bool,
     chain_id: int = 0,
-    asset: str = "",
     exclude_ltd: bool = False,
 ) -> tuple[MiniAppPayload, str]:
     """Apply a section scope: validate, evict stale data, load the CORE group.
@@ -2006,7 +2075,7 @@ def _apply_section_load(
     range_state = _range_state(start_at, end_at)
     filters = _validate_filters(
         section_key, query, proposal_state, proposal_type, quorum_status,
-        category_id, forum_status, sort_by, chain_id, asset, exclude_ltd,
+        category_id, forum_status, sort_by, chain_id, exclude_ltd,
     )
     fingerprint = _section_fingerprint(section_key, range_state, filters)
     stored_fingerprints = dict(current.get("section_fingerprints") or {})
@@ -2216,15 +2285,28 @@ _ENTITY_LABEL_COLUMN = {
     "voter": "voter_display",
     "forum_topic": "title",
     "forum_user": "username",
-    # NOT `symbol`: breadcrumbs render their label raw, and a token symbol is
-    # attacker-authored. The detail specs compose `entity_label` server-side
-    # from the chain name and the address, which cannot be spoofed.
-    "treasury_token": "entity_label",
-    "treasury_wallet": "entity_label",
 }
 
 
+def _treasury_entity_label(kind: str, identifier: str) -> str:
+    """Breadcrumb label for a treasury entity, from TRUSTED sources only: the
+    reviewed registry symbol (tokens) or the attributed wallet label, then the
+    chain name and a short address. Never the on-chain symbol — breadcrumbs
+    render their label raw, and 18 contracts in this treasury claim "USDC"."""
+    chain_text, address = identifier.split(":", 1)
+    chain = int(chain_text)
+    base = f"{TREASURY_CHAINS.get(chain, chain_text)} {address[:6]}\u2026{address[-4:]}"
+    if kind == "treasury_wallet":
+        label = treasury_registry.wallet_label(address)
+    else:
+        entry = treasury_registry.entry_at(chain, address, treasury_registry.PRESENT)
+        label = entry.symbol if entry else ""
+    return f"{label} \u00b7 {base}" if label else base
+
+
 def _entity_label(kind: str, identifier: str, datasets: dict[str, CachedDataset]) -> str:
+    if kind in ("treasury_token", "treasury_wallet"):
+        return _treasury_entity_label(kind, identifier)
     dataset = datasets.get(_ENTITY_DETAIL_KEY[kind])
     if dataset is not None and dataset.rows:
         columns = {name: idx for idx, name in enumerate(dataset.columns)}
@@ -2329,6 +2411,79 @@ def _apply_entity_load(
 SEARCH_CANDIDATE_CAP = 20
 
 
+def _treasury_overlay_wanted(
+    datasets: dict[str, CachedDataset],
+) -> tuple[dict[int, set[str]], dict[int, set[str]]]:
+    """(icon tokens, spot tokens) per chain from the attached treasury datasets.
+
+    Icons: every token not classified as spam. Spot: ONLY rows the SQL marked
+    ``spot_eligible`` (reviewed tokens without a hub price). Hub-priced tokens,
+    spam and retired mirrors never reach CoinGecko's price endpoint.
+    """
+    icons: dict[int, set[str]] = {}
+    spot: dict[int, set[str]] = {}
+    for dataset in datasets.values():
+        columns = {name: index for index, name in enumerate(dataset.columns)}
+        if "token_address" not in columns or "chain_id" not in columns:
+            continue
+        for row in dataset.rows:
+            try:
+                chain = int(row[columns["chain_id"]] or 0)
+            except (TypeError, ValueError):
+                continue
+            token = str(row[columns["token_address"]] or "").lower()
+            if chain <= 0 or not ADDRESS_RE.fullmatch(token):
+                continue
+            token_class = (
+                str(row[columns["token_class"]] or "") if "token_class" in columns else ""
+            )
+            if token_class != "spam":
+                icons.setdefault(chain, set()).add(token)
+            if "spot_eligible" in columns and str(row[columns["spot_eligible"]]) in ("1", "True"):
+                spot.setdefault(chain, set()).add(token)
+    return icons, spot
+
+
+def _treasury_spot_guard(
+    prices: dict[str, Any], datasets: dict[str, CachedDataset]
+) -> dict[str, list[str]]:
+    """Drop spot quotes that would value one position above
+    ``TREASURY_SPOT_MAX_NAV_SHARE`` of its chain's hub-priced holdings; return what
+    was dropped. Needs the section summary (chain NAV) — without it no guard runs,
+    and the UI still shows spot only as its own "today only" subtotal."""
+    summary = datasets.get("treasury_summary")
+    if summary is None:
+        return {}
+    cols = {name: index for index, name in enumerate(summary.columns)}
+    nav = {
+        str(row[cols["chain_id"]]): float(row[cols["nav_usd"]] or 0)
+        for row in summary.rows
+        if "chain_id" in cols and "nav_usd" in cols
+    }
+    units: dict[tuple[str, str], float] = {}
+    for dataset in datasets.values():
+        dcols = {name: index for index, name in enumerate(dataset.columns)}
+        if not {"chain_id", "token_address", "balance_units"} <= dcols.keys():
+            continue
+        for row in dataset.rows:
+            value = row[dcols["balance_units"]]
+            if value is None:
+                continue
+            key = (str(row[dcols["chain_id"]]), str(row[dcols["token_address"]]).lower())
+            units[key] = max(units.get(key, 0.0), float(value))
+    excluded: dict[str, list[str]] = {}
+    for chain, quotes in (prices.get("by_chain") or {}).items():
+        limit = TREASURY_SPOT_MAX_NAV_SHARE * nav.get(chain, 0.0)
+        if limit <= 0:
+            continue
+        for token in sorted(quotes):
+            if units.get((chain, token), 0.0) * float(quotes[token]) > limit:
+                excluded.setdefault(chain, []).append(token)
+        for token in excluded.get(chain, []):
+            quotes.pop(token, None)
+    return excluded
+
+
 def _search_candidates(ch: ClickHouseManager, query: str) -> list[dict[str, Any]]:
     """Classify a query into typed arms and return ranked candidates.
 
@@ -2388,6 +2543,11 @@ def _search_candidates(ch: ClickHouseManager, query: str) -> list[dict[str, Any]
             "role": str(row[columns["role"]]) if "role" in columns else "",
             "evidence_count": evidence,
         }))
+    # Treasury wallets and registry tokens resolve from the reviewed registry in
+    # Python (no query) and compete on the same exact/prefix/substring ladder.
+    for candidate in treasury_registry.search(q):
+        rank = int(candidate.pop("match_rank"))
+        ranked.append((rank, 0, candidate))
     ranked.sort(key=lambda item: (item[0], item[1], item[2]["entity_type"], item[2]["identifier"]))
     return [candidate for _, _, candidate in ranked[:SEARCH_CANDIDATE_CAP]]
 
@@ -2439,6 +2599,14 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
         and forum activity — never binding on-chain execution. Use ``query``
         to resolve a proposal id, voter address, GIP number, topic/user id,
         or title text; or pass ``entity_type`` + ``identifier`` directly.
+
+        ``section="treasury"`` opens the GnosisDAO treasury: ERC-20 holdings of
+        the 23 census wallets on Ethereum and Gnosis Chain at finalized blocks,
+        FULL month-end history since 2020, USD from the dbt daily price hub via a
+        reviewed address registry (spam hidden, spot only as a flagged fallback).
+        ``query`` also resolves treasury wallet labels/addresses and registry
+        token symbols; treasury entities are ``treasury_wallet`` /
+        ``treasury_token`` with identifier ``<chain_id>:<address>``.
         """
         try:
             section_key = section.strip().lower() or "overview"
@@ -2502,7 +2670,6 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
         sort_by: str = "",
         force_refresh: bool = False,
         chain_id: int = 0,
-        asset: str = "",
         exclude_ltd: bool = False,
     ) -> CallToolResult:
         """[App-only] Atomically load one Governance Explorer section."""
@@ -2510,8 +2677,7 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
             payload, summary = _apply_section_load(
                 ch, view_id, request_id, section, query, start_at, end_at,
                 proposal_state, proposal_type, quorum_status, category_id,
-                forum_status, sort_by, force_refresh, chain_id, asset,
-                exclude_ltd,
+                forum_status, sort_by, force_refresh, chain_id, exclude_ltd,
             )
             return mini_apps.payload_to_call_tool_result(payload, summary)
         except Exception as exc:
@@ -2604,12 +2770,13 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
         background fetches, with ``overlay_pending`` in the warnings telling the
         frontend that one retry a few seconds later will find more.
 
-        Prices are CURRENT spot and are applied client-side. A historical series
-        valued with them is a constant-price revaluation, NOT historical market
-        value — the UI is required to say so. Tokens CoinGecko does not list are
-        omitted rather than priced at 0: this treasury holds 19 distinct tokens
-        spoofing the symbol ``USDC``, and a fabricated $0 would make them
-        indistinguishable from the real one.
+        Treasury USD comes from the dbt price hub (server-side, historical). This
+        overlay is only the SPOT FALLBACK for reviewed tokens the hub does not
+        price (``spot_eligible`` rows): today's value, shown as its own subtotal,
+        never used in history. Spam, retired mirrors and hub-priced tokens are
+        never sent to CoinGecko's price endpoint; a quote that would dominate its
+        chain's hub total is dropped and listed in ``excluded_implausible``.
+        Tokens CoinGecko does not list are omitted, never priced at 0.
         """
         try:
             record = mini_apps.get_view(view_id)
@@ -2617,12 +2784,17 @@ def register_governance_tools(mcp, ch: ClickHouseManager) -> None:
                 return mini_apps.error_call_tool_result(
                     f"Unknown or expired view_id: {view_id}"
                 )
+            icon_tokens, spot_tokens = _treasury_overlay_wanted(record.datasets)
             icons, icons_pending = coingecko.build_icon_overlay(
-                record.datasets, token_columns=TREASURY_TOKEN_COLUMN_RE
+                record.datasets, token_columns=TREASURY_TOKEN_COLUMN_RE,
+                wanted=icon_tokens,
             )
             prices, prices_pending = coingecko.build_price_overlay(
-                record.datasets, token_columns=TREASURY_TOKEN_COLUMN_RE
+                record.datasets, token_columns=TREASURY_TOKEN_COLUMN_RE,
+                wanted=spot_tokens,
             )
+            prices["role"] = "spot_fallback"
+            prices["excluded_implausible"] = _treasury_spot_guard(prices, record.datasets)
             patch = {
                 "icon_overlay": icons,
                 "price_overlay": prices,

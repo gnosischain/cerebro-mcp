@@ -17,26 +17,56 @@ import { shortAddr } from "../../utils/format";
  * lure trying to smuggle a sentence into the table. */
 export const MAX_SYMBOL_LENGTH = 14;
 
-/** Strip what a ticker can never legitimately contain: C0/C1 controls, the
- * bidi overrides used to disguise text, and zero-width joiners. Collapse
- * whitespace, then cap. Returns "" when nothing legible survives, which the
- * caller renders as the unnamed state. */
-export function sanitizeSymbol(raw: unknown): string {
-  const text = String(raw ?? "");
+/** Everything attacker-authored display text can never legitimately need, in
+ * ONE unicode-aware class so no range can be forgotten on one code path:
+ *
+ *   \p{Cc} \p{Cf}   C0/C1 controls, and format characters: the bidi overrides
+ *                   (U+202A-202E, U+2066-2069) and zero-widths used to disguise
+ *                   one string as another;
+ *   \p{Co} \p{Cs}   private-use glyphs and lone surrogates (unrenderable);
+ *   \p{Default_Ignorable_Code_Point}
+ *                   invisible-by-definition characters that are NOT all Cf.
+ *                   U+034F COMBINING GRAPHEME JOINER is how the live treasury's
+ *                   "U+034F-USDC" spoof passed as USDC; VS16 (U+FE0F) and the
+ *                   Hangul fillers ride here too;
+ *   \p{Mn} \p{Me}   combining marks, stripped AFTER NFC so a precomposed "é"
+ *                   survives while a stack of marks does not;
+ *   U+2800 U+FFFC U+FFFD
+ *                   the braille blank, object-replacement and replacement
+ *                   characters, which render as nothing or as boxes;
+ *   < >             so a symbol can never open markup in string-built HTML
+ *                   (chart tooltips, the ChartCard data view).
+ *
+ * An emoji's base character is kept: stripping VS16 leaves the sword of a
+ * "crossed swords + VS16" symbol. */
+const UNPRINTABLE_RE =
+  /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Default_Ignorable_Code_Point}\p{Mn}\p{Me}\u{2800}\u{FFFC}\u{FFFD}<>]/gu;
+
+/** Sanitize untrusted display text (token symbols and names, wallet labels):
+ * NFC-normalize, strip the unprintable set above, collapse whitespace, then cap
+ * at `max` CODE POINTS with an ellipsis. Truncation counts code points, never
+ * UTF-16 units, so an emoji's surrogate pair is never split into a lone half.
+ * Returns "" when nothing legible survives: the caller renders the unnamed
+ * state (a short address), never a placeholder that could pass as a name. */
+export function sanitizeText(raw: unknown, max: number): string {
+  if (raw === null || raw === undefined) return "";
+  const text = String(raw);
   if (!text) return "";
   const cleaned = text
-    // C0/C1 control characters.
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
-    // Zero-width and bidi-override ranges — the standard way to disguise
-    // one string as another (U+200B-200F, U+202A-202E, U+2066-2069, U+FEFF).
-    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
+    .normalize("NFC")
+    .replace(UNPRINTABLE_RE, "")
     .replace(/\s+/g, " ")
     .trim();
   if (!cleaned) return "";
-  return cleaned.length > MAX_SYMBOL_LENGTH
-    ? `${cleaned.slice(0, MAX_SYMBOL_LENGTH - 1)}…`
-    : cleaned;
+  const cap = Number.isFinite(max) && max >= 1 ? Math.floor(max) : MAX_SYMBOL_LENGTH;
+  const points = Array.from(cleaned);
+  if (points.length <= cap) return cleaned;
+  return `${points.slice(0, Math.max(0, cap - 1)).join("").trimEnd()}…`;
+}
+
+/** A ticker: `sanitizeText` capped at MAX_SYMBOL_LENGTH. */
+export function sanitizeSymbol(raw: unknown): string {
+  return sanitizeText(raw, MAX_SYMBOL_LENGTH);
 }
 
 /** Deterministic monogram hue, mirroring ChainBadge's rule. Applied ONLY where
@@ -73,7 +103,9 @@ export function TokenIdentity({
   const showImage = Boolean(iconUrl && iconUrl !== failedUrl);
   const clean = sanitizeSymbol(symbol);
   const named = clean !== "";
-  const glyph = (clean || address.slice(2, 4) || "??").slice(0, 2).toUpperCase();
+  // Code points, not UTF-16 units: an emoji symbol must not render half a
+  // surrogate pair as its monogram.
+  const glyph = Array.from(clean || address.slice(2, 4) || "??").slice(0, 2).join("").toUpperCase();
   return (
     <span className="ma-token" title={named ? `${clean} — ${address}` : address}>
       {showImage ? (

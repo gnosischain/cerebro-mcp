@@ -10,7 +10,7 @@ res AS (
          max(b.balance_raw > 0) AS r_any_positive
   FROM @db.@view AS b
   WHERE b.chain_id = @chain AND b.job_name = '@job'
-    AND b.snapshot_date IN (SELECT ras_of FROM rasof)
+    AND b.snapshot_date = (SELECT ras_of FROM rasof)
     AND @pool_sql
   GROUP BY r_pool
 )

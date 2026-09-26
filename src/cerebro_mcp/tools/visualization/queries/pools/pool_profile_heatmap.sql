@@ -10,15 +10,21 @@
 -- A range is spread across the buckets it covers in proportion to the ticks it
 -- covers in each, so a full-range position contributes its liquidity evenly
 -- across the visible axis instead of being clipped away or drawn as one wall.
+--
+-- Candidate days come from each day's SERVED publication, once per day: a
+-- re-census left a second raw row that counted the day twice in dates_total and
+-- the stride, and a published-but-unserved day samples a column the tick view
+-- has no rows for. Lesson: published-is-not-served.
 @asof_cte,
 days_all AS (
-  SELECT p.snapshot_date AS d_date
+  SELECT DISTINCT p.snapshot_date AS d_date
   FROM @pub AS p
   WHERE p.job_name = '@job' AND p.target_kind = 'pool' AND p.chain_id = @chain
     AND p.target_address = {pool:String}
     AND NOT has(p.checks_passed, '@check')
     AND p.snapshot_date <= (SELECT as_of FROM asof)
     AND @window_pub
+    AND @served_pred
 ),
 grid AS (
   SELECT count() AS dates_total,

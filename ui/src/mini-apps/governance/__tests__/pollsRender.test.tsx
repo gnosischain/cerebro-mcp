@@ -16,6 +16,7 @@ import { ForumSection } from "../sections/ForumSection";
 import type { GovViewContext } from "../sections/common";
 import { MOCK_PAYLOAD } from "../devFixture";
 import { EMPTY_DRAFT } from "../state/toolArgs";
+import { DEFAULT_TREASURY_VIEW } from "../state/treasuryView";
 import type { GovernanceViewState } from "../types";
 
 function ctxFor(
@@ -50,6 +51,7 @@ function ctxFor(
     openLink: () => {},
     sendMessage: async () => true,
     aggregates: {},
+    treasury: { view: DEFAULT_TREASURY_VIEW, update: () => {}, now: 0 },
   };
 }
 

@@ -363,13 +363,16 @@ The app and Data Catalog use isolated split bundles. Their public assets remain
 **Agent tool**: `open_governance`
 **App-only tools**: `load_governance_section`, `load_governance_datasets`, `search_governance`, `load_governance_entity`, `load_governance_overlays`
 
-`load_governance_overlays` resolves CoinGecko token icons and CURRENT spot USD for the tokens
-visible in the view, patching `icon_overlay` / `price_overlay` / `price_overlay_at` into view
-state. It never blocks on the network (`overlay_pending` in the warnings means one retry will
-find more), and a token CoinGecko does not list is omitted rather than priced at 0 — this
-treasury holds 19 distinct tokens spoofing the symbol `USDC`, so a fabricated $0 would make
-them indistinguishable from the real asset. Prices are spot only: a historical series valued
-with them is a constant-price revaluation, not historical market value.
+`load_governance_overlays` resolves CoinGecko token icons and a SPOT FALLBACK price for the
+treasury. Treasury USD itself is server-side and historical: every as-of and month-end balance
+is valued with the dbt daily price hub (`dbt.int_execution_token_prices_daily`) through the
+reviewed address registry (`tools/visualization/treasury_registry.py`) — never through an
+on-chain symbol, because 18 contracts in this treasury claim `USDC`. The overlay only quotes
+reviewed tokens the hub cannot price (`spot_eligible` rows): today's value, shown as its own
+subtotal, never used in history. Spam, retired mirrors and hub-priced tokens are never sent to
+CoinGecko's price endpoint, a quote that would dominate its chain's hub total is dropped
+(`excluded_implausible`), and an unlisted token is omitted rather than priced at 0. It never
+blocks on the network (`overlay_pending` means one retry will find more).
 
 Read-only governance intelligence over `governance_db` (populated by the
 click-runner Snapshot + Discourse ingestors, daily cadence). Four sections —
@@ -387,17 +390,23 @@ are retained per view (four sections + one entity), so tab returns with an
 unchanged scope fingerprint are query-free. All eight `governance_db` tables
 are `ReplacingMergeTree(ingested_at)` re-inserted by the daily ingestors, so
 every `governance_db` read carries `FINAL`. The two external planes are the
-exception: `rpc_log_indexer.v_delegate_events_gnosis` (delegations) and
-`rpc_state_indexer.v_treasury_balances` (treasury) resolve dedup internally
-and are queried WITHOUT `FINAL`. Treasury reads additionally MUST pin
-`job_name = 'daily_treasury'` — the view spans every census job, and its base
-table holds billions of rows since the holder census landed. Snapshot dates
-are resolved from `census_publications` (never by aggregating the view — that
-OOMs at the server cap), and every view scan carries a
-`snapshot_date IN (SELECT ...)` prune beside its asof/months join, because a
-JOIN alone never prunes (lesson: `fat-view-join-never-prunes`). The history
-datasets are bounded to the latest `TREASURY_HISTORY_MONTHS` (24) month-end
-snapshots per chain, disclosed in each dataset's basis. Freshness is tracked as two independent
+exception: `rpc_log_indexer.v_delegate_events_gnosis` (delegations) resolves dedup internally
+and is queried WITHOUT `FINAL`. The treasury plane reads `rpc_state_indexer` through a SERVED
+two-step read (lesson: `published-is-not-served`): dates resolve from `v_publications_current`
+(as-of = latest complete served day, with per-token carry up to 7 days, counted; history = each
+token's latest served day in the month's last 7 published days), then `token_balances` is read
+for exactly those served attempts — `job_name = 'daily_treasury'` pin, a constant date bound and a
+4-tuple IN on `attempt_id`, deduplicated with `argMax(balance_raw, insert_version)` (FINAL is
+forbidden on that billions-row raw table). Full history (every month-end since 2020 on both
+chains) is one fan-out dataset (`grain` chain / wallet / token) cached for 6h, with a
+per-month completeness dataset so a gap is disclosed, never drawn as a zero. Tokens are
+classified in SQL — priced / listed / unverified / spam (impersonation, lure, obfuscated,
+malformed, mass_airdrop) / retired_mirror (Monerium EURe/GBPe v1 after the 2024-08-25
+migration) — so every total excludes spam identically; the UI hides spam by default with a
+reason per token. Every section dataset carries both chains and all wallets (with `*_ex_ltd`
+companions): the chain filter and the Gnosis Ltd toggle are client-side. Wallet labels come
+from the koeppelmann/GnosisDAO_treasury README (attributed). Totals are ERC-20 holdings only —
+native ETH/xDAI and non-tokenized positions are not indexed. Freshness is tracked as two independent
 clocks per source (ingestion vs latest activity; `source_stale` after 24h).
 
 Cross-source linking is two-tier and never fuzzy: the author-declared
@@ -466,9 +475,18 @@ cannot exist. A missing panel reads as "there is no liquidity", which would be f
   takes it. The `v_*` views resolve dedup internally and must never be FINAL'd. The
   raw `pool_*` tables are never read at all: their sort key includes `attempt_id`,
   so even FINAL leaves one row per retry.
-- **Dates resolve from `census_publications`**, never by aggregating a view, and
-  every view scan carries a constant-folding `IN` prune beside its join
-  (`fat-view-join-never-prunes`).
+- **Dates resolve from SERVED publications** (`v_publications_current`), never
+  from raw `census_publications` alone and never by aggregating a view. Raw
+  publications supply the newest candidate days; the as-of is the newest candidate
+  whose served pool count reaches 98% of both its published count and the peak of
+  the 7 candidates before it, so a run still writing (the CL job publishes over
+  1-4.5 hours every morning) or stopped part-way (2026-08-23) is skipped. Every
+  per-pool publication fact (probe flags, provenance, heatmap days) is pinned to the
+  served attempt — an unpinned probe join counted 193 re-censused pools twice on
+  2026-09-10 (`published-is-not-served`). Every view scan carries a constant-folding
+  prune beside its join — the scalar `= (SELECT as_of FROM asof)`, which ClickHouse
+  evaluates once per query, where each `IN` context would re-run the resolver
+  (`fat-view-join-never-prunes`, `ch-cte-inlined-per-reference`).
 - **Every date column is an ISO string.** With an unbounded as-of predicate
   ClickHouse folds the aggregate to a constant and the driver returns the raw day
   number, so the same column arrived as `2026-09-16` on one path and `20712` on

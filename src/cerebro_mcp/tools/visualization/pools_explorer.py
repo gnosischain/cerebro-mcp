@@ -36,9 +36,16 @@ sides):
   internally and must NOT be FINAL'd. The raw ``pool_*`` tables are never read
   at all: their sort key includes ``attempt_id``, so even FINAL leaves one row
   per retry.
-* **Dates resolve from ``census_publications``**, never by aggregating a view,
-  and every view scan carries a constant-folding ``IN`` prune beside its join
-  (lesson: fat-view-join-never-prunes).
+* **Dates resolve from SERVED publications** (``v_publications_current``),
+  never from raw ``census_publications`` alone and never by aggregating a view.
+  A raw publication is what an attempt WROTE; the views serve only the eligible,
+  conflict-free attempt. The as-of is the latest COMPLETE served day among the
+  newest raw-published candidates — a day still being written (the CL job
+  publishes over hours) or stopped part-way is skipped — and every per-pool
+  publication fact is pinned to the served attempt, so a re-census's second raw
+  row never fans a pool out (lesson: published-is-not-served). Every view scan
+  carries a constant-folding ``IN`` prune beside its join (lesson:
+  fat-view-join-never-prunes).
 * **Every date column is an ISO string.** When the as-of predicate is
   unbounded ClickHouse folds the whole aggregate to a constant and the driver
   returns the raw day number, so the same column arrives as ``2026-09-16`` on
@@ -86,6 +93,10 @@ BALANCES_VIEW = "v_pool_token_balances_published"
 METADATA_VIEW = "v_token_metadata_current"
 ANCHORS_VIEW = "v_day_anchors_canonical"
 PUB_TABLE = "census_publications"
+#: What the v_pool_* views actually serve: one eligible, conflict-free attempt
+#: per (job, pool, day). Never scanned unbounded — it OOMs over the pool jobs'
+#: history — only for candidate days, one pool, or one resolved date.
+SERVED_VIEW = "v_publications_current"
 #: The check the indexer records when it decided a pool was too quiet to be
 #: worth reading every initialized tick for. Its PRESENCE means the ticks were
 #: NOT read, which is why every consumer negates it.
@@ -98,6 +109,15 @@ CL_CLASSES = ("uniswap_v3", "swapr_v3_algebra")
 RESERVES_CLASSES = ("balancer_v2", "balancer_v3")
 POOL_CLASSES = frozenset(CL_CLASSES + RESERVES_CLASSES)
 POOL_FAMILIES = frozenset({"cl", "reserves_only"})
+
+#: As-of resolution (see queries/pools/_cte_asof.sql). The newest
+#: ASOF_CANDIDATE_DAYS raw-published days on or before the bound are the
+#: candidates; a candidate is complete when its served pool count reaches
+#: ASOF_COMPLETENESS_RATIO of both its own published count and the peak served
+#: over the ASOF_PEAK_DAYS candidates before it.
+ASOF_CANDIDATE_DAYS = 21
+ASOF_PEAK_DAYS = 7
+ASOF_COMPLETENESS_RATIO = 0.98
 
 #: Earliest snapshot either pool job published. Used to reject an ``as_of``
 #: before the plane existed rather than returning a silently empty app.
@@ -254,6 +274,12 @@ class QuerySpec:
     #: bounded by construction.
     exact_count: bool = True
 
+    def __post_init__(self) -> None:
+        # Every pool statement is compacted where it is built: the served as-of
+        # resolvers took pool_detail to 9,979 characters against the 10,000-char
+        # MAX_QUERY_LENGTH, which must also fit the exact-count wrapper.
+        object.__setattr__(self, "sql", sql_loader.compact(self.sql))
+
 
 _BUNDLE = mini_apps.StaticBundle(
     "pools_explorer.html",
@@ -275,24 +301,49 @@ def get_pools_explorer_diagnostics() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _PUB = f"{POOLS_DB}.{PUB_TABLE}"
+_SERVED = f"{POOLS_DB}.{SERVED_VIEW}"
 _CL_CLASS_LIST = ", ".join(f"'{name}'" for name in CL_CLASSES)
 
 
+def _complete_expr(served: str, published: str, day: str) -> str:
+    """Whether a candidate day is a complete served snapshot (see the file)."""
+    return sql_loader.load_sql(
+        "pools", "_expr_served_day_complete", served=served, published=published,
+        day=day, ratio=ASOF_COMPLETENESS_RATIO, peak_days=ASOF_PEAK_DAYS,
+    )
+
+
 def _asof_cte(as_of: str) -> str:
-    """The as-of resolver. ``as_of`` is "" for the newest published day or an
-    ISO date for the newest day on or before it — never an equality, so a day
-    the indexer skipped resolves backwards instead of emptying the app."""
+    """The as-of resolver. ``as_of`` is "" for the newest complete served day or
+    an ISO date for the newest one on or before it — never an equality, so a day
+    the indexer skipped, served only in part, or is still writing resolves
+    backwards instead of emptying or thinning the app."""
     bound = "1"
     if as_of:
         bound = sql_loader.load_sql("pools", "_pred_asof_upper_bound")
     return sql_loader.load_sql(
-        "pools", "_cte_asof", pub=_PUB, job=CL_JOB, chain=CHAIN_ID, asof_bound=bound
+        "pools", "_cte_asof", pub=_PUB, served=_SERVED, job=CL_JOB, chain=CHAIN_ID,
+        asof_bound=bound, candidate_days=ASOF_CANDIDATE_DAYS,
+        complete=_complete_expr("s.as_served", "r.ar_published", "r.ar_date"),
     )
 
 
 def _reserves_asof_cte() -> str:
     return sql_loader.load_sql(
-        "pools", "_cte_reserves_asof", pub=_PUB, job=RESERVES_JOB, chain=CHAIN_ID
+        "pools", "_cte_reserves_asof", pub=_PUB, served=_SERVED, job=RESERVES_JOB,
+        chain=CHAIN_ID, candidate_days=ASOF_CANDIDATE_DAYS,
+        complete=_complete_expr("s.rs_served", "r.rr_published", "r.rr_date"),
+    )
+
+
+def _served_pool_pred(alias: str, jobs: tuple[str, ...], bound: str) -> str:
+    """Keep only ONE pool's publication rows that the served view selected.
+    ``bound`` is a predicate on alias ``v`` that limits the served read to the
+    days the caller can use."""
+    return sql_loader.load_sql(
+        "pools", "_pred_served_pool_attempts", alias=alias, served=_SERVED,
+        jobs=", ".join(f"'{job}'" for job in jobs), chain=CHAIN_ID,
+        served_bound=bound,
     )
 
 
@@ -312,8 +363,8 @@ def _meta_cte() -> str:
 
 def _probe_cte() -> str:
     return sql_loader.load_sql(
-        "pools", "_cte_probe_flags", pub=_PUB, job=CL_JOB, chain=CHAIN_ID,
-        check=BELOW_THRESHOLD_CHECK,
+        "pools", "_cte_probe_flags", pub=_PUB, served=_SERVED, job=CL_JOB,
+        chain=CHAIN_ID, check=BELOW_THRESHOLD_CHECK,
     )
 
 
@@ -335,12 +386,13 @@ def _res_cte(pool_sql: str = "1") -> str:
     )
 
 
-def _probe_days_cte() -> str:
+def _probe_days_cte(days: int) -> str:
     """Per-day tick-probe flag for one pool, so a history series can mark the
-    days the indexer did not read its ticks."""
+    days the indexer did not read its ticks. Bounded by the series' own window."""
     return sql_loader.load_sql(
         "pools", "_cte_probe_days", pub=_PUB, job=CL_JOB, chain=CHAIN_ID,
-        check=BELOW_THRESHOLD_CHECK,
+        check=BELOW_THRESHOLD_CHECK, window_pub=_window_pred("p", days),
+        served_pred=_served_pool_pred("p", (CL_JOB,), _window_pred("v", days)),
     )
 
 def _ranges_cte(pool_sql: str, date_sql: str) -> str:
@@ -752,24 +804,30 @@ def _pool_entity_specs(
             "price_raw", "token0_decimals", "token1_decimals"
         ),
         fee_band_sql=_fee_band("fee"), db=POOLS_DB, view=STATE_VIEW,
-        chain=CHAIN_ID, cl_job=CL_JOB, pub=_PUB, check=BELOW_THRESHOLD_CHECK,
+        chain=CHAIN_ID, cl_job=CL_JOB,
     )
     facts = sql_loader.load_sql(
         "pools", "pool_publication_facts", asof_cte=asof_cte,
         reserves_asof_cte=_reserves_asof_cte(), pub=_PUB, db=POOLS_DB,
         anchors_view=ANCHORS_VIEW, chain=CHAIN_ID, cl_job=CL_JOB,
         reserves_job=RESERVES_JOB, check=BELOW_THRESHOLD_CHECK,
+        served_pred=_served_pool_pred(
+            "p", (CL_JOB, RESERVES_JOB),
+            sql_loader.load_sql("pools", "_pred_asof_either", alias="v"),
+        ),
     )
     reserves_history = sql_loader.load_sql(
         "pools", "pool_reserves_history", asof_cte=asof_cte, db=POOLS_DB,
         view=BALANCES_VIEW, meta_view=METADATA_VIEW, chain=CHAIN_ID,
         job=RESERVES_JOB, window_state=_window_pred("b", days),
     )
-    as_of_note = f"as of {as_of}" if as_of else "as of the newest published day"
+    as_of_note = (
+        f"as of {as_of}" if as_of else "as of the newest complete served day"
+    )
     specs = [
         QuerySpec("pool_detail", "Pool", detail, dict(params), as_of_note),
         QuerySpec("pool_publication_facts", "Provenance", facts, dict(params),
-                  "the publication behind this pool-day, per job"),
+                  "the served publication behind this pool-day, per job"),
         QuerySpec("pool_reserves_history", "Reserves over time", reserves_history,
                   dict(params),
                   "raw balances; scaled to units only where decimals resolved",
@@ -799,7 +857,7 @@ def _pool_entity_specs(
     state_history = sql_loader.load_sql(
         "pools", "pool_state_history", asof_cte=asof_cte,
         cfg_cte=_cfg_cte("c.target_address = {pool:String}"), meta_cte=_meta_cte(),
-        probe_days_cte=_probe_days_cte(),
+        probe_days_cte=_probe_days_cte(days),
         asset_decimals_sql=_asset_decimals("cfg.assets"),
         price_raw_sql=_price_raw("s"), db=POOLS_DB, view=STATE_VIEW,
         chain=CHAIN_ID, job=CL_JOB, window_state=_window_pred("s", days),
@@ -807,7 +865,7 @@ def _pool_entity_specs(
     fee_growth = sql_loader.load_sql(
         "pools", "pool_fee_growth", asof_cte=asof_cte,
         cfg_cte=_cfg_cte("c.target_address = {pool:String}"), meta_cte=_meta_cte(),
-        probe_days_cte=_probe_days_cte(),
+        probe_days_cte=_probe_days_cte(days),
         asset_decimals_sql=_asset_decimals("cfg.assets"), db=POOLS_DB,
         view=STATE_VIEW, chain=CHAIN_ID, job=CL_JOB,
         window_state=_window_pred("s", days),
@@ -820,6 +878,7 @@ def _pool_entity_specs(
         ),
         pub=_PUB, db=POOLS_DB, view=STATE_VIEW, chain=CHAIN_ID, job=CL_JOB,
         check=BELOW_THRESHOLD_CHECK, window_pub=_window_pred("p", heat_days),
+        served_pred=_served_pool_pred("p", (CL_JOB,), _window_pred("v", heat_days)),
         max_dates=HEATMAP_MAX_DATES, tick_buckets=HEATMAP_TICK_BUCKETS,
         axis_pad=HEATMAP_AXIS_PAD_TICKS,
     )

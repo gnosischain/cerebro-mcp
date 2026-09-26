@@ -43,6 +43,13 @@ separate corpus.
 - [dataset-column-order-is-a-contract](dataset-column-order-is-a-contract.md)
   `observed` — reordering a SELECT list re-labelled every field for consumers that
   read rows positionally.
+- [published-is-not-served](published-is-not-served.md) `observed` — a raw
+  `census_publications` row is not a served snapshot: 19 Ethereum days published
+  under an interim config hash served nothing, and month-ends resolved from raw
+  publications emptied the July treasury bucket with no error. Resolve dates from
+  `v_publications_current`; count raw rows with `uniqExact` (re-census doubles them)
+  and pin any per-target fact joined from the raw table to the served attempt — the
+  pools probe join fanned 193 re-censused pools out on 2026-09-10.
 - [dbt-sqlx-silently-not-compiled](dbt-sqlx-silently-not-compiled.md) `observed` — a
   model renamed to `.sqlx` left dbt's DAG with no error and froze ~12 days behind
   chain head; a whitelist in the same model claimed "COMPLETE · 7 of 7" for a 9-leg
@@ -57,12 +64,16 @@ separate corpus.
   contradictory; this record resolves them.
 - [ch-cte-inlined-per-reference](ch-cte-inlined-per-reference.md) `enforced` — a CTE
   is substituted per reference, not materialised; a 4-reference CTE exhausted the
-  2 GiB cap. The guard for it had a line-initial-regex bug that made it check nothing.
+  2 GiB cap. Every `IN (SELECT ... FROM cte)` re-runs it too; only identical scalar
+  subqueries run once. The guard's line-initial-regex bug (first CTE unchecked)
+  recurred in the pools suite.
 - [fat-view-join-never-prunes](fat-view-join-never-prunes.md) `observed` — a JOIN on
   resolved anchor dates never prunes a fat view (only constant-foldable predicates
   prune); when the holder census grew token_balances to 2.3B rows, the treasury
   plane's asof-JOIN pattern took every dataset down with total-cap 241s. Resolve
-  dates from the cheap authoritative table and add an IN-prune beside every scan.
+  dates from a cheap authoritative table (for served data: `v_publications_current`,
+  see published-is-not-served) and add a constant-folding prune beside every scan —
+  a scalar `= (SELECT as_of FROM asof)` for one date, IN for a set.
 - [ch-alias-in-where-illegal-aggregation](ch-alias-in-where-illegal-aggregation.md)
   `enforced` — an aggregate alias beside a same-level `WHERE` raises code 184, and
   only on the widest scope arm.

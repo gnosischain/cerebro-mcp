@@ -11,21 +11,22 @@
 @res_cte,
 @life_cte,
 hist AS (
+  -- The pool's whole SERVED state history, as one aggregate row.
+  -- profile_available_from is the first served day with initialized ticks:
+  -- tick_count > 0 on a served state row IS the served attempt's probe verdict
+  -- (874,228 of 874,228 CL pool-days agree, 2023-09..2026-09, measured
+  -- 2026-09-26), so no raw publications read is needed. The one this replaced took
+  -- the first PUBLISHED probe verdict, which is not served data (lesson:
+  -- published-is-not-served).
+  -- minOrNullIf, not minIf: a pool the indexer never probed has no such day, and
+  -- a bare min() over an empty set returns the Date default 1970-01-01 — which
+  -- the UI printed as "profile since 1970-01-01" for a pool with no profile at
+  -- any date. Nothing measured means NULL.
   SELECT countIf(h.liquidity > 0) AS days_live,
-         min(h.snapshot_date) AS state_from
+         minOrNullIf(h.snapshot_date, h.tick_count > 0) AS profile_available_from
   FROM @db.@view AS h
   WHERE h.chain_id = @chain AND h.job_name = '@cl_job'
     AND h.pool_address = {pool:String}
-),
-probed_from AS (
-  -- minOrNull, not min: a pool the indexer never probed has NO rows here, and a
-  -- bare min() over an empty set returns the Date default 1970-01-01 — which the
-  -- UI then printed as "profile since 1970-01-01" for a pool that has no profile
-  -- at any date. Nothing measured means NULL.
-  SELECT minOrNull(p.snapshot_date) AS profile_available_from
-  FROM @pub AS p
-  WHERE p.job_name = '@cl_job' AND p.target_kind = 'pool' AND p.chain_id = @chain
-    AND p.target_address = {pool:String} AND NOT has(p.checks_passed, '@check')
 )
 SELECT
   cfg.pool_address AS pool_address,
@@ -84,12 +85,13 @@ SELECT
   toString(lf.first_published) AS first_published,
   toString(lf.last_published) AS last_published,
   lf.days_published AS days_published,
-  (SELECT days_live FROM hist) AS days_live,
-  toString((SELECT profile_available_from FROM probed_from)) AS profile_available_from,
+  hist.days_live AS days_live,
+  toString(hist.profile_available_from) AS profile_available_from,
   cfg.deployment_block AS deployment_block,
   if(has_state, toNullable(st.st_anchor_block), NULL) AS anchor_block
 FROM cfg
 CROSS JOIN mm
+CROSS JOIN hist
 LEFT JOIN st ON st.st_pool = cfg.pool_address
 LEFT JOIN probe AS pr ON pr.p_pool = cfg.pool_address
 LEFT JOIN res AS rs ON rs.r_pool = cfg.pool_address

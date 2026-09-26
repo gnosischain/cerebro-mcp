@@ -1,19 +1,12 @@
 // Frontend-only view partition of the `treasury` section.
 //
-// The section loads ~13 panels and 11 charts in one scroll, which is more than
-// anyone can navigate. These tabs slice that into ≤3 panels per screen WITHOUT
-// changing the server contract: every tab reads the same SECTION_GROUPS the
-// section already loads.
-//
-// `groups` is not gating. Treasury has only two non-core groups and the loader
-// runs two in flight, so they already arrive together — there is no queue to
-// jump. It names which GroupGates a view renders, so skeletons appear only in
-// the tab that needs them, and it is exactly the set an on-demand loader would
-// sync if that ever becomes worth doing.
+// Every tab reads the same two SECTION_GROUPS (core + history) the section
+// loads; `groups` names which GroupGates a tab renders, so skeletons appear
+// only where a tab actually waits on a group.
 
-export type TreasuryTabId = "portfolio" | "tokens" | "wallets" | "history";
+export type TreasuryTabId = "overview" | "assets" | "wallets" | "history";
 
-export const DEFAULT_TREASURY_TAB: TreasuryTabId = "portfolio";
+export const DEFAULT_TREASURY_TAB: TreasuryTabId = "overview";
 
 export interface TreasuryTab {
   id: TreasuryTabId;
@@ -23,25 +16,36 @@ export interface TreasuryTab {
 }
 
 export const TREASURY_TABS: readonly TreasuryTab[] = [
-  // Portfolio is first and default: it answers "how much is there", and it is
-  // the only tab that needs nothing beyond `core`.
-  { id: "portfolio", label: "Portfolio", groups: ["core"] },
-  // `token_history` is a group of its own because treasury_token_history is the
-  // most expensive read in the app and used to hold its two siblings up behind
-  // the 3-worker pool. Only the two tabs that actually read it name it: Tokens
-  // for the per-row sparklines, History for the holdings-over-time chart.
-  { id: "tokens", label: "Tokens", groups: ["core", "insights", "token_history"] },
+  // Overview answers "how much is there, and how did it get here".
+  { id: "overview", label: "Overview", groups: ["core", "history"] },
+  // Assets and Wallets read history for sparklines and the by-wallet chart.
+  { id: "assets", label: "Assets", groups: ["core", "history"] },
   { id: "wallets", label: "Wallets", groups: ["core", "history"] },
-  { id: "history", label: "History", groups: ["history", "token_history"] },
+  { id: "history", label: "History", groups: ["history"] },
 ];
+
+/** Tab ids of the previous layout, kept working for shared links. */
+export const TREASURY_TAB_ALIASES: Readonly<Record<string, TreasuryTabId>> = {
+  portfolio: "overview",
+  tokens: "assets",
+};
 
 export function isTreasuryTab(value: unknown): value is TreasuryTabId {
   return TREASURY_TABS.some((tab) => tab.id === value);
 }
 
+/** Resolve a tab id (or an old alias); null when unrecognised. */
+export function resolveTreasuryTab(value: unknown): TreasuryTabId | null {
+  if (isTreasuryTab(value)) return value;
+  if (typeof value === "string" && Object.prototype.hasOwnProperty.call(TREASURY_TAB_ALIASES, value)) {
+    return TREASURY_TAB_ALIASES[value];
+  }
+  return null;
+}
+
 /** Coerce anything (a URL param, stale state) to a real tab. */
 export function toTreasuryTab(value: unknown): TreasuryTabId {
-  return isTreasuryTab(value) ? value : DEFAULT_TREASURY_TAB;
+  return resolveTreasuryTab(value) ?? DEFAULT_TREASURY_TAB;
 }
 
 export function groupsForTab(tab: TreasuryTabId): readonly string[] {

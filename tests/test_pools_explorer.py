@@ -492,9 +492,80 @@ def test_final_belongs_to_exactly_one_relation_on_this_plane():
         assert not re.search(r"census_publications\s+(?:AS\s+\w+\s+)?FINAL", body), key
 
 
-def test_dates_resolve_from_publications_and_every_view_scan_is_pruned():
-    """A JOIN on resolved dates never prunes a ClickHouse scan; an uncorrelated
-    IN folds to a constant set and does. Lesson: fat-view-join-never-prunes."""
+_SERVED = f"{px.POOLS_DB}.{px.SERVED_VIEW}"
+_PUB = f"{px.POOLS_DB}.{px.PUB_TABLE}"
+_CTE_START = re.compile(r"(?m)^\s*(?:WITH\s+)?(\w+) AS \(")
+#: A served pin: the publication row's attempt matched against the served view,
+#: as a tuple (probe) or inside the has()-array predicate (one pool's calendar).
+_SERVED_PIN = re.compile(r"\(p\.\w+, (?:p\.\w+, )?p\.attempt_id\)")
+#: Every segment that reads the raw publications ledger, and why it may. PINNED
+#: segments carry per-pool facts that are joined to served data (probe flags,
+#: provenance, heatmap days), so they must keep only the served attempt — an
+#: unpinned read fanned each re-censused pool into two joined rows. COUNTED
+#: segments report what was PUBLISHED (as-of candidates, lifetimes, clocks,
+#: calendars) and may stay raw, but only as distinct counts. A new raw read has to
+#: be classified here, which forces the decision rather than inheriting a default.
+_PUB_PINNED = frozenset({"probe", "probe_days", "days_all", "pool_publication_facts"})
+_PUB_COUNTED = frozenset({
+    "asof_raw", "rasof_raw", "life", "latest", "pubs", "daily",
+    "publication_calendar", "coverage_summary", "source_freshness",
+})
+
+
+def _segments(key: str, code: str) -> dict[str, str]:
+    """Top-level CTE bodies by name, and the final statement under the spec key."""
+    segments: dict[str, str] = {}
+    end = 0
+    for match in _CTE_START.finditer(code):
+        if match.start() < end:  # nested inside the previous CTE
+            continue
+        depth, i = 1, match.end()
+        while depth:
+            depth += {"(": 1, ")": -1}.get(code[i], 0)
+            i += 1
+        segments[match.group(1)] = code[match.end():i - 1]
+        end = i
+    segments[key] = code[end:]
+    return segments
+
+
+def _pool_read_problems(key: str, code: str) -> list[str]:
+    """Problems with a pools statement's date resolution and publication reads;
+    empty means compliant. Shared by the guard and its negative fixture, so the
+    guard is proven to reject the shapes it exists to reject."""
+    problems: list[str] = []
+    resolves = bool(re.search(r"(?m)^\s*(?:WITH\s+)?r?asof AS \(", code))
+    if (resolves or "rpc_state_indexer.v_pool_" in code) and _SERVED not in code:
+        problems.append("dates or views without served publications")
+    if re.search(r"max\(\s*snapshot_date\s*\)\)?\s+AS\s+r?as_of\b", code):
+        problems.append("as-of resolved from raw publications")
+    if re.search(r"IN \(SELECT r?as_of FROM r?asof\)", code):
+        problems.append("as-of prune as an IN subquery (re-runs the resolver per context)")
+    for expr, cte in re.findall(r"\(SELECT\s+(.+?)\s+FROM\s+(r?asof)\)", code):
+        if expr != ("as_of" if cte == "asof" else "ras_of"):
+            problems.append(f"a second scalar form over {cte}: {expr}")
+    for name, body in _segments(key, code).items():
+        if _PUB not in body:
+            continue
+        if name in _PUB_PINNED:
+            if not (_SERVED_PIN.search(body) and _SERVED in body):
+                problems.append(f"{name}: raw publications not pinned to the served attempt")
+        elif name in _PUB_COUNTED:
+            if re.search(r"\bcountIf\([^)]*\bp\.", body) or re.search(
+                r"\bcount\(\)(?! AS publications_total)", body
+            ):
+                problems.append(f"{name}: raw publication rows counted, not distinct pools")
+        else:
+            problems.append(f"{name}: unclassified raw publications read")
+    return problems
+
+
+def test_dates_resolve_from_served_publications_and_every_view_scan_is_pruned():
+    """A raw census_publications row is not a served snapshot (lesson:
+    published-is-not-served): every as-of resolves from v_publications_current,
+    every per-pool publication fact is pinned to the served attempt, and every
+    view scan is pruned by a constant-folding predicate beside its join (lesson:
+    fat-view-join-never-prunes)."""
     #: live_pool_trend at window="all" deliberately scans the whole state view —
     #: that is what "every published day" means, and it is why the dataset sits
     #: alone in its group with exact_count=False and a 3600s TTL. Measured
@@ -502,13 +573,12 @@ def test_dates_resolve_from_publications_and_every_view_scan_is_pruned():
     #: budget. Nothing else on this plane is allowed an unbounded view scan.
     ALL_HISTORY_SCANS = {"live_pool_trend"}
     scan = re.compile(r"(?:FROM|JOIN)\s+rpc_state_indexer\.(v_pool_\w+)\s+AS\s+(\w+)")
+    pinned: set[str] = set()
     for spec in _all_specs():
         body = sql_code(spec.sql)
-        if not re.search(r"rpc_state_indexer\.v_pool_", body):
-            continue
-        assert "census_publications" in body, f"{spec.key}: no publications anchor"
-        assert not re.search(r"max\(\s*snapshot_date\s*\)\s*(?:AS \w+\s*)?FROM\s+"
-                             r"rpc_state_indexer\.v_", body), spec.key
+        assert _pool_read_problems(spec.key, body) == [], spec.key
+        pinned |= {name for name, seg in _segments(spec.key, body).items()
+                   if name in _PUB_PINNED and _PUB in seg}
         if spec.key in ALL_HISTORY_SCANS:
             continue
         # Alias-aware, per scan site. An earlier version only asked whether a
@@ -518,13 +588,67 @@ def test_dates_resolve_from_publications_and_every_view_scan_is_pruned():
         # the publications table.
         for view, alias in scan.findall(body):
             bounds = (
-                f"{alias}.snapshot_date IN (SELECT",
+                f"{alias}.snapshot_date = (SELECT as_of FROM asof)",
+                f"{alias}.snapshot_date = (SELECT ras_of FROM rasof)",
+                f"{alias}.snapshot_date IN (SELECT snapshot_date FROM days)",
                 f"{alias}.pool_address = {{pool:String}}",
                 f"{alias}.snapshot_date >= (SELECT as_of FROM asof)",
             )
             assert any(b in body for b in bounds), (
                 f"{spec.key}: unbounded scan of {view} AS {alias}"
             )
+    assert pinned == _PUB_PINNED, "a pinned publications read vanished from the specs"
+
+    # Negative fixture: the pre-2026-09-26 shapes MUST fail, one problem each.
+    old_shape = sql_code(
+        "WITH asof AS (\n"
+        f"SELECT toDate(max(snapshot_date)) AS as_of FROM {_PUB}\n"
+        "WHERE job_name = 'daily_cl_liquidity'\n"
+        "),\n"
+        "probe AS (\n"
+        "SELECT p.target_address AS p_pool,\n"
+        "NOT has(p.checks_passed, 'cl_below_active_threshold') AS ticks_probed\n"
+        f"FROM {_PUB} AS p\n"
+        "WHERE p.snapshot_date IN (SELECT as_of FROM asof)\n"
+        "),\n"
+        "mystery AS (\n"
+        f"SELECT p.snapshot_date AS m_date FROM {_PUB} AS p\n"
+        ")\n"
+        "SELECT countIf(has(p.checks_passed, 'x')) AS probed,\n"
+        "toString((SELECT max(as_of) FROM asof)) AS as_of\n"
+        f"FROM {_PUB} AS p\n"
+        "LEFT JOIN rpc_state_indexer.v_pool_cl_state_published AS s ON 1\n"
+    )
+    problems = _pool_read_problems("publication_calendar", old_shape)
+    for needle in (
+        "without served publications", "resolved from raw publications",
+        "IN subquery", "second scalar form", "probe: raw publications not pinned",
+        "mystery: unclassified", "publication_calendar: raw publication rows counted",
+    ):
+        assert any(needle in problem for problem in problems), (needle, problems)
+
+
+def test_the_as_of_resolver_is_served_complete_and_bounded():
+    """The resolver's parts, pinned: raw candidates (bounded, cheap, robust to a
+    hole of any length), a served count read ONLY for those days, and the
+    complete-day rule against the day's own published count and a TRAILING peak —
+    a whole-window peak would pin the as-of to the last day before a genuine
+    universe shrink until that day aged out."""
+    for as_of in ("", "2026-03-01"):
+        code = sql_code(px._asof_cte(as_of))
+        assert f"FROM {_PUB}" in code and f"FROM {_SERVED}" in code
+        assert f"LIMIT {px.ASOF_CANDIDATE_DAYS}" in code
+        assert "snapshot_date IN (SELECT ar_date FROM asof_raw)" in code
+        assert (f"ROWS BETWEEN {px.ASOF_PEAK_DAYS} PRECEDING AND 1 PRECEDING" in code)
+        assert f"s.as_served >= {px.ASOF_COMPLETENESS_RATIO} * greatest(r.ar_published," in code
+        # With no complete candidate: the newest day that served anything.
+        assert "maxIf(ad_date, ad_served > 0)" in code
+        assert ("snapshot_date <= {as_of:Date}" in code) is bool(as_of)
+    reserves = sql_code(px._reserves_asof_cte())
+    assert f"FROM {_SERVED}" in reserves
+    # Reserves never post-date the CL snapshot they sit beside.
+    assert "snapshot_date <= (SELECT as_of FROM asof)" in reserves
+    assert f"s.rs_served >= {px.ASOF_COMPLETENESS_RATIO} * greatest(r.rr_published," in reserves
 
 
 def test_every_view_scan_pins_its_job_and_chain():
@@ -547,6 +671,9 @@ def test_a_cte_is_referenced_once_unless_it_is_declared_cheap():
     # against restructuring the query around a single read.
     allowed = {
         "asof", "rasof",                      # one row each
+        # <= 21 candidate days each, read twice (the served count's IN set and
+        # the join): a narrow scan of the ledger, ~0.03s. Measured 2026-09-26.
+        "asof_raw", "rasof_raw",
         "mm",                                 # one row of per-chain token arrays
         "grid", "axis", "latest",             # one row each
         "cfg_counts", "token_stats", "pool_stats", "totals", "per_band",
@@ -559,7 +686,9 @@ def test_a_cte_is_referenced_once_unless_it_is_declared_cheap():
     offenders = []
     for spec in _all_specs():
         body = sql_code(spec.sql)
-        for name in re.findall(r"(?m)^\s*(\w+) AS \(", body):
+        # `WITH name AS (` too: without it the FIRST CTE of every statement was
+        # never counted, which is how asof_raw's double read went unseen.
+        for name in _CTE_START.findall(body):
             if name in allowed:
                 continue
             uses = len(re.findall(rf"(?:FROM|JOIN)\s+{name}\b", body))
@@ -807,16 +936,19 @@ def test_the_frontend_mirror_of_section_groups_cannot_drift():
 
 
 def test_an_unmeasured_aggregate_is_null_not_the_type_default():
-    """A pool the indexer never probed has no publication rows to take a min
-    over, and a bare min() returns the Date DEFAULT — which reached the UI as
+    """A pool the indexer never probed has no served day with ticks to take a
+    min over, and a bare min() returns the Date DEFAULT — which reached the UI as
     "profile since 1970-01-01" for a pool that has no profile at any date. The
     empty-set-aware aggregate is the fix, and it is the same NULL-never-zero
-    rule the price and fee columns follow."""
+    rule the price and fee columns follow. It reads the SERVED state history, not
+    raw publications (lesson: published-is-not-served)."""
     detail = next(s for s in px._pool_entity_specs(POOL, "", "1y", "1y", True)
                   if s.key == "pool_detail")
     body = sql_code(detail.sql)
-    assert "minOrNull(p.snapshot_date) AS profile_available_from" in body
-    assert "min(p.snapshot_date) AS profile_available_from" not in body
+    assert ("minOrNullIf(h.snapshot_date, h.tick_count > 0) AS profile_available_from"
+            in body)
+    assert not re.search(r"\bmin(?:If)?\(\w+\.snapshot_date[^)]*\) AS profile_available_from",
+                         body)
 
 
 # ---------------------------------------------------------------------------

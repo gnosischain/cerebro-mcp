@@ -1,0 +1,339 @@
+{
+  "$comment": "Treasury dataset contract, shared by the backend SQL (queries/governance/treasury_*.sql, wallet_*.sql, token_*.sql, holder_series.sql) and the UI parsers (model/treasuryRows.ts). Column ORDER is part of the contract. Dates are 'YYYY-MM-DD' strings; buckets are month starts 'YYYY-MM-01'. NULL means not measured / not priced, never 0. The live smoke test compares real result columns against this file.",
+  "vocab": {
+    "token_class": [
+      "priced",
+      "listed",
+      "unverified",
+      "spam",
+      "retired_mirror"
+    ],
+    "spam_reason": [
+      "",
+      "impersonation",
+      "lure",
+      "obfuscated",
+      "malformed",
+      "mass_airdrop"
+    ],
+    "as_of_status": [
+      "complete",
+      "partial",
+      "no_served_snapshot"
+    ],
+    "coverage_status": [
+      "complete",
+      "partial",
+      "gap",
+      "unpublished"
+    ],
+    "grain": [
+      "chain",
+      "wallet",
+      "token"
+    ],
+    "price_source": [
+      "hub",
+      "hub_proxy",
+      ""
+    ],
+    "asset_class": [
+      "GNO",
+      "ETH",
+      "Stablecoins",
+      "BTC",
+      "RWA",
+      "Other",
+      ""
+    ],
+    "$comment": "price_source 'hub_proxy' = priced with a pegged asset's hub series (e.g. stETH with WETH, DAI with xDAI) — show as hub-priced with a 'peg proxy' marker. coverage_status: only 'gap' and 'unpublished' months are blanked (null) in charts; 'partial' months ARE drawn, with a note naming unserved_registry_symbols. spot_eligible = 1 only for token_class 'listed' (reviewed real tokens without a hub price) with known decimals; 'unverified' tokens are never spot-valued. treasury_token_detail may return ZERO rows when the treasury does not hold the token on the as-of day (history and price history can still exist)."
+  },
+  "datasets": {
+    "treasury_summary": [
+      "chain_id",
+      "as_of",
+      "as_of_status",
+      "anchor_block",
+      "published_tokens",
+      "served_tokens",
+      "carried_tokens",
+      "wallets_tracked",
+      "wallets_active",
+      "tokens_held",
+      "positions",
+      "priced_tokens",
+      "listed_tokens",
+      "unverified_tokens",
+      "hidden_spam_tokens",
+      "hidden_retired_tokens",
+      "gno_units",
+      "gno_units_ex_ltd",
+      "nav_usd",
+      "nav_usd_ex_ltd",
+      "oldest_price_date",
+      "hub_latest_date"
+    ],
+    "treasury_holdings": [
+      "chain_id",
+      "token_address",
+      "symbol",
+      "name",
+      "registry_symbol",
+      "asset_key",
+      "asset_class",
+      "decimals",
+      "metadata_status",
+      "token_class",
+      "spam_reason",
+      "wallets_holding",
+      "balance_total_raw",
+      "balance_units",
+      "balance_units_ex_ltd",
+      "supply_share",
+      "symbol_collisions",
+      "price_usd",
+      "price_date",
+      "price_source",
+      "value_usd",
+      "value_usd_ex_ltd",
+      "spot_eligible",
+      "token_date",
+      "as_of"
+    ],
+    "treasury_by_wallet": [
+      "chain_id",
+      "wallet_address",
+      "wallet_label",
+      "label_source",
+      "is_ltd",
+      "tokens_held",
+      "priced_positions",
+      "unpriced_positions",
+      "hidden_positions",
+      "gno_units",
+      "nav_usd",
+      "as_of"
+    ],
+    "treasury_history": [
+      "grain",
+      "chain_id",
+      "bucket",
+      "bucket_date",
+      "wallet_address",
+      "wallet_label",
+      "is_ltd",
+      "token_address",
+      "registry_symbol",
+      "asset_key",
+      "asset_class",
+      "token_class",
+      "balance_units",
+      "balance_units_ex_ltd",
+      "price_usd",
+      "price_date",
+      "nav_usd",
+      "nav_usd_ex_ltd",
+      "gno_units",
+      "gno_units_ex_ltd",
+      "wallets_holding",
+      "tokens_held",
+      "positions",
+      "priced_tokens",
+      "listed_tokens",
+      "unverified_tokens",
+      "hidden_spam_tokens"
+    ],
+    "treasury_history_coverage": [
+      "chain_id",
+      "bucket",
+      "raw_month_end",
+      "bucket_date",
+      "published_tokens",
+      "served_tokens",
+      "carried_tokens",
+      "unserved_tokens",
+      "unserved_registry_tokens",
+      "unserved_registry_symbols",
+      "status"
+    ],
+    "treasury_wallet_detail": [
+      "chain_id",
+      "wallet_address",
+      "wallet_label",
+      "label_source",
+      "is_ltd",
+      "as_of",
+      "as_of_status",
+      "anchor_block",
+      "tokens_held",
+      "priced_positions",
+      "unpriced_positions",
+      "hidden_positions",
+      "gno_units",
+      "nav_usd"
+    ],
+    "treasury_wallet_positions": [
+      "chain_id",
+      "token_address",
+      "symbol",
+      "name",
+      "registry_symbol",
+      "asset_key",
+      "asset_class",
+      "decimals",
+      "metadata_status",
+      "token_class",
+      "spam_reason",
+      "wallets_holding",
+      "symbol_collisions",
+      "balance_total_raw",
+      "balance_units",
+      "treasury_share",
+      "supply_share",
+      "price_usd",
+      "price_date",
+      "price_source",
+      "value_usd",
+      "spot_eligible",
+      "token_date",
+      "as_of"
+    ],
+    "treasury_wallet_series": [
+      "chain_id",
+      "bucket",
+      "bucket_date",
+      "token_address",
+      "registry_symbol",
+      "asset_key",
+      "asset_class",
+      "token_class",
+      "balance_units",
+      "price_usd",
+      "price_date",
+      "value_usd"
+    ],
+    "treasury_wallet_chains": [
+      "chain_id",
+      "wallet_address",
+      "tracked",
+      "has_positions",
+      "tokens_held",
+      "nav_usd",
+      "as_of"
+    ],
+    "treasury_wallet_months": [
+      "chain_id",
+      "bucket",
+      "raw_month_end",
+      "bucket_date",
+      "published_tokens",
+      "served_tokens",
+      "carried_tokens",
+      "unserved_tokens",
+      "unserved_registry_tokens",
+      "unserved_registry_symbols",
+      "status"
+    ],
+    "treasury_token_detail": [
+      "chain_id",
+      "token_address",
+      "symbol",
+      "name",
+      "registry_symbol",
+      "asset_key",
+      "asset_class",
+      "decimals",
+      "metadata_status",
+      "token_class",
+      "spam_reason",
+      "wallets_holding",
+      "symbol_collisions",
+      "balance_total_raw",
+      "balance_units",
+      "supply_share",
+      "price_usd",
+      "price_date",
+      "price_source",
+      "value_usd",
+      "spot_eligible",
+      "token_date",
+      "as_of",
+      "anchor_block",
+      "sibling_tokens"
+    ],
+    "treasury_token_holders": [
+      "chain_id",
+      "wallet_address",
+      "wallet_label",
+      "label_source",
+      "is_ltd",
+      "balance_total_raw",
+      "balance_units",
+      "value_usd",
+      "treasury_share"
+    ],
+    "treasury_token_holder_series": [
+      "chain_id",
+      "bucket",
+      "bucket_date",
+      "wallet_address",
+      "wallet_label",
+      "is_ltd",
+      "balance_units",
+      "value_usd"
+    ],
+    "treasury_token_price_history": [
+      "day",
+      "price_symbol",
+      "price_usd",
+      "role"
+    ],
+    "treasury_token_months": [
+      "chain_id",
+      "bucket",
+      "raw_month_end",
+      "bucket_date",
+      "published_tokens",
+      "served_tokens",
+      "carried_tokens",
+      "unserved_tokens",
+      "unserved_registry_tokens",
+      "unserved_registry_symbols",
+      "status"
+    ]
+  },
+  "groups": {
+    "treasury": {
+      "core": [
+        "treasury_summary",
+        "treasury_holdings",
+        "treasury_by_wallet"
+      ],
+      "history": [
+        "treasury_history",
+        "treasury_history_coverage"
+      ]
+    }
+  },
+  "entity_bundles": {
+    "treasury_token": [
+      "treasury_token_detail",
+      "treasury_token_holders",
+      "treasury_token_holder_series",
+      "treasury_token_price_history",
+      "treasury_token_months"
+    ],
+    "treasury_wallet": [
+      "treasury_wallet_detail",
+      "treasury_wallet_positions",
+      "treasury_wallet_series",
+      "treasury_wallet_chains",
+      "treasury_wallet_months"
+    ]
+  },
+  "overlay": {
+    "$comment": "view_state.price_overlay = {kind: 'spot', role: 'spot_fallback', by_chain: {chain: {token_address: usd}}, excluded_implausible: {chain: [token_address]}}. Quotes exist ONLY for rows with spot_eligible = 1; apply spot only where value_usd is NULL. Never used in history.",
+    "kind": "spot",
+    "role": "spot_fallback"
+  }
+}

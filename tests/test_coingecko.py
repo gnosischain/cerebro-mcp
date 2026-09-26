@@ -203,3 +203,42 @@ def test_logo_urls_outside_the_allowlist_are_dropped():
     assert coingecko._safe_logo_url("http://assets.coingecko.com/x.png") == ""
     assert coingecko._safe_logo_url("https://assets.coingecko.com/x.png")
     assert coingecko._safe_logo_url(None) == ""
+
+
+def test_wanted_overrides_the_dataset_scan_for_prices_and_icons(monkeypatch):
+    """The governance treasury prices from the dbt hub and asks CoinGecko ONLY for
+    its reviewed, hub-unpriced remainder — so a caller-supplied ``wanted`` set must
+    replace the scan entirely: a token visible in the datasets but not wanted is
+    never requested, never priced and gets no icon."""
+    monkeypatch.setattr(coingecko, "_EXECUTOR", InlineExecutor())
+    monkeypatch.setattr(coingecko, "fetch_coin_index", lambda: {
+        "ethereum": {TOKEN_A: "alpha", TOKEN_B: "beta"},
+    })
+    requested: list[set[str]] = []
+
+    def prices(ids):
+        requested.append(set(ids))
+        return {"alpha": 2.0, "beta": 3.0}
+
+    monkeypatch.setattr(coingecko, "fetch_prices", prices)
+    monkeypatch.setattr(coingecko, "fetch_icon_map", lambda chain: {
+        TOKEN_A: "https://assets.coingecko.com/a.png",
+        TOKEN_B: "https://assets.coingecko.com/b.png",
+    })
+    datasets = {"h": _dataset([[1, TOKEN_A], [1, TOKEN_B]])}
+    wanted = {1: {TOKEN_A}}
+    for _ in range(2):
+        overlay, _ = coingecko.build_price_overlay(
+            datasets, token_columns=TREASURY_TOKEN_RE, wanted=wanted
+        )
+        icons, _ = coingecko.build_icon_overlay(
+            datasets, token_columns=TREASURY_TOKEN_RE, wanted=wanted
+        )
+    assert overlay["by_chain"] == {"1": {TOKEN_A: 2.0}}
+    assert icons == {"1": {TOKEN_A: "https://assets.coingecko.com/a.png"}}
+    assert all("beta" not in ids for ids in requested)
+    # An empty wanted set asks for nothing at all (not "fall back to the scan").
+    overlay, pending = coingecko.build_price_overlay(
+        datasets, token_columns=TREASURY_TOKEN_RE, wanted={}
+    )
+    assert overlay["by_chain"] == {} and pending is False

@@ -4,7 +4,8 @@
 import { describe, expect, it } from "vitest";
 
 import { deliverAskPrompt } from "../components/AskCerebroButton";
-import { buildAskPrompt, SIGNALING_DISCLAIMER } from "../model/contextPrompt";
+import { buildAskPrompt, buildModelContextLines, SIGNALING_DISCLAIMER } from "../model/contextPrompt";
+import { DEFAULT_TREASURY_VIEW } from "../state/treasuryView";
 import type { GovernanceViewState } from "../types";
 
 function makeState(overrides: Partial<GovernanceViewState> = {}): GovernanceViewState {
@@ -64,6 +65,37 @@ describe("buildAskPrompt content", () => {
     );
     expect(prompt).toContain("Selected entity: proposal 0xabc");
     expect(prompt).toContain('"GIP-149"');
+  });
+});
+
+describe("treasury view in the model context", () => {
+  const view = { ...DEFAULT_TREASURY_VIEW, tab: "wallets" as const, chain: 100 as const, exLtd: true };
+
+  it("adds a treasury_view line (the treasury filters are client-side) on the treasury section", () => {
+    const lines = buildModelContextLines(makeState({ section: "treasury" }), {}, view);
+    expect(lines.treasury_view).toContain("tab=wallets");
+    expect(lines.treasury_view).toContain("chain=Gnosis Chain");
+    expect(lines.treasury_view).toContain("exclude Gnosis Ltd.=yes");
+    expect(lines.treasury_provenance).toContain("dbt price hub");
+  });
+
+  it("and on treasury entity pages", () => {
+    const lines = buildModelContextLines(makeState({
+      section: "entity",
+      selected_entity: { entity_type: "treasury_wallet", identifier: "1:0xabc", label: "" },
+    }), {}, view);
+    expect(lines.treasury_view).toBeDefined();
+  });
+
+  it("never outside the treasury", () => {
+    const lines = buildModelContextLines(makeState(), {}, view);
+    expect(lines.treasury_view).toBeUndefined();
+    expect(lines.treasury_provenance).toBeUndefined();
+  });
+
+  it("the Ask prompt carries the treasury view too", () => {
+    const prompt = buildAskPrompt(makeState({ section: "treasury" }), {}, view);
+    expect(prompt).toContain("Treasury view: tab=wallets");
   });
 });
 

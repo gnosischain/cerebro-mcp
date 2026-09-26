@@ -59,7 +59,7 @@ function rowCapFor(key: string): number {
 /** Frozen warning-code vocabulary → user copy. Unknown strings pass through. */
 const WARNING_COPY: Record<string, string> = {
   query_failed: "A dataset failed to load; the others remain available.",
-  as_of_shifted: "The requested as-of date had no publication; the nearest earlier publication was used.",
+  as_of_shifted: "The requested as-of date has no complete served snapshot; the nearest earlier complete day was used.",
   pool_below_active_threshold: "This pool sat below the active-liquidity threshold: state only, ticks not probed — no profile.",
   reserves_only_pool: "Balancer pool: raw reserves only, no tick liquidity.",
   metadata_unresolved: "Token metadata is unresolved for at least one token — prices and amounts are in raw units.",

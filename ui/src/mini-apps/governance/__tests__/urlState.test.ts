@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { MOCK_PAYLOAD } from "../devFixture";
+import { DEFAULT_TREASURY_VIEW, type TreasuryViewState } from "../state/treasuryView";
 import { readUrl, writeUrl } from "../urlState";
 
 function baseState() {
@@ -89,39 +90,90 @@ describe("Governance standalone URL state", () => {
   });
 });
 
-describe("treasury sub-tab (?ttab=)", () => {
+describe("treasury view keys (ttab tchain tltd thidden tstack tmeasure trange tassets)", () => {
   beforeEach(() => window.history.replaceState({}, "", "/app/governance?token=secret"));
 
-  it("round-trips a non-default tab and implies section=treasury on read", () => {
+  const view: TreasuryViewState = {
+    tab: "history", chain: 100, exLtd: true, showHidden: true,
+    stackBy: "wallet", measure: "gno", range: "1y", assetFilter: "hidden",
+  };
+
+  it("round-trips every key on the treasury section and keeps ?token=", () => {
     const state = baseState();
     state.section = "treasury";
-    writeUrl(state, "wallets");
-    expect(new URLSearchParams(window.location.search).get("ttab")).toBe("wallets");
+    writeUrl(state, view);
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get("ttab")).toBe("history");
+    expect(params.get("tchain")).toBe("100");
+    expect(params.get("tltd")).toBe("1");
+    expect(params.get("thidden")).toBe("1");
+    expect(params.get("tstack")).toBe("wallet");
+    expect(params.get("tmeasure")).toBe("gno");
+    expect(params.get("trange")).toBe("1y");
+    expect(params.get("tassets")).toBe("hidden");
+    expect(params.get("token")).toBe("secret");
     const parsed = readUrl();
-    expect(parsed.ttab).toBe("wallets");
-    // ttab is client-only, so a shared ?ttab= link must still land on treasury.
+    expect(parsed.treasury).toEqual(view);
+    // Treasury keys are client-only, so a shared link must land on treasury.
     expect(parsed.section).toBe("treasury");
-    expect(new URLSearchParams(window.location.search).get("token")).toBe("secret");
   });
 
-  it("omits the default tab so an ordinary treasury link stays clean", () => {
+  it("omits every default so an ordinary treasury link stays clean", () => {
     const state = baseState();
     state.section = "treasury";
-    writeUrl(state, "portfolio");
-    expect(new URLSearchParams(window.location.search).has("ttab")).toBe(false);
+    writeUrl(state, DEFAULT_TREASURY_VIEW);
+    expect(window.location.search).toBe("?token=secret&section=treasury");
+    expect(readUrl().treasury).toEqual({});
   });
 
-  it("never emits ttab off the treasury section", () => {
+  it("travels with a treasury entity page too (the wallet page honours the hidden toggle)", () => {
+    const state = baseState();
+    state.section = "entity";
+    state.selected_entity = { entity_type: "treasury_wallet", identifier: "1:0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f", label: "" };
+    writeUrl(state, { ...DEFAULT_TREASURY_VIEW, showHidden: true });
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get("thidden")).toBe("1");
+    expect(params.get("entity")).toBe("treasury_wallet");
+    expect(params.get("id")).toBe("1:0x458cd345b4c05e8df39d0a07220feb4ec19f5e6f");
+  });
+
+  it("never emits treasury keys off the treasury", () => {
     const state = baseState();
     state.section = "proposals";
-    writeUrl(state, "wallets");
-    expect(new URLSearchParams(window.location.search).has("ttab")).toBe(false);
+    writeUrl(state, view);
+    const params = new URLSearchParams(window.location.search);
+    for (const key of ["ttab", "tchain", "tltd", "thidden", "tstack", "tmeasure", "trange", "tassets"]) {
+      expect(params.has(key), key).toBe(false);
+    }
   });
 
-  it("reads an unrecognised tab as absent rather than rendering an empty view", () => {
+  it("clears stale treasury keys when the view returns to defaults", () => {
+    window.history.replaceState({}, "", "/app/governance?token=secret&section=treasury&tchain=100&tltd=1");
+    const state = baseState();
+    state.section = "treasury";
+    writeUrl(state, DEFAULT_TREASURY_VIEW);
+    const params = new URLSearchParams(window.location.search);
+    expect(params.has("tchain")).toBe(false);
+    expect(params.has("tltd")).toBe(false);
+  });
+
+  it("aliases the old tab ids and ignores junk", () => {
+    window.history.replaceState({}, "", "/app/governance?ttab=portfolio");
+    expect(readUrl().treasury.tab).toBe("overview");
+    window.history.replaceState({}, "", "/app/governance?ttab=tokens");
+    expect(readUrl().treasury.tab).toBe("assets");
     window.history.replaceState({}, "", "/app/governance?ttab=nope");
     const parsed = readUrl();
-    expect(parsed.ttab).toBe("");
+    expect(parsed.treasury).toEqual({});
     expect(parsed.section).toBe("");
+  });
+
+  it("uses replaceState only — a filter change is not a navigation", () => {
+    const before = window.history.length;
+    const state = baseState();
+    state.section = "treasury";
+    writeUrl(state, view);
+    writeUrl(state, DEFAULT_TREASURY_VIEW);
+    expect(window.history.length).toBe(before);
   });
 });

@@ -6,6 +6,7 @@ import type { GovAggregates } from "../model/contextPrompt";
 import type { RowDataset } from "../../shared/rowDataset";
 import type { GovSectionId } from "../state/navigation";
 import type { GovFilterDraft } from "../state/toolArgs";
+import type { TreasuryViewState } from "../state/treasuryView";
 import type { GovEntityType, GovernanceViewState } from "../types";
 
 export type FetchRows = (
@@ -34,6 +35,17 @@ export interface GovViewContext {
   openLink: (url: string) => void;
   sendMessage: (text: string) => Promise<boolean>;
   aggregates: GovAggregates;
+  /** Client-side treasury view (tab, chain, Gnosis Ltd., hidden tokens,
+   * history controls). Held by GovernanceApp so it survives drill-downs. */
+  treasury: TreasuryViewBinding;
+}
+
+export interface TreasuryViewBinding {
+  view: TreasuryViewState;
+  /** Merge a change into the view (invalid combinations are normalized). */
+  update: (patch: Partial<TreasuryViewState>) => void;
+  /** Epoch ms treated as "now" for snapshot staleness (injectable for tests). */
+  now: number;
 }
 
 /** Prefer the fully hydrated rows; fall back to the descriptor preview. */

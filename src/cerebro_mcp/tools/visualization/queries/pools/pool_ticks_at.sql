@@ -16,5 +16,5 @@ SELECT
 FROM @db.@view AS t
 WHERE t.chain_id = @chain AND t.job_name = '@job'
   AND t.pool_address = {pool:String}
-  AND t.snapshot_date IN (SELECT as_of FROM asof)
+  AND t.snapshot_date = (SELECT as_of FROM asof)
 ORDER BY tick

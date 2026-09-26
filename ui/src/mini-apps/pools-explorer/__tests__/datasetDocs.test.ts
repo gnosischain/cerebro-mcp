@@ -25,6 +25,15 @@ describe("dataset docs completeness", () => {
     expect(DATASET_DOCS.pool_profile_heatmap.method).toContain("on demand");
     expect(DATASET_DOCS.token_pools.method).toContain("never summed across pairs");
   });
+
+  it("says the as-of is a complete SERVED day and the provenance is the served attempt", () => {
+    // Lesson published-is-not-served: a raw publication is not what the views
+    // serve, and the newest raw day is often one the indexer is still writing.
+    expect(DATASET_DOCS.pools_summary.method).toContain("v_publications_current");
+    expect(DATASET_DOCS.pools_summary.method).toContain("COMPLETE served day");
+    expect(DATASET_DOCS.pool_publication_facts.method).toContain("v_publications_current");
+    expect(DATASET_DOCS.pool_publication_facts.method).not.toContain("Both jobs' rows");
+  });
 });
 
 describe("column policy", () => {
@@ -92,6 +101,13 @@ describe("column policy", () => {
     expect(kindForColumn("is_full_range")).toBe("bool");
     expect(kindForColumn("tick_lower")).toBe("tick");
     expect(kindForColumn("reserve_share")).toBe("share");
+  });
+
+  it("renders attempt ids as the UUIDs they are, not as integers", () => {
+    // attempt_id sat in the integer pattern, so every attempt in the provenance
+    // table rendered as "—" — the one column that names the SERVED attempt.
+    expect(kindForColumn("attempt_id")).toBe("hash");
+    expect(kindForColumn("publication_id")).toBe("hash");
   });
 
   it("every dataset resolves a policy with no unlabelled visible column", () => {

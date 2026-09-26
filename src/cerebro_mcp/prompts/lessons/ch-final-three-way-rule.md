@@ -10,10 +10,18 @@ scope: >-
 symptom: >-
   either double-counted rows (FINAL omitted where required) or code 241
   MEMORY_LIMIT_EXCEEDED (FINAL applied to a multi-million-row table)
-last_verified: 2026-07-30
+last_verified: 2026-09-25
 evidence:
   - 'MANDATORY: src/cerebro_mcp/prompts/agents/dao_governance_analyst.md:16 — "Every FROM governance_db.<table> MUST be followed by FINAL. No exceptions"'
-  - 'FORBIDDEN (view resolves dedup internally): src/cerebro_mcp/tools/visualization/governance_explorer.py:66-69, :83-84; tests/test_governance_explorer.py::test_treasury_specs_always_pin_the_job_and_never_use_final'
+  - 'FORBIDDEN (view resolves dedup internally): src/cerebro_mcp/tools/visualization/governance_explorer.py (DELEGATE_DB notes); tests/test_governance_explorer.py::test_treasury_specs_pin_the_job_never_use_final_and_keep_chains_apart'
+  - >-
+    FORBIDDEN (memory), branch 3 on a RAW table: rpc_state_indexer.token_balances
+    (3.9B rows, ReplacingMergeTree(insert_version) keyed with attempt_id) — the
+    treasury plane dedups with argMax(balance_raw, insert_version) over the full
+    key and pins the served attempt; FINAL alone would still mix attempts.
+    Verified 2026-09-25: argMax and FINAL key counts identical (602,301 / 1,087,796
+    keys, 146 month-ends) and every served attempt's argMax sum equals its
+    observed_sum_raw (tests/test_governance_live_smoke.py::test_treasury_attempt_sums_equal_the_published_observed_sums)
   - 'FORBIDDEN (memory): src/cerebro_mcp/tools/visualization/cow_explorer.py:1743-1752; tests/test_cow_explorer.py:1159-1167 asserts FINAL not in sql'
   - 'src/cerebro_mcp/prompts/agents/_forensic_standards.md:188 and 5 further sites for the scratch-table variant'
 ---
@@ -43,7 +51,9 @@ contradictory ("No exceptions" beside a test literally named
    instead.** `cow_db.orders` reached ~12M rows and FINAL blew the budget at
    all-networks scope. Prefilter on an **immutable** column (`valid_to` is fixed
    per `order_uid`) so the `argMax` hash stays small, and only `argMax` the
-   genuinely mutable columns.
+   genuinely mutable columns. `rpc_state_indexer.token_balances` is the same
+   branch on a RAW table: never FINAL; bound the scan (job pin + constant date +
+   attempt IN) and `argMax(balance_raw, insert_version)` over the full key.
 
 A separate obligation rides along with branch 2: `v_treasury_balances` is **not
 job-scoped**, so every read must also pin `job_name` — unpinned it spans 185M+
