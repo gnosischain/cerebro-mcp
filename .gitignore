@@ -11,6 +11,8 @@ build/
 .pytest_cache/
 .mypy_cache/
 .cerebro/
+# Local dev auth store and minted tokens (connector work) — secrets, never commit.
+.cerebro-dev/
 reports/
 benchmarks/results/*
 !benchmarks/results/.gitkeep
