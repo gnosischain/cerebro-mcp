@@ -5,7 +5,7 @@
 # `--platform linux/amd64,linux/arm64` build it must run ONCE natively rather
 # than once per target arch with arm64 emulated under QEMU. Stage 2 only
 # `COPY --from`s data files out of it, so the platform mismatch is inert.
-FROM --platform=$BUILDPLATFORM node:20-slim AS ui-builder
+FROM --platform=$BUILDPLATFORM node:24.22.1-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS ui-builder
 
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
